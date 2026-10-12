@@ -8655,3 +8655,220 @@ $$;
 
 revoke all on function public.refund_edge_rate_limit (text) from public, anon, authenticated;
 grant execute on function public.refund_edge_rate_limit (text) to service_role;
+
+-- ===== supabase/migrations/20261012120100_one_entitling_subscription_per_user.sql =====
+-- At most one entitling subscription per user per Stripe account.
+--
+-- The double charge this closes (QA round 4, D1): stripe-checkout refused a
+-- second purchase by reading this table, but it read it when a Checkout Session
+-- was CREATED, not when one was PAID. Two sessions opened before either was
+-- paid both passed the guard -- two tabs, a double-click, a back button and a
+-- retry; a session stays payable for 24 hours -- and paying both left the
+-- customer with two `active` subscriptions whose billed periods overlapped
+-- completely, $38 for one plan's worth of service. Nothing told them: the
+-- entitlements RPC takes the highest tier and stops (`order by tier ... limit
+-- 1`), so the app looked exactly as it does for one subscription, and the
+-- second renewed every month unnoticed.
+--
+-- stripe-checkout now expires the customer's open sessions before it opens
+-- another and passes Stripe a deterministic idempotency key, so two sessions
+-- should no longer exist to be paid. This index is the layer that does not
+-- depend on an Edge Function having run at all: whatever a client, a Stripe
+-- retry or a future code path does, the webhook's upsert cannot land a SECOND
+-- entitling row beside one that is already there. Entitlement is computed from
+-- rows with these statuses, so a status nobody is entitled by is not something
+-- to serialise -- a cancelled subscription and the new one replacing it must
+-- both be allowed to sit here.
+--
+-- What the webhook does when it hits this index is deliberate and is NOT to
+-- cancel the loser in Stripe (see stripe-webhook/index.ts): the row is left
+-- absent, the event is acknowledged, and a single ALERT line names the user and
+-- both subscriptions for a human to reconcile.
+
+-- Fail the push rather than skip the index.
+--
+-- `create unique index` on a table that already violates it aborts the whole
+-- `db push` with Postgres's own message, which names the duplicated KEY but not
+-- the user, and leaves whoever is deploying to work out what to do. This says
+-- it instead -- and it still fails, on purpose. The alternative, creating the
+-- index only when the data allows it, would mean the one database that has
+-- already double-charged somebody is the one database left unprotected, and the
+-- failure would be a line in a log nobody reads rather than a stopped deploy.
+-- Reconcile in Stripe first (cancel the duplicate subscription, refund it),
+-- then push.
+--
+-- Checked read-only against production (jibgwgosihadbjgxdsfe) on 2026-10-12:
+-- no user holds more than one entitling subscription in either mode, out of one
+-- subscription row in total.
+do $$
+declare
+    v_dup record;
+begin
+    select s.user_id, s.mode, count(*) as n
+    into v_dup
+    from public.subscriptions s
+    where s.status in ('active', 'trialing')
+    group by s.user_id, s.mode
+    having count(*) > 1
+    limit 1;
+
+    if found then
+        raise exception
+            'user % already holds % entitling subscriptions in % mode; cancel and refund the duplicate in Stripe, then push this migration',
+            v_dup.user_id, v_dup.n, v_dup.mode
+            using errcode = '23505';
+    end if;
+end
+$$;
+
+create unique index if not exists subscriptions_one_entitling_per_user_mode
+    on public.subscriptions (user_id, mode)
+    where status in ('active', 'trialing');
+
+-- ===== supabase/migrations/20261012120101_stripe_event_claim_recovery.sql =====
+-- Make a webhook event's claim recoverable (QA round 4, D2).
+--
+-- stripe-webhook claims an event id before it processes the event, so two
+-- concurrent deliveries of the same event cannot both apply it. The claim was a
+-- committed row and the only compensation was an in-process delete: if the
+-- isolate died between claiming and finishing -- a timeout on the Stripe
+-- read-back, an OOM, a deploy restarting the worker -- no catch ran, the row
+-- stayed, and every one of Stripe's retries for the next three days answered
+-- `200 duplicate`. For checkout.session.completed that is a customer who paid
+-- and was never entitled, and nothing swept for claims that had never been
+-- applied.
+--
+-- So a claim now records that it is in progress and when it was taken. An
+-- unfinished one goes stale and Stripe's own retry re-claims it; a finished one
+-- is a duplicate forever, as before.
+
+-- Every row that exists was written by the old claim, which processed the event
+-- in the same invocation and had no other state to be in -- so 'done' is what
+-- they are, and the default is what backfills them. Nothing inserts without
+-- naming a status (claim_stripe_event below always does), so the default only
+-- ever decides for these historical rows.
+alter table public.stripe_events
+    add column if not exists status text not null default 'done' check (status in ('processing', 'done')),
+    add column if not exists claimed_at timestamptz not null default now();
+
+-- Claim an event, or say that someone else holds it.
+--
+-- Why a function rather than the upsert this replaces: the claim has to stay a
+-- SINGLE statement, or two deliveries racing can both read "not claimed" and
+-- both process. PostgREST's upsert can express "insert, ignore a conflict" but
+-- not "insert, or take the row over when the claim on it has gone stale", which
+-- is a conditional `on conflict do update ... where`.
+--
+-- It answers with the stamp it wrote rather than a boolean, so the answer says
+-- both "do I own this?" (non-null) and WHICH claim is mine. The webhook needs
+-- the second part: releasing a claim after a failure must delete the row only
+-- while it is still this invocation's claim -- if the claim went stale and
+-- another delivery took it over, deleting would strand that one and let a third
+-- delivery in beside it.
+--
+--  * no row            -> claimed, and this invocation processes the event;
+--  * 'done'            -> null; it has been applied, and a replay must not
+--                         re-apply it;
+--  * 'processing', recent -> null; another delivery is genuinely in flight, and
+--                         both applying it is what the claim exists to stop;
+--  * 'processing', stale -> claimed; whoever took it never finished, so this
+--                         delivery takes it over and processes it.
+--
+-- Re-processing a taken-over event is safe: every write the handler makes is an
+-- upsert keyed on the Stripe id, or an RPC (apply_free_tier_archival /
+-- restore_plan_archived_scores) that recomputes from the entitlements the
+-- database holds now rather than stepping a counter.
+--
+-- `type` is refreshed on a takeover for the same reason the insert records it:
+-- it is only ever read by a human looking at the row.
+create or replace function public.claim_stripe_event (p_id text, p_type text, p_stale_after interval)
+returns timestamptz language plpgsql set search_path = public as $$
+declare
+    v_claimed_at timestamptz;
+begin
+    insert into public.stripe_events as e (id, type, status, claimed_at)
+    values (p_id, p_type, 'processing', now())
+    on conflict (id) do update
+    set status = 'processing',
+        claimed_at = now(),
+        type = excluded.type
+    where e.status = 'processing'
+      and e.claimed_at < now() - p_stale_after
+    returning claimed_at into v_claimed_at;
+
+    return v_claimed_at;
+end;
+$$;
+
+-- Service role only, like every other billing write: to anyone else this would
+-- be a way to claim an event Stripe has not delivered yet and have the real
+-- delivery answered as a duplicate -- a purchase acknowledged and dropped.
+revoke all on function public.claim_stripe_event (text, text, interval) from public, anon, authenticated;
+
+grant execute on function public.claim_stripe_event (text, text, interval) to service_role;
+
+-- ===== supabase/migrations/20261012120102_subscriptions_refuse_stale_event.sql =====
+-- Refuse a subscription write that carries an older Stripe event than the row
+-- already holds (QA round 4, D3).
+--
+-- `customer.subscription.created` / `.updated` already re-read the subscription
+-- from Stripe instead of applying the copy embedded in the event, which removes
+-- most of the damage reordering can do. What it cannot remove is two deliveries
+-- in flight at once: A reads `active`, B reads the newer `past_due`, B writes,
+-- and then A's write lands and puts `active` back. The row then says a customer
+-- whose card failed is paid up, until the next event about them -- a month away
+-- on a monthly plan, a year on an annual one.
+--
+-- So each write now carries the `created` timestamp of the event that triggered
+-- it, and the row keeps the newest one it has seen. Stripe stamps `created` on
+-- every event, and it is the account's clock for both deliveries, so comparing
+-- them is meaningful in a way that comparing our own two write times is not.
+--
+-- It has to be a trigger: the webhook writes through PostgREST's upsert, which
+-- has no way to carry a conditional `where`, and splitting it into a read and a
+-- write would reintroduce the same race one level up.
+alter table public.subscriptions
+    add column if not exists last_event_created_at timestamptz;
+
+-- BEFORE UPDATE returning OLD rather than NULL: the write is dropped, but the
+-- statement still reports a row, so PostgREST answers the webhook 200 and
+-- Stripe is not asked to retry an event that is simply too old to matter.
+--
+-- Both NULL cases let the write through, and both are real:
+--  * the row has no stamp -- every row written before this migration, and any
+--    row a code path other than the webhook touches. There is nothing to
+--    compare against, and refusing would freeze those rows permanently.
+--  * the write has no stamp -- an event without `created` (nothing Stripe sends
+--    today), or a future caller that does not thread one through. A guard that
+--    swallowed those would silently drop legitimate writes, which is strictly
+--    worse than the staleness it is guarding against; it keeps the stamp the
+--    row already has instead, so one unstamped write cannot wipe out the
+--    high-water mark and reopen the window for the next stale event.
+--
+-- Equal stamps pass. Re-processing the SAME event has to stay possible: a retry
+-- after a failure that landed its upsert but not the archival after it depends
+-- on being able to write the same state again.
+create or replace function public.subscriptions_refuse_stale_event () returns trigger
+language plpgsql set search_path = public as $$
+begin
+    if new.last_event_created_at is null then
+        new.last_event_created_at := old.last_event_created_at;
+        return new;
+    end if;
+
+    if old.last_event_created_at is not null and new.last_event_created_at < old.last_event_created_at then
+        return old;
+    end if;
+
+    return new;
+end;
+$$;
+
+revoke all on function public.subscriptions_refuse_stale_event () from public, anon, authenticated;
+
+drop trigger if exists subscriptions_refuse_stale_event on public.subscriptions;
+
+create trigger subscriptions_refuse_stale_event
+    before update on public.subscriptions
+    for each row
+    execute function public.subscriptions_refuse_stale_event ();

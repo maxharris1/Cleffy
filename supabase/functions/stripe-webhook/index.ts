@@ -9,8 +9,10 @@ import { serviceClient } from '../_shared/rateLimit.ts';
 import { priceTiers, servedModes, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
 import {
     handleStripeEvent,
+    STRIPE_EVENT_CLAIM_STALE_AFTER,
     SUBSCRIPTION_MISSING,
     type StripeEventLike,
+    type SubscriptionWriteOutcome,
     type WebhookStore,
 } from '../_shared/stripeEvents.ts';
 import { type SignatureFailure, verifyStripeSignature } from '../_shared/stripeSignature.ts';
@@ -33,6 +35,21 @@ import { type SignatureFailure, verifyStripeSignature } from '../_shared/stripeS
  * All the decision logic lives in _shared/stripeEvents.ts so it can be unit
  * tested; this file is only I/O.
  */
+/** Postgres unique_violation. 23503, its foreign-key sibling, lives in deletedAccountBilling.ts. */
+const UNIQUE_VIOLATION = '23505';
+
+/** The partial unique index from migration 20261012120100. */
+const DUPLICATE_ENTITLING_INDEX = 'subscriptions_one_entitling_per_user_mode';
+
+/**
+ * Whether a 23505 came from THAT index. PostgREST puts the constraint name in
+ * `message` and sometimes repeats it in `details`; both are checked because
+ * neither is a documented contract, and a miss here would turn a real bug into
+ * an acknowledged event.
+ */
+const namesDuplicateEntitlingIndex = (error: { message?: string; details?: string | null }): boolean =>
+    `${error.message ?? ''} ${error.details ?? ''}`.includes(DUPLICATE_ENTITLING_INDEX);
+
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
         return optionsResponse();
@@ -123,24 +140,92 @@ Deno.serve(async (req) => {
         },
     };
 
+    /**
+     * The subscription already recorded as entitling for this user and account —
+     * the other half of the duplicate, for the alert. Best effort: the alert is
+     * worth sending even if this read fails, and it is the only thing that
+     * reads it.
+     */
+    const entitlingSubscriptionId = async (userId: string): Promise<string | null> => {
+        const { data } = await admin
+            .from('subscriptions')
+            .select('stripe_subscription_id')
+            .eq('user_id', userId)
+            .eq('mode', mode)
+            .in('status', ['active', 'trialing'])
+            .maybeSingle();
+        return data?.stripe_subscription_id ?? null;
+    };
+
+    /**
+     * The stamp on the claim this invocation holds, so finishing and releasing
+     * can both say "only while it is still mine". Null until the claim is taken,
+     * and null again for a delivery that lost the claim to another one. Per
+     * request, because this store is.
+     */
+    let claimedAt: string | null = null;
+
     const store: WebhookStore = {
         claimEvent: async (id, type) => {
-            // Single statement, so two concurrent deliveries of the same event
-            // cannot both win: the loser gets zero rows back.
-            const { data, error } = await admin
-                .from('stripe_events')
-                .upsert({ id, type }, { onConflict: 'id', ignoreDuplicates: true })
-                .select('id');
+            // One statement, so two concurrent deliveries of the same event
+            // cannot both win -- and one that can also take over a claim whose
+            // isolate died before it finished, which an upsert cannot express
+            // (claim_stripe_event, migration 20261012120101). The claim used to
+            // be an unconditional insert, so a death between claiming and
+            // applying made every Stripe retry answer `200 duplicate`: for a
+            // checkout, a customer charged and never entitled.
+            const { data, error } = await admin.rpc('claim_stripe_event', {
+                p_id: id,
+                p_type: type,
+                p_stale_after: STRIPE_EVENT_CLAIM_STALE_AFTER,
+            });
             if (error) {
                 throw new Error(`could not claim event ${id}: ${error.message}`);
             }
-            return (data?.length ?? 0) > 0;
+            claimedAt = typeof data === 'string' ? data : null;
+            return claimedAt !== null;
         },
+        markEventDone: async (id) => {
+            if (!claimedAt) {
+                return;
+            }
+            // Scoped to our own claim: if ours went stale and another delivery
+            // took it over, that delivery's claim is the live one and marking it
+            // done would tell it its work had already landed.
+            const { error } = await admin
+                .from('stripe_events')
+                .update({ status: 'done', processed_at: new Date().toISOString() })
+                .eq('id', id)
+                .eq('claimed_at', claimedAt);
+            if (error) {
+                // Thrown, so the caller releases the claim and asks Stripe to
+                // retry: a claim left `processing` would be re-processed when it
+                // went stale anyway, but an event whose outcome we are unsure of
+                // is better re-run than left to a timer.
+                throw new Error(`could not finish event ${id}: ${error.message}`);
+            }
+        },
+        // The three lookups below are all filtered by mode as well as by the
+        // Stripe id (QA round 4, D4). Stripe ids are globally unique, so no
+        // deployment is exposed today -- but "globally unique" is a property of
+        // Stripe's id space, not an invariant of this table, and every
+        // ENFORCEMENT path (get_entitlements, entitling_billing_modes) is
+        // already mode-filtered, so an unfiltered lookup here is the one place
+        // a live event could have resolved its user through a test-mode row.
+        //
+        // What the filter changes is the fall-through: a row that exists only in
+        // the OTHER mode now resolves to no user, and the handler answers 200
+        // `unknown_user` with a log line rather than attributing the event to
+        // whoever that row names. That is the right answer -- a live
+        // subscription must not be recorded off a sandbox mapping -- and for a
+        // deployment serving one account (production serves live alone) every
+        // row carries that account's mode, so nothing changes at all.
         userIdForCustomer: async (customerId) => {
             const { data } = await admin
                 .from('billing_customers')
                 .select('user_id')
                 .eq('stripe_customer_id', customerId)
+                .eq('mode', mode)
                 .maybeSingle();
             return data?.user_id ?? null;
         },
@@ -159,7 +244,12 @@ Deno.serve(async (req) => {
                 throw new Error(`could not link customer ${customerId}: ${error.message}`);
             }
         },
-        upsertSubscription: async (row) => {
+        upsertSubscription: async (row): Promise<SubscriptionWriteOutcome> => {
+            // The conflict target stays stripe_subscription_id, the primary key:
+            // it is what makes a redelivery update the subscription's own row
+            // instead of adding another. The new partial unique index is NOT a
+            // conflict target -- a second entitling subscription is not the same
+            // subscription, so there is no row for it to merge into.
             const { error } = await admin
                 .from('subscriptions')
                 .upsert(
@@ -178,10 +268,20 @@ Deno.serve(async (req) => {
                         deletedAccountStripe,
                         (message) => console.log(message),
                     );
-                    return;
+                    return { duplicate: false };
+                }
+                // 23505 on the partial unique index and ON THAT INDEX ONLY: this
+                // user already holds an entitling subscription in this account,
+                // so the double charge D1 describes has happened in Stripe even
+                // though no row records it. Matched by constraint name rather
+                // than by code, because another 23505 here -- a primary key, a
+                // constraint added later -- is a bug this must not swallow.
+                if (error.code === UNIQUE_VIOLATION && namesDuplicateEntitlingIndex(error)) {
+                    return { duplicate: true, otherSubscriptionId: await entitlingSubscriptionId(row.user_id) };
                 }
                 throw new Error(`could not upsert subscription ${row.stripe_subscription_id}: ${error.message}`);
             }
+            return { duplicate: false };
         },
         fetchSubscription: async (subscriptionId) => {
             try {
@@ -205,6 +305,7 @@ Deno.serve(async (req) => {
                 .from('subscriptions')
                 .select('user_id')
                 .eq('stripe_subscription_id', subscriptionId)
+                .eq('mode', mode)
                 .maybeSingle();
             return data?.user_id ?? null;
         },
@@ -213,6 +314,7 @@ Deno.serve(async (req) => {
                 .from('subscriptions')
                 .select('status')
                 .eq('stripe_subscription_id', subscriptionId)
+                .eq('mode', mode)
                 .maybeSingle();
             return data?.status ?? null;
         },
@@ -233,7 +335,10 @@ Deno.serve(async (req) => {
             }
         },
         releaseEvent: async (id) => {
-            const { error } = await admin.from('stripe_events').delete().eq('id', id);
+            if (!claimedAt) {
+                return;
+            }
+            const { error } = await admin.from('stripe_events').delete().eq('id', id).eq('claimed_at', claimedAt);
             if (error) {
                 // Nothing more to do from here: the retry will read as a
                 // duplicate. Loud, because that is a lost billing event.

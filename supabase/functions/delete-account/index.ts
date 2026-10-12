@@ -11,7 +11,7 @@ import {
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
-import { servedModes, stripeClient } from '../_shared/stripe.ts';
+import { expireOpenCheckoutSessions, servedModes, stripeClient } from '../_shared/stripe.ts';
 
 /**
  * Deletes the calling user's account and everything it owns. The decisions —
@@ -88,18 +88,10 @@ const stripePort = (stripe: Stripe): StripePort => ({
             throw err;
         }
     },
-    expireOpenCheckoutSessions: async (customerId) => {
-        let expired = 0;
-        for await (const session of stripe.checkout.sessions.list({
-            customer: customerId,
-            status: 'open',
-            limit: 100,
-        })) {
-            await stripe.checkout.sessions.expire(session.id);
-            expired += 1;
-        }
-        return expired;
-    },
+    // Shared with stripe-checkout, which expires a customer's open sessions
+    // before opening another one (see _shared/stripe.ts). No key to keep here:
+    // the account is going away, so every open session must go with it.
+    expireOpenCheckoutSessions: (customerId) => expireOpenCheckoutSessions(stripe, customerId),
     findCustomersByUserId: async (userId) => {
         // The id is a GoTrue uuid (validated below), so it cannot break out of
         // the quoted search term.

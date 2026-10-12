@@ -41,6 +41,47 @@ export const priceTiers = (mode: StripeMode) => priceTiersWith(mode, env);
 
 export const appOrigin = (req: Request): string => appOriginFrom(req.headers.get('Origin'), env);
 
+/**
+ * Expires every Checkout Session the customer still has open, and answers how
+ * many there were.
+ *
+ * Two callers, for two reasons that come to the same thing. delete-account
+ * expires them so a session opened before the account went away cannot later be
+ * paid for a user who no longer exists. stripe-checkout expires them before it
+ * opens another, because a session stays payable for 24 hours and two open
+ * sessions are two charges (QA round 4, D1) -- Stripe bills a Checkout Session
+ * when it is PAID, which is long after the moment any guard of ours ran.
+ *
+ * `keepIdempotencyKey` is what lets those two uses share one implementation
+ * without stripe-checkout destroying its own second layer. The session it is
+ * about to create carries the request's idempotency key in its metadata, and a
+ * genuine double-submit (two tabs, a double-click) replays the first session
+ * instead of making a second one -- so expiring everything first would hand the
+ * buyer back a session we had just killed. A session stamped with the key this
+ * request will use is therefore the one session left alone; every other open
+ * one goes. delete-account passes nothing and expires all of them, which is the
+ * behaviour (and the count) it had before this was factored out.
+ */
+export const expireOpenCheckoutSessions = async (
+    stripe: Stripe,
+    customerId: string,
+    keepIdempotencyKey?: string | null,
+): Promise<number> => {
+    let expired = 0;
+    for await (const session of stripe.checkout.sessions.list({
+        customer: customerId,
+        status: 'open',
+        limit: 100,
+    })) {
+        if (keepIdempotencyKey && session.metadata?.checkout_key === keepIdempotencyKey) {
+            continue;
+        }
+        await stripe.checkout.sessions.expire(session.id);
+        expired += 1;
+    }
+    return expired;
+};
+
 const clients = new Map<StripeMode, Stripe | null>();
 
 export const stripeClient = (mode: StripeMode): Stripe | null => {

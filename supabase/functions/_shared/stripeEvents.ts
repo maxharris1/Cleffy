@@ -73,6 +73,14 @@ export interface SubscriptionUpsert {
     price_id: string | null;
     current_period_end: string | null;
     cancel_at_period_end: boolean;
+    /**
+     * When Stripe created the event this row was written from. The row keeps the
+     * newest one it has seen and the subscriptions_refuse_stale_event trigger
+     * drops any write carrying an older stamp, which is the one reordering the
+     * live read-back cannot fix: two deliveries in flight at once, the one that
+     * read the older state writing second (QA round 4, D3).
+     */
+    last_event_created_at: string | null;
 }
 
 /** Only the fields this handler reads — not a full mirror of Stripe's type. */
@@ -109,6 +117,13 @@ export interface StripeEventLike {
     data: { object: unknown };
     /** Stripe stamps the sending account's mode on every event. */
     livemode?: boolean;
+    /**
+     * Seconds since the epoch, stamped by Stripe when the event was created.
+     * Optional only because this type describes what we READ rather than what
+     * Stripe promises: an event without it writes no stamp, and the trigger
+     * leaves such a write alone rather than guessing (see SubscriptionUpsert).
+     */
+    created?: number;
 }
 
 /**
@@ -119,12 +134,54 @@ export interface StripeEventLike {
  */
 export const SUBSCRIPTION_MISSING = 'missing' as const;
 
+/**
+ * How long a claim may sit unfinished before another delivery may take it over.
+ *
+ * Written as a Postgres interval because that is where the comparison happens
+ * (claim_stripe_event, migration 20261012120101). The window has to clear the
+ * longest honest processing time by a wide margin -- an Edge Function's
+ * wall-clock ceiling is low single-digit minutes, and the slowest path here is
+ * a Stripe read plus two RPCs -- or a delivery that is genuinely still running
+ * gets a second one beside it. And it has to be far inside Stripe's roughly
+ * three days of retries, or the claim is never recovered at all. Ten minutes
+ * sits between the two: a claim lost to a dead isolate is picked up by the
+ * retry after it (Stripe backs off to 30 minutes, then hours), hours before
+ * Stripe gives up, and no live invocation has ever been running that long.
+ */
+export const STRIPE_EVENT_CLAIM_STALE_AFTER = '10 minutes';
+
+/**
+ * What upsertSubscription did.
+ *
+ * `duplicate` is the partial unique index (subscriptions_one_entitling_per_user_mode,
+ * migration 20261012120100) refusing a SECOND entitling subscription for this
+ * user and Stripe account. The row is deliberately left absent; see the
+ * handler's duplicate branch for why nothing is cancelled in Stripe.
+ */
+export type SubscriptionWriteOutcome =
+    | { duplicate: false }
+    | { duplicate: true; otherSubscriptionId: string | null };
+
 export interface WebhookStore {
-    /** Records the event id. `false` means it was already recorded — a replay. */
+    /**
+     * Takes the claim on an event id. `false` means someone else holds it — a
+     * replay of an event already applied, or a delivery genuinely in flight
+     * right now. A claim whose invocation died without finishing goes stale
+     * after STRIPE_EVENT_CLAIM_STALE_AFTER and is claimable again, which is
+     * what stops a dead isolate turning every Stripe retry into `200 duplicate`
+     * (QA round 4, D2).
+     */
     claimEvent: (id: string, type: string) => Promise<boolean>;
+    /**
+     * Marks the claim finished, so every later delivery of it is a duplicate
+     * rather than a claim waiting to go stale. Called for every outcome that
+     * genuinely finished with the event, which is every 2xx this module returns
+     * after taking the claim.
+     */
+    markEventDone: (id: string) => Promise<void>;
     userIdForCustomer: (customerId: string) => Promise<string | null>;
     linkCustomer: (customerId: string, userId: string) => Promise<void>;
-    upsertSubscription: (row: SubscriptionUpsert) => Promise<void>;
+    upsertSubscription: (row: SubscriptionUpsert) => Promise<SubscriptionWriteOutcome>;
     /**
      * The subscription as Stripe holds it NOW. Every event that changes a
      * subscription's entitlements except `deleted` is applied from this rather
@@ -149,7 +206,9 @@ export interface WebhookStore {
     /**
      * Forgets a claimed event id, so Stripe's retry of it is processed rather
      * than skipped as a duplicate. Must be called before answering with a
-     * retryable status.
+     * retryable status. Only ever drops the claim this invocation holds: if it
+     * went stale and another delivery took it over, that one is mid-flight and
+     * its claim is not ours to remove.
      */
     releaseEvent: (id: string) => Promise<void>;
     log: (message: string) => void;
@@ -214,10 +273,21 @@ const endingOf = (sub: StripeSubscriptionLike): { periodEnd: string | null; canc
     };
 };
 
+/**
+ * The event's own clock, as the row records it. Stripe stamps `created` on every
+ * event it sends, so this is the Stripe account's view of when the change
+ * happened -- the only ordering both deliveries of a race can be compared on.
+ */
+export const eventStampOf = (event: StripeEventLike): string | null =>
+    typeof event.created === 'number' && Number.isFinite(event.created)
+        ? new Date(event.created * 1000).toISOString()
+        : null;
+
 export const subscriptionRowFrom = (
     sub: StripeSubscriptionLike,
     userId: string,
     priceTiers: Record<string, BillingTier>,
+    lastEventCreatedAt: string | null = null,
 ): SubscriptionUpsert => {
     const priceId = priceIdOf(sub);
     const ending = endingOf(sub);
@@ -229,6 +299,7 @@ export const subscriptionRowFrom = (
         price_id: priceId,
         current_period_end: ending.periodEnd,
         cancel_at_period_end: ending.cancelling,
+        last_event_created_at: lastEventCreatedAt,
     };
 };
 
@@ -252,6 +323,46 @@ const resolveUserId = async (
 };
 
 /**
+ * The answer for a second entitling subscription the partial unique index
+ * refuses (QA round 4, D1). It is a 200 with no row written, and that is a
+ * decision rather than a shrug:
+ *
+ *  * Stripe is NOT asked to retry. The constraint will refuse the write
+ *    identically for the next three days, so retrying only buries the
+ *    failures that matter under endpoint-failure alerts.
+ *  * the duplicate is NOT cancelled in Stripe from here. Cancelling bills
+ *    nobody back and cannot be undone, and nothing in this process can tell
+ *    which of two subscriptions the customer meant to have -- the one they
+ *    opened first, or the one whose plan they actually wanted. A human reads
+ *    the alert, cancels the right one in the dashboard and refunds it.
+ *  * the row's ABSENCE is what keeps the money and the product in step:
+ *    get_entitlements reads this table, so the customer is entitled by the
+ *    subscription that did land and by that one only, exactly as if the
+ *    duplicate had never been bought. delete-account is unaffected too --
+ *    it lists subscriptions from Stripe, not from here, so a duplicate with
+ *    no row is still cancelled when the account goes.
+ *
+ * What it leaves open, and what the alert is for: nothing reconciles Stripe
+ * against this table on a schedule, and the alert's only destination today is
+ * the function log. A sweep that compares the two (and a place for it to shout)
+ * is the follow-up.
+ */
+const duplicateEntitling = (
+    store: WebhookStore,
+    event: StripeEventLike,
+    sub: StripeSubscriptionLike,
+    userId: string,
+    otherSubscriptionId: string | null,
+): WebhookResult => {
+    store.log(
+        `ALERT ${event.type} ${event.id}: user ${userId} would hold two entitling subscriptions ` +
+            `(${otherSubscriptionId ?? 'unknown'} is recorded, ${sub.id} was refused as ${sub.status}); ` +
+            'the duplicate is NOT recorded and NOT cancelled -- cancel and refund the right one in Stripe',
+    );
+    return { status: 200, body: { received: true, ignored: 'duplicate_active_subscription' } };
+};
+
+/**
  * Writes the row, then brings the score archive in line with it. Both halves
  * read the user's entitlements AFTER the upsert, so they act on every
  * subscription the user holds, not just this one: a lapse while another plan is
@@ -269,16 +380,23 @@ const resolveUserId = async (
  */
 const applySubscription = async (
     store: WebhookStore,
+    event: StripeEventLike,
     sub: StripeSubscriptionLike,
     userId: string,
     priceTiers: Record<string, BillingTier>,
-): Promise<void> => {
-    await store.upsertSubscription(subscriptionRowFrom(sub, userId, priceTiers));
+): Promise<WebhookResult | null> => {
+    const written = await store.upsertSubscription(
+        subscriptionRowFrom(sub, userId, priceTiers, eventStampOf(event)),
+    );
+    if (written.duplicate) {
+        return duplicateEntitling(store, event, sub, userId, written.otherSubscriptionId);
+    }
     if (shouldArchiveOnStatus(sub.status)) {
         await store.applyFreeTierArchival(userId);
     } else if (isEntitlingStatus(sub.status)) {
         await store.restorePlanArchivedScores(userId);
     }
+    return null;
 };
 
 /**
@@ -312,6 +430,16 @@ const subscriptionMissing = (store: WebhookStore, event: StripeEventLike, subscr
  * makes Stripe retry, which is only useful when we genuinely failed. Every
  * non-2xx it returns has already released the event's claim (see retryLater);
  * a THROWN error leaves that to the caller, which releases it the same way.
+ *
+ * Takes the claim, dispatches, and marks the claim finished on every outcome
+ * that genuinely is. A 2xx IS that outcome, whatever it says in the body: an
+ * `ignored:` answer -- an unattributable event, a one-off payment, a
+ * subscription Stripe says is gone, a status floor, an event type we do not
+ * handle -- is a decision not to apply it, not a failure, and a redelivery must
+ * read as the duplicate it is rather than as an abandoned claim for some future
+ * delivery to take over. The non-2xx paths all go through retryLater, which
+ * releases the claim, so they are skipped here; so is a throw, which the caller
+ * releases.
  */
 export const handleStripeEvent = async (
     event: StripeEventLike,
@@ -322,9 +450,23 @@ export const handleStripeEvent = async (
     const fresh = await store.claimEvent(event.id, event.type);
     if (!fresh) {
         store.log(`duplicate event ${event.id} (${event.type}) ignored`);
+        // Nothing to mark: the claim belongs to the delivery that took it, and
+        // it is that one's job to finish or to release it.
         return { status: 200, body: { received: true, duplicate: true } };
     }
 
+    const result = await dispatchStripeEvent(event, store, priceTiers);
+    if (result.status >= 200 && result.status < 300) {
+        await store.markEventDone(event.id);
+    }
+    return result;
+};
+
+const dispatchStripeEvent = async (
+    event: StripeEventLike,
+    store: WebhookStore,
+    priceTiers: Record<string, BillingTier>,
+): Promise<WebhookResult> => {
     switch (event.type) {
         case 'checkout.session.completed': {
             const session = event.data.object as StripeCheckoutSessionLike;
@@ -357,12 +499,23 @@ export const handleStripeEvent = async (
                 return retryLater(store, event, 'subscription_unavailable');
             }
 
-            await applySubscription(store, sub, userId, priceTiers);
-            return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
+            return (
+                (await applySubscription(store, event, sub, userId, priceTiers)) ?? {
+                    status: 200,
+                    body: { received: true, applied: 'subscription_upserted' },
+                }
+            );
         }
 
+        // paused/resumed are the same shape and want the same answer: the event
+        // carries a subscription, and what gets written is that subscription as
+        // Stripe holds it now. A `paused` subscription bills nothing, and
+        // `paused` is not an entitling status, so applying it is also what stops
+        // a pause entitling a teacher for free (QA round 4, D6).
         case 'customer.subscription.created':
         case 'customer.subscription.updated':
+        case 'customer.subscription.paused':
+        case 'customer.subscription.resumed':
         case 'customer.subscription.deleted': {
             const embedded = event.data.object as StripeSubscriptionLike;
             const customerId = idOf(embedded.customer);
@@ -427,10 +580,23 @@ export const handleStripeEvent = async (
                 return { status: 200, body: { received: true, ignored: 'terminal_status' } };
             }
 
-            await applySubscription(store, current, userId, priceTiers);
-            return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
+            return (
+                (await applySubscription(store, event, current, userId, priceTiers)) ?? {
+                    status: 200,
+                    body: { received: true, applied: 'subscription_upserted' },
+                }
+            );
         }
 
+        // invoice.paid and invoice.payment_succeeded join payment_failed rather
+        // than being handled apart from it: all three are "an invoice settled
+        // one way or the other, read the subscription back and apply it". Their
+        // absence was the renewal blip (QA round 4, D6) -- a renewal moves the
+        // period end, and until some other event arrived the row still said the
+        // old one, so get_entitlements dropped the teacher to free limits in
+        // between.
+        case 'invoice.paid':
+        case 'invoice.payment_succeeded':
         case 'invoice.payment_failed': {
             const invoice = event.data.object as StripeInvoiceLike;
             const subscriptionId =
@@ -439,15 +605,17 @@ export const handleStripeEvent = async (
                 return { status: 200, body: { received: true, ignored: 'no_subscription' } };
             }
 
-            // Re-read from Stripe rather than trusting the invoice: Stripe decides
-            // whether this failure means past_due, unpaid, or nothing yet.
-            // Same as checkout: a failed read must be retried, not acknowledged.
+            // Re-read from Stripe rather than trusting the invoice: Stripe
+            // decides what the invoice means for the subscription -- past_due,
+            // unpaid, or nothing yet on a failure; a moved period end, or a
+            // revival out of past_due, on a payment. Same as checkout: a failed
+            // read must be retried, not acknowledged.
             const sub = await store.fetchSubscription(subscriptionId);
             if (sub === SUBSCRIPTION_MISSING) {
                 return subscriptionMissing(store, event, subscriptionId);
             }
             if (!sub) {
-                store.log(`invoice.payment_failed ${event.id}: subscription ${subscriptionId} not retrievable`);
+                store.log(`${event.type} ${event.id}: subscription ${subscriptionId} not retrievable`);
                 return retryLater(store, event, 'subscription_unavailable');
             }
             const customerId = idOf(invoice.customer) ?? idOf(sub.customer);
@@ -457,9 +625,12 @@ export const handleStripeEvent = async (
                 return { status: 200, body: { received: true, ignored: 'unknown_user' } };
             }
 
-            await applySubscription(store, sub, userId, priceTiers);
-            store.log(`invoice.payment_failed for ${userId}: subscription now ${sub.status}`);
-            return { status: 200, body: { received: true, applied: 'payment_failed_recorded' } };
+            const duplicate = await applySubscription(store, event, sub, userId, priceTiers);
+            if (duplicate) {
+                return duplicate;
+            }
+            store.log(`${event.type} for ${userId}: subscription now ${sub.status}`);
+            return { status: 200, body: { received: true, applied: 'invoice_recorded' } };
         }
 
         default:

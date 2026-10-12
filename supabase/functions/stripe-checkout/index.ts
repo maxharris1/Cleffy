@@ -1,147 +1,116 @@
-import { requireUser, rejectAnonymous, rejectStudent } from '../_shared/auth.ts';
+import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
+import { handleCheckout } from '../_shared/checkoutFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
-import { appOrigin, modeForRequest, resolvePrice, stripeClient } from '../_shared/stripe.ts';
+import {
+    appOrigin,
+    expireOpenCheckoutSessions,
+    modeForRequest,
+    resolvePrice,
+    stripeClient,
+    type StripeMode,
+} from '../_shared/stripe.ts';
 import { holdsRunningSubscription } from '../_shared/stripeEvents.ts';
 
 /**
  * Creates a Stripe Checkout session for a subscription price and maps
  * auth.uid() to a Stripe customer, creating the customer on first upgrade.
  *
- * Free signup stays card-free: the free tier is simply "no subscriptions row",
- * so nothing here runs until a teacher actually chooses to pay.
+ * Every decision — who may buy, at what price, against which Stripe account,
+ * and how a double-submit is kept to ONE charge (QA round 4, D1) — lives in
+ * _shared/checkoutFlow.ts, where the vitest suite drives it against a fake
+ * Stripe that models open sessions. This file is only what it runs against.
  */
-Deno.serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return optionsResponse();
-    }
-    if (req.method !== 'POST') {
-        return jsonResponse({ error: 'Method not allowed' }, 405);
-    }
 
-    const rate = await checkRateLimit(`checkout:${clientKey(req)}`, 10, 60_000);
-    if (!rate.ok) {
-        return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
-    }
-
-    const auth = await requireUser(req);
-    if (!auth.ok) {
-        return auth.response;
-    }
-    const anonymous = rejectAnonymous(auth.caller);
-    if (anonymous) {
-        return anonymous;
-    }
-    // A provisioned student has no billing relationship at all: their teacher's
-    // plan entitles them, and there is nothing here for them to buy.
-    const student = rejectStudent(auth.caller);
-    if (student) {
-        return student;
-    }
-
-    let body: { priceId?: string };
-    try {
-        body = await req.json();
-    } catch {
-        return jsonResponse({ error: 'Invalid JSON body' }, 400);
-    }
-
-    // Which Stripe account this buyer belongs to is decided by where they are
-    // browsing, never by anything they send: cleffy.io is the live account,
-    // dev.cleffy.io the sandbox. An origin we do not publish from gets no
-    // checkout at all rather than a guessed account.
-    const mode = modeForRequest(req);
-    if (!mode) {
-        return jsonResponse({ error: 'Unrecognised origin', code: 'unknown_origin' }, 400);
-    }
-
-    const requested = typeof body.priceId === 'string' ? body.priceId.trim() : '';
-    // Only prices we published are checkout-able; a client-supplied id is never
-    // trusted. The id names the plan, and this re-prices that plan in the
-    // caller's own mode, so a bundle cached from before the live flip still
-    // checks out against the right account.
-    const priceId = requested ? resolvePrice(requested, mode) : null;
-    if (!priceId) {
-        return jsonResponse({ error: 'Unknown price', code: 'unknown_price' }, 400);
-    }
-
+/**
+ * The two clients every Stripe-touching dep needs. Throwing is the right
+ * failure here: `billingConfigured` below has already answered a 500 for a mode
+ * we cannot serve, so reaching this means the configuration changed underneath
+ * the request, and the flow turns a throw into a refusal rather than a session.
+ */
+const billing = (mode: StripeMode) => {
     const stripe = stripeClient(mode);
     const admin = serviceClient();
     if (!stripe || !admin) {
-        return jsonResponse({ error: 'Billing is not configured' }, 500);
+        throw new Error('Billing is not configured');
     }
+    return { stripe, admin };
+};
 
-    try {
-        // One subscription per buyer per account: switching plans or resuming a
-        // cancelled one is the billing portal's job, and a second Checkout here
-        // would bill both (see holdsRunningSubscription). Fails closed -- a buyer
-        // we cannot check is asked to retry rather than risk a double charge.
-        const { data: running, error: runningError } = await admin
-            .from('subscriptions')
-            .select('status, current_period_end')
-            .eq('user_id', auth.caller.userId)
-            .eq('mode', mode);
-        if (runningError) {
-            logError('stripe-checkout', runningError, { code: 'subscription_check_failed' });
-            return jsonResponse({ error: 'Could not check your current plan. Please try again.' }, 502);
-        }
-        if (holdsRunningSubscription(running ?? [], Date.now())) {
-            return jsonResponse(
-                {
-                    error: 'You already have a subscription. Change or resume it with Manage subscription on your Account page.',
-                    code: 'already_subscribed',
+Deno.serve((req) =>
+    handleCheckout(req, {
+        json: jsonResponse,
+        options: optionsResponse,
+        clientKey,
+        checkRateLimit,
+        authenticate: async (request) => {
+            const auth = await requireUser(request);
+            if (!auth.ok) {
+                return auth.response;
+            }
+            const anonymous = rejectAnonymous(auth.caller);
+            if (anonymous) {
+                return anonymous;
+            }
+            // A provisioned student has no billing relationship at all: their
+            // teacher's plan entitles them, and there is nothing here for them
+            // to buy.
+            const student = rejectStudent(auth.caller);
+            if (student) {
+                return student;
+            }
+            return {
+                userId: auth.caller.userId,
+                // Asked for only when a Stripe customer is actually created,
+                // which is once per teacher per Stripe account.
+                email: async () => {
+                    const { data } = await auth.caller.userClient.auth.getUser();
+                    return data.user?.email ?? null;
                 },
-                409,
-            );
-        }
-
-        // Scoped to the mode: a customer id belongs to one Stripe account, so the
-        // sandbox `cus_…` a teacher picked up testing on dev is not a customer
-        // the live account has ever heard of.
-        const { data: existing } = await admin
-            .from('billing_customers')
-            .select('stripe_customer_id')
-            .eq('user_id', auth.caller.userId)
-            .eq('mode', mode)
-            .maybeSingle();
-
-        let customerId = existing?.stripe_customer_id ?? null;
-        if (!customerId) {
-            const { data: userData } = await auth.caller.userClient.auth.getUser();
+            };
+        },
+        modeForRequest,
+        resolvePrice,
+        appOrigin,
+        billingConfigured: (mode) => Boolean(stripeClient(mode) && serviceClient()),
+        runningSubscriptions: async (userId, mode) => {
+            const { data, error } = await billing(mode)
+                .admin.from('subscriptions')
+                .select('status, current_period_end')
+                .eq('user_id', userId)
+                .eq('mode', mode);
+            return error ? { ok: false, error } : { ok: true, rows: data ?? [] };
+        },
+        findCustomer: async (userId, mode) => {
+            // Scoped to the mode: a customer id belongs to one Stripe account,
+            // so the sandbox `cus_…` a teacher picked up testing on dev is not
+            // a customer the live account has ever heard of.
+            const { data, error } = await billing(mode)
+                .admin.from('billing_customers')
+                .select('stripe_customer_id')
+                .eq('user_id', userId)
+                .eq('mode', mode)
+                .maybeSingle();
+            return error ? { ok: false, error } : { ok: true, customerId: data?.stripe_customer_id ?? null };
+        },
+        createCustomer: async (userId, email, mode) => {
+            const { stripe, admin } = billing(mode);
             const customer = await stripe.customers.create({
-                email: userData.user?.email ?? undefined,
-                metadata: { user_id: auth.caller.userId },
+                email: email ?? undefined,
+                metadata: { user_id: userId },
             });
-            customerId = customer.id;
             await admin
                 .from('billing_customers')
-                .upsert(
-                    { user_id: auth.caller.userId, mode, stripe_customer_id: customerId },
-                    { onConflict: 'user_id,mode' },
-                );
-        }
-
-        const origin = appOrigin(req);
-        const session = await stripe.checkout.sessions.create({
-            mode: 'subscription',
-            customer: customerId,
-            line_items: [{ price: priceId, quantity: 1 }],
-            // Both are belt-and-braces for the webhook's user resolution: either
-            // survives even if the billing_customers row is somehow missing.
-            client_reference_id: auth.caller.userId,
-            subscription_data: { metadata: { user_id: auth.caller.userId } },
-            success_url: `${origin}/settings?checkout=success`,
-            cancel_url: `${origin}/settings?checkout=cancelled`,
-            allow_promotion_codes: true,
-        });
-
-        if (!session.url) {
-            return jsonResponse({ error: 'Stripe did not return a checkout URL' }, 502);
-        }
-        return jsonResponse({ url: session.url });
-    } catch (err) {
-        logError('stripe-checkout', err, { code: 'checkout_failed' });
-        return jsonResponse({ error: err instanceof Error ? err.message : 'Checkout failed' }, 502);
-    }
-});
+                .upsert({ user_id: userId, mode, stripe_customer_id: customer.id }, { onConflict: 'user_id,mode' });
+            return customer.id;
+        },
+        expireOpenSessions: (customerId, keepIdempotencyKey, mode) =>
+            expireOpenCheckoutSessions(billing(mode).stripe, customerId, keepIdempotencyKey),
+        createSession: (params, options, mode) => billing(mode).stripe.checkout.sessions.create(params, options),
+        holdsRunningSubscription,
+        now: () => Date.now(),
+        log: (message) => console.log(message),
+        logError: (code, err) => logError('stripe-checkout', err, { code }),
+    }),
+);

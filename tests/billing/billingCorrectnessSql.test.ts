@@ -270,3 +270,88 @@ describe('billing-correctness RPC privileges', () => {
         expect(after).toMatch(/s\.mode\s*=\s*any\s*\(public\.entitling_billing_modes\s*\(\s*\)\)/i);
     });
 });
+
+/**
+ * The three guards behind the double-charge fix (QA round 4, D1-D3). Their
+ * behaviour is proven against Postgres in tests/sql/billing_double_charge.sql,
+ * run by hand like the rest of that directory; what CI can hold without a
+ * database is that the migrations still declare them, and that the names the
+ * webhook matches on are the names the SQL creates — a rename on one side alone
+ * turns the duplicate-subscription branch into an unhandled 23505, which is a
+ * Stripe retry every few hours against a constraint that will never yield.
+ */
+describe('the double-charge guards', () => {
+    const declaring = (pattern: RegExp): { name: string; sql: string } => {
+        const found = migrations().filter((m) => pattern.test(m.sql));
+        expect(found.length, `migrations declaring ${pattern.source}`).toBe(1);
+        return found[0] as { name: string; sql: string };
+    };
+
+    const ENTITLING_INDEX = 'subscriptions_one_entitling_per_user_mode';
+
+    it('creates the partial unique index on the statuses that entitle', () => {
+        const migration = declaring(new RegExp(`create unique index if not exists ${ENTITLING_INDEX}`, 'i'));
+        expect(migration.sql).toMatch(
+            new RegExp(
+                `create\\s+unique\\s+index\\s+if\\s+not\\s+exists\\s+${ENTITLING_INDEX}\\s+on\\s+public\\.subscriptions\\s*\\(user_id,\\s*mode\\)\\s+where\\s+status\\s+in\\s*\\('active',\\s*'trialing'\\)`,
+                'i',
+            ),
+        );
+        // A violating row must stop the push with something a human can act on,
+        // not with Postgres's own message about a duplicated key.
+        expect(migration.sql).toMatch(/raise\s+exception/i);
+        expect(migration.sql).toMatch(/errcode\s*=\s*'23505'/i);
+        expect(migration.sql).toMatch(/having\s+count\s*\(\*\)\s*>\s*1/i);
+    });
+
+    it('matches that index by name in the webhook, and only that index', () => {
+        const source = readFileSync(resolve(process.cwd(), 'supabase/functions/stripe-webhook/index.ts'), 'utf8');
+        expect(source).toContain(ENTITLING_INDEX);
+        // Name AND code: an unrelated 23505 has to keep throwing.
+        expect(source).toMatch(/error\.code === UNIQUE_VIOLATION && namesDuplicateEntitlingIndex\(error\)/);
+        expect(source).toMatch(/const UNIQUE_VIOLATION = '23505'/);
+    });
+
+    it('gives stripe_events a claim state, defaulting the rows that predate it to done', () => {
+        const migration = declaring(/add column if not exists status text not null default 'done'/i);
+        expect(migration.sql).toMatch(/check\s*\(status\s+in\s*\('processing',\s*'done'\)\)/i);
+        expect(migration.sql).toMatch(/add column if not exists claimed_at timestamptz not null default now\(\)/i);
+    });
+
+    it('claims an event in one statement, taking over only a stale claim', () => {
+        const sql = latestDefining('claim_stripe_event');
+        const def = definition(sql, 'claim_stripe_event');
+        // One INSERT ... ON CONFLICT: two deliveries racing cannot both win.
+        expect(def).toMatch(/insert\s+into\s+public\.stripe_events/i);
+        expect(def).toMatch(/on\s+conflict\s*\(id\)\s*do\s+update/i);
+        expect(def).toMatch(/where\s+e\.status\s*=\s*'processing'\s+and\s+e\.claimed_at\s*<\s*now\s*\(\)\s*-\s*p_stale_after/i);
+        expect(def).toMatch(/set\s+search_path\s*=\s*public/i);
+        // No SECURITY DEFINER: the service role already owns this table, and a
+        // definer function would hand the claim to anyone who could call it.
+        expect(def).not.toMatch(/security\s+definer/i);
+        expect(sql).toMatch(
+            /revoke\s+all\s+on\s+function\s+public\.claim_stripe_event\s*\(text,\s*text,\s*interval\)\s+from\s+public,\s*anon,\s*authenticated\s*;/i,
+        );
+        expect(sql).toMatch(
+            /grant\s+execute\s+on\s+function\s+public\.claim_stripe_event\s*\(text,\s*text,\s*interval\)\s+to\s+service_role\s*;/i,
+        );
+    });
+
+    it('refuses a stale subscription write in a BEFORE UPDATE trigger that returns OLD', () => {
+        const sql = latestDefining('subscriptions_refuse_stale_event');
+        const def = definition(sql, 'subscriptions_refuse_stale_event');
+        expect(sql).toMatch(/add column if not exists last_event_created_at timestamptz/i);
+        expect(sql).toMatch(
+            /create\s+trigger\s+subscriptions_refuse_stale_event\s+before\s+update\s+on\s+public\.subscriptions/i,
+        );
+        expect(def).toMatch(/returns\s+trigger/i);
+        // OLD, not NULL: the statement still reports a row, so PostgREST answers
+        // the webhook 200 and Stripe is not asked to retry an event too old to
+        // matter.
+        expect(def).toMatch(/return\s+old\s*;/i);
+        // Both NULL cases let the write through, and an unstamped write keeps
+        // the stamp the row already has.
+        expect(def).toMatch(/new\.last_event_created_at\s*:=\s*old\.last_event_created_at/i);
+        expect(def).toMatch(/old\.last_event_created_at\s+is\s+not\s+null/i);
+    });
+});
