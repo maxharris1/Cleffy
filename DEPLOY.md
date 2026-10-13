@@ -42,6 +42,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Supabase plan (realtime quota, connections, pausing)                   | ✅ **Pro** (org "Cleffy"); watch realtime usage after launch (§10)                                                    |
 | QA round 3 migrations `20261010120200` … `20261010120302`              | ✅ dev branch project (latest `20261010120302`); ⏳ production has none of the 2026-10 migrations (release checklist) |
 | QA round 4 migrations `20261011120100`, `20261011120101`               | ⏳ not applied on either project (release checklist)                                                                  |
+| Recovery path (history replay, corpus tables, logical restore)         | ⚠️ four known gaps, none blocking the push (_Recovery and disaster recovery_)                                         |
 
 ---
 
@@ -436,6 +437,16 @@ to refund (comment at the end of `20261007120300`).
     them, and that branch's migrations guard their creates so they re-apply
     over the existing objects when it merges.
 
+    **Two recovery-path gaps to settle before trusting any rebuilt
+    environment**, both measured on 2026-10-12 and written up under _Recovery
+    and disaster recovery_: production's history row for `20260828180000` has
+    `statements = NULL`, so replaying production's history builds a database
+    that **fails** on migration 15 — which is why branch-based QA has been
+    standing in for production only after manual remediation (R1, and read its
+    landmine note before repairing it); and the 10,618 rows in the corpus
+    tables above are recreatable by no migration on `main` until PR #52 merges
+    (R2). Neither blocks this push.
+
 2. **Prove the set on the `dev` branch first.** Push `dev` (unpause the branch
    first, §5), then run, against `qdbnlrgylelelvwbkvnm` only, each rolled-back
    proof: `tests/sql/column_integrity.sql`, `tests/sql/cross_branch_integration.sql`
@@ -546,6 +557,15 @@ to refund (comment at the end of `20261007120300`).
       `guard_guest_email` now refuses, and a new bundle's banner gets a 404
       until `guest-email-start` is deployed — so do not hold the functions or
       the bundle back once `20261010120200` is in.
+
+    **Deactivate `imslp-sync` the moment migration 3 (`20260902120000`)
+    commits**, and re-enable it only after migration 10 (`20260910160001`):
+    that migration schedules the job 27 migrations early, and on the rehearsal
+    it fired 9 times mid-push, including inside migration 9's 102-second
+    exclusive lock on `imslp_works`. Statements and the reason are under
+    _Recovery and disaster recovery_, R4 — which also says to leave
+    `omr-sweep` running.
+
 9. **Realtime topic split** (`20261007120101`). Committed annotation rows, PDF
    replacement and play-along status move from `doc:{id}` to the receive-only
    `doc-db:{id}`; presence, live ink and the sharing `membership` event stay on
@@ -1610,3 +1630,309 @@ The hosted images do **not** behave that way — a rebuilt branch shows
 hosted, which the rebuild confirmed. Keep it: it makes the grant explicit rather
 than dependent on which image an environment happens to run, and any new table
 should grant explicitly for the same reason.
+
+---
+
+## Recovery and disaster recovery — four things that do not work today
+
+The 2026-10-12 rehearsal replayed all 30 pending migrations against a copy of
+production's data and **passed**: 30/30 clean, no table rewrite, no dropped
+column, not one of production's 10,931 rows altered. The push is safe.
+
+What is not safe is the recovery path. Four separate findings, none of which
+blocks the push and all of which make "we can roll back" or "we can restore"
+untrue as written. **Nothing below has been applied to any database** — the
+observations are read-only reads of production, and the repairs are for a human
+to run deliberately, not steps the deploy performs.
+
+The one constraint that shapes all of it: `GET /v1/projects/{ref}/database/backups`
+reports `walg_enabled: true` and **`pitr_enabled: false`**. There are seven daily
+physical backups and nothing finer. A physical restore is therefore not a
+rollback — it is a jump back to that morning's snapshot that discards every user
+write since, and it cannot be aimed at "the moment before the push". Treat it as
+a disaster option. The real rollback is forward-only SQL, and the real backup is
+a logical dump taken immediately before the push (which is where R3 bites).
+
+### R1. Production's migration history cannot rebuild production
+
+```sql
+select version, name, statements is null
+from supabase_migrations.schema_migrations
+where version = '20260828180000';
+-- 20260828180000 | billing_stripe_mode | t
+```
+
+`20260828180000_billing_stripe_mode` is recorded on production with
+**`statements = NULL`**, and it is the only row in the table that is (re-checked
+read-only 2026-10-12; 27 rows, head `20260830101624`). The migration _is_ applied
+to the live schema — the `mode` columns are there — but its body was never
+recorded, so the history is a list of names with one hole in it.
+
+Anything built by replaying that history — a preview branch, a staging
+environment, a `supabase db reset`, a DR rebuild — comes up **without**
+`billing_customers.mode`, `subscriptions.mode`, the
+`billing_customers_pkey (user_id, mode)` composite primary key, the
+`subscriptions_user_mode` index and `entitling_billing_modes()`, and with the
+pre-mode body of `get_entitlements()`. Migration 15,
+`20261007120300_billing_correctness.sql`, then **fails** there: it references
+`s.mode` and `public.entitling_billing_modes()`. This is why the rehearsal's
+clean preview branch had to be remediated by hand before it could stand in for
+production at all, and it is why branch-based QA cannot currently be trusted to
+have tested what production will run.
+
+#### The landmine — read this before repairing anything
+
+The single migration whose body was never recorded is _exactly_ the one whose
+shipped body would re-open test-mode billing.
+
+`20260828180000_billing_stripe_mode.sql` ships
+`select array['live', 'test']::text[]`. Production's live
+`entitling_billing_modes()` is the hand-applied `select array['live']::text[]`
+from §0's live-flip step — which exists in this repository **only as the comment
+at lines 46-56 of that migration**, in no migration anyone can run (verified
+read-only 2026-10-12: production's body is the narrowed one). So a
+rebuild-from-migrations, or any future `create or replace` of that function,
+silently re-enables **test-mode subscriptions entitling in production**: Stripe's
+published test card buying a real plan. And because `statements` is NULL, no
+drift check that reads the recorded history can see the difference.
+
+Two things follow.
+
+- **The 1.0 push itself is safe.** None of the 30 pending migrations re-creates
+  `entitling_billing_modes()` — they only call it — so the push preserves
+  production's narrowing. `tests/migrationRecoverability.test.ts` now asserts
+  that the function is redefined in exactly one migration, so a second
+  definition cannot arrive unnoticed.
+- **Repairing R1 makes the landmine reachable.** Today the NULL row hides it by
+  accident: a rebuild from production's history has no
+  `entitling_billing_modes()` at all and dies at migration 15. Once `statements`
+  carries the shipped body, a rebuild succeeds and comes up entitling **both**
+  modes. For a preview or staging environment that is the correct answer and what
+  the migration's comment intends. For a DR rebuild **of production** it is
+  wrong, and re-narrowing it is a mandatory step of that rebuild. Folding the
+  narrowed body into a ref-guarded migration (Phase 1 finding F3) is the real
+  fix; until that exists, the repair below has to be paired with the manual
+  re-narrowing.
+
+#### The repair
+
+Neither option touches the live schema. `statements` is metadata consumed when an
+environment is rebuilt from history, so repairing it is safe for a running
+production — and it does **not** mean re-running the migration, which is already
+applied.
+
+**Option A, preferred — let the CLI write the row.**
+
+```sh
+supabase link --project-ref jibgwgosihadbjgxdsfe
+supabase migration repair --status reverted 20260828180000 --linked
+supabase migration repair --status applied  20260828180000 --linked
+```
+
+Reverted-then-applied rather than `applied` alone, because `applied` on a version
+that is already present depends on the CLI's `ON CONFLICT` clause, which the
+shipped binary does not expose: CLI 2.103.0's `migration repair` is a thin
+wrapper that shells out to the legacy Go CLI (`legacy.migration.repair`), so the
+SQL is not readable from the installed artifact and whether it overwrites a
+non-NULL-to-NULL `statements` cannot be established without running it. Deleting
+the row first removes the question: the insert path is the same one `db push`
+uses to record every migration, and that path demonstrably writes `statements`.
+The history is one row short between the two commands, which is harmless because
+nothing replays in between — but do not stop halfway.
+
+Note `migration repair` needs a **direct Postgres connection and the project
+password**, not the Management API. From this sandbox that is possible (see
+`.claude/skills/supabase-ops/SKILL.md`, _Applying migrations_); it is not a
+reason to reach for Option B.
+
+**Option B, fallback — write the row by hand.** Use this only if the CLI cannot
+reach the database, or if Option A is observed to leave `statements` NULL.
+
+```sql
+update supabase_migrations.schema_migrations
+set name = 'billing_stripe_mode',
+    statements = array[$mig$ -- paste supabase/migrations/20260828180000_billing_stripe_mode.sql verbatim
+$mig$]
+where version = '20260828180000';
+```
+
+`$mig$` is safe as the quote tag: the file's own dollar quoting is `$$`. The
+one-element array is not a guess — it is a shape production already carries.
+`20260830101624` has `array_length(statements, 1) = 1` with a 862-character
+element against an 865-byte file, i.e. the whole file in one element, while
+`20260827140000` has 10 elements whose `array_to_string(statements, ';')` is 2,410
+characters against a 2,426-byte file, i.e. split on statement boundaries with the
+separators dropped. Both shapes replay, so there is no canonical decomposition to
+reproduce and the whole-file element is the one a human can get right.
+
+Confirm either way, and expect `f`:
+
+```sql
+select version, statements is null, array_length(statements, 1),
+       length(array_to_string(statements, ';'))
+from supabase_migrations.schema_migrations
+where version = '20260828180000';
+```
+
+### R2. Four production tables and three functions exist in no migration on `main`
+
+`pd_pdf_store` (2,402 rows), `playalong_corpus_seed` (8,215), `playalong_corpus`
+(0) and `playalong_corpus_control` (1) — 10,618 rows, including the two largest
+tables in production — plus `playalong_corpus_get_by_hash()`,
+`playalong_corpus_put()` and `playalong_corpus_get_by_layout()` exist on
+production and on the `dev` branch project, created out of band (see _Before the
+merge_ step 1, which records the five history rows that were removed in the
+2026-10-08 repair). No migration on `main` or on `dev` creates them, so nothing
+in the repository can recreate them: a `supabase db diff`-generated migration, a
+branch merge or a schema reset can drop all 10,618 rows and the only copy is
+production itself.
+
+**What closes this is merging PR #52** (`dev` ← `mh/playalong-on-dev-ab47`), which
+carries six migrations that create and then evolve every one of the seven objects
+— `20260916140000_playalong_corpus.sql`, `…150000_playalong_corpus_seed_bucket.sql`,
+`…160000_…edition_signals.sql`, `…180000_…imslp_origin.sql`,
+`…190000_…imslp_pause.sql` and `20260924120000_…hash_prefers_symbolic.sql` — every
+statement guarded (`if not exists`, `drop constraint if exists`,
+`create or replace`, `on conflict do nothing`) precisely so they replay over the
+objects production already has.
+
+Their cumulative end state was diffed against production's live DDL read
+read-only on 2026-10-12, and it is faithful: all 60 columns of the four tables
+match on name, `attnum` order, type, NOT NULL and default (including the columns
+the later files add — `playalong_corpus_seed`'s `us_pd`, `attempts`,
+`candidate_url`, `edition` and `playalong_corpus_control`'s `imslp_paused_until`,
+`imslp_pause_reason`); all 10 constraints match, including the three-column
+`playalong_corpus_pkey`, `playalong_corpus_seed_pkey (work_title, origin, filename)`,
+`playalong_corpus_control`'s `singleton` primary key with its `CHECK (singleton)`,
+and `pd_pdf_store_origin_check` after `…180000` drops and re-adds it to admit
+`imslp`; both non-primary-key indexes match; RLS is enabled with zero policies on
+all four, as on production, with `grant all … to service_role` and EXECUTE
+revoked from public/anon/authenticated and granted to `service_role` alone, which
+is production's ACL (`{postgres=X/postgres,service_role=X/postgres}`).
+
+One difference, and it runs the safe way. Production's
+`playalong_corpus_get_by_hash()` is the body from `20260916140000`;
+`20260924120000` adds `(c.symbolic_source is distinct from 'omr') desc` to its
+`order by` so a symbolic row outranks an OMR row for the same bytes, and
+production never received that file. So merging #52 **advances** production by
+that one function body, which is the intent of the file. Nothing production has
+is lost, and the other two function bodies are byte-identical after whitespace
+normalisation.
+
+**If #52 stalls, the exposure stays open**, and it is the largest irreplaceable
+data risk in the project: 10,618 rows that no migration can rebuild, on a project
+with no PITR. Either merge it or lift its corpus migrations onto `dev`
+separately — and that means **all six**, not the first two. Which file supplies
+what:
+
+| File                                        | What only it carries                                                                            |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `20260916140000_playalong_corpus.sql`       | `playalong_corpus`, `playalong_corpus_seed`, `playalong_corpus_control` and all three functions |
+| `…150000_playalong_corpus_seed_bucket.sql`  | `pd_pdf_store`; the seed's `us_pd`, `attempts`, `candidate_url`                                 |
+| `…160000_…edition_signals.sql`              | `edition jsonb` on `pd_pdf_store` **and** on `playalong_corpus_seed`                            |
+| `…180000_…imslp_origin.sql`                 | `pd_pdf_store_origin_check` re-added to admit `imslp`                                           |
+| `…190000_…imslp_pause.sql`                  | `playalong_corpus_control.imslp_paused_until`, `imslp_pause_reason`                             |
+| `20260924120000_…hash_prefers_symbolic.sql` | `playalong_corpus_get_by_hash()` preferring a symbolic row over an OMR one                      |
+
+The first two alone do close this finding's own exposure — every one of the seven
+objects becomes recreatable from the repository — but they do **not** reproduce
+production's schema, and the gap is the quiet kind. A database built from them
+has no `edition` column for the importer's signals to land in and an
+`origin` CHECK that refuses `imslp`, so the failure does not arrive as a
+migration that fails: it arrives later, as rows the app cannot store, in whatever
+environment was rebuilt. If the first two are lifted on their own to stop the
+data risk, the other four are not optional follow-up — they are the rest of the
+same schema, and nothing may write an IMSLP-sourced row or an edition signal in
+that environment until they are in.
+
+`tests/migrationRecoverability.test.ts` fails on exactly that partial state: once
+any migration creates these tables, it requires the two `edition` columns, the
+`imslp`-admitting CHECK and the pause columns to be somewhere in the tree.
+
+Do not write a second capture of the same seven objects — two sources of truth
+for the same DDL is how they drift.
+
+### R3. A naive logical restore of production is broken today
+
+`public.omr_jobs.id` is `bigint generated always as identity`
+(`20260806120000_omr_jobs.sql`, and it is the only such column in the schema —
+`pg_attribute.attidentity = 'a'`, sequence `public.omr_jobs_id_seq`, confirmed
+read-only 2026-10-12). A production-to-environment copy written the obvious way
+is **rejected outright**:
+
+```
+ERROR: cannot insert a non-DEFAULT value into column "id"
+DETAIL: Column "id" is an identity column defined as GENERATED ALWAYS.
+```
+
+It needs the override, and then the sequence has to be moved past the restored
+rows or the first insert after the restore dies on a duplicate key:
+
+```sql
+-- inside the restore transaction, with session_replication_role = replica
+insert into public.omr_jobs overriding system value
+select * from <source>;
+
+-- and afterwards, or the next enqueue collides on omr_jobs_pkey
+select setval(
+    pg_get_serial_sequence('public.omr_jobs', 'id'),
+    coalesce((select max(id) from public.omr_jobs), 0) + 1,
+    false
+);
+```
+
+`select *` relies on the source and target having identical column order, which a
+same-version copy does; `session_replication_role = replica` is what the rehearsal
+used to load all 28 public tables in one 10.6-second transaction without firing
+triggers or ordering around foreign keys.
+
+Both statements are only right while the column is still `generated always`, and
+one `alter table public.omr_jobs alter column id set generated by default` in any
+later migration would make them wrong quietly: `OVERRIDING SYSTEM VALUE` on a
+by-default column is accepted and ignored, so the copy would succeed and the
+skipped `setval` would surface as a primary-key collision on the next enqueue.
+`tests/migrationRecoverability.test.ts` pins both halves — that the column is
+defined `generated always` in exactly one migration, and that no migration
+relaxes or drops that identity afterwards.
+
+This is the step that makes "we can restore production" false rather than slow.
+Combined with **R2** (the largest tables are not in any migration, so a rebuilt
+schema has nowhere to restore them _to_) and `pitr_enabled: false`, the honest
+statement today is: the migration is safe to run, and the plan for what to do if
+it is not would not work. Both must be fixed before the push, and the pre-flight
+logical dump has to be taken with the two statements above in it — a backup that
+silently skips `omr_jobs` is discovered at the worst possible moment.
+
+### R4. Pause `imslp-sync` across the push
+
+`20260902120000_imslp_category_index.sql` ends with
+
+```sql
+select cron.schedule ('imslp-sync', '*/2 * * * *', $$select public.imslp_sync_tick ()$$);
+```
+
+That is **migration 3 of the 30**, so the job goes live 27 migrations early.
+Measured on the rehearsal: it began firing immediately after migration 3 committed
+and ran 9 times during the push, including ticks inside migration 9's 102-second
+`AccessExclusiveLock` on `imslp_works`. All 9 runs succeeded in under 62 ms and
+nothing broke — but that is partly luck. For migrations 3-10 the job calls an
+`imslp_sync_tick()` that later migrations redefine, against tables migration 10
+drops, and it issues outbound `pg_net` HTTP to IMSLP from production from
+migration 3 onward.
+
+So, as part of the serial push:
+
+```sql
+-- immediately after migration 3 (20260902120000) commits
+update cron.job set active = false where jobname = 'imslp-sync';
+
+-- only after migration 10 (20260910160001) commits
+update cron.job set active = true where jobname = 'imslp-sync';
+```
+
+**Leave `omr-sweep` alone.** Production already runs it every minute
+(`20260806140000_omr_cron.sql`, scheduled long ago; read-only check on 2026-10-12
+shows exactly one job, `omr-sweep`, active, and no `imslp-sync` yet). It reaps
+expired OMR leases and purges the score cache; deactivating it stalls OMR for the
+duration, and no migration in the pending set re-schedules it, which
+`tests/migrationRecoverability.test.ts` pins.
