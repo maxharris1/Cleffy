@@ -158,9 +158,7 @@ export const STRIPE_EVENT_CLAIM_STALE_AFTER = '10 minutes';
  * user and Stripe account. The row is deliberately left absent; see the
  * handler's duplicate branch for why nothing is cancelled in Stripe.
  */
-export type SubscriptionWriteOutcome =
-    | { duplicate: false }
-    | { duplicate: true; otherSubscriptionId: string | null };
+export type SubscriptionWriteOutcome = { duplicate: false } | { duplicate: true; otherSubscriptionId: string | null };
 
 export interface WebhookStore {
     /**
@@ -385,9 +383,7 @@ const applySubscription = async (
     userId: string,
     priceTiers: Record<string, BillingTier>,
 ): Promise<WebhookResult | null> => {
-    const written = await store.upsertSubscription(
-        subscriptionRowFrom(sub, userId, priceTiers, eventStampOf(event)),
-    );
+    const written = await store.upsertSubscription(subscriptionRowFrom(sub, userId, priceTiers, eventStampOf(event)));
     if (written.duplicate) {
         return duplicateEntitling(store, event, sub, userId, written.otherSubscriptionId);
     }

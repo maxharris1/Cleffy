@@ -168,11 +168,13 @@ const harness = (
             calls.push('expire');
             return stripe.expireOpenSessions(customer, keepKey);
         }),
-        createSession: vi.fn(async (sessionParams: CheckoutSessionParams, sessionOptions: { idempotencyKey: string }) => {
-            calls.push('create-session');
-            params.push(sessionParams);
-            return stripe.createSession(sessionParams, sessionOptions);
-        }),
+        createSession: vi.fn(
+            async (sessionParams: CheckoutSessionParams, sessionOptions: { idempotencyKey: string }) => {
+                calls.push('create-session');
+                params.push(sessionParams);
+                return stripe.createSession(sessionParams, sessionOptions);
+            },
+        ),
         holdsRunningSubscription,
         now: options.now ?? (() => NOW),
         log: (message) => logs.push(message),

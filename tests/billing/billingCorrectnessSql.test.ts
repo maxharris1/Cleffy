@@ -324,7 +324,9 @@ describe('the double-charge guards', () => {
         // One INSERT ... ON CONFLICT: two deliveries racing cannot both win.
         expect(def).toMatch(/insert\s+into\s+public\.stripe_events/i);
         expect(def).toMatch(/on\s+conflict\s*\(id\)\s*do\s+update/i);
-        expect(def).toMatch(/where\s+e\.status\s*=\s*'processing'\s+and\s+e\.claimed_at\s*<\s*now\s*\(\)\s*-\s*p_stale_after/i);
+        expect(def).toMatch(
+            /where\s+e\.status\s*=\s*'processing'\s+and\s+e\.claimed_at\s*<\s*now\s*\(\)\s*-\s*p_stale_after/i,
+        );
         expect(def).toMatch(/set\s+search_path\s*=\s*public/i);
         // No SECURITY DEFINER: the service role already owns this table, and a
         // definer function would hand the claim to anyone who could call it.

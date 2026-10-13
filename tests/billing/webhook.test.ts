@@ -136,10 +136,7 @@ class FakeStore implements WebhookStore {
                 });
                 return { duplicate: false };
             }
-            if (
-                current.last_event_created_at !== null &&
-                row.last_event_created_at < current.last_event_created_at
-            ) {
+            if (current.last_event_created_at !== null && row.last_event_created_at < current.last_event_created_at) {
                 this.staleWritesRefused.push(row.stripe_subscription_id);
                 return { duplicate: false };
             }

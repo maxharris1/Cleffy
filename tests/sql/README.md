@@ -119,6 +119,23 @@ hash and an unknown username), and refuses every caller but the service role.
 back one use of a bucket inside its window (never below zero, never into the
 next window, never creating a bucket), and only the service role may call it.
 
+`billing_double_charge.sql` proves the three guards behind the double charge
+QA round 4 reproduced in Stripe (`supabase/migrations/20261012120100`,
+`120101` and `120102`): `subscriptions_one_entitling_per_user_mode` refuses a
+second `active` or `trialing` subscription for one user in one Stripe account —
+on the insert and on the upsert's update, naming the index in its 23505 — while
+leaving the other account, another user, a cancelled subscription's replacement
+and the live subscription's own updates alone; `claim_stripe_event` claims a
+fresh event, answers with the stamp it wrote, refuses one already `done` or
+claimed moments ago, takes over a claim left `processing` past its staleness
+window (which is what makes Stripe's retry of an event whose isolate died
+recoverable rather than a permanent `200 duplicate`), and is the service role's
+alone, as is the table; and the `subscriptions_refuse_stale_event` trigger
+drops an update carrying an older `last_event_created_at` than the row holds,
+applies a newer or equal one, and lets an unstamped write through without
+losing the stamp the row already had. Like the others it reports its checks on
+the last line and rolls back.
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's

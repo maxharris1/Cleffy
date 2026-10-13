@@ -92,8 +92,7 @@ export interface CheckoutCaller {
  * better than a buyer charged twice.
  */
 export type RunningLookup =
-    | { ok: true; rows: Array<{ status: string; current_period_end: string | null }> }
-    | { ok: false; error: unknown };
+    { ok: true; rows: Array<{ status: string; current_period_end: string | null }> } | { ok: false; error: unknown };
 
 export type CustomerLookup = { ok: true; customerId: string | null } | { ok: false; error: unknown };
 
@@ -168,7 +167,11 @@ export const handleCheckout = async (req: Request, deps: CheckoutDeps): Promise<
         return deps.json({ error: 'Method not allowed' }, 405);
     }
 
-    const rate = await deps.checkRateLimit(`checkout:${deps.clientKey(req)}`, CHECKOUT_RATE.limit, CHECKOUT_RATE.windowMs);
+    const rate = await deps.checkRateLimit(
+        `checkout:${deps.clientKey(req)}`,
+        CHECKOUT_RATE.limit,
+        CHECKOUT_RATE.windowMs,
+    );
     if (!rate.ok) {
         return deps.json({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }

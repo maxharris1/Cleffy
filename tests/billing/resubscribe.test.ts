@@ -47,6 +47,12 @@ class BillingBackedStore implements WebhookStore {
         this.events.add(id);
         return true;
     };
+    /**
+     * Whether an applied event is marked done is webhook.test.ts's subject (the
+     * three claim states live in its fake); here a claimed id is simply never
+     * claimed again, which is all these tests need of it.
+     */
+    markEventDone = async () => undefined;
     releaseEvent = async (id: string) => {
         this.events.delete(id);
     };
@@ -60,6 +66,9 @@ class BillingBackedStore implements WebhookStore {
             status: r.status,
             current_period_end: r.current_period_end,
         }));
+        // Never the duplicate the partial unique index refuses: one teacher,
+        // one subscription at a time is the premise of every test below.
+        return { duplicate: false as const };
     };
     fetchSubscription = async (id: string) => this.remote.get(id) ?? null;
     userIdForSubscription = async (id: string) => this.rows.get(id)?.user_id ?? null;
