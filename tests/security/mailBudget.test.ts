@@ -37,7 +37,10 @@ import {
  * CI instead.
  */
 
-const env = (values: Record<string, string>): EnvLookup => (name) => values[name];
+const env =
+    (values: Record<string, string>): EnvLookup =>
+    (name) =>
+        values[name];
 
 describe('the auth-mail reserve', () => {
     it('cannot be allocated to the senders we control', () => {

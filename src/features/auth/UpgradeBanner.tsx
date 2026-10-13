@@ -213,12 +213,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     <button type="button" disabled={busy} onClick={sendCode} className={LINK_BUTTON_CLASS}>
                         Send a new code
                     </button>
-                    <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => goTo('details')}
-                        className={LINK_BUTTON_CLASS}
-                    >
+                    <button type="button" disabled={busy} onClick={() => goTo('details')} className={LINK_BUTTON_CLASS}>
                         Change email
                     </button>
                     {errorLine}

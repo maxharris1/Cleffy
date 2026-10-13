@@ -87,8 +87,7 @@ const logIn = async (user: ReturnType<typeof userEvent.setup>) => {
 };
 
 /** GoTrue's refusal for an account whose address is not confirmed yet. */
-const notConfirmed = () =>
-    new AuthApiError('Email not confirmed', 400, 'email_not_confirmed');
+const notConfirmed = () => new AuthApiError('Email not confirmed', 400, 'email_not_confirmed');
 
 describe('after signing up with confirmation on', () => {
     it('stays on "Check your email" instead of assuming a session, and says the link expires', async () => {

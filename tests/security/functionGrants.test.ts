@@ -137,13 +137,17 @@ describe('peek_share_link is meant to be callable by anon', () => {
         //
         // Confirmed on the live dev branch project (read-only): anon and
         // authenticated both hold EXECUTE, PUBLIC does not.
-        expect(sql).toMatch(/grant\s+execute\s+on\s+function\s+public\.peek_share_link\s*\(\s*text\s*\)\s+to\s+anon\s*;/i);
+        expect(sql).toMatch(
+            /grant\s+execute\s+on\s+function\s+public\.peek_share_link\s*\(\s*text\s*\)\s+to\s+anon\s*;/i,
+        );
         expect(sql).toMatch(
             /grant\s+execute\s+on\s+function\s+public\.peek_share_link\s*\(\s*text\s*\)\s+to\s+authenticated\s*;/i,
         );
         // Revoked from PUBLIC first so the grant list is exactly the two API
         // roles rather than "everyone, plus two redundant grants".
-        expect(sql).toMatch(/revoke\s+all\s+on\s+function\s+public\.peek_share_link\s*\(\s*text\s*\)\s+from\s+public\s*;/i);
+        expect(sql).toMatch(
+            /revoke\s+all\s+on\s+function\s+public\.peek_share_link\s*\(\s*text\s*\)\s+from\s+public\s*;/i,
+        );
     });
 
     it('answers only whether a link works and at what role — never which document', () => {
