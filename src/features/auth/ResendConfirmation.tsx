@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { confirmationResendProblem } from '@/features/auth/authErrors';
 import { resendSignUpConfirmation } from '@/features/auth/session';
 import { TurnstileField } from '@/features/auth/TurnstileField';
+import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 
@@ -32,11 +33,22 @@ import { ErrorText } from '@/ui/ErrorText';
  *  * A Turnstile token when Turnstile is configured, because /resend is one of
  *    the project-wide captcha-protected GoTrue endpoints. Renders nothing and
  *    changes nothing while the site key is unset.
+ *
+ * "Sent" is a promise, so the two ways it could be made falsely are closed
+ * here. The button does not send at all without a token on a build that renders
+ * the widget — a null token is a refusal with no mail behind it, and `sent` is
+ * the one state this component cannot leave. And a captcha refusal from GoTrue
+ * is reported rather than swallowed (confirmationResendProblem names it): it
+ * sends no mail, it is alike for every address, and the fix is the fresh
+ * challenge this puts up with it.
  */
 export const ResendConfirmation = ({ email, className = '' }: { email: string; className?: string }) => {
     const [state, setState] = useState<'idle' | 'sending' | 'sent'>('idle');
     const [problem, setProblem] = useState<string | null>(null);
     const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+    /** Bumped to remount the widget: a token is spent once it is redeemed. */
+    const [captchaRound, setCaptchaRound] = useState(0);
+    const captchaRequired = isTurnstileEnabled();
 
     if (state === 'sent') {
         return (
@@ -47,6 +59,13 @@ export const ResendConfirmation = ({ email, className = '' }: { email: string; c
     }
 
     const send = async () => {
+        // Nothing is sent without a solved challenge: GoTrue would refuse the
+        // request outright, and the `sent` screen below would then be a lie
+        // with no way back from it.
+        if (captchaRequired && !captchaToken) {
+            setProblem('Finish the “I’m human” check, then try again.');
+            return;
+        }
         setState('sending');
         setProblem(null);
         try {
@@ -56,6 +75,12 @@ export const ResendConfirmation = ({ email, className = '' }: { email: string; c
             if (named) {
                 setProblem(named);
                 setState('idle');
+                if (captchaRequired) {
+                    // Whatever GoTrue made of the rest of the request, the token
+                    // is spent; a retry needs a new challenge.
+                    setCaptchaToken(null);
+                    setCaptchaRound((round) => round + 1);
+                }
                 return;
             }
             // Anything else could depend on what is true of this address:
@@ -66,7 +91,7 @@ export const ResendConfirmation = ({ email, className = '' }: { email: string; c
 
     return (
         <div className={className}>
-            <TurnstileField action="resend-confirmation" onToken={setCaptchaToken} />
+            <TurnstileField key={captchaRound} action="resend-confirmation" onToken={setCaptchaToken} />
             <Button variant="ghost" disabled={state === 'sending'} onClick={() => void send()} className="w-full">
                 {state === 'sending' ? 'Sending…' : 'Send the email again'}
             </Button>

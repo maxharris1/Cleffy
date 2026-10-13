@@ -52,7 +52,14 @@ const LoginForm = () => {
                 }
                 footer={
                     <>
-                        {unconfirmed ? <ResendConfirmation email={unconfirmed} className="mt-4" /> : null}
+                        {/* Keyed on the address: the component is single-use
+                            (one send, then a permanent "Sent" screen), so
+                            reusing the instance for a SECOND unconfirmed
+                            address would show that screen for an address
+                            nothing was ever sent to. */}
+                        {unconfirmed ? (
+                            <ResendConfirmation key={unconfirmed} email={unconfirmed} className="mt-4" />
+                        ) : null}
                         <p className="mt-6 text-center text-sm text-stone-600">
                             No account yet?{' '}
                             <Link to="/register" className={linkClassName}>

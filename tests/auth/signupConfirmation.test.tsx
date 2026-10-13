@@ -4,9 +4,11 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { isEmailNotConfirmed, mapAuthError } from '../../src/features/auth/authErrors';
+import { isEmailNotConfirmed, mapAuthError, passwordResetProblem } from '../../src/features/auth/authErrors';
+import { ForgotPasswordPage } from '../../src/features/auth/ForgotPasswordPage';
 import { LoginPage } from '../../src/features/auth/LoginPage';
 import { RegisterPage } from '../../src/features/auth/RegisterPage';
+import { resetTurnstileLoaderForTests, type TurnstileRenderOptions } from '../../src/features/auth/turnstile';
 
 /**
  * Sign-up with email confirmation ON, end to end through the pages — the state
@@ -48,7 +50,35 @@ afterEach(() => {
     signUpWithPassword.mockReset();
     requestPasswordReset.mockReset();
     resendSignUpConfirmation.mockReset();
+    vi.unstubAllEnvs();
+    resetTurnstileLoaderForTests();
+    delete (window as { turnstile?: unknown }).turnstile;
+    document.getElementById('cf-turnstile-script')?.remove();
 });
+
+/** Cloudflare's always-passes test site key; see src/features/auth/turnstile.ts. */
+const SITE_KEY = '1x00000000000000000000AA';
+
+/**
+ * Turnstile switched on, with a stubbed `window.turnstile` — the harness
+ * tests/auth/turnstileField.test.tsx uses, repeated here because the resend is
+ * the one place where an UNSOLVED challenge used to be answered with "Sent."
+ */
+const withTurnstile = () => {
+    vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+    const rendered: TurnstileRenderOptions[] = [];
+    Object.assign(window, {
+        turnstile: {
+            render: (_host: HTMLElement, options: TurnstileRenderOptions) => {
+                rendered.push(options);
+                return `widget-${rendered.length}`;
+            },
+            remove: () => undefined,
+            reset: () => undefined,
+        },
+    });
+    return rendered;
+};
 
 const EMAIL = 'teacher@example.com';
 const PASSWORD = 'letters4ever';
@@ -207,6 +237,151 @@ describe('logging in before confirming', () => {
 
         expect(await screen.findByText('Email or password is incorrect.')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Send the email again' })).not.toBeInTheDocument();
+    });
+});
+
+describe('the resend with Turnstile on', () => {
+    /** GoTrue's refusal when the token is absent, stale, forged or spent. */
+    const captchaRefused = () =>
+        new AuthApiError('captcha protection: request disallowed (invalid-input-response)', 400, 'captcha_failed');
+
+    /**
+     * The sign-up screen, got to with the sign-up form's OWN challenge solved,
+     * and the resend button on the far side of it. `rendered` collects every
+     * widget in mount order, so the sign-up form's is [0] and the resend's is
+     * the next one.
+     */
+    const resendFrom = async (user: ReturnType<typeof userEvent.setup>, rendered: TurnstileRenderOptions[]) => {
+        signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: true });
+        renderRegister();
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        rendered[0]!.callback('cf-signup-token');
+        await signUp(user);
+        return await screen.findByRole('button', { name: 'Send the email again' });
+    };
+
+    it('does not send, and does not say "Sent", before the check is finished', async () => {
+        // The bug this closes: the button sent `null` as the token, GoTrue
+        // refused the request with captcha_failed, the refusal was unmapped and
+        // therefore swallowed as "an address-specific failure", and the
+        // component moved to its one-way "Sent." screen. No mail, no way back,
+        // and a promise on screen that was never true.
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        const resend = await resendFrom(user, rendered);
+
+        await user.click(resend);
+
+        expect(await screen.findByText(/Finish the “I’m human” check/)).toBeInTheDocument();
+        expect(resendSignUpConfirmation).not.toHaveBeenCalled();
+        expect(screen.queryByText(/Sent\./)).not.toBeInTheDocument();
+        // Still offered: finishing the check and clicking again is the advice.
+        expect(screen.getByRole('button', { name: 'Send the email again' })).toBeInTheDocument();
+    });
+
+    it('sends the solved token', async () => {
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        const resend = await resendFrom(user, rendered);
+        await waitFor(() => expect(rendered).toHaveLength(2));
+
+        rendered[1]!.callback('cf-token');
+        await user.click(resend);
+
+        expect(resendSignUpConfirmation).toHaveBeenCalledExactlyOnceWith(EMAIL, 'cf-token');
+        expect(await screen.findByText(/Sent\./)).toBeInTheDocument();
+    });
+
+    it('names a captcha refusal and puts up a fresh challenge instead of claiming "Sent"', async () => {
+        // Alike for every address — GoTrue verifies the token before it has
+        // looked at anything about the account — so saying it is no oracle, and
+        // it is the only honest answer: no mail went out.
+        resendSignUpConfirmation.mockRejectedValue(captchaRefused());
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        const resend = await resendFrom(user, rendered);
+        await waitFor(() => expect(rendered).toHaveLength(2));
+        rendered[1]!.callback('cf-token');
+
+        await user.click(resend);
+
+        expect(await screen.findByText(/didn’t go through/)).toBeInTheDocument();
+        expect(screen.queryByText(/Sent\./)).not.toBeInTheDocument();
+        // A token is spent on redemption, so the retry needs a new challenge:
+        // the field is remounted, which is a third render of a widget here.
+        await waitFor(() => expect(rendered).toHaveLength(3));
+    });
+});
+
+describe('the resend offered on the login page', () => {
+    it('comes back for a second unconfirmed address rather than still reading "Sent"', async () => {
+        // The resend is single-use by design (one send, then a permanent
+        // "Sent." screen). Without a key on it React kept the same instance
+        // when `unconfirmed` changed, so after a send for one address the
+        // SECOND address's notice showed that screen — a claim that mail had
+        // gone to an address nothing was ever sent to.
+        signInWithPassword.mockRejectedValue(notConfirmed());
+        const user = userEvent.setup();
+        renderLogin();
+        await logIn(user);
+        await user.click(await screen.findByRole('button', { name: 'Send the email again' }));
+        expect(await screen.findByText(/Sent\./)).toBeInTheDocument();
+
+        // A second address, same refusal.
+        await user.clear(screen.getByLabelText('Email'));
+        await user.type(screen.getByLabelText('Email'), 'someone-else@example.com');
+        await user.click(screen.getByRole('button', { name: 'Log in' }));
+
+        expect(await screen.findByRole('button', { name: 'Send the email again' })).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Send the email again' }));
+        expect(resendSignUpConfirmation).toHaveBeenLastCalledWith('someone-else@example.com', null);
+    });
+});
+
+describe('the password-reset form with Turnstile on', () => {
+    const renderForgot = () =>
+        render(
+            <MemoryRouter initialEntries={['/forgot-password']}>
+                <Routes>
+                    <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+                    <Route path="/login" element={<p>log in</p>} />
+                </Routes>
+            </MemoryRouter>,
+        );
+
+    it('says a captcha refusal instead of "Check your email"', async () => {
+        // The same bug as the resend, on the form that had the careful
+        // oracle-proof silence to begin with: a captcha refusal sends no mail,
+        // and swallowing it showed the success screen to someone who will
+        // never get one.
+        requestPasswordReset.mockRejectedValue(
+            new AuthApiError('captcha protection: request disallowed', 400, 'captcha_failed'),
+        );
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        renderForgot();
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        rendered[0]!.callback('cf-token');
+
+        await user.type(screen.getByLabelText('Email'), EMAIL);
+        await user.click(screen.getByRole('button', { name: 'Send reset link' }));
+
+        expect(await screen.findByText(/didn’t go through/)).toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: 'Check your email' })).not.toBeInTheDocument();
+    });
+
+    it('still says nothing about anything that depends on the address', () => {
+        // The rule the captcha entry had to be added without breaking.
+        expect(passwordResetProblem(new AuthApiError('captcha protection', 400, 'captcha_failed'))).toMatch(
+            /didn’t go through/,
+        );
+        for (const err of [
+            new AuthApiError('Email rate limit exceeded', 429, 'over_email_send_rate_limit'),
+            new AuthApiError('Email address is invalid', 422, 'email_address_invalid'),
+            new AuthApiError('Error sending recovery email', 500, 'unexpected_failure'),
+        ]) {
+            expect(passwordResetProblem(err), err.code).toBeNull();
+        }
     });
 });
 

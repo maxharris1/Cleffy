@@ -115,7 +115,11 @@ export interface StudentLoginBackend {
      *
      * Nothing here validates it: it is Cloudflare's to judge via GoTrue, and a
      * wrong one is just a refused sign-in, which is already this endpoint's
-     * one answer. Forwarding it grants a caller nothing they did not already
+     * one answer. That collapse is also why the refusal cannot be named: the
+     * grant runs only for a username that EXISTS, so "the captcha failed" here
+     * would be the username oracle this endpoint is built not to be. The
+     * student re-solves the widget (the form remounts it on any failure) and
+     * tries again. Forwarding it grants a caller nothing they did not already
      * have — a token they solved themselves.
      */
     signIn: (email: string, password: string, captchaToken: string | null) => Promise<StudentSession | null>;
@@ -204,11 +208,22 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
         return await reject();
     }
 
-    // Optional, and only ever handed on to GoTrue (see backend.signIn). It is
-    // absent today — no student form sends one, and nothing here requires one.
-    // A missing token is NOT a rejection: making it one would break every
-    // student sign-in the moment somebody enabled the project-wide captcha,
-    // which is the exact outage this argument exists to avoid.
+    // Optional, and only ever handed on to GoTrue (see backend.signIn).
+    // StudentLoginPage sends one whenever VITE_TURNSTILE_SITE_KEY is set, so a
+    // project that switches the captcha on has a token to verify instead of a
+    // sign-in box that refuses every child.
+    //
+    // Not verified here, and that is deliberate: a Turnstile token may be
+    // redeemed ONCE, so checking it ourselves (verifyTurnstileRequest, as
+    // guest-email-start does) would spend it and leave GoTrue's own check
+    // nothing to pass. GoTrue is the verifier for this endpoint; what stands in
+    // front of a flood here is the per-IP ceiling and the per-username throttle
+    // below, which cost an attacker a slot whether or not they send a token.
+    //
+    // A missing token is NOT a rejection: making it one would refuse every
+    // client bundle cached from before the widget shipped, and the one thing
+    // worse than an unsolved challenge on a sign-in box aimed at children is a
+    // sign-in box that cannot be used at all.
     const captchaToken = typeof body.captchaToken === 'string' && body.captchaToken ? body.captchaToken : null;
 
     const backend = deps.backend();

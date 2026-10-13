@@ -13,6 +13,19 @@ const WEAK_PASSWORD = `That password is too weak. ${PASSWORD_HINT}`;
 const PWNED_PASSWORD = 'That password has appeared in a data breach. Choose a different one.';
 const SAME_PASSWORD = 'Choose a password different from your current one.';
 /**
+ * GoTrue refusing the Turnstile token rather than the credential beside it.
+ *
+ * It answers `captcha_failed` for a token that is absent, expired, forged or
+ * already redeemed — a token is single-use, and GoTrue redeems it BEFORE it
+ * looks at the password, so this is also what a retry with the same token gets.
+ * Without an entry here it fell through to each form's fallback ("Could not
+ * sign in.", "Could not send the reset link."), which points at the wrong
+ * thing: nothing the user typed is wrong, and the fix is a fresh challenge.
+ * Every form that renders a widget remounts it on a failed submit, so the
+ * challenge they are being asked to redo is already waiting.
+ */
+const CAPTCHA_FAILED = 'That “I’m human” check didn’t go through. Try it again.';
+/**
  * The error a brand-new account hits, and the reason it needed its own copy.
  *
  * Production turned sign-up confirmation on (`mailer_autoconfirm = false`) with
@@ -38,6 +51,7 @@ const BY_CODE: Readonly<Record<string, string>> = {
     over_request_rate_limit: RATE_LIMITED,
     otp_expired: LINK_EXPIRED,
     same_password: SAME_PASSWORD,
+    captcha_failed: CAPTCHA_FAILED,
 };
 
 /**
@@ -52,6 +66,10 @@ const BY_MESSAGE: readonly { pattern: RegExp; message: string }[] = [
         pattern: /email link is invalid or has expired|token has expired|one-time token not found/i,
         message: LINK_EXPIRED,
     },
+    // GoTrue phrases the captcha refusal 'captcha protection: request
+    // disallowed (…)', and sends `captcha_failed` with it — BY_CODE answers it
+    // normally, and this is the codeless shape.
+    { pattern: /captcha protection|captcha verification/i, message: CAPTCHA_FAILED },
     // GoTrue does send `email_not_confirmed` with this one, so BY_CODE above is
     // what normally answers it. The pattern is here for the codeless shape the
     // same refusal takes when it arrives as a redirect `error_description`
@@ -150,6 +168,12 @@ const RESET_UNREACHABLE = 'Could not reach Cleffy. Check your connection and try
  *  * over_request_rate_limit — the per-IP limiter in front of /recover —
  *    so the person knows to wait;
  *  * validation_failed — a malformed address, from the request validation;
+ *  * captcha_failed — GoTrue verifies the token at the top of the request,
+ *    before it has looked at anything about the address. Saying it is also the
+ *    only way these forms can be honest once Turnstile is on: a captcha
+ *    refusal sends NO mail, so swallowing it would show "check your email" to
+ *    someone who will never get one, and the fix (solve the challenge again)
+ *    is one nobody can guess from a neutral success screen;
  *  * no answer at all: offline, or the service down (502/503). Not a 504:
  *    a gateway timeout can be a slow mail send, which only accounts reach.
  * The success screen's "try again" covers what a real user needs otherwise.
@@ -159,6 +183,9 @@ const mailRequestProblem = (err: unknown): string | null => {
     const record = err && typeof err === 'object' ? (err as { name?: unknown; status?: unknown }) : {};
     if (code === 'over_request_rate_limit') {
         return RESET_RATE_LIMITED;
+    }
+    if (code === 'captcha_failed' || (!code && /captcha protection|captcha verification/i.test(message))) {
+        return CAPTCHA_FAILED;
     }
     if (code === 'validation_failed' || (!code && /unable to validate email/i.test(message))) {
         return RESET_INVALID_EMAIL;

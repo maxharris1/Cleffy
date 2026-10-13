@@ -20,12 +20,12 @@ import { describe, expect, it } from 'vitest';
  */
 const SOURCE = readFileSync(resolve(process.cwd(), 'supabase/functions/student-claim/index.ts'), 'utf8');
 
-/** From the commit's own comment to the sign-in that follows it. */
+/** From the commit's own comment to the throttle clear that follows it. */
 const commitStatement = (): string => {
     const start = SOURCE.indexOf('// The commit:');
-    const end = SOURCE.indexOf('// A FRESH anon-key client');
+    const end = SOURCE.indexOf('// The card is spent');
     expect(start, 'the commit UPDATE was not found — was its comment reworded?').toBeGreaterThan(-1);
-    expect(end, 'the anon sign-in was not found — was its comment reworded?').toBeGreaterThan(start);
+    expect(end, 'the post-commit throttle clear was not found — was its comment reworded?').toBeGreaterThan(start);
     return SOURCE.slice(start, end);
 };
 
@@ -55,7 +55,7 @@ describe('the student-claim commit', () => {
         // that matched no row is handed a session for an account it did not
         // claim, under a username the roster never stored.
         expect(commit).toContain(".select('id')");
-        expect(commit).toMatch(/if \(!claimed\) \{/);
+        expect(commit).toMatch(/if \(claimError \|\| !claimed\) \{/);
         expect(commit).toMatch(/return reject\(\);/);
     });
 
@@ -67,6 +67,26 @@ describe('the student-claim commit', () => {
         // knows that — the CHECK constraint only speaks about rows that move.
         expect(commit).toContain(".is('claimed_at', null)");
         expect(commit).toContain(".is('archived_at', null)");
+    });
+
+    it('signs the student in before it spends the code, and drops the session if the commit does not land', () => {
+        // The order is the fix for a captcha refusal costing a child their card
+        // (QA round 4 review of #57): GoTrue verifies the Turnstile token at
+        // the password grant, so a grant that runs AFTER the commit judges the
+        // token when the code is already spent — the account exists, the card
+        // is dead, and the student is told to go and sign in instead. Before
+        // the commit, every way the grant can fail leaves the row Invited and
+        // the code live.
+        const grant = SOURCE.indexOf('signInWithPassword(');
+        const spend = SOURCE.indexOf('login_code_hash: null');
+        expect(grant, 'the password grant was not found').toBeGreaterThan(-1);
+        expect(spend, 'the statement that spends the code was not found').toBeGreaterThan(-1);
+        expect(grant).toBeLessThan(spend);
+        // And the session minted a moment earlier must not be handed out when
+        // the commit found no row to write: that row is somebody else's claim.
+        const commit = commitStatement();
+        expect(commit).toContain('signOutQuietly(admin, signIn.session.access_token)');
+        expect(commit).toMatch(/code: 'username_taken'/);
     });
 
     it('cannot tell a lost race from a won one without asking for the row', async () => {

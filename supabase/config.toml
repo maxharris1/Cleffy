@@ -269,11 +269,13 @@ web3 = 30
 #    and password reset begin refusing everybody the moment this flips.
 #  * /token, the password grant — which our own Edge Functions call
 #    SERVER-SIDE, with no browser in the loop to solve a challenge:
-#    student-login/index.ts and student-claim/index.ts. Both now forward an
-#    optional caller-supplied `captchaToken`, so they survive this being on —
-#    but only if the student forms start sending one, which is a captcha in
-#    front of a sign-in box aimed at children and is a product decision, not a
-#    deploy step.
+#    student-login/index.ts and student-claim/index.ts. Both forward an
+#    optional caller-supplied `captchaToken`, and both student forms now send
+#    one when the site key is set (StudentLoginPage, StudentClaimPage), so the
+#    two survive this being on. Neither verifies the token itself: a Turnstile
+#    token is single-use, so GoTrue is the verifier there and ours would spend
+#    it first. student-claim signs the student in BEFORE it spends their setup
+#    code, so a refused challenge costs a retry rather than the card.
 #  * /signup with anonymous: true — the share-link join page
 #    (src/features/share/JoinPage.tsx), which also sends one when the site key
 #    is set.

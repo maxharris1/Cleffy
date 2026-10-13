@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
+import { TurnstileField } from '@/features/auth/TurnstileField';
+import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import { StudentAuthError, claimStudentAccount } from '@/features/student/studentApi';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
@@ -72,6 +74,21 @@ const ClaimFlow = () => {
     const [usernameError, setUsernameError] = useState<string | null>(null);
     const [strandedMessage, setStrandedMessage] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    /**
+     * The Turnstile token the claim carries, or null on a build with no site
+     * key — every build today, and why this page is unchanged until Max sets
+     * one.
+     *
+     * student-claim signs the student in with a password grant once the code is
+     * spent, and GoTrue's captcha is project-wide: switching it on without a
+     * token here would leave every claim refused at that grant. The widget sits
+     * on step TWO, which is the step that posts — step one never leaves the
+     * browser, and a challenge in front of a child typing a code off paper
+     * would be a gate on nothing.
+     */
+    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+    const [captchaRound, setCaptchaRound] = useState(0);
+    const captchaRequired = isTurnstileEnabled();
     const usernameRef = useRef<HTMLInputElement | null>(null);
 
     // Focus follows the complaint, but only once the field is enabled again —
@@ -112,6 +129,12 @@ const ClaimFlow = () => {
             setError('Passwords do not match.');
             return;
         }
+        // Last of the form checks, so a mistyped password is not answered with
+        // a complaint about the robot check. Never reached without a site key.
+        if (captchaRequired && !captchaToken) {
+            setError('Finish the “I’m human” check, then try again.');
+            return;
+        }
         setError(null);
         setUsernameError(null);
         setBusy(true);
@@ -119,10 +142,19 @@ const ClaimFlow = () => {
             // The code goes as typed — the function folds case and dashes itself.
             // The username goes normalized, because that spelling is the one the
             // student was just shown, and it is what they will type to sign in.
-            await claimStudentAccount({ code, username: normalizedUsername, password });
+            await claimStudentAccount({ code, username: normalizedUsername, password, captchaToken });
             navigate('/assignments', { replace: true });
         } catch (err) {
             setBusy(false);
+            if (captchaRequired) {
+                // Spent on redemption whatever else the request met, so the
+                // retry this failure invites needs a fresh challenge. Done for
+                // every failure, including the ones handled below: the code is
+                // still live in all of them (student-claim signs the student in
+                // BEFORE it spends it), so every one of them is retryable.
+                setCaptchaToken(null);
+                setCaptchaRound((round) => round + 1);
+            }
             if (err instanceof StudentAuthError) {
                 // The code is the only thing step one owns, so a refusal of it
                 // sends them back there with what they typed still in the field.
@@ -139,6 +171,13 @@ const ClaimFlow = () => {
                 // is real, only the automatic sign-in fell over. Anything that
                 // looks like "try again" would be a lie, so this stops and points
                 // at the door their new password already opens.
+                //
+                // student-claim no longer produces this: it signs the student in
+                // before it spends the code, so a failed sign-in leaves the card
+                // live and is answered with something retryable instead. Kept
+                // because a rolling deploy can still have the old function
+                // answering, and because being stranded is the one failure here
+                // that must never read as "try again".
                 if (err.code === 'claimed_sign_in_failed') {
                     setStrandedMessage(err.message);
                     return;
@@ -255,6 +294,7 @@ const ClaimFlow = () => {
                             autoComplete="new-password"
                             spaced
                         />
+                        <TurnstileField key={captchaRound} action="student-claim" onToken={setCaptchaToken} />
                         <Button type="submit" disabled={busy} className="mt-4 w-full">
                             {busy ? 'Setting up…' : 'Create my account'}
                         </Button>
