@@ -42,9 +42,13 @@ export const TurnstileField = ({ onToken, action, className = '' }: TurnstileFie
     const hostRef = useRef<HTMLDivElement | null>(null);
     const [unavailable, setUnavailable] = useState(false);
     // The callbacks outlive each render; a ref keeps the widget from being torn
-    // down and rebuilt (a fresh challenge for the user) on every parent render.
+    // down and rebuilt — a fresh challenge for the user — every time the
+    // parent re-renders with a new inline `onToken`. Kept current in an effect
+    // rather than assigned during render, which React warns about.
     const onTokenRef = useRef(onToken);
-    onTokenRef.current = onToken;
+    useEffect(() => {
+        onTokenRef.current = onToken;
+    }, [onToken]);
 
     useEffect(() => {
         if (!siteKey) {
