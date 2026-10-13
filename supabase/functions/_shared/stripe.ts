@@ -95,6 +95,31 @@ export const customerSubscriptionStatuses = async (stripe: Stripe, customerId: s
 const isMissing = (err: unknown): boolean => (err as { code?: unknown } | null)?.code === 'resource_missing';
 
 /**
+ * Expires ONE Checkout Session, for the one case where expiring the customer's
+ * open sessions would be wrong: stripe-checkout opened a session, lost its lease
+ * while the create was in flight, and is about to refuse the buyer (QA round 4,
+ * Codex round 2 of #56). That session is an orphan -- the request that took the
+ * lease over ran its own expiry before this create returned, so it never saw it
+ * -- and that request has a session it IS handing out, which expiring by
+ * customer would kill.
+ *
+ * An id Stripe has never heard of is not an error worth raising: the caller
+ * wanted the session unpayable and it is. Everything else throws, including
+ * Stripe's refusal to expire a session that is already finished, and the caller
+ * logs it rather than failing a response the buyer has already been refused.
+ */
+export const expireCheckoutSession = async (stripe: Stripe, sessionId: string): Promise<void> => {
+    try {
+        await stripe.checkout.sessions.expire(sessionId);
+    } catch (err) {
+        if (isMissing(err)) {
+            return;
+        }
+        throw err;
+    }
+};
+
+/**
  * A Checkout Session as checkoutFlow.ts reads it back (layer 4), or null when
  * Stripe has no session with that id -- a stored id from the other account, or
  * one old enough that Stripe has forgotten it. Everything else throws, because

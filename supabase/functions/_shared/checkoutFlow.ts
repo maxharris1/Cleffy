@@ -47,7 +47,12 @@ import type * as StripeEvents from './stripeEvents.ts';
  *  4b. the attempt that staged a key and recorded no session -- an isolate that
  *     died around the create. Its key is replayed rather than a new one minted,
  *     so Stripe answers with the session it opened (if it opened one) instead of
- *     a second one beside it;
+ *     a second one beside it, and the replayed answer is read back before the
+ *     buyer is sent to it, because what Stripe replays is the response it saved
+ *     and not the session as it stands today. An isolate that DIED is the only
+ *     attempt that leaves a key here: a create we were alive to watch fail
+ *     clears it instead, since Stripe replays a saved failure exactly as
+ *     readily as a saved session (`discardAttempt`);
  *  5. everything else open is expired before a new session is created, and the
  *     new session's idempotency key carries a FRESH attempt id, so Stripe never
  *     replays the URL of a session we have since expired. The key is written to
@@ -303,6 +308,26 @@ export interface CheckoutDeps {
         holder: string,
         attempt: { attemptId: string; priceId: string; sessionId: string | null },
     ) => Promise<boolean>;
+    /**
+     * Releases the lock AND forgets the key this attempt staged, so no later
+     * attempt replays it. The same statement as `finishAttempt` with nothing to
+     * remember -- an attempt that opened no session and left no key behind --
+     * and scoped to our own lease for the same reason.
+     *
+     * Why a create that FAILED has to be forgotten (QA round 4, Codex round 2 of
+     * #56): Stripe saves the response it answers an idempotency key with
+     * whether that response succeeded or failed, and replays it for 24 hours. So
+     * a create that came back 500 poisons its own key, and layer 4b -- which
+     * reads "an attempt id with no session" as "replay this" -- handed that key
+     * straight back to Stripe, which answered with the same 500. Every retry,
+     * for a day: the buyer could not buy that plan at all.
+     *
+     * Forgetting it sends the next request down layer 5 instead, which is the
+     * path that is safe when we cannot tell whether Stripe made a session: it
+     * expires every open session this customer has -- the orphan of a create
+     * whose answer we lost included -- before it mints a key of its own.
+     */
+    discardAttempt: (userId: string, mode: StripeMode, holder: string) => Promise<void>;
     /** Releases the lock having opened nothing, leaving the stored session alone. */
     releaseAttempt: (userId: string, mode: StripeMode, holder: string) => Promise<void>;
     /** A fresh attempt id (crypto.randomUUID in the handler). */
@@ -317,6 +342,13 @@ export interface CheckoutDeps {
     subscriptionStatus: (subscriptionId: string, mode: StripeMode) => Promise<StripeStatusLookup>;
     /** Layer 5: expires every open Checkout Session this customer has. */
     expireOpenSessions: (customerId: string, mode: StripeMode) => Promise<number>;
+    /**
+     * Expires ONE session by id, for the session this attempt opened and then
+     * lost the lease on -- the only session we know nobody will ever be sent to.
+     * By id rather than by customer, because the request that took the lease
+     * over has a session of its own that it IS handing out.
+     */
+    expireSession: (sessionId: string, mode: StripeMode) => Promise<void>;
     createSession: (
         params: CheckoutSessionParams,
         options: { idempotencyKey: string },
@@ -493,31 +525,104 @@ const openSessionUnderLock = async (
         return unrecorded(deps.json(CHECKOUT_IN_PROGRESS, 409));
     }
 
-    const origin = deps.appOrigin(req);
-    const session = await deps.createSession(
-        {
-            mode: 'subscription',
-            customer: customerId,
-            line_items: [{ price: priceId, quantity: 1 }],
-            // Both are belt-and-braces for the webhook's user resolution: either
-            // survives even if the billing_customers row is somehow missing.
-            client_reference_id: caller.userId,
-            subscription_data: { metadata: { user_id: caller.userId } },
-            // `checkout_key` is provenance only now: nothing reads it back (the
-            // expire step no longer spares a session by it), but a session in
-            // the Stripe dashboard saying which attempt opened it is what makes
-            // a double-charge report answerable afterwards.
-            metadata: { user_id: caller.userId, checkout_key: idempotencyKey },
-            success_url: `${origin}/settings?checkout=success`,
-            cancel_url: `${origin}/settings?checkout=cancelled`,
-            allow_promotion_codes: true,
-        },
-        { idempotencyKey },
-        mode,
-    );
+    /**
+     * Give up the staged key, best effort, on every way out of the create that
+     * leaves us without a session the buyer can pay.
+     *
+     * Best effort because there is nothing better available: a discard that
+     * fails leaves the key staged, which is the behaviour this fix replaces, and
+     * refusing the buyer a retry would not unpoison it. It is logged, and the
+     * key stops being replayable as soon as any attempt stages one of its own.
+     */
+    const discardStagedKey = async (): Promise<void> => {
+        try {
+            await deps.discardAttempt(caller.userId, mode, holder);
+        } catch (err) {
+            deps.logError('checkout_attempt_discard_failed', err);
+        }
+    };
 
+    const origin = deps.appOrigin(req);
+    let session: Awaited<ReturnType<CheckoutDeps['createSession']>>;
+    try {
+        session = await deps.createSession(
+            {
+                mode: 'subscription',
+                customer: customerId,
+                line_items: [{ price: priceId, quantity: 1 }],
+                // Both are belt-and-braces for the webhook's user resolution:
+                // either survives even if the billing_customers row is somehow
+                // missing.
+                client_reference_id: caller.userId,
+                subscription_data: { metadata: { user_id: caller.userId } },
+                // `checkout_key` is provenance only now: nothing reads it back
+                // (the expire step no longer spares a session by it), but a
+                // session in the Stripe dashboard saying which attempt opened it
+                // is what makes a double-charge report answerable afterwards.
+                metadata: { user_id: caller.userId, checkout_key: idempotencyKey },
+                success_url: `${origin}/settings?checkout=success`,
+                cancel_url: `${origin}/settings?checkout=cancelled`,
+                allow_promotion_codes: true,
+            },
+            { idempotencyKey },
+            mode,
+        );
+    } catch (err) {
+        // A create we watched fail is a create whose key must never be used
+        // again: Stripe has saved that failure against it and will replay it for
+        // 24 hours, so staging it was for an attempt that cannot be resumed.
+        //
+        // This does not take layer 4b's job away, because an isolate that is
+        // KILLED around the create never reaches this line -- it runs no catch
+        // block, answers the buyer nothing, and leaves its lease to go stale.
+        // The staged key survives for the attempt that takes the lease over,
+        // which is the one case where replaying it is right. What is cleared
+        // here is the narrower one: a failure we were still alive to see.
+        //
+        // The orphan is handled by clearing it rather than in spite of it. If
+        // the failure was the ANSWER going missing -- a timeout, a reset -- then
+        // Stripe may hold a session we never saw the id of; the next request,
+        // with nothing to replay, runs layer 5 and expires every open session
+        // this customer has, that one included, before opening its own.
+        await discardStagedKey();
+        throw err;
+    }
+
+    // Stripe answered, but with nothing payable. The key is spent on that answer
+    // exactly as it would be on a failure, so it goes the same way: kept, it
+    // would be replayed into the same URL-less answer for a day.
     if (!session.url) {
+        await discardStagedKey();
         return unrecorded(deps.json({ error: 'Stripe did not return a checkout URL' }, 502));
+    }
+
+    // What a REPLAY answers with is the response Stripe saved at the time, not
+    // the session as it stands now, so a 24-hour-old key can hand back the URL
+    // of a session that has since been paid or expired. Reading it back is the
+    // difference between "here is your Checkout page" and a page that refuses
+    // the buyer with no way forward: the key is discarded instead, and their
+    // next request is a clean attempt through all five layers -- which answers a
+    // paid session with `already_subscribed` or `checkout_pending` (layers 3 and
+    // 4) and an expired one with a session of its own.
+    if (resumed !== null && session.id) {
+        const replayed = await deps.fetchSession(session.id, mode);
+        if (!replayed.ok) {
+            return unrecorded(unavailable(deps, 'checkout_session_read_failed', replayed.error));
+        }
+        // A session Stripe has no record of at all (`null`) goes the same way as
+        // a dead one: whatever that saved URL is, it is not a page the buyer can
+        // pay on.
+        const status = replayed.session?.status ?? 'missing';
+        if (status !== 'open') {
+            deps.log(
+                `checkout: the replayed key for ${caller.userId} answered with ` +
+                    `${status} session ${session.id} (${mode})`,
+            );
+            await discardStagedKey();
+            return unrecorded(
+                deps.json({ error: 'Could not start checkout. Please try again.', code: 'checkout_unavailable' }, 502),
+            );
+        }
     }
 
     // Recorded before the lock goes, so the next request sees this session
@@ -541,6 +646,22 @@ const openSessionUnderLock = async (
                 `checkout: the attempt lease for ${caller.userId} was taken over before ` +
                     `session ${session.id ?? 'unknown'} could be recorded (${mode})`,
             );
+            // And this session is now an orphan nobody will ever be sent to --
+            // the request that took the lease over ran its expiry BEFORE this
+            // create returned, so it did not see this one. Left open it is a
+            // second payable session beside the live one, which is the double
+            // charge the lock exists to stop. Expired by id, so the session the
+            // other request is handing out is untouched; a failure here is
+            // logged rather than returned, because the buyer is already being
+            // asked to retry and the next attempt's layer 5 will find it.
+            if (session.id) {
+                try {
+                    await deps.expireSession(session.id, mode);
+                    deps.log(`checkout: expired orphan session ${session.id} for ${caller.userId} (${mode})`);
+                } catch (err) {
+                    deps.logError('orphan_session_expire_failed', err);
+                }
+            }
             return unrecorded(deps.json(CHECKOUT_IN_PROGRESS, 409));
         }
         return { response: deps.json({ url: session.url }), recorded: true };

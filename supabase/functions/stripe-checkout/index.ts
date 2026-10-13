@@ -6,6 +6,7 @@ import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.t
 import {
     appOrigin,
     customerSubscriptionStatuses,
+    expireCheckoutSession,
     expireOpenCheckoutSessions,
     modeForRequest,
     readCheckoutSession,
@@ -174,6 +175,26 @@ Deno.serve((req) =>
             }
             return data === true;
         },
+        // finish_checkout_attempt with nothing to remember: the lock goes back
+        // and the staged idempotency key is cleared, so no later attempt replays
+        // a key Stripe has already answered (see `discardAttempt` in the flow --
+        // Stripe saves and replays a failed answer too, which locked a buyer out
+        // of a plan for 24 hours). Scoped to our own lease by the same `where`
+        // that scopes the record, so a lease that has been taken over is left
+        // exactly as its new holder staged it.
+        discardAttempt: async (userId, mode, holder) => {
+            const { error } = await billing(mode).admin.rpc('finish_checkout_attempt', {
+                p_user: userId,
+                p_mode: mode,
+                p_holder: holder,
+                p_attempt_id: null,
+                p_price_id: null,
+                p_session_id: null,
+            });
+            if (error) {
+                throw new Error(`could not discard the checkout attempt: ${error.message}`);
+            }
+        },
         releaseAttempt: async (userId, mode, holder) => {
             const { error } = await billing(mode).admin.rpc('release_checkout_attempt', {
                 p_user: userId,
@@ -207,6 +228,7 @@ Deno.serve((req) =>
             }
         },
         expireOpenSessions: (customerId, mode) => expireOpenCheckoutSessions(billing(mode).stripe, customerId),
+        expireSession: (sessionId, mode) => expireCheckoutSession(billing(mode).stripe, sessionId),
         createSession: (params, options, mode) => billing(mode).stripe.checkout.sessions.create(params, options),
         holdsRunningSubscription,
         now: () => Date.now(),

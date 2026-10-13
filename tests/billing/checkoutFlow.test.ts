@@ -97,13 +97,21 @@ type Latch = ReturnType<typeof latch>;
 class FakeStripe {
     sessions: FakeSession[] = [];
     customers: string[] = [];
-    /** Stripe's idempotency memory: key -> the response it answered with. */
-    replays = new Map<string, { id: string; url: string }>();
+    /**
+     * Stripe's idempotency memory: key -> the response it answered with,
+     * FAILURES INCLUDED. Stripe saves the first answer a key got whether it
+     * succeeded or not and replays it for 24 hours, which is the half of the
+     * idempotency layer this fake used not to model -- and the half that locked
+     * a buyer out of a plan when a create came back 500 (Codex round 2 of #56).
+     */
+    replays = new Map<string, { id: string; url: string } | { error: string }>();
     /** The customer's subscriptions, as Stripe holds them. */
     subscriptions = new Map<string, string>();
     expireFails = false;
     listFails = false;
     sessionReadFails = false;
+    /** Stripe's answer to the next create: set it to the message it fails with. */
+    createFails: string | null = null;
     keysUsed: string[] = [];
 
     openSessions = (): FakeSession[] => this.sessions.filter((session) => session.status === 'open');
@@ -130,11 +138,35 @@ class FakeStripe {
         return expired;
     };
 
-    createSession = (params: CheckoutSessionParams, options: { idempotencyKey: string }) => {
+    /** Expires one session by id, as Stripe does for a session that is still open. */
+    expireSession = (sessionId: string): void => {
+        if (this.expireFails) {
+            throw new Error('Stripe could not be reached');
+        }
+        const session = this.sessions.find((candidate) => candidate.id === sessionId);
+        if (session?.status === 'open') {
+            session.status = 'expired';
+            session.url = null;
+        }
+    };
+
+    createSession = (
+        params: CheckoutSessionParams,
+        options: { idempotencyKey: string },
+    ): { id: string; url: string } => {
         this.keysUsed.push(options.idempotencyKey);
         const replay = this.replays.get(options.idempotencyKey);
         if (replay) {
+            if ('error' in replay) {
+                throw new Error(replay.error);
+            }
             return replay;
+        }
+        if (this.createFails) {
+            // Saved against the key, exactly like a success: this is what a
+            // replay of a failed create gets back for the next 24 hours.
+            this.replays.set(options.idempotencyKey, { error: this.createFails });
+            throw new Error(this.createFails);
         }
         const id = `cs_${this.sessions.length + 1}`;
         this.sessions.push({
@@ -226,7 +258,10 @@ class FakeAttempts {
         return true;
     };
 
-    finish = (holder: string, attempt: { attemptId: string; priceId: string; sessionId: string | null }): boolean => {
+    finish = (
+        holder: string,
+        attempt: { attemptId: string | null; priceId: string | null; sessionId: string | null },
+    ): boolean => {
         if (this.holder !== holder) {
             return false;
         }
@@ -236,6 +271,13 @@ class FakeAttempts {
         this.sessionId = attempt.sessionId;
         return true;
     };
+
+    /**
+     * finish_checkout_attempt with nothing to remember, which is how the flow
+     * discards a staged key: the lock goes back and the row keeps no attempt for
+     * a later request to replay.
+     */
+    discard = (holder: string): boolean => this.finish(holder, { attemptId: null, priceId: null, sessionId: null });
 
     release = (holder: string): boolean => {
         if (this.holder !== holder) {
@@ -273,6 +315,7 @@ const harness = (
     const errors: string[] = [];
     let attemptIds = 0;
     let paused = false;
+    let pausedCreate = false;
     let customerId = options.customerId ?? null;
     const deps: CheckoutDeps = {
         json,
@@ -331,6 +374,10 @@ const harness = (
             calls.push('finish-attempt');
             return attempts.finish(holder, attempt);
         }),
+        discardAttempt: vi.fn(async (_userId, _mode, holder: string) => {
+            calls.push('discard-attempt');
+            attempts.discard(holder);
+        }),
         releaseAttempt: vi.fn(async (_userId, _mode, holder: string) => {
             calls.push('release-attempt');
             attempts.release(holder);
@@ -374,10 +421,18 @@ const harness = (
             calls.push('expire');
             return stripe.expireOpenSessions(customer);
         }),
+        expireSession: vi.fn(async (sessionId: string) => {
+            calls.push('expire-session');
+            stripe.expireSession(sessionId);
+        }),
         createSession: vi.fn(
             async (sessionParams: CheckoutSessionParams, sessionOptions: { idempotencyKey: string }) => {
                 calls.push('create-session');
-                if (options.pauseBeforeCreate) {
+                // The FIRST request to get here, and only that one, so a second
+                // can run past it from end to end -- a create still in flight
+                // when its lease is taken off it.
+                if (options.pauseBeforeCreate && !pausedCreate) {
+                    pausedCreate = true;
                     options.pauseBeforeCreate.arrive();
                     await options.pauseBeforeCreate.released;
                 }
@@ -394,6 +449,43 @@ const harness = (
 };
 
 const body = async (response: Response) => (await response.json()) as Record<string, unknown>;
+
+type Harness = ReturnType<typeof harness>;
+
+/**
+ * An isolate killed inside `checkout.sessions.create`, as it is really killed:
+ * Stripe makes the session and the invocation stops there. Nothing after the
+ * create runs -- no discard of the key it staged, no release of the lock, no
+ * answer to the buyer -- so what is left behind is the row layer 4b was written
+ * for (an attempt id, the price, no session) and a lease nobody hands back,
+ * which the next request takes over once it has gone stale.
+ *
+ * The flow never sees an error here, and that is the point of modelling the
+ * death this way rather than as a throw from the create: a create whose failure
+ * the flow DOES see has its key discarded, because Stripe replays a saved
+ * failure for 24 hours as readily as a saved session (Codex round 2 of #56).
+ * The two leave Stripe in the same state and must leave `checkout_attempts` in
+ * different ones.
+ */
+const diesInsideCreate = async (h: Harness): Promise<void> => {
+    const create = h.deps.createSession;
+    let created = () => {};
+    const didCreate = new Promise<void>((resolve_) => {
+        created = () => resolve_();
+    });
+    h.deps.createSession = async (params, sessionOptions, mode) => {
+        const made = await create(params, sessionOptions, mode);
+        created();
+        // The isolate is gone: nothing below this line ever runs, and the
+        // request it was serving never answers.
+        await new Promise<never>(() => {});
+        return made;
+    };
+    void handleCheckout(post(), h.deps);
+    await didCreate;
+    h.deps.createSession = create;
+    h.attempts.clock += LEASE_MS + 1_000;
+};
 
 describe('stripe-checkout flow', () => {
     it('opens one session for a first-time buyer, under the lock, with an attempt-keyed idempotency key', async () => {
@@ -625,24 +717,18 @@ describe('stripe-checkout flow', () => {
             // was gone with the isolate, so the buyer's next attempt minted a
             // fresh one and Stripe made them a SECOND session. Both payable.
             const h = harness({ customerId: 'cus_1' });
-            const realCreate = h.deps.createSession;
-            h.deps.createSession = async (params, sessionOptions, mode) => {
-                // Stripe makes the session, and then this invocation is gone.
-                await realCreate(params, sessionOptions, mode);
-                throw new Error('isolate terminated');
-            };
+            await diesInsideCreate(h);
 
-            const died = await handleCheckout(post(), h.deps);
-            expect(died.status).toBe(502);
             // Stripe's side of the half-finished attempt: one payable session
             // nobody recorded.
             expect(h.stripe.openSessions()).toHaveLength(1);
             // Our side: the key it was created with, which is the whole fix.
             expect(h.attempts.attemptId).toBe('attempt-1');
             expect(h.attempts.sessionId).toBeNull();
-            expect(h.attempts.holder).toBeNull();
+            // And the lock it never gave back, which is why the next request
+            // can only have it once the lease has gone stale.
+            expect(h.attempts.holder).toBe('holder-1');
 
-            h.deps.createSession = realCreate;
             const next = await handleCheckout(post(), h.deps);
 
             expect(next.status).toBe(200);
@@ -664,13 +750,7 @@ describe('stripe-checkout flow', () => {
             // exactly the dead Checkout page the per-attempt key replaced the old
             // time-bucket key to avoid.
             const h = harness({ customerId: 'cus_1' });
-            const realCreate = h.deps.createSession;
-            h.deps.createSession = async (params, sessionOptions, mode) => {
-                await realCreate(params, sessionOptions, mode);
-                throw new Error('isolate terminated');
-            };
-            await handleCheckout(post(), h.deps);
-            h.deps.createSession = realCreate;
+            await diesInsideCreate(h);
             const expiresBefore = (h.deps.expireOpenSessions as ReturnType<typeof vi.fn>).mock.calls.length;
 
             const next = await handleCheckout(post(), h.deps);
@@ -685,13 +765,7 @@ describe('stripe-checkout flow', () => {
             // half-done and the buyer now wants Academy: Teacher's orphan session
             // has to be expired, and Academy needs a key of its own.
             const h = harness({ customerId: 'cus_1' });
-            const realCreate = h.deps.createSession;
-            h.deps.createSession = async (params, sessionOptions, mode) => {
-                await realCreate(params, sessionOptions, mode);
-                throw new Error('isolate terminated');
-            };
-            await handleCheckout(post(), h.deps);
-            h.deps.createSession = realCreate;
+            await diesInsideCreate(h);
 
             const academy = await handleCheckout(postAcademy(), h.deps);
 
@@ -750,6 +824,53 @@ describe('stripe-checkout flow', () => {
             expect(response.status).toBe(409);
             expect(await body(response)).toMatchObject({ code: 'checkout_in_progress' });
             expect(h.logs.some((line) => line.includes('taken over before session cs_1 could be recorded'))).toBe(true);
+            // And the session it opened is not left payable: nobody will ever be
+            // sent to it, and the request that took the lease over has one of its
+            // own, so an open orphan beside it is two payable sessions.
+            expect(h.deps.expireSession).toHaveBeenCalledWith('cs_1', 'live');
+            expect(h.stripe.openSessions()).toHaveLength(0);
+        });
+
+        it('expires the orphan it opened, and leaves the live session alone', async () => {
+            // The same thing with both requests real: A's create is still in
+            // flight when its lease goes stale, B takes the lock over and runs
+            // the whole flow, and A's session arrives AFTER B's expiry has
+            // already been and gone. Two sessions exist in Stripe -- A's create
+            // could not be called back -- so the only question is how many are
+            // payable, and expiring A's by id is what makes the answer one
+            // without killing the URL B has just handed the buyer.
+            const gate = latch();
+            const h = harness({ customerId: 'cus_1', pauseBeforeCreate: gate });
+            const stalled = handleCheckout(post(), h.deps);
+            await gate.arrived;
+            h.attempts.clock += LEASE_MS + 1_000;
+            const tookOver = await handleCheckout(postAcademy(), h.deps);
+            gate.release();
+            const stalledResponse = await stalled;
+
+            expect(tookOver.status).toBe(200);
+            expect(await body(tookOver)).toEqual({ url: 'https://checkout.stripe.com/cs_1' });
+            expect(stalledResponse.status).toBe(409);
+            expect(h.stripe.sessions).toHaveLength(2);
+            expect(h.stripe.openSessions().map((session) => session.id)).toEqual(['cs_1']);
+            expect(h.deps.expireSession).toHaveBeenCalledWith('cs_2', 'live');
+            expect(h.logs.some((line) => line.includes('expired orphan session cs_2'))).toBe(true);
+        });
+
+        it('still refuses the buyer when the orphan cannot be expired', async () => {
+            // A Stripe call we cannot make is not a reason to hand out a URL the
+            // other request's expiry may already have killed. The next attempt's
+            // layer 5 finds the orphan anyway.
+            const h = harness({ customerId: 'cus_1' });
+            h.deps.finishAttempt = async () => false;
+            h.deps.expireSession = async () => {
+                throw new Error('Stripe could not be reached');
+            };
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(409);
+            expect(h.errors).toEqual(['orphan_session_expire_failed']);
         });
 
         it('refuses the checkout when the key cannot be made durable', async () => {
@@ -769,6 +890,141 @@ describe('stripe-checkout flow', () => {
             expect(h.errors).toEqual(['checkout_attempt_stage_failed']);
             // The lock is handed back, so the retry we just asked for is not
             // refused as an attempt in flight.
+            expect(h.attempts.holder).toBeNull();
+        });
+    });
+
+    /**
+     * Stripe's idempotency layer saves the answer a key got -- a session OR an
+     * error -- and replays it for 24 hours. Staging the key before the create
+     * (above) made a dead isolate's session recoverable; it also made a FAILED
+     * create's key recoverable, which is not the same favour (Codex round 2 of
+     * #56).
+     */
+    describe('a create whose failure this request lived to see', () => {
+        it('mints a fresh key instead of replaying the 500 Stripe remembers', async () => {
+            // The lockout: the create came back 500, the row kept the attempt id
+            // it had staged, and layer 4b read that as "replay this key". Stripe
+            // answered the replay with the same 500 it had saved -- so did the
+            // retry after that, for 24 hours. The buyer could not buy that plan
+            // at all, and switching plan was the only way out.
+            const h = harness({ customerId: 'cus_1' });
+            h.stripe.createFails = 'Stripe had an internal error';
+
+            const failed = await handleCheckout(post(), h.deps);
+
+            expect(failed.status).toBe(502);
+            // Nothing staged for a later attempt to replay: a key Stripe has
+            // saved a failure against is a key nothing may use again.
+            expect(h.attempts.attemptId).toBeNull();
+            expect(h.attempts.priceId).toBeNull();
+            expect(h.attempts.sessionId).toBeNull();
+            expect(h.attempts.holder).toBeNull();
+
+            h.stripe.createFails = null;
+            const next = await handleCheckout(post(), h.deps);
+
+            expect(next.status).toBe(200);
+            expect(await body(next)).toEqual({ url: 'https://checkout.stripe.com/cs_1' });
+            // A FRESH key, so Stripe creates a session rather than replaying its
+            // own error at the buyer.
+            expect(h.stripe.keysUsed).toEqual([
+                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-2'),
+            ]);
+            expect(h.stripe.openSessions()).toHaveLength(1);
+        });
+
+        it('expires the session a lost answer may have opened, rather than replay its key', async () => {
+            // The other shape of a watched failure: the create DID reach Stripe
+            // and the answer went missing (a timeout, a reset), so Stripe holds a
+            // session whose id we never saw. Discarding the key gives that up,
+            // and gives up nothing: the next request has no key to replay, so it
+            // runs layer 5, where the orphan is expired like any other open
+            // session before a new one is opened. One payable session either way,
+            // and no key that can replay a failure.
+            const h = harness({ customerId: 'cus_1' });
+            const realCreate = h.deps.createSession;
+            h.deps.createSession = async (params, sessionOptions, mode) => {
+                await realCreate(params, sessionOptions, mode);
+                throw new Error('socket hang up');
+            };
+
+            const lost = await handleCheckout(post(), h.deps);
+            expect(lost.status).toBe(502);
+            expect(h.attempts.attemptId).toBeNull();
+
+            h.deps.createSession = realCreate;
+            const next = await handleCheckout(post(), h.deps);
+
+            expect(next.status).toBe(200);
+            expect(await body(next)).toEqual({ url: 'https://checkout.stripe.com/cs_2' });
+            expect(h.stripe.sessions).toHaveLength(2);
+            expect(h.stripe.openSessions().map((session) => session.id)).toEqual(['cs_2']);
+            expect(h.stripe.keysUsed).toEqual([
+                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-2'),
+            ]);
+        });
+
+        it('reads a replayed answer back, and refuses rather than send the buyer to a dead page', async () => {
+            // What Stripe replays is the response it SAVED, not the session as it
+            // stands today, so a key staged a day ago can hand back the URL of a
+            // session that has since been expired or paid. The read is what turns
+            // that into a retry the buyer can act on instead of a Checkout page
+            // that refuses them with nothing to go back to.
+            const h = harness({ customerId: 'cus_1' });
+            await diesInsideCreate(h);
+            // Something else has since expired the orphan -- here, the account's
+            // own open sessions being cleared -- while the staged key lives on.
+            h.stripe.expireOpenSessions('cus_1');
+
+            const replayed = await handleCheckout(post(), h.deps);
+
+            expect(replayed.status).toBe(502);
+            expect(await body(replayed)).toMatchObject({ code: 'checkout_unavailable' });
+            expect(h.logs.some((line) => line.includes('replayed key'))).toBe(true);
+            // The spent key is given up with it, so the retry is a clean attempt
+            // rather than the same replay again.
+            expect(h.attempts.attemptId).toBeNull();
+
+            const next = await handleCheckout(post(), h.deps);
+
+            expect(next.status).toBe(200);
+            expect(await body(next)).toEqual({ url: 'https://checkout.stripe.com/cs_2' });
+            expect(h.stripe.openSessions().map((session) => session.id)).toEqual(['cs_2']);
+        });
+
+        it('forgets the key when Stripe answers without a URL', async () => {
+            // Nothing payable came back, so the key is spent on that answer
+            // exactly as it is on an error -- and replaying it would get the same
+            // URL-less answer back for a day.
+            const h = harness({ customerId: 'cus_1' });
+            h.deps.createSession = async () => ({ id: 'cs_no_url', url: null });
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(502);
+            expect(h.attempts.attemptId).toBeNull();
+            expect(h.attempts.holder).toBeNull();
+        });
+
+        it('still answers the buyer when the key cannot be discarded', async () => {
+            // Best effort: a discard that fails leaves the buyer where this fix
+            // found them, which is a reason to log it and not a reason to answer
+            // them differently.
+            const h = harness({ customerId: 'cus_1' });
+            h.stripe.createFails = 'Stripe had an internal error';
+            h.deps.discardAttempt = async () => {
+                throw new Error('connection reset');
+            };
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(502);
+            expect(h.errors).toEqual(['checkout_attempt_discard_failed', 'checkout_failed']);
+            // The lock is still given back, by the release every unrecorded path
+            // runs.
             expect(h.attempts.holder).toBeNull();
         });
     });
@@ -1069,12 +1325,24 @@ describe('stripe-checkout/index.ts is wiring only', () => {
 
     it('expires open sessions through the helper delete-account shares', () => {
         expect(source).toContain('expireOpenCheckoutSessions');
+        // And one session by id, for the orphan of a create that lost its lease:
+        // expiring that buyer's open sessions would kill the live one too.
+        expect(source).toContain('expireCheckoutSession');
     });
 
     it('takes the cross-isolate lock through the RPCs that hold it', () => {
         expect(source).toContain('begin_checkout_attempt');
+        expect(source).toContain('stage_checkout_attempt');
         expect(source).toContain('finish_checkout_attempt');
         expect(source).toContain('release_checkout_attempt');
         expect(source).toContain('CHECKOUT_ATTEMPT_STALE_AFTER');
+    });
+
+    it('discards a staged key through finish_checkout_attempt with nothing to remember', () => {
+        // No migration of its own: the discard is the record statement with no
+        // attempt, no price and no session, under the same lease scoping. A
+        // reader of the SQL sees only finish_checkout_attempt, so the nulls are
+        // asserted here.
+        expect(source).toMatch(/p_attempt_id: null,\s*\n\s*p_price_id: null,\s*\n\s*p_session_id: null,/);
     });
 });
