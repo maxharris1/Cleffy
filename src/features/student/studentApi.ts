@@ -72,6 +72,15 @@ const rejectionFrom = async (response: Response): Promise<StudentAuthError> => {
  * nothing else; sending an Authorization header would only invite the function
  * to trust a caller-supplied identity it must ignore.
  *
+ * `captchaToken` travels in the body like every other field, under the name
+ * supabase-js uses for it, and is forwarded by both functions to the password
+ * grant they call server-side. It is null on every build with no
+ * VITE_TURNSTILE_SITE_KEY — which is every build today — and both functions
+ * leave the grant's `options` off entirely without one, so nothing about these
+ * requests changes until the key is set. Nothing on this side verifies it:
+ * GoTrue is the one that redeems it, and a Turnstile token may only be redeemed
+ * once.
+ *
  * Failures are not re-interpreted, only carried. Both functions answer with one
  * indistinguishable body per class of rejection so neither can become an oracle
  * for which usernames or codes exist, and second-guessing that on the client
@@ -136,11 +145,16 @@ const openStudentSession = async (fn: 'student-login' | 'student-claim', payload
  * for an address, and an address typed by a code student simply fails at GoTrue
  * exactly as a wrong password would.
  */
-export const loginStudent = async (identifier: string, password: string): Promise<string> => {
+export const loginStudent = async (
+    identifier: string,
+    password: string,
+    captchaToken?: string | null,
+): Promise<string> => {
     if (identifier.includes('@')) {
         const { data, error } = await getSupabase().auth.signInWithPassword({
             email: identifier.trim(),
             password,
+            ...(captchaToken ? { options: { captchaToken } } : {}),
         });
         if (error) {
             // GoTrue answers a banned account before it checks the password,
@@ -157,7 +171,7 @@ export const loginStudent = async (identifier: string, password: string): Promis
     // Sent exactly as typed. The function normalizes case and surrounding space
     // itself, so reshaping it here could only ever turn a username that would
     // have worked into one that does not.
-    return openStudentSession('student-login', { username: identifier, password });
+    return openStudentSession('student-login', { username: identifier, password, captchaToken });
 };
 
 /**
@@ -171,6 +185,7 @@ export const claimStudentAccount = async (input: {
     code: string;
     username: string;
     password: string;
+    captchaToken?: string | null;
 }): Promise<string> => openStudentSession('student-claim', input);
 
 /** One assigned score: the teacher's assignment plus the document it points at. */

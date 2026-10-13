@@ -252,12 +252,18 @@ describe('recovery paths lift the limits', () => {
     });
 
     it('student-claim clears the claimed username after the claim commits', () => {
+        // After the commit, and only after it: the misses this forgets belong
+        // to a username that is this student's from the commit onwards, and a
+        // claim that never committed must leave another student's throttle
+        // alone. The sign-in now runs BEFORE the commit (so a refused captcha
+        // cannot spend the card), which is why this is keyed on the commit's
+        // own guard rather than on the grant.
         const source = read('student-claim');
         const forget = source.indexOf(
             'forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, username)',
         );
         expect(forget).toBeGreaterThan(-1);
-        expect(forget).toBeGreaterThan(source.indexOf('if (!claimed) {'));
-        expect(forget).toBeLessThan(source.indexOf('signInWithPassword('));
+        expect(source.indexOf('signInWithPassword(')).toBeLessThan(source.indexOf('.update({'));
+        expect(forget).toBeGreaterThan(source.indexOf('if (claimError || !claimed) {'));
     });
 });

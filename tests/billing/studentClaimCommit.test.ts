@@ -20,12 +20,12 @@ import { describe, expect, it } from 'vitest';
  */
 const SOURCE = readFileSync(resolve(process.cwd(), 'supabase/functions/student-claim/index.ts'), 'utf8');
 
-/** From the commit's own comment to the sign-in that follows it. */
+/** From the commit's own comment to the throttle clear that follows it. */
 const commitStatement = (): string => {
     const start = SOURCE.indexOf('// The commit:');
-    const end = SOURCE.indexOf('// A FRESH anon-key client');
+    const end = SOURCE.indexOf('// The card is spent');
     expect(start, 'the commit UPDATE was not found — was its comment reworded?').toBeGreaterThan(-1);
-    expect(end, 'the anon sign-in was not found — was its comment reworded?').toBeGreaterThan(start);
+    expect(end, 'the post-commit throttle clear was not found — was its comment reworded?').toBeGreaterThan(start);
     return SOURCE.slice(start, end);
 };
 
@@ -55,7 +55,7 @@ describe('the student-claim commit', () => {
         // that matched no row is handed a session for an account it did not
         // claim, under a username the roster never stored.
         expect(commit).toContain(".select('id')");
-        expect(commit).toMatch(/if \(!claimed\) \{/);
+        expect(commit).toMatch(/if \(claimError \|\| !claimed\) \{/);
         expect(commit).toMatch(/return reject\(\);/);
     });
 
@@ -67,6 +67,65 @@ describe('the student-claim commit', () => {
         // knows that — the CHECK constraint only speaks about rows that move.
         expect(commit).toContain(".is('claimed_at', null)");
         expect(commit).toContain(".is('archived_at', null)");
+    });
+
+    it('signs the student in before it spends the code, and drops the session if the commit does not land', () => {
+        // The order is the fix for a captcha refusal costing a child their card
+        // (QA round 4 review of #57): GoTrue verifies the Turnstile token at
+        // the password grant, so a grant that runs AFTER the commit judges the
+        // token when the code is already spent — the account exists, the card
+        // is dead, and the student is told to go and sign in instead. Before
+        // the commit, every way the grant can fail leaves the row Invited and
+        // the code live.
+        const grant = SOURCE.indexOf('signInWithPassword(');
+        const spend = SOURCE.indexOf('login_code_hash: null');
+        expect(grant, 'the password grant was not found').toBeGreaterThan(-1);
+        expect(spend, 'the statement that spends the code was not found').toBeGreaterThan(-1);
+        expect(grant).toBeLessThan(spend);
+        // And the session minted a moment earlier must not be handed out when
+        // the commit found no row to write: that row is somebody else's claim.
+        const commit = commitStatement();
+        expect(commit).toContain('signOutQuietly(admin, signIn.session.access_token)');
+        expect(commit).toMatch(/code: 'username_taken'/);
+    });
+
+    it('revokes only the session it minted, never every session of that student', () => {
+        // QA round 4 review of #57. Two children typing the same card at once
+        // both get past the lookup, both mint a session for the SAME auth user,
+        // and exactly one commits. The loser reaches signOutQuietly -- and a
+        // 'global' scope there revokes every session of that user, the winner's
+        // included, with the card already spent and no retry left that fixes it.
+        const quietly = SOURCE.slice(SOURCE.indexOf('const signOutQuietly'), SOURCE.indexOf('Deno.serve('));
+        expect(quietly, 'signOutQuietly was not found').not.toBe('');
+        expect(quietly).toContain("admin.auth.admin.signOut(accessToken, 'local')");
+        // 'others' is the same bug with the arguments the other way round: it
+        // revokes everything EXCEPT the token we are trying to drop.
+        expect(SOURCE).not.toMatch(/signOut\(accessToken, '(?:global|others)'\)/);
+    });
+
+    it('scopes the sign-out on the wire, so local and global are different requests', async () => {
+        // The mechanism the test above exists for, against the real client:
+        // supabase-js puts the scope in the query string of /auth/v1/logout, so
+        // what GoTrue deletes is decided by that one word. 'local' deletes the
+        // session the presented JWT belongs to; 'global' deletes all of the
+        // user's.
+        const scopeOf = async (scope: 'local' | 'global') => {
+            let seen = '';
+            const admin = createClient('https://example.supabase.co', 'service-role', {
+                auth: { persistSession: false, autoRefreshToken: false },
+                global: {
+                    fetch: async (input: RequestInfo | URL) => {
+                        seen = String(input);
+                        return new Response(null, { status: 204 });
+                    },
+                },
+            });
+            await admin.auth.admin.signOut('the-losers-access-token', scope);
+            return seen;
+        };
+
+        expect(await scopeOf('local')).toContain('/auth/v1/logout?scope=local');
+        expect(await scopeOf('global')).toContain('/auth/v1/logout?scope=global');
     });
 
     it('cannot tell a lost race from a won one without asking for the row', async () => {

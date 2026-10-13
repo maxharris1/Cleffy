@@ -92,7 +92,10 @@ describe('JoinPage', () => {
         await user.type(await screen.findByLabelText('Your name'), 'Sharon');
         await user.click(screen.getByRole('button', { name: 'Join' }));
         expect(await screen.findByText('viewer')).toBeInTheDocument();
-        expect(signInAnonymouslyWithName).toHaveBeenCalledWith('Sharon');
+        // The trailing null is the inertness guarantee: without
+        // VITE_TURNSTILE_SITE_KEY this page renders no widget and requires no
+        // token, so a share link joins exactly as it did before.
+        expect(signInAnonymouslyWithName).toHaveBeenCalledWith('Sharon', null);
         expect(redeemShareLink).toHaveBeenCalledWith('tok');
     });
 

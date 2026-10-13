@@ -1,9 +1,10 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as sessionModule from '@/features/auth/session';
+import { resetTurnstileLoaderForTests, type TurnstileRenderOptions } from '@/features/auth/turnstile';
 import { discardedChangesNotice, keptChangesNotice } from '@/features/student/keptChangesNotice';
 import { ACCOUNT_DELETED, SIGNED_OUT_BY_TEACHER, StudentLoginPage } from '@/features/student/StudentLoginPage';
 
@@ -37,7 +38,32 @@ beforeEach(() => {
 
 afterEach(() => {
     cleanup();
+    vi.unstubAllEnvs();
+    resetTurnstileLoaderForTests();
+    delete (window as { turnstile?: unknown }).turnstile;
+    document.getElementById('cf-turnstile-script')?.remove();
 });
+
+/**
+ * Turnstile switched on with a stubbed `window.turnstile`, the harness
+ * tests/auth/turnstileField.test.tsx uses. Cloudflare's always-passes test site
+ * key; `rendered` collects the widgets in mount order.
+ */
+const withTurnstile = () => {
+    vi.stubEnv('VITE_TURNSTILE_SITE_KEY', '1x00000000000000000000AA');
+    const rendered: TurnstileRenderOptions[] = [];
+    Object.assign(window, {
+        turnstile: {
+            render: (_host: HTMLElement, options: TurnstileRenderOptions) => {
+                rendered.push(options);
+                return `widget-${rendered.length}`;
+            },
+            remove: () => undefined,
+            reset: () => undefined,
+        },
+    });
+    return rendered;
+};
 
 describe('StudentLoginPage', () => {
     it('takes one identifier and a password, and points at the ways in it does not own', () => {
@@ -59,8 +85,10 @@ describe('StudentLoginPage', () => {
         await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
         await user.click(screen.getByRole('button', { name: 'Open my music' }));
 
-        // Unnormalized on purpose: the server folds case and space itself.
-        expect(loginStudent).toHaveBeenCalledWith('  Ada_Lovelace ', 'hunter2hunter2');
+        // Unnormalized on purpose: the server folds case and space itself. The
+        // third argument is the Turnstile token, null on a build with no site
+        // key — which is this one, and every build until Max sets one.
+        expect(loginStudent).toHaveBeenCalledWith('  Ada_Lovelace ', 'hunter2hunter2', null);
         expect(await screen.findByText('your pieces')).toBeInTheDocument();
     });
 
@@ -151,5 +179,69 @@ describe('StudentLoginPage', () => {
         renderLogin({ signedOutByTeacher: true, keptChanges: 0, accountDeleted: true, discardedChanges: 0 });
         expect(screen.getByRole('status')).toHaveTextContent(ACCOUNT_DELETED);
         expect(screen.getByRole('status')).not.toHaveTextContent('removed from this device');
+    });
+});
+
+describe('StudentLoginPage with Turnstile on', () => {
+    // Why the widget belongs here at all: both halves of the roster sign in
+    // through a password grant — an email-method student at GoTrue directly, a
+    // username student through student-login, which calls the same grant
+    // server-side with whatever token the caller sent. GoTrue's captcha is
+    // project-wide, so without this, switching it on refuses every child at the
+    // sign-in box (QA round 4 review of #57).
+    it('renders nothing at all without a site key, which is every build today', () => {
+        renderLogin();
+        expect(screen.queryByTestId('turnstile-field')).not.toBeInTheDocument();
+    });
+
+    it('sends the solved token with the credential', async () => {
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        renderLogin();
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        expect(rendered[0]).toMatchObject({ action: 'student-login' });
+        rendered[0]!.callback('cf-token');
+
+        await user.type(screen.getByLabelText('Username or email'), 'ada_lovelace');
+        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
+        await user.click(screen.getByRole('button', { name: 'Open my music' }));
+
+        expect(loginStudent).toHaveBeenCalledWith('ada_lovelace', 'hunter2hunter2', 'cf-token');
+    });
+
+    it('asks for the check last, after the fields, and sends nothing without it', async () => {
+        withTurnstile();
+        const user = userEvent.setup();
+        renderLogin();
+
+        // A child who left a field empty hears about the field first.
+        await user.click(screen.getByRole('button', { name: 'Open my music' }));
+        expect(screen.getByRole('status')).toHaveTextContent('Type your username and password.');
+
+        await user.type(screen.getByLabelText('Username or email'), 'ada_lovelace');
+        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
+        await user.click(screen.getByRole('button', { name: 'Open my music' }));
+
+        expect(screen.getByRole('status')).toHaveTextContent('Finish the “I’m human” check');
+        expect(loginStudent).not.toHaveBeenCalled();
+    });
+
+    it('puts up a fresh challenge after a refused sign-in', async () => {
+        // The token is spent the moment it is redeemed, whatever became of the
+        // password beside it, so a retry with the same one fails the captcha
+        // rather than the credential.
+        loginStudent.mockRejectedValue(new Error('That username and password did not work'));
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        renderLogin();
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        rendered[0]!.callback('cf-token');
+
+        await user.type(screen.getByLabelText('Username or email'), 'ada_lovelace');
+        await user.type(screen.getByLabelText('Password'), 'wrong-password-1');
+        await user.click(screen.getByRole('button', { name: 'Open my music' }));
+
+        expect(await screen.findByText('That username and password did not work')).toBeInTheDocument();
+        await waitFor(() => expect(rendered).toHaveLength(2));
     });
 });

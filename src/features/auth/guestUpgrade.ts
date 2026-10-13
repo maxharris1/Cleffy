@@ -43,9 +43,18 @@ const post = async (fn: 'guest-email-start' | 'guest-email-confirm', payload: ob
     return body;
 };
 
-/** Mail a one-time code to `email` for the signed-in guest. */
-export const startGuestEmailUpgrade = async (email: string): Promise<void> => {
-    await post('guest-email-start', { email: email.trim() });
+/**
+ * Mail a one-time code to `email` for the signed-in guest.
+ *
+ * `captchaToken` is our own function's gate, not GoTrue's: guest-email-start
+ * verifies it against Cloudflare itself (supabase/functions/_shared/turnstile.ts)
+ * because this is the one send path that is entirely ours — anybody with a
+ * share link can reach it, and every call it admits is an email. Null on a
+ * build with no site key, and the function admits that case unchanged, so this
+ * flow is untouched until both keys are set.
+ */
+export const startGuestEmailUpgrade = async (email: string, captchaToken?: string | null): Promise<void> => {
+    await post('guest-email-start', { email: email.trim(), ...(captchaToken ? { captchaToken } : {}) });
 };
 
 /**
@@ -66,6 +75,16 @@ export const confirmGuestEmailUpgrade = async (input: {
     email: string;
     code: string;
     password: string;
+    /**
+     * For the sign-in at the end, not for the attach: the code is what proves
+     * the address, and guest-email-confirm asks for no captcha. This token is
+     * needed because the sign-in is GoTrue's password grant, which the
+     * project-wide captcha setting covers — and because the attach has already
+     * destroyed this user's sessions by then, a refused sign-in here leaves a
+     * guest with their work saved and no way into it until they sign in by
+     * hand. Null on a build with no site key, and then nothing is sent.
+     */
+    captchaToken?: string | null;
 }): Promise<'signed_in' | 'sign_in_needed'> => {
     const typed = input.email.trim();
     const body = (await post('guest-email-confirm', { email: typed, code: input.code, password: input.password })) as {
@@ -74,7 +93,11 @@ export const confirmGuestEmailUpgrade = async (input: {
     // The address as the server stored it (normalised), else as typed.
     const email = typeof body.email === 'string' && body.email ? body.email : typed;
     try {
-        const { data, error } = await getSupabase().auth.signInWithPassword({ email, password: input.password });
+        const { data, error } = await getSupabase().auth.signInWithPassword({
+            email,
+            password: input.password,
+            ...(input.captchaToken ? { options: { captchaToken: input.captchaToken } } : {}),
+        });
         if (!error && data.session && !data.session.user.is_anonymous) {
             return 'signed_in';
         }

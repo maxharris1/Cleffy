@@ -101,8 +101,28 @@ export interface StudentLoginBackend {
     findClaimedStudent: (username: string) => Promise<ClaimedStudent | null>;
     /** The auth user a roster row points at; null if it cannot be read. */
     readAuthUser: (userId: string) => Promise<StudentAuthUser | null>;
-    /** A password sign-in on a fresh anon client; null when GoTrue refuses. */
-    signIn: (email: string, password: string) => Promise<StudentSession | null>;
+    /**
+     * A password sign-in on a fresh anon client; null when GoTrue refuses.
+     *
+     * `captchaToken` is forwarded to GoTrue untouched, and is the reason this
+     * signature has a third argument at all. GoTrue's captcha
+     * (`[auth.captcha]`) is PROJECT-WIDE: switching it on makes the
+     * password-grant endpoint demand a token from every caller, this function
+     * included — and this function is server-side, with no browser to put a
+     * challenge in front of. So the token has to come from whoever called us,
+     * and the alternative to accepting one is that enabling captcha anywhere
+     * silently breaks every student sign-in.
+     *
+     * Nothing here validates it: it is Cloudflare's to judge via GoTrue, and a
+     * wrong one is just a refused sign-in, which is already this endpoint's
+     * one answer. That collapse is also why the refusal cannot be named: the
+     * grant runs only for a username that EXISTS, so "the captcha failed" here
+     * would be the username oracle this endpoint is built not to be. The
+     * student re-solves the widget (the form remounts it on any failure) and
+     * tries again. Forwarding it grants a caller nothing they did not already
+     * have — a token they solved themselves.
+     */
+    signIn: (email: string, password: string, captchaToken: string | null) => Promise<StudentSession | null>;
     /**
      * Whether `password` is the password of the ARCHIVED, claimed roster row
      * with this username (archived_student_password_matches). False for no
@@ -159,7 +179,7 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
         return json({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
 
-    let body: { username?: unknown; password?: unknown };
+    let body: { username?: unknown; password?: unknown; captchaToken?: unknown };
     try {
         body = await req.json();
     } catch {
@@ -187,6 +207,24 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
     if (!password) {
         return await reject();
     }
+
+    // Optional, and only ever handed on to GoTrue (see backend.signIn).
+    // StudentLoginPage sends one whenever VITE_TURNSTILE_SITE_KEY is set, so a
+    // project that switches the captcha on has a token to verify instead of a
+    // sign-in box that refuses every child.
+    //
+    // Not verified here, and that is deliberate: a Turnstile token may be
+    // redeemed ONCE, so checking it ourselves (verifyTurnstileRequest, as
+    // guest-email-start does) would spend it and leave GoTrue's own check
+    // nothing to pass. GoTrue is the verifier for this endpoint; what stands in
+    // front of a flood here is the per-IP ceiling and the per-username throttle
+    // below, which cost an attacker a slot whether or not they send a token.
+    //
+    // A missing token is NOT a rejection: making it one would refuse every
+    // client bundle cached from before the widget shipped, and the one thing
+    // worse than an unsolved challenge on a sign-in box aimed at children is a
+    // sign-in box that cannot be used at all.
+    const captchaToken = typeof body.captchaToken === 'string' && body.captchaToken ? body.captchaToken : null;
 
     const backend = deps.backend();
     if (!backend) {
@@ -247,7 +285,7 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
         return await reject();
     }
 
-    const session = await backend.signIn(authUser.email, password);
+    const session = await backend.signIn(authUser.email, password, captchaToken);
     if (!session) {
         return await reject();
     }

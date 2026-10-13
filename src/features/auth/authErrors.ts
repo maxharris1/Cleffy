@@ -12,15 +12,46 @@ const LINK_EXPIRED = 'This link has expired. Request a new one.';
 const WEAK_PASSWORD = `That password is too weak. ${PASSWORD_HINT}`;
 const PWNED_PASSWORD = 'That password has appeared in a data breach. Choose a different one.';
 const SAME_PASSWORD = 'Choose a password different from your current one.';
+/**
+ * GoTrue refusing the Turnstile token rather than the credential beside it.
+ *
+ * It answers `captcha_failed` for a token that is absent, expired, forged or
+ * already redeemed — a token is single-use, and GoTrue redeems it BEFORE it
+ * looks at the password, so this is also what a retry with the same token gets.
+ * Without an entry here it fell through to each form's fallback ("Could not
+ * sign in.", "Could not send the reset link."), which points at the wrong
+ * thing: nothing the user typed is wrong, and the fix is a fresh challenge.
+ * Every form that renders a widget remounts it on a failed submit, so the
+ * challenge they are being asked to redo is already waiting.
+ */
+const CAPTCHA_FAILED = 'That “I’m human” check didn’t go through. Try it again.';
+/**
+ * The error a brand-new account hits, and the reason it needed its own copy.
+ *
+ * Production turned sign-up confirmation on (`mailer_autoconfirm = false`) with
+ * `mailer_allow_unverified_email_sign_ins` off, so somebody who signs up and
+ * then logs in before opening the email gets `email_not_confirmed`. Before
+ * that flip this path did not exist at all; now it is the single most likely
+ * failure a new user meets, and with no entry here it fell through to
+ * LoginPage's "Could not sign in." — indistinguishable from a wrong password,
+ * with nothing to tell them the email was the thing they had missed.
+ *
+ * Points at the confirmation email, not at the password, and names the resend
+ * because the link expires after an hour (`mailer_otp_exp = 3600`).
+ */
+const EMAIL_NOT_CONFIRMED =
+    'Confirm your email address first — open the link in the email we sent you, then log in. Links expire after an hour; you can send a new one below.';
 
 /** Closed map of Auth API `error.code` → product copy. */
 const BY_CODE: Readonly<Record<string, string>> = {
     invalid_credentials: INVALID_CREDENTIALS,
+    email_not_confirmed: EMAIL_NOT_CONFIRMED,
     user_already_exists: USER_EXISTS,
     over_email_send_rate_limit: RATE_LIMITED,
     over_request_rate_limit: RATE_LIMITED,
     otp_expired: LINK_EXPIRED,
     same_password: SAME_PASSWORD,
+    captcha_failed: CAPTCHA_FAILED,
 };
 
 /**
@@ -35,6 +66,16 @@ const BY_MESSAGE: readonly { pattern: RegExp; message: string }[] = [
         pattern: /email link is invalid or has expired|token has expired|one-time token not found/i,
         message: LINK_EXPIRED,
     },
+    // GoTrue phrases the captcha refusal 'captcha protection: request
+    // disallowed (…)', and sends `captcha_failed` with it — BY_CODE answers it
+    // normally, and this is the codeless shape.
+    { pattern: /captcha protection|captcha verification/i, message: CAPTCHA_FAILED },
+    // GoTrue does send `email_not_confirmed` with this one, so BY_CODE above is
+    // what normally answers it. The pattern is here for the codeless shape the
+    // same refusal takes when it arrives as a redirect `error_description`
+    // rather than as a thrown AuthApiError — the form of error authUrlError.ts
+    // reads out of the address bar, which carries only a sentence.
+    { pattern: /email not confirmed/i, message: EMAIL_NOT_CONFIRMED },
 ];
 
 const readAuthFields = (err: unknown): { code: string; message: string } => {
@@ -90,6 +131,21 @@ export const mapAuthError = (err: unknown, fallback = 'Something went wrong.'): 
     return fallback;
 };
 
+/**
+ * Whether a failed sign-in was "this account exists, with this password, but
+ * the address has not been confirmed" — which is the one sign-in failure the
+ * login page may offer a resend against.
+ *
+ * Safe to act on visibly: GoTrue checks the password BEFORE the confirmation
+ * flag, so `email_not_confirmed` reaches nobody who does not already hold the
+ * credential. A wrong password on an unconfirmed account is the usual
+ * `invalid_credentials`, and this stays false.
+ */
+export const isEmailNotConfirmed = (err: unknown): boolean => {
+    const { code, message } = readAuthFields(err);
+    return code === 'email_not_confirmed' || (!code && /email not confirmed/i.test(message));
+};
+
 const RESET_RATE_LIMITED = 'Too many requests right now. Wait a few minutes, then try again.';
 const RESET_INVALID_EMAIL = 'Enter a valid email address.';
 const RESET_UNREACHABLE = 'Could not reach Cleffy. Check your connection and try again.';
@@ -112,15 +168,24 @@ const RESET_UNREACHABLE = 'Could not reach Cleffy. Check your connection and try
  *  * over_request_rate_limit — the per-IP limiter in front of /recover —
  *    so the person knows to wait;
  *  * validation_failed — a malformed address, from the request validation;
+ *  * captcha_failed — GoTrue verifies the token at the top of the request,
+ *    before it has looked at anything about the address. Saying it is also the
+ *    only way these forms can be honest once Turnstile is on: a captcha
+ *    refusal sends NO mail, so swallowing it would show "check your email" to
+ *    someone who will never get one, and the fix (solve the challenge again)
+ *    is one nobody can guess from a neutral success screen;
  *  * no answer at all: offline, or the service down (502/503). Not a 504:
  *    a gateway timeout can be a slow mail send, which only accounts reach.
  * The success screen's "try again" covers what a real user needs otherwise.
  */
-export const passwordResetProblem = (err: unknown): string | null => {
+const mailRequestProblem = (err: unknown): string | null => {
     const { code, message } = readAuthFields(err);
     const record = err && typeof err === 'object' ? (err as { name?: unknown; status?: unknown }) : {};
     if (code === 'over_request_rate_limit') {
         return RESET_RATE_LIMITED;
+    }
+    if (code === 'captcha_failed' || (!code && /captcha protection|captcha verification/i.test(message))) {
+        return CAPTCHA_FAILED;
     }
     if (code === 'validation_failed' || (!code && /unable to validate email/i.test(message))) {
         return RESET_INVALID_EMAIL;
@@ -130,3 +195,23 @@ export const passwordResetProblem = (err: unknown): string | null => {
     }
     return null;
 };
+
+export const passwordResetProblem = (err: unknown): string | null => mailRequestProblem(err);
+
+/**
+ * The same rule for the sign-up confirmation resend, and for the same reason.
+ *
+ * GoTrue's /resend does not answer every address alike: an address with no
+ * pending confirmation, or one already confirmed, is refused where an address
+ * with a pending one is accepted. So a resend button that reported its failures
+ * would answer "does this address have an unconfirmed account?" — the same
+ * question the forgot-password form is careful not to answer, asked about a
+ * narrower and more interesting set of addresses.
+ *
+ * On the sign-up screen the caller already knows the address (it was typed into
+ * the form a moment ago), so there is nothing to learn there. Holding the line
+ * anyway costs nothing, and means the button can be put anywhere — the login
+ * page's `email_not_confirmed` notice included — without the question being
+ * re-opened at each new site.
+ */
+export const confirmationResendProblem = (err: unknown): string | null => mailRequestProblem(err);

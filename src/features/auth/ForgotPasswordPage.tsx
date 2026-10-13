@@ -45,6 +45,7 @@ export const ForgotPasswordPage = () => {
                 emailId="forgot-email"
                 submitLabel="Send reset link"
                 busyLabel="Sending…"
+                captchaAction="password-reset"
                 describeError={(err) =>
                     err instanceof ResetProblem ? err.message : 'Could not send the reset link. Please try again.'
                 }
@@ -55,9 +56,9 @@ export const ForgotPasswordPage = () => {
                         </Link>
                     </p>
                 }
-                onSubmit={async ({ email }) => {
+                onSubmit={async ({ email, captchaToken }) => {
                     try {
-                        await requestPasswordReset(email);
+                        await requestPasswordReset(email, captchaToken);
                     } catch (err) {
                         const problem = passwordResetProblem(err);
                         if (problem) {

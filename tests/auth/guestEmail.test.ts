@@ -15,11 +15,13 @@ import {
     hashGuestEmailCode,
     isPlausibleGuestEmail,
     recipientRateKey,
+    type CaptchaVerdict,
     type CodeCheck,
     type GuestCaller,
     type GuestEmailConfirmDeps,
     type GuestEmailStartDeps,
 } from '../../supabase/functions/_shared/guestEmail';
+import { mailLimit } from '../../supabase/functions/_shared/mailBudget';
 import { passwordProblem, passwordProblemMessage } from '../../supabase/functions/_shared/passwordPolicy';
 
 /**
@@ -59,12 +61,23 @@ const common = (calls: string[], caller: GuestCaller | Response = GUEST) => ({
     logError: vi.fn(),
 });
 
+/**
+ * The project's mail allowance for guest codes, exactly as
+ * guest-email-start/index.ts reads it. Passed in rather than restated so these
+ * tests exercise the DERIVED ceilings — if mailBudget.ts ever narrows them
+ * (because the reserve for password resets grew, or the budget was corrected
+ * to the real Resend quota), the ceiling asserted here moves with it.
+ */
+const MAIL_BUDGET = { hour: mailLimit('guestEmailCode', 'hour'), day: mailLimit('guestEmailCode', 'day') };
+
 const startHarness = (
     options: {
         taken?: boolean | null;
         send?: 'sent' | 'failed' | 'unconfigured';
         caller?: GuestCaller | Response;
         save?: boolean;
+        /** The Turnstile verdict for the request; a configured deploy that passes by default. */
+        captcha?: CaptchaVerdict;
     } = {},
 ) => {
     const calls: string[] = [];
@@ -72,6 +85,11 @@ const startHarness = (
     const sent: { to: string; subject: string; text: string }[] = [];
     const deps: GuestEmailStartDeps = {
         ...common(calls, options.caller),
+        verifyCaptcha: vi.fn(async (_req: Request, body: Record<string, unknown> | null) => {
+            calls.push(`captcha:${typeof body?.['captchaToken'] === 'string' ? 'token' : 'none'}`);
+            return options.captcha ?? ({ ok: true, verified: true } satisfies CaptchaVerdict);
+        }),
+        mailBudget: MAIL_BUDGET,
         emailTaken: vi.fn(async (email: string) => {
             calls.push(`taken:${email}`);
             return options.taken === undefined ? false : options.taken;
@@ -103,7 +121,10 @@ const startHarness = (
 describe('guest-email-start', () => {
     it('mails a code to the address and stores only its HMAC, bound to the guest and the address', async () => {
         const h = startHarness();
-        const response = await handleGuestEmailStart(post({ email: '  Ada@Example.COM ' }), h.deps);
+        const response = await handleGuestEmailStart(
+            post({ email: '  Ada@Example.COM ', captchaToken: 'cf-token' }),
+            h.deps,
+        );
 
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual({ sent: true, expiresInSec: GUEST_EMAIL_CODE_TTL_MS / 1000 });
@@ -118,12 +139,20 @@ describe('guest-email-start', () => {
             },
         ]);
         expect(h.saved[0]?.codeHash).not.toContain('482913');
-        // IP gate before the auth round-trip; then the guest, the lookup, and
-        // only for a code about to be mailed, the address's own allowance.
+        // IP gate before the auth round-trip; then the guest, the captcha, the
+        // lookup, and only for a code about to be mailed, the address's own
+        // allowance.
+        //
+        // The captcha's position is the load-bearing part of this list: after
+        // the two free counting gates (so a flood pays a slot before it costs
+        // Cloudflare a verification) and before `taken:` — the only question
+        // this endpoint answers about somebody else's address — and before the
+        // save and the send, which are what cost us.
         expect(h.calls).toEqual([
             'rate:guest-email-start:ip',
             'auth',
             'rate:guest-email-start:user',
+            'captcha:token',
             'taken:ada@example.com',
             'rate:guest-email-to:' + (await recipientRateKey(SECRET, 'ada@example.com')).split(':')[1],
             'rate:guest-email-to-day:' + (await recipientRateKey(SECRET, 'ada@example.com', 'day')).split(':')[1],
@@ -194,7 +223,7 @@ describe('guest-email-start', () => {
     });
 
     it('stops mailing anyone once the project-wide ceiling is reached', async () => {
-        expect(GUEST_EMAIL_LIMITS.startGlobal.limit).toBeLessThan(GUEST_EMAIL_LIMITS.startGlobalDaily.limit);
+        expect(MAIL_BUDGET.hour.limit).toBeLessThan(MAIL_BUDGET.day.limit);
         for (const blocked of ['guest-email-start:global', 'guest-email-start:global-day']) {
             const h = startHarness();
             h.deps.checkRateLimit = vi.fn(async (key: string) =>
@@ -207,6 +236,77 @@ describe('guest-email-start', () => {
             expect(h.sent, blocked).toEqual([]);
             expect(h.deps.logError).toHaveBeenCalled();
         }
+    });
+
+    it('mails nothing, and asks nothing about the address, without a verified captcha', async () => {
+        const refusals = [
+            { verdict: { ok: false, code: 'captcha_missing', status: 400 }, error: GUEST_EMAIL_ERRORS.captchaMissing },
+            { verdict: { ok: false, code: 'captcha_failed', status: 403 }, error: GUEST_EMAIL_ERRORS.captchaFailed },
+            {
+                verdict: { ok: false, code: 'captcha_unavailable', status: 503 },
+                error: GUEST_EMAIL_ERRORS.captchaUnavailable,
+            },
+        ] as const satisfies readonly { verdict: CaptchaVerdict; error: { error: string; code: string } }[];
+
+        for (const { verdict, error } of refusals) {
+            const h = startHarness({ captcha: verdict });
+            const response = await handleGuestEmailStart(post({ email: 'owner@example.com' }), h.deps);
+            expect(response.status, verdict.code).toBe(verdict.status);
+            expect(await response.json()).toEqual(error);
+            // Nothing past the gate ran: no send, no pending row, and — the
+            // one that matters most — the address was never looked up, so a
+            // script cannot use this endpoint to find out who has an account.
+            expect(h.sent, verdict.code).toEqual([]);
+            expect(h.saved, verdict.code).toEqual([]);
+            expect(h.deps.emailTaken, verdict.code).not.toHaveBeenCalled();
+            // And the counting gates in front of it stay spent: a caller who
+            // cannot solve a challenge still pays for trying.
+            expect(h.calls.filter((c) => c.startsWith('rate:'))).toEqual([
+                'rate:guest-email-start:ip',
+                'rate:guest-email-start:user',
+            ]);
+            expect(h.deps.refundRateLimit, verdict.code).not.toHaveBeenCalled();
+        }
+
+        // Each refusal says something different, because "solve it again" and
+        // "this is our problem, wait" are different instructions.
+        const codes = refusals.map(({ error }) => error.code);
+        expect(new Set(codes).size).toBe(codes.length);
+    });
+
+    it('a deploy with no TURNSTILE_SECRET_KEY works exactly as it did before', async () => {
+        // The inertness guarantee, as the verifier reports it: ok, nothing
+        // verified. The request carries no token at all — no browser can mint
+        // one without the site key — and it is still answered with a mailed
+        // code, which is what lets this branch ship ahead of the keys.
+        const h = startHarness({ captcha: { ok: true, verified: false } });
+        const response = await handleGuestEmailStart(post({ email: 'ada@example.com' }), h.deps);
+        expect(response.status).toBe(200);
+        expect(h.sent).toEqual([expect.objectContaining({ to: 'ada@example.com' })]);
+        expect(h.calls).toContain('captcha:none');
+    });
+
+    it('spends the project mail budget derived from mailBudget.ts, not a literal of its own', async () => {
+        // guest-email-start/index.ts passes mailLimit('guestEmailCode', …) in,
+        // and the handler counts against exactly those two ceilings. The point
+        // is that narrowing the budget there narrows this flow here, with no
+        // second number to remember to edit.
+        const seen: { key: string; limit: number; windowMs: number }[] = [];
+        const h = startHarness();
+        h.deps.checkRateLimit = vi.fn(async (key: string, limit: number, windowMs: number) => {
+            seen.push({ key, limit, windowMs });
+            return { ok: true as const };
+        });
+        expect((await handleGuestEmailStart(post({ email: 'a@example.com' }), h.deps)).status).toBe(200);
+
+        expect(seen.find((call) => call.key === 'guest-email-start:global')).toEqual({
+            key: 'guest-email-start:global',
+            ...MAIL_BUDGET.hour,
+        });
+        expect(seen.find((call) => call.key === 'guest-email-start:global-day')).toEqual({
+            key: 'guest-email-start:global-day',
+            ...MAIL_BUDGET.day,
+        });
     });
 
     it('withdraws the code when the mail could not be sent', async () => {

@@ -2,6 +2,8 @@ import { useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
+import { TurnstileField } from '@/features/auth/TurnstileField';
+import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { SignedOutByTeacherState } from '@/features/student/endedSignIn';
 import { discardedChangesNotice, keptChangesNotice } from '@/features/student/keptChangesNotice';
@@ -64,11 +66,33 @@ const CredentialEntry = () => {
     const [password, setPassword] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    /**
+     * The Turnstile token this sign-in carries, or null on a build with no site
+     * key — which is every build today, and why this page is unchanged until
+     * Max sets one.
+     *
+     * It is here because BOTH halves of the roster sign in through a password
+     * grant: an email-method student goes straight at GoTrue, and a username
+     * student goes through student-login, which calls the same grant
+     * server-side with whatever token the caller sent. GoTrue's captcha is
+     * project-wide, so switching it on without this would refuse every student
+     * at the sign-in box — the function has accepted a token since it was
+     * written, and nothing was producing one.
+     */
+    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+    const [captchaRound, setCaptchaRound] = useState(0);
+    const captchaRequired = isTurnstileEnabled();
 
     const submit = async (e: FormEvent) => {
         e.preventDefault();
         if (identifier.trim().length === 0 || password.length === 0) {
             setError('Type your username and password.');
+            return;
+        }
+        // After the fields, so a child who left one empty is not first told off
+        // about the robot check. Never reached on a build with no site key.
+        if (captchaRequired && !captchaToken) {
+            setError('Finish the “I’m human” check, then try again.');
             return;
         }
         setError(null);
@@ -77,11 +101,18 @@ const CredentialEntry = () => {
             // Sent exactly as typed. The server folds case and space itself, so
             // reshaping it here could only ever turn a sign-in that would have
             // worked into one that does not.
-            await loginStudent(identifier, password);
+            await loginStudent(identifier, password, captchaToken);
             navigate('/assignments', { replace: true });
         } catch (err) {
             setBusy(false);
             setError(err instanceof Error ? err.message : 'That did not work');
+            if (captchaRequired) {
+                // The token is spent the moment it is redeemed, whatever became
+                // of the credential beside it, so a retry needs a new challenge
+                // rather than the dead proof in hand.
+                setCaptchaToken(null);
+                setCaptchaRound((round) => round + 1);
+            }
         }
     };
 
@@ -126,6 +157,7 @@ const CredentialEntry = () => {
                     autoComplete="current-password"
                     spaced
                 />
+                <TurnstileField key={captchaRound} action="student-login" onToken={setCaptchaToken} />
                 <Button type="submit" disabled={busy} className="mt-4 w-full">
                     {busy ? 'Opening…' : 'Open my music'}
                 </Button>
