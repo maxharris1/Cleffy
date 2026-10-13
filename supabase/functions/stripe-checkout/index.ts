@@ -1,14 +1,17 @@
 import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
-import { handleCheckout } from '../_shared/checkoutFlow.ts';
+import { CHECKOUT_ATTEMPT_STALE_AFTER, handleCheckout } from '../_shared/checkoutFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import {
     appOrigin,
+    customerSubscriptionStatuses,
     expireOpenCheckoutSessions,
     modeForRequest,
+    readCheckoutSession,
     resolvePrice,
     stripeClient,
+    subscriptionStatusOf,
     type StripeMode,
 } from '../_shared/stripe.ts';
 import { holdsRunningSubscription } from '../_shared/stripeEvents.ts';
@@ -22,6 +25,14 @@ import { holdsRunningSubscription } from '../_shared/stripeEvents.ts';
  * _shared/checkoutFlow.ts, where the vitest suite drives it against a fake
  * Stripe that models open sessions. This file is only what it runs against.
  */
+
+/** One row of begin_checkout_attempt's answer, as PostgREST returns it. */
+interface CheckoutAttemptRow {
+    holder: string | null;
+    attempt_id: string | null;
+    price_id: string | null;
+    session_id: string | null;
+}
 
 /**
  * The two clients every Stripe-touching dep needs. Throwing is the right
@@ -105,8 +116,78 @@ Deno.serve((req) =>
                 .upsert({ user_id: userId, mode, stripe_customer_id: customer.id }, { onConflict: 'user_id,mode' });
             return customer.id;
         },
-        expireOpenSessions: (customerId, keepIdempotencyKey, mode) =>
-            expireOpenCheckoutSessions(billing(mode).stripe, customerId, keepIdempotencyKey),
+        // The (user, mode) lock (migration 20261012120103). `begin` answers with
+        // an empty set when another request holds it, which is the one case the
+        // flow must not read as an error: it is a double-submit, not a failure.
+        beginAttempt: async (userId, mode) => {
+            const { data, error } = await billing(mode).admin.rpc('begin_checkout_attempt', {
+                p_user: userId,
+                p_mode: mode,
+                p_stale_after: CHECKOUT_ATTEMPT_STALE_AFTER,
+            });
+            if (error) {
+                return { ok: false, reason: 'error', error };
+            }
+            const row = (data as CheckoutAttemptRow[] | null)?.[0];
+            if (!row?.holder) {
+                return { ok: false, reason: 'in_flight' };
+            }
+            return {
+                ok: true,
+                holder: row.holder,
+                stored: {
+                    attemptId: row.attempt_id ?? null,
+                    priceId: row.price_id ?? null,
+                    sessionId: row.session_id ?? null,
+                },
+            };
+        },
+        finishAttempt: async (userId, mode, holder, attempt) => {
+            const { error } = await billing(mode).admin.rpc('finish_checkout_attempt', {
+                p_user: userId,
+                p_mode: mode,
+                p_holder: holder,
+                p_attempt_id: attempt.attemptId,
+                p_price_id: attempt.priceId,
+                p_session_id: attempt.sessionId,
+            });
+            if (error) {
+                throw new Error(`could not record the checkout attempt: ${error.message}`);
+            }
+        },
+        releaseAttempt: async (userId, mode, holder) => {
+            const { error } = await billing(mode).admin.rpc('release_checkout_attempt', {
+                p_user: userId,
+                p_mode: mode,
+                p_holder: holder,
+            });
+            if (error) {
+                throw new Error(`could not release the checkout attempt: ${error.message}`);
+            }
+        },
+        newAttemptId: () => crypto.randomUUID(),
+        stripeSubscriptionStatuses: async (customerId, mode) => {
+            try {
+                return { ok: true, statuses: await customerSubscriptionStatuses(billing(mode).stripe, customerId) };
+            } catch (error) {
+                return { ok: false, error };
+            }
+        },
+        fetchSession: async (sessionId, mode) => {
+            try {
+                return { ok: true, session: await readCheckoutSession(billing(mode).stripe, sessionId) };
+            } catch (error) {
+                return { ok: false, error };
+            }
+        },
+        subscriptionStatus: async (subscriptionId, mode) => {
+            try {
+                return { ok: true, status: await subscriptionStatusOf(billing(mode).stripe, subscriptionId) };
+            } catch (error) {
+                return { ok: false, error };
+            }
+        },
+        expireOpenSessions: (customerId, mode) => expireOpenCheckoutSessions(billing(mode).stripe, customerId),
         createSession: (params, options, mode) => billing(mode).stripe.checkout.sessions.create(params, options),
         holdsRunningSubscription,
         now: () => Date.now(),

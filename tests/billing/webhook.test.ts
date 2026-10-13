@@ -8,8 +8,11 @@ import {
     holdsRunningSubscription,
     isEntitlingStatus,
     STRIPE_EVENT_CLAIM_STALE_AFTER,
+    STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER,
     SUBSCRIPTION_MISSING,
     subscriptionRowFrom,
+    type ClaimOutcome,
+    type DuplicateUndo,
     type StripeEventLike,
     type StripeSubscriptionLike,
     type SubscriptionUpsert,
@@ -52,6 +55,9 @@ const PRICE_TIERS = {
 /** How long claim_stripe_event lets a claim sit unfinished; see the migration. */
 const STALE_AFTER_MS = 10 * 60_000;
 
+/** How long claim_subscription_write lets a write lock sit; see the migration. */
+const LOCK_STALE_AFTER_MS = 2 * 60_000;
+
 /** A `stripe_events` row, in the three states the table can hold it in. */
 interface FakeEvent {
     id: string;
@@ -84,15 +90,23 @@ class FakeStore implements WebhookStore {
      * never re-claimed, an in-flight one is left to the delivery that holds it,
      * and one whose claim has gone stale is taken over (QA round 4, D2).
      */
-    claimEvent = async (id: string, type: string): Promise<boolean> => {
+    claimEvent = async (id: string, type: string): Promise<ClaimOutcome> => {
         const existing = this.events.get(id);
-        if (existing && (existing.status === 'done' || this.clock - existing.claimedAt < STALE_AFTER_MS)) {
+        if (existing?.status === 'done') {
             this.held = null;
-            return false;
+            return 'done';
+        }
+        // A claim still inside its window belongs to a delivery that may be
+        // running right now, and nobody has applied the event: that is the
+        // answer Stripe has to be told to try again for (QA round 4, D2
+        // follow-up).
+        if (existing && this.clock - existing.claimedAt < STALE_AFTER_MS) {
+            this.held = null;
+            return 'in_flight';
         }
         this.events.set(id, { id, type, status: 'processing', claimedAt: this.clock });
         this.held = this.clock;
-        return true;
+        return 'claimed';
     };
     markEventDone = async (id: string) => {
         const row = this.events.get(id);
@@ -154,6 +168,48 @@ class FakeStore implements WebhookStore {
     };
     restorePlanArchivedScores = async (userId: string) => {
         this.restored.push(userId);
+    };
+    /**
+     * subscription_writes and claim/release_subscription_write, modelled: one
+     * holder per subscription, with a lease another delivery can take over once
+     * it has gone stale (QA round 4, D3 follow-up).
+     */
+    locks = new Map<string, { holder: string; claimedAt: number }>();
+    locksTaken = 0;
+    lockSubscription = async (subscriptionId: string): Promise<string | null> => {
+        const held = this.locks.get(subscriptionId);
+        if (held && this.clock - held.claimedAt < LOCK_STALE_AFTER_MS) {
+            return null;
+        }
+        this.locksTaken += 1;
+        const holder = `lock-${this.locksTaken}`;
+        this.locks.set(subscriptionId, { holder, claimedAt: this.clock });
+        return holder;
+    };
+    unlockSubscription = async (subscriptionId: string, holder: string) => {
+        if (this.locks.get(subscriptionId)?.holder === holder) {
+            this.locks.delete(subscriptionId);
+        }
+    };
+    /** What cancelAndRefundDuplicate does in Stripe, as a ledger. */
+    canceledInStripe: string[] = [];
+    refundedInStripe: string[] = [];
+    cancelFails = false;
+    /** The four outcomes the refund half reports; see DuplicateUndo. */
+    refundOutcome: DuplicateUndo['refund'] = 'refunded';
+    cancelDuplicateSubscription = async (subscriptionId: string): Promise<DuplicateUndo> => {
+        const stopped = !this.cancelFails;
+        if (stopped) {
+            this.canceledInStripe.push(subscriptionId);
+        }
+        if (this.refundOutcome === 'refunded') {
+            this.refundedInStripe.push(subscriptionId);
+        }
+        return {
+            stopped,
+            refund: this.refundOutcome,
+            detail: `stopped=${stopped} refund=${this.refundOutcome}`,
+        };
     };
     /**
      * Mirrors the real store: the claim is forgotten, so a redelivery is fresh
@@ -250,6 +306,24 @@ describe('stripe signature verification', () => {
         expect((await verifyStripeSignature(reSerialized, header, SECRET, NOW)).ok).toBe(false);
     });
 });
+
+/**
+ * A place to suspend one delivery while another arrives: `arrived` resolves when
+ * the handler reaches the step, and it goes no further until `release` is
+ * called. Two deliveries really overlapping is the only way to test what the
+ * per-subscription lock is for.
+ */
+const latch = () => {
+    let release = () => {};
+    const released = new Promise<void>((resolve_) => {
+        release = () => resolve_();
+    });
+    let arrive = () => {};
+    const arrived = new Promise<void>((resolve_) => {
+        arrive = () => resolve_();
+    });
+    return { released, release, arrived, arrive };
+};
 
 /**
  * Stripe sending `event` right after the change it reports: the object it
@@ -685,17 +759,26 @@ describe('stripe event handling', () => {
             expect(store.events.get('evt_orphaned')?.status).toBe('done');
         });
 
-        it('is left alone while the delivery holding it may still be running', async () => {
+        it('is left alone while the delivery holding it may still be running, and Stripe keeps trying', async () => {
             // Inside the window, a second delivery is genuinely concurrent, and
-            // both applying it is exactly what the claim exists to stop.
+            // both applying it is exactly what the claim exists to stop. But it
+            // is NOT a duplicate: nobody has applied this event, so a 200 would
+            // make Stripe forget it -- and if the delivery holding the claim is
+            // the one that died, there would be no later delivery to take the
+            // claim over once it went stale (QA round 4, D2 follow-up).
             const event = subscriptionEvent('evt_inflight', 'customer.subscription.updated');
             await diedHolding(event);
 
             store.clock += STALE_AFTER_MS - 1_000;
             const second = await deliver(store, event);
 
-            expect(second.body).toMatchObject({ duplicate: true });
+            expect(second.status).toBe(409);
+            expect(second.body).toMatchObject({ retry: true });
             expect(store.subscriptions.size).toBe(0);
+            // The claim belongs to the other delivery: not ours to release, and
+            // not ours to finish.
+            expect(store.released).toEqual([]);
+            expect(store.events.get('evt_inflight')?.status).toBe('processing');
         });
 
         it('is never reprocessed once it is done, however long ago', async () => {
@@ -808,6 +891,12 @@ describe('stripe event handling', () => {
             expect(alert).toContain('teacher-1');
             expect(alert).toContain('sub_1');
             expect(alert).toContain('sub_2');
+            // The refusal IS the detection, so the money stops here rather than
+            // when a human reads the alert: the subscription that was refused is
+            // the one cancelled and refunded, and the recorded one is left
+            // entitling the customer.
+            expect(store.canceledInStripe).toEqual(['sub_2']);
+            expect(store.refundedInStripe).toEqual(['sub_2']);
             // Not retried: the constraint would refuse it identically for three
             // days, burying the endpoint failures that matter.
             expect(store.events.get('evt_two')?.status).toBe('done');
@@ -825,6 +914,53 @@ describe('stripe event handling', () => {
             );
             expect(update.body).toMatchObject({ applied: 'subscription_upserted' });
             expect(store.subscriptions.get('sub_1')).toMatchObject({ cancel_at_period_end: true });
+        });
+
+        it.each([
+            ['the cancellation failed', { cancelFails: true }],
+            ['the refund failed', { refundOutcome: 'failed' as const }],
+        ])('asks Stripe to redeliver when %s', async (_name, failure) => {
+            await deliver(store, subscriptionEvent('evt_dup_one', 'customer.subscription.created'));
+            Object.assign(store, failure);
+
+            const second = await deliver(
+                store,
+                subscriptionEvent('evt_dup_two', 'customer.subscription.created', { id: 'sub_2' }),
+            );
+
+            // An unrefunded duplicate is money we are holding that is not ours,
+            // and both halves are safe to repeat, so the retry is the only thing
+            // that can still put it right without a human.
+            expect(second.status).toBeGreaterThanOrEqual(500);
+            expect(second.body).toMatchObject({ retry: true });
+            expect(store.released).toEqual(['evt_dup_two']);
+            expect(store.subscriptions.has('sub_2')).toBe(false);
+            expect(store.logs.some((line) => line.startsWith('ALERT') && line.includes('sub_2'))).toBe(true);
+        });
+
+        it.each([
+            // Caught while still trialing: billed nothing, so nothing to hand back.
+            ['there was nothing to refund', 'nothing_to_refund' as const],
+            // A paid invoice whose payment cannot be identified reads the same
+            // way on every retry, so three days of 500s would bury the alert
+            // rather than surface it.
+            ['only a human can refund it', 'needs_human' as const],
+        ])('acknowledges the event when %s', async (_name, outcome) => {
+            await deliver(store, subscriptionEvent('evt_dup_tri_one', 'customer.subscription.created'));
+            store.refundOutcome = outcome;
+
+            const second = await deliver(
+                store,
+                subscriptionEvent('evt_dup_tri_two', 'customer.subscription.created', { id: 'sub_2' }),
+            );
+
+            expect(second.status).toBe(200);
+            expect(second.body).toMatchObject({ ignored: 'duplicate_active_subscription' });
+            expect(store.canceledInStripe).toEqual(['sub_2']);
+            expect(store.released).toEqual([]);
+            expect(store.events.get('evt_dup_tri_two')?.status).toBe('done');
+            const alert = store.logs.find((line) => line.startsWith('ALERT') && line.includes('sub_2'));
+            expect(alert).toContain(outcome);
         });
 
         it('does not stand in the way of a new subscription after a cancellation', async () => {
@@ -939,6 +1075,171 @@ describe('stripe event handling', () => {
             );
             expect(older.status).toBe(200);
             expect(store.subscriptions.get('sub_1')?.status).toBe('past_due');
+        });
+    });
+
+    describe('two deliveries about one subscription at once', () => {
+        // What the staleness trigger cannot see (QA round 4, D3 follow-up).
+        // Stripe stamps `created` to the second, and equal stamps have to pass
+        // the trigger -- a retry of one event must be able to write its own
+        // state again -- so two events created inside the SAME second and
+        // delivered concurrently could still land in the order they READ in
+        // rather than the order they wrote in. The per-subscription write lock
+        // makes the read and the write one step, which is the only thing that
+        // orders them.
+        const activeRemote = { status: 'active' };
+        const pastDueRemote = { status: 'past_due' };
+        const remote = (overrides: Partial<StripeSubscriptionLike>): StripeSubscriptionLike => ({
+            id: 'sub_1',
+            status: 'active',
+            customer: 'cus_1',
+            current_period_end: 1_800_000_000,
+            items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            metadata: { user_id: 'teacher-1' },
+            ...overrides,
+        });
+
+        it('agrees with the window claim_subscription_write is called with', () => {
+            expect(STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER).toBe(`${LOCK_STALE_AFTER_MS / 60_000} minutes`);
+        });
+
+        it('refuses the second delivery and asks Stripe to redeliver it', async () => {
+            // A reads `active` and is suspended on its way to the write. The
+            // card then fails in Stripe, in the same second, and B arrives
+            // carrying the newer change. Without the lock B would read
+            // `past_due`, write it, and then A's suspended write would put
+            // `active` back -- a customer whose card failed, recorded as paid up
+            // until the next event about them.
+            store.remote.set('sub_1', remote(activeRemote));
+            const gate = latch();
+            const realUpsert = store.upsertSubscription;
+            let suspend = true;
+            store.upsertSubscription = async (row) => {
+                if (suspend) {
+                    suspend = false;
+                    gate.arrive();
+                    await gate.released;
+                }
+                return realUpsert(row);
+            };
+
+            const first = handleStripeEvent(
+                subscriptionEvent('evt_race_a', 'customer.subscription.updated', activeRemote),
+                store,
+                PRICE_TIERS,
+            );
+            await gate.arrived;
+
+            store.remote.set('sub_1', remote(pastDueRemote));
+            const second = await handleStripeEvent(
+                subscriptionEvent('evt_race_b', 'customer.subscription.updated', pastDueRemote),
+                store,
+                PRICE_TIERS,
+            );
+
+            expect(second.status).toBe(503);
+            expect(second.body).toMatchObject({ retry: true });
+            // Its claim is released, so the redelivery Stripe is being asked for
+            // is processed rather than answered as a duplicate.
+            expect(store.released).toEqual(['evt_race_b']);
+            expect(store.events.has('evt_race_b')).toBe(false);
+
+            gate.release();
+            await first;
+            expect(store.subscriptions.get('sub_1')?.status).toBe('active');
+            // The lock is given back, so the redelivery gets it...
+            expect(store.locks.size).toBe(0);
+
+            const redelivery = await handleStripeEvent(
+                subscriptionEvent('evt_race_b', 'customer.subscription.updated', pastDueRemote),
+                store,
+                PRICE_TIERS,
+            );
+
+            // ...and reads Stripe AFTER A's write, so what lands is the current
+            // state and not whichever delivery happened to write last.
+            expect(redelivery.body).toMatchObject({ applied: 'subscription_upserted' });
+            expect(store.subscriptions.get('sub_1')?.status).toBe('past_due');
+            // And the trigger never fired: the two stamps are equal, which is
+            // exactly why the lock had to do this rather than the comparison.
+            expect(store.staleWritesRefused).toEqual([]);
+        });
+
+        it('gives the lock back after every delivery, including a failed one', async () => {
+            store.remote.set('sub_1', remote(activeRemote));
+            await deliverLate(store, subscriptionEvent('evt_lock_ok', 'customer.subscription.updated'));
+            expect(store.locks.size).toBe(0);
+
+            store.applyFreeTierArchival = async () => {
+                throw new Error('connection reset');
+            };
+            store.remote.set('sub_1', remote({ status: 'canceled' }));
+            await expect(
+                handleStripeEvent(
+                    subscriptionEvent('evt_lock_throw', 'customer.subscription.updated', { status: 'canceled' }),
+                    store,
+                    PRICE_TIERS,
+                ),
+            ).rejects.toThrow('connection reset');
+
+            // A lease nobody released would refuse every later event about this
+            // subscription until it went stale.
+            expect(store.locks.size).toBe(0);
+        });
+
+        it('takes a lock over once the delivery holding it is long gone', async () => {
+            // The lease, for the same reason the event claim has one: an isolate
+            // killed mid-write releases nothing.
+            store.remote.set('sub_1', remote(activeRemote));
+            await store.lockSubscription('sub_1');
+
+            const refused = await deliverLate(
+                store,
+                subscriptionEvent('evt_locked_out', 'customer.subscription.updated'),
+            );
+            expect(refused.status).toBe(503);
+
+            store.clock += LOCK_STALE_AFTER_MS + 1_000;
+            const taken = await deliverLate(
+                store,
+                subscriptionEvent('evt_takes_over', 'customer.subscription.updated'),
+            );
+
+            expect(taken.body).toMatchObject({ applied: 'subscription_upserted' });
+            expect(store.subscriptions.get('sub_1')?.status).toBe('active');
+        });
+
+        it('locks the subscription a checkout and an invoice are about too', async () => {
+            // All three paths that read Stripe and write the row take it; a path
+            // that did not would be free to interleave with the ones that do.
+            store.remote.set('sub_1', remote(activeRemote));
+            await store.lockSubscription('sub_1');
+
+            const checkout = await handleStripeEvent(
+                {
+                    id: 'evt_checkout_locked',
+                    type: 'checkout.session.completed',
+                    created: EVENT_CREATED,
+                    data: { object: { customer: 'cus_1', client_reference_id: 'teacher-1', subscription: 'sub_1' } },
+                },
+                store,
+                PRICE_TIERS,
+            );
+            const invoice = await handleStripeEvent(
+                {
+                    id: 'evt_invoice_locked',
+                    type: 'invoice.paid',
+                    created: EVENT_CREATED,
+                    data: { object: { customer: 'cus_1', subscription: 'sub_1' } },
+                },
+                store,
+                PRICE_TIERS,
+            );
+
+            expect(checkout.status).toBe(503);
+            expect(invoice.status).toBe(503);
+            expect(store.subscriptions.size).toBe(0);
+            expect(store.released).toEqual(['evt_checkout_locked', 'evt_invoice_locked']);
         });
     });
 
@@ -1170,17 +1471,29 @@ describe('checkout guard', () => {
     it('is wired into the checkout flow ahead of creating any session', () => {
         // The decisions moved to _shared/checkoutFlow.ts, where the suite can
         // drive them (tests/billing/checkoutFlow.test.ts); stripe-checkout is
-        // wiring. The ORDER inside the flow is what this holds in place: the
-        // guard first, then the customer -- whose open sessions are the ones to
-        // expire -- then the expiry, and only then a new session. Creating the
+        // wiring. The ORDER is what this holds in place, in the two functions it
+        // is spread across: this guard before the lock is taken, and then --
+        // inside the lock -- the customer, whose subscriptions and sessions are
+        // the ones read, before the expiry, before a new session. Creating the
         // session before expiring the old ones leaves two that can be paid,
         // which is the double charge itself.
         const source = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/checkoutFlow.ts'), 'utf8');
         const guard = source.indexOf('deps.holdsRunningSubscription(running.rows');
         expect(guard).toBeGreaterThan(0);
-        expect(guard).toBeLessThan(source.indexOf('deps.findCustomer('));
-        expect(source.indexOf('deps.findCustomer(')).toBeLessThan(source.indexOf('deps.expireOpenSessions('));
-        expect(source.indexOf('deps.expireOpenSessions(')).toBeLessThan(source.indexOf('deps.createSession('));
+        expect(guard).toBeLessThan(source.indexOf('deps.beginAttempt('));
+        const order = [
+            'deps.findCustomer(',
+            'deps.stripeSubscriptionStatuses(',
+            'deps.fetchSession(',
+            'deps.expireOpenSessions(',
+            'deps.createSession(',
+            'deps.finishAttempt(',
+        ].map((call) => {
+            const at = source.indexOf(call);
+            expect(at, call).toBeGreaterThan(0);
+            return at;
+        });
+        expect(order).toEqual([...order].sort((a, b) => a - b));
         expect(source).toMatch(/code: 'already_subscribed'/);
     });
 });

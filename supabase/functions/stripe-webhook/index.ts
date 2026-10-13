@@ -6,10 +6,18 @@ import {
 } from '../_shared/deletedAccountBilling.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
-import { priceTiers, servedModes, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
+import {
+    cancelAndRefundDuplicate,
+    priceTiers,
+    servedModes,
+    stripeClient,
+    type StripeMode,
+    webhookSecretFor,
+} from '../_shared/stripe.ts';
 import {
     handleStripeEvent,
     STRIPE_EVENT_CLAIM_STALE_AFTER,
+    STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER,
     SUBSCRIPTION_MISSING,
     type StripeEventLike,
     type SubscriptionWriteOutcome,
@@ -170,10 +178,10 @@ Deno.serve(async (req) => {
             // One statement, so two concurrent deliveries of the same event
             // cannot both win -- and one that can also take over a claim whose
             // isolate died before it finished, which an upsert cannot express
-            // (claim_stripe_event, migration 20261012120101). The claim used to
-            // be an unconditional insert, so a death between claiming and
-            // applying made every Stripe retry answer `200 duplicate`: for a
-            // checkout, a customer charged and never entitled.
+            // (claim_stripe_event, migrations 20261012120101 and 120104). The
+            // claim used to be an unconditional insert, so a death between
+            // claiming and applying made every Stripe retry answer `200
+            // duplicate`: for a checkout, a customer charged and never entitled.
             const { data, error } = await admin.rpc('claim_stripe_event', {
                 p_id: id,
                 p_type: type,
@@ -182,8 +190,17 @@ Deno.serve(async (req) => {
             if (error) {
                 throw new Error(`could not claim event ${id}: ${error.message}`);
             }
-            claimedAt = typeof data === 'string' ? data : null;
-            return claimedAt !== null;
+            const row = (data as Array<{ state?: string; claimed_at?: string | null }> | null)?.[0];
+            claimedAt = row?.state === 'claimed' ? (row.claimed_at ?? null) : null;
+            if (claimedAt !== null) {
+                return 'claimed';
+            }
+            // Anything that is not 'done' has not been applied by anyone: a live
+            // claim, a stale one another delivery is about to take over, or a row
+            // that vanished between the two statements. All of them want Stripe
+            // to deliver again rather than to forget the event (QA round 4, D2
+            // follow-up).
+            return row?.state === 'done' ? 'done' : 'in_flight';
         },
         markEventDone: async (id) => {
             if (!claimedAt) {
@@ -334,6 +351,33 @@ Deno.serve(async (req) => {
                 console.log(`restored ${data} lapse-archived score(s) for ${userId}`);
             }
         },
+        // The per-subscription write lock (migration 20261012120105): the Stripe
+        // read-back and the row it writes are one step, so two deliveries about
+        // the same subscription cannot land in the order they READ in rather
+        // than the order they wrote in (QA round 4, D3 follow-up).
+        lockSubscription: async (subscriptionId) => {
+            const { data, error } = await admin.rpc('claim_subscription_write', {
+                p_subscription_id: subscriptionId,
+                p_stale_after: STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER,
+            });
+            if (error) {
+                throw new Error(`could not lock subscription ${subscriptionId}: ${error.message}`);
+            }
+            return typeof data === 'string' ? data : null;
+        },
+        unlockSubscription: async (subscriptionId, holder) => {
+            const { error } = await admin.rpc('release_subscription_write', {
+                p_subscription_id: subscriptionId,
+                p_holder: holder,
+            });
+            if (error) {
+                // Not thrown: the work is done, the answer is already decided,
+                // and the lease goes stale on its own. Loud, because until it
+                // does, every event about this subscription is refused.
+                console.error(`could not unlock subscription ${subscriptionId}: ${error.message}`);
+            }
+        },
+        cancelDuplicateSubscription: (subscriptionId) => cancelAndRefundDuplicate(stripe, subscriptionId),
         releaseEvent: async (id) => {
             if (!claimedAt) {
                 return;

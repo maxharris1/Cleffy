@@ -151,6 +151,35 @@ export const SUBSCRIPTION_MISSING = 'missing' as const;
 export const STRIPE_EVENT_CLAIM_STALE_AFTER = '10 minutes';
 
 /**
+ * How long one delivery may hold a subscription's write lock before another may
+ * take it over (claim_subscription_write, migration 20261012120105).
+ *
+ * The locked section is a Stripe read plus the upsert and at most two RPCs after
+ * it, so a live invocation is out of it in seconds; an Edge Function cannot run
+ * for anything like two minutes. Short, because the cost of a lease held by a
+ * dead isolate is paid by every later event about that subscription -- each one
+ * refused with a 503 until the lease goes stale -- and Stripe's backoff means
+ * the next delivery is minutes away anyway.
+ */
+export const STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER = '2 minutes';
+
+/**
+ * What came of asking for an event's claim. The three answers want three
+ * different HTTP statuses, which is the whole reason this is not a boolean
+ * (QA round 4, D2 follow-up):
+ *
+ *  * `claimed`   -- ours; process the event.
+ *  * `done`      -- applied already. A redelivery is a duplicate, and 200 is
+ *                   right: Stripe may forget it.
+ *  * `in_flight` -- another delivery holds the claim and has not finished. A 200
+ *                   here would tell Stripe the event landed when NOBODY has
+ *                   applied it; if the holder then dies, the claim goes stale
+ *                   with no delivery left to take it over. So it is answered
+ *                   with a 409 and Stripe keeps trying.
+ */
+export type ClaimOutcome = 'claimed' | 'done' | 'in_flight';
+
+/**
  * What upsertSubscription did.
  *
  * `duplicate` is the partial unique index (subscriptions_one_entitling_per_user_mode,
@@ -162,14 +191,15 @@ export type SubscriptionWriteOutcome = { duplicate: false } | { duplicate: true;
 
 export interface WebhookStore {
     /**
-     * Takes the claim on an event id. `false` means someone else holds it — a
-     * replay of an event already applied, or a delivery genuinely in flight
-     * right now. A claim whose invocation died without finishing goes stale
-     * after STRIPE_EVENT_CLAIM_STALE_AFTER and is claimable again, which is
-     * what stops a dead isolate turning every Stripe retry into `200 duplicate`
-     * (QA round 4, D2).
+     * Takes the claim on an event id, and says what happened when it could not:
+     * `done` is an event already applied (a duplicate, acknowledge it) and
+     * `in_flight` is a delivery still holding the claim (nobody has applied it,
+     * so ask Stripe to try again). A claim whose invocation died without
+     * finishing goes stale after STRIPE_EVENT_CLAIM_STALE_AFTER and is
+     * claimable again, which is what stops a dead isolate turning every Stripe
+     * retry into `200 duplicate` (QA round 4, D2).
      */
-    claimEvent: (id: string, type: string) => Promise<boolean>;
+    claimEvent: (id: string, type: string) => Promise<ClaimOutcome>;
     /**
      * Marks the claim finished, so every later delivery of it is a duplicate
      * rather than a claim waiting to go stale. Called for every outcome that
@@ -209,7 +239,51 @@ export interface WebhookStore {
      * its claim is not ours to remove.
      */
     releaseEvent: (id: string) => Promise<void>;
+    /**
+     * Takes the write lock for one subscription and answers with the token to
+     * give it back with, or null because another delivery holds it.
+     *
+     * What it buys (QA round 4, D3 follow-up): the Stripe read-back and the row
+     * it writes become one step per subscription. The
+     * subscriptions_refuse_stale_event trigger can only order events Stripe
+     * stamped different seconds apart -- equal stamps have to pass, or a retry
+     * of one event could not write its own state again -- so two events created
+     * inside the same second and delivered at once could still land in the
+     * wrong order: A reads `active`, B reads `past_due`, B writes, A writes.
+     * Whoever holds this lock reads AFTER the other one's write, so there is no
+     * older read left to land.
+     */
+    lockSubscription: (subscriptionId: string) => Promise<string | null>;
+    /** Gives the lock back. Only ever drops the lease this delivery holds. */
+    unlockSubscription: (subscriptionId: string, holder: string) => Promise<void>;
+    /**
+     * Cancels a duplicate subscription in Stripe and refunds what it charged.
+     *
+     * Called only when the partial unique index refuses a SECOND entitling
+     * subscription for one user, which means the double charge D1 describes has
+     * already happened in Stripe. Never throws: a duplicate it could not undo is
+     * still one the alert has to name.
+     */
+    cancelDuplicateSubscription: (subscriptionId: string) => Promise<DuplicateUndo>;
     log: (message: string) => void;
+}
+
+/**
+ * What cancelDuplicateSubscription managed to do, for the alert to report and
+ * for the handler to decide whether a redelivery could do better.
+ *
+ * `refund` is four-valued rather than a boolean because only one of its
+ * outcomes is worth retrying: a duplicate caught while still trialing has
+ * nothing to hand back (`nothing_to_refund`), a paid invoice whose payment
+ * cannot be identified will read the same on every retry (`needs_human`), and
+ * only `failed` -- Stripe unreachable, or refusing in a way that may not repeat
+ * -- gets another delivery.
+ */
+export interface DuplicateUndo {
+    /** Whether the duplicate can still bill. */
+    stopped: boolean;
+    refund: 'refunded' | 'nothing_to_refund' | 'needs_human' | 'failed';
+    detail: string;
 }
 
 export type WebhookResult = { status: number; body: Record<string, unknown> };
@@ -322,41 +396,56 @@ const resolveUserId = async (
 
 /**
  * The answer for a second entitling subscription the partial unique index
- * refuses (QA round 4, D1). It is a 200 with no row written, and that is a
- * decision rather than a shrug:
+ * refuses (QA round 4, D1). The row is not written, the duplicate is cancelled
+ * and refunded in Stripe, and Stripe is answered 200.
  *
- *  * Stripe is NOT asked to retry. The constraint will refuse the write
- *    identically for the next three days, so retrying only buries the
- *    failures that matter under endpoint-failure alerts.
- *  * the duplicate is NOT cancelled in Stripe from here. Cancelling bills
- *    nobody back and cannot be undone, and nothing in this process can tell
- *    which of two subscriptions the customer meant to have -- the one they
- *    opened first, or the one whose plan they actually wanted. A human reads
- *    the alert, cancels the right one in the dashboard and refunds it.
- *  * the row's ABSENCE is what keeps the money and the product in step:
+ * Each of those three is a decision:
+ *
+ *  * no row, because that is what keeps the money and the product in step:
  *    get_entitlements reads this table, so the customer is entitled by the
  *    subscription that did land and by that one only, exactly as if the
- *    duplicate had never been bought. delete-account is unaffected too --
- *    it lists subscriptions from Stripe, not from here, so a duplicate with
- *    no row is still cancelled when the account goes.
+ *    duplicate had never been bought. delete-account is unaffected too -- it
+ *    lists subscriptions from Stripe, not from here, so a duplicate with no row
+ *    is still cancelled when the account goes.
+ *  * cancelled and refunded, because the refusal IS the detection: the index
+ *    only refuses when the customer has been billed twice for the same period,
+ *    and the first round of fixes left that for a human reading a log line,
+ *    which means the customer keeps paying until someone does. Which one to
+ *    cancel is decided by which one landed: the recorded subscription is the one
+ *    entitling them, so the newcomer is the one that goes. A plan they actually
+ *    wanted is one portal click away from the plan they have, and a refund is
+ *    the half that cannot be undone by waiting.
+ *  * 200, because the constraint will refuse this write identically for the
+ *    next three days: retrying only buries the failures that matter under
+ *    endpoint-failure alerts. A cancel or refund that failed in a way a
+ *    redelivery might get past is the exception -- that is asked for again,
+ *    because an unrefunded duplicate is money we are holding that is not ours.
  *
- * What it leaves open, and what the alert is for: nothing reconciles Stripe
- * against this table on a schedule, and the alert's only destination today is
- * the function log. A sweep that compares the two (and a place for it to shout)
- * is the follow-up.
+ * The alert is loud either way, and still names both subscriptions: nothing
+ * reconciles Stripe against this table on a schedule, so a human reading it is
+ * how a case neither half could undo is noticed.
  */
-const duplicateEntitling = (
+const duplicateEntitling = async (
     store: WebhookStore,
     event: StripeEventLike,
     sub: StripeSubscriptionLike,
     userId: string,
     otherSubscriptionId: string | null,
-): WebhookResult => {
+): Promise<WebhookResult> => {
+    const undone = await store.cancelDuplicateSubscription(sub.id);
     store.log(
         `ALERT ${event.type} ${event.id}: user ${userId} would hold two entitling subscriptions ` +
             `(${otherSubscriptionId ?? 'unknown'} is recorded, ${sub.id} was refused as ${sub.status}); ` +
-            'the duplicate is NOT recorded and NOT cancelled -- cancel and refund the right one in Stripe',
+            `the duplicate is NOT recorded, and in Stripe: ${undone.detail}`,
     );
+    if (!undone.stopped || undone.refund === 'failed') {
+        // Both halves are safe to repeat (see cancelAndRefundDuplicate), so a
+        // retry costs nothing and is the only thing that can still put this
+        // right without a human. Only a failure that MIGHT not repeat is worth
+        // one: an unidentifiable payment reads the same way every time, and
+        // three days of 500s would bury it instead of surfacing it.
+        return retryLater(store, event, 'duplicate_not_undone');
+    }
     return { status: 200, body: { received: true, ignored: 'duplicate_active_subscription' } };
 };
 
@@ -385,7 +474,7 @@ const applySubscription = async (
 ): Promise<WebhookResult | null> => {
     const written = await store.upsertSubscription(subscriptionRowFrom(sub, userId, priceTiers, eventStampOf(event)));
     if (written.duplicate) {
-        return duplicateEntitling(store, event, sub, userId, written.otherSubscriptionId);
+        return await duplicateEntitling(store, event, sub, userId, written.otherSubscriptionId);
     }
     if (shouldArchiveOnStatus(sub.status)) {
         await store.applyFreeTierArchival(userId);
@@ -407,6 +496,39 @@ const retryLater = async (store: WebhookStore, event: StripeEventLike, reason: s
 };
 
 /**
+ * Runs the read-and-write for one subscription with nothing else writing it
+ * (QA round 4, D3 follow-up). A delivery that cannot get the lock has done
+ * nothing, so it releases its event claim and asks Stripe for the redelivery
+ * that will find the lock free -- 503 rather than 500, because the event is
+ * fine and only the timing was wrong.
+ *
+ * The lock is given back on every path out, including a throw: the caller turns
+ * a throw into a 500 and a released claim, and a lease nobody released would
+ * refuse every later event about this subscription until it went stale.
+ */
+const withSubscriptionLock = async (
+    store: WebhookStore,
+    event: StripeEventLike,
+    subscriptionId: string,
+    apply: () => Promise<WebhookResult>,
+): Promise<WebhookResult> => {
+    const holder = await store.lockSubscription(subscriptionId);
+    if (!holder) {
+        store.log(
+            `${event.type} ${event.id}: ${subscriptionId} is being written by another delivery; ` +
+                'asking Stripe to redeliver',
+        );
+        await store.releaseEvent(event.id);
+        return { status: 503, body: { error: 'subscription_write_in_flight', retry: true } };
+    }
+    try {
+        return await apply();
+    } finally {
+        await store.unlockSubscription(subscriptionId, holder);
+    }
+};
+
+/**
  * The answer for an event whose subscription Stripe says does not exist. The
  * claim is KEPT and the answer is a 200: retrying for Stripe's three days would
  * fail identically every time and trip its endpoint-failure alerts, burying the
@@ -423,9 +545,11 @@ const subscriptionMissing = (store: WebhookStore, event: StripeEventLike, subscr
 
 /**
  * Returns 200 for anything it understands OR deliberately ignores — a non-2xx
- * makes Stripe retry, which is only useful when we genuinely failed. Every
- * non-2xx it returns has already released the event's claim (see retryLater);
- * a THROWN error leaves that to the caller, which releases it the same way.
+ * makes Stripe retry, which is only useful when nobody has applied the event.
+ * Every non-2xx it returns has either released the event's claim (retryLater,
+ * and the subscription-lock 503 beside it) or never held it (the 409 for a
+ * claim another delivery is holding); a THROWN error leaves the release to the
+ * caller, which does it the same way.
  *
  * Takes the claim, dispatches, and marks the claim finished on every outcome
  * that genuinely is. A 2xx IS that outcome, whatever it says in the body: an
@@ -443,12 +567,21 @@ export const handleStripeEvent = async (
     priceTiers: Record<string, BillingTier>,
 ): Promise<WebhookResult> => {
     // Idempotency first: a replay must never re-apply, and must never re-archive.
-    const fresh = await store.claimEvent(event.id, event.type);
-    if (!fresh) {
+    const claim = await store.claimEvent(event.id, event.type);
+    if (claim === 'done') {
         store.log(`duplicate event ${event.id} (${event.type}) ignored`);
         // Nothing to mark: the claim belongs to the delivery that took it, and
         // it is that one's job to finish or to release it.
         return { status: 200, body: { received: true, duplicate: true } };
+    }
+    if (claim === 'in_flight') {
+        // NOT a duplicate: nobody has applied this event yet. A 200 would make
+        // Stripe forget it, and if the delivery holding the claim is dying --
+        // the case the staleness window exists for -- there would be no later
+        // delivery to take the claim over (QA round 4, D2 follow-up). Nothing
+        // to release either: the claim is not ours.
+        store.log(`event ${event.id} (${event.type}) is in flight elsewhere; asking Stripe to retry`);
+        return { status: 409, body: { error: 'event_in_flight', retry: true } };
     }
 
     const result = await dispatchStripeEvent(event, store, priceTiers);
@@ -482,25 +615,30 @@ const dispatchStripeEvent = async (
                 return { status: 200, body: { received: true, ignored: 'no_subscription' } };
             }
 
-            // Not retrievable is not "nothing to do": this event is the purchase.
-            // Stripe retries a 5xx with backoff for days, so a transient API
-            // failure heals itself; a 200 here would have dropped it for good.
-            // Only a subscription Stripe says does not exist is acknowledged.
-            const sub = await store.fetchSubscription(subscriptionId);
-            if (sub === SUBSCRIPTION_MISSING) {
-                return subscriptionMissing(store, event, subscriptionId);
-            }
-            if (!sub) {
-                store.log(`checkout.session.completed ${event.id}: subscription ${subscriptionId} not retrievable`);
-                return retryLater(store, event, 'subscription_unavailable');
-            }
-
-            return (
-                (await applySubscription(store, event, sub, userId, priceTiers)) ?? {
-                    status: 200,
-                    body: { received: true, applied: 'subscription_upserted' },
+            // Held for the read AND the write, so a `customer.subscription.*`
+            // delivery about the same subscription cannot read Stripe between
+            // them and write its own older answer afterwards.
+            return await withSubscriptionLock(store, event, subscriptionId, async () => {
+                // Not retrievable is not "nothing to do": this event is the purchase.
+                // Stripe retries a 5xx with backoff for days, so a transient API
+                // failure heals itself; a 200 here would have dropped it for good.
+                // Only a subscription Stripe says does not exist is acknowledged.
+                const sub = await store.fetchSubscription(subscriptionId);
+                if (sub === SUBSCRIPTION_MISSING) {
+                    return subscriptionMissing(store, event, subscriptionId);
                 }
-            );
+                if (!sub) {
+                    store.log(`checkout.session.completed ${event.id}: subscription ${subscriptionId} not retrievable`);
+                    return retryLater(store, event, 'subscription_unavailable');
+                }
+
+                return (
+                    (await applySubscription(store, event, sub, userId, priceTiers)) ?? {
+                        status: 200,
+                        body: { received: true, applied: 'subscription_upserted' },
+                    }
+                );
+            });
         }
 
         // paused/resumed are the same shape and want the same answer: the event
@@ -545,43 +683,50 @@ const dispatchStripeEvent = async (
             // `deleted` needs no read: a cancellation is final, so its event can
             // never be older than anything it overwrites. Its object can still
             // read `active`; the row must not.
-            let current: StripeSubscriptionLike;
-            if (event.type === 'customer.subscription.deleted') {
-                current = { ...embedded, status: 'canceled' };
-            } else {
-                const live = await store.fetchSubscription(embedded.id);
-                if (live === SUBSCRIPTION_MISSING) {
-                    return subscriptionMissing(store, event, embedded.id);
+            // The read and the write as one step: whoever holds the lock reads
+            // Stripe after the previous delivery's write, so the two cannot
+            // land in the order they read in rather than the order they wrote
+            // in. `deleted` takes it too -- it writes without reading, and that
+            // write must not interleave with another delivery's.
+            return await withSubscriptionLock(store, event, embedded.id, async () => {
+                let current: StripeSubscriptionLike;
+                if (event.type === 'customer.subscription.deleted') {
+                    current = { ...embedded, status: 'canceled' };
+                } else {
+                    const live = await store.fetchSubscription(embedded.id);
+                    if (live === SUBSCRIPTION_MISSING) {
+                        return subscriptionMissing(store, event, embedded.id);
+                    }
+                    if (!live) {
+                        store.log(`${event.type} ${event.id}: subscription ${embedded.id} not retrievable`);
+                        return retryLater(store, event, 'subscription_unavailable');
+                    }
+                    current = live;
                 }
-                if (!live) {
-                    store.log(`${event.type} ${event.id}: subscription ${embedded.id} not retrievable`);
-                    return retryLater(store, event, 'subscription_unavailable');
-                }
-                current = live;
-            }
 
-            // Belt and braces for the one window the live read leaves: two
-            // deliveries for the same subscription in flight at once, the older
-            // read landing second. A subscription Stripe has ended never comes
-            // back, so nothing may reopen a row already recorded as ended.
-            // Keyed on the status being APPLIED, not the one embedded: the retry
-            // of an event whose archival threw after its upsert landed reads the
-            // ended status back from Stripe and must re-run that archival.
-            const stored = await store.storedStatusOf(embedded.id);
-            if (stored !== null && isTerminalStatus(stored) && !isTerminalStatus(current.status)) {
-                store.log(
-                    `${event.type} ${event.id}: ${embedded.id} is already ${stored}; ` +
-                        `refusing to reopen it as ${current.status}`,
+                // Belt and braces for the one window the live read leaves: two
+                // deliveries for the same subscription in flight at once, the older
+                // read landing second. A subscription Stripe has ended never comes
+                // back, so nothing may reopen a row already recorded as ended.
+                // Keyed on the status being APPLIED, not the one embedded: the retry
+                // of an event whose archival threw after its upsert landed reads the
+                // ended status back from Stripe and must re-run that archival.
+                const stored = await store.storedStatusOf(embedded.id);
+                if (stored !== null && isTerminalStatus(stored) && !isTerminalStatus(current.status)) {
+                    store.log(
+                        `${event.type} ${event.id}: ${embedded.id} is already ${stored}; ` +
+                            `refusing to reopen it as ${current.status}`,
+                    );
+                    return { status: 200, body: { received: true, ignored: 'terminal_status' } };
+                }
+
+                return (
+                    (await applySubscription(store, event, current, userId, priceTiers)) ?? {
+                        status: 200,
+                        body: { received: true, applied: 'subscription_upserted' },
+                    }
                 );
-                return { status: 200, body: { received: true, ignored: 'terminal_status' } };
-            }
-
-            return (
-                (await applySubscription(store, event, current, userId, priceTiers)) ?? {
-                    status: 200,
-                    body: { received: true, applied: 'subscription_upserted' },
-                }
-            );
+            });
         }
 
         // invoice.paid and invoice.payment_succeeded join payment_failed rather
@@ -601,32 +746,35 @@ const dispatchStripeEvent = async (
                 return { status: 200, body: { received: true, ignored: 'no_subscription' } };
             }
 
-            // Re-read from Stripe rather than trusting the invoice: Stripe
-            // decides what the invoice means for the subscription -- past_due,
-            // unpaid, or nothing yet on a failure; a moved period end, or a
-            // revival out of past_due, on a payment. Same as checkout: a failed
-            // read must be retried, not acknowledged.
-            const sub = await store.fetchSubscription(subscriptionId);
-            if (sub === SUBSCRIPTION_MISSING) {
-                return subscriptionMissing(store, event, subscriptionId);
-            }
-            if (!sub) {
-                store.log(`${event.type} ${event.id}: subscription ${subscriptionId} not retrievable`);
-                return retryLater(store, event, 'subscription_unavailable');
-            }
-            const customerId = idOf(invoice.customer) ?? idOf(sub.customer);
-            const userId =
-                (await resolveUserId(store, customerId, sub.metadata)) ?? (await store.userIdForSubscription(sub.id));
-            if (!userId) {
-                return { status: 200, body: { received: true, ignored: 'unknown_user' } };
-            }
+            return await withSubscriptionLock(store, event, subscriptionId, async () => {
+                // Re-read from Stripe rather than trusting the invoice: Stripe
+                // decides what the invoice means for the subscription -- past_due,
+                // unpaid, or nothing yet on a failure; a moved period end, or a
+                // revival out of past_due, on a payment. Same as checkout: a failed
+                // read must be retried, not acknowledged.
+                const sub = await store.fetchSubscription(subscriptionId);
+                if (sub === SUBSCRIPTION_MISSING) {
+                    return subscriptionMissing(store, event, subscriptionId);
+                }
+                if (!sub) {
+                    store.log(`${event.type} ${event.id}: subscription ${subscriptionId} not retrievable`);
+                    return retryLater(store, event, 'subscription_unavailable');
+                }
+                const customerId = idOf(invoice.customer) ?? idOf(sub.customer);
+                const userId =
+                    (await resolveUserId(store, customerId, sub.metadata)) ??
+                    (await store.userIdForSubscription(sub.id));
+                if (!userId) {
+                    return { status: 200, body: { received: true, ignored: 'unknown_user' } };
+                }
 
-            const duplicate = await applySubscription(store, event, sub, userId, priceTiers);
-            if (duplicate) {
-                return duplicate;
-            }
-            store.log(`${event.type} for ${userId}: subscription now ${sub.status}`);
-            return { status: 200, body: { received: true, applied: 'invoice_recorded' } };
+                const duplicate = await applySubscription(store, event, sub, userId, priceTiers);
+                if (duplicate) {
+                    return duplicate;
+                }
+                store.log(`${event.type} for ${userId}: subscription now ${sub.status}`);
+                return { status: 200, body: { received: true, applied: 'invoice_recorded' } };
+            });
         }
 
         default:

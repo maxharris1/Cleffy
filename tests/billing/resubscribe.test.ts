@@ -42,10 +42,10 @@ class BillingBackedStore implements WebhookStore {
 
     claimEvent = async (id: string) => {
         if (this.events.has(id)) {
-            return false;
+            return 'done' as const;
         }
         this.events.add(id);
-        return true;
+        return 'claimed' as const;
     };
     /**
      * Whether an applied event is marked done is webhook.test.ts's subject (the
@@ -79,6 +79,19 @@ class BillingBackedStore implements WebhookStore {
     restorePlanArchivedScores = async (userId: string) => {
         this.restoredCounts.push(await this.billing.restorePlanArchivedScores(userId));
     };
+    /**
+     * The per-subscription write lock. Nothing here is concurrent -- one
+     * delivery at a time is the premise -- so it is always free; what it is for
+     * lives in webhook.test.ts.
+     */
+    lockSubscription = async () => 'lock';
+    unlockSubscription = async () => undefined;
+    /** Never reached: no test here produces the duplicate the index refuses. */
+    cancelDuplicateSubscription = async () => ({
+        stopped: true,
+        refund: 'nothing_to_refund' as const,
+        detail: 'not reached',
+    });
     log = () => undefined;
 }
 
