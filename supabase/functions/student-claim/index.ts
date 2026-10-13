@@ -78,13 +78,28 @@ const captchaRefusal = (err: { code?: string | null; message?: string | null } |
  * Drops a session this function minted and then decided not to hand out. Best
  * effort by design: the alternative to ignoring a failure here is failing a
  * request whose real work is already done, and the session expires on its own.
+ *
+ * `'local'` -- this ONE session -- and never `'global'`, which is the bug this
+ * scope argument exists to spell out (QA round 4 review of #57). Two children
+ * typing the same card at once both get past the lookup and both mint a session
+ * for the SAME auth user; exactly one of them commits. The loser lands here, and
+ * a global sign-out revokes every session that user has, which at that moment
+ * includes the session the WINNER is about to be handed. The winner's `setSession`
+ * then fails or their next refresh 400s, and the card is already spent, so there
+ * is no retry that fixes it. The same applies to the quieter version of the race:
+ * a student re-claiming on a second device, or a retry after a dropped response,
+ * would sign the working device out.
+ *
+ * Only the loser's own token is ours to revoke, and `'local'` is exactly that
+ * token's session. `'others'` would be the same bug with the arguments the other
+ * way round.
  */
 const signOutQuietly = async (
     admin: { auth: { admin: { signOut: (jwt: string, scope?: 'global' | 'local' | 'others') => Promise<unknown> } } },
     accessToken: string,
 ): Promise<void> => {
     try {
-        await admin.auth.admin.signOut(accessToken, 'global');
+        await admin.auth.admin.signOut(accessToken, 'local');
     } catch (err) {
         console.error('could not revoke the session of an uncommitted claim:', err);
     }

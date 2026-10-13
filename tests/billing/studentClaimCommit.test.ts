@@ -89,6 +89,45 @@ describe('the student-claim commit', () => {
         expect(commit).toMatch(/code: 'username_taken'/);
     });
 
+    it('revokes only the session it minted, never every session of that student', () => {
+        // QA round 4 review of #57. Two children typing the same card at once
+        // both get past the lookup, both mint a session for the SAME auth user,
+        // and exactly one commits. The loser reaches signOutQuietly -- and a
+        // 'global' scope there revokes every session of that user, the winner's
+        // included, with the card already spent and no retry left that fixes it.
+        const quietly = SOURCE.slice(SOURCE.indexOf('const signOutQuietly'), SOURCE.indexOf('Deno.serve('));
+        expect(quietly, 'signOutQuietly was not found').not.toBe('');
+        expect(quietly).toContain("admin.auth.admin.signOut(accessToken, 'local')");
+        // 'others' is the same bug with the arguments the other way round: it
+        // revokes everything EXCEPT the token we are trying to drop.
+        expect(SOURCE).not.toMatch(/signOut\(accessToken, '(?:global|others)'\)/);
+    });
+
+    it('scopes the sign-out on the wire, so local and global are different requests', async () => {
+        // The mechanism the test above exists for, against the real client:
+        // supabase-js puts the scope in the query string of /auth/v1/logout, so
+        // what GoTrue deletes is decided by that one word. 'local' deletes the
+        // session the presented JWT belongs to; 'global' deletes all of the
+        // user's.
+        const scopeOf = async (scope: 'local' | 'global') => {
+            let seen = '';
+            const admin = createClient('https://example.supabase.co', 'service-role', {
+                auth: { persistSession: false, autoRefreshToken: false },
+                global: {
+                    fetch: async (input: RequestInfo | URL) => {
+                        seen = String(input);
+                        return new Response(null, { status: 204 });
+                    },
+                },
+            });
+            await admin.auth.admin.signOut('the-losers-access-token', scope);
+            return seen;
+        };
+
+        expect(await scopeOf('local')).toContain('/auth/v1/logout?scope=local');
+        expect(await scopeOf('global')).toContain('/auth/v1/logout?scope=global');
+    });
+
     it('cannot tell a lost race from a won one without asking for the row', async () => {
         // The mechanism the two cases above exist for, against the real client.
         // supabase-js sends Prefer: return=minimal unless .select() is chained, so
