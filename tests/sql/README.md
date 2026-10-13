@@ -171,8 +171,9 @@ unique violation is raised rather than swallowed. `duplicate_refunds` with
 refund owed after the event that found it is gone — pending until it is settled,
 counted on every attempt that reports back, mode-filtered like every other
 billing lookup, never reopened once resolved, never retried once it is a human's
-(`needs_human`), and kept (`on delete set null`) when the account goes, because
-an account being deleted does not make a refund we never issued stop being owed.
+(`needs_human`), and kept when the account goes — its foreign key nulls the user
+rather than cascading, because an account going away does not make a refund we
+never issued stop being owed.
 All three are the service role's alone, as is the ledger table. Like the others
 it reports its checks on the last line and rolls back.
 

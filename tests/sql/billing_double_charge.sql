@@ -1044,10 +1044,13 @@ select pg_temp.holds (
     $q$select not exists (select 1 from public.pending_duplicate_refund ('sub_d1_human', 'live'))$q$
 );
 
--- `on delete set null`, not cascade: an account being deleted does not make a
--- refund we never issued stop being owed, and this row is the only record of it.
+-- The foreign key nulls the user rather than cascading: an account going away
+-- does not make a refund we never issued stop being owed, and this row is the
+-- only record of it -- the subscription id in it is enough to find the charge in
+-- Stripe. (Spelled through confdeltype so this file keeps its promise to contain
+-- no row-removal keyword; see README.md.)
 select pg_temp.holds (
-    'and deleting the account leaves the debt, with the subscription id to find it by',
+    'the debt outlives the account it belongs to, with the id to find it by',
     $q$select exists (
            select 1 from pg_constraint c
            join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
