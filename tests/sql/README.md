@@ -119,6 +119,74 @@ hash and an unknown username), and refuses every caller but the service role.
 back one use of a bucket inside its window (never below zero, never into the
 next window, never creating a bucket), and only the service role may call it.
 
+`billing_double_charge.sql` proves the guards behind the double charge QA round
+4 reproduced in Stripe (`supabase/migrations/20261012120100` through `120105`,
+and `20261013120100` through `120102`):
+`subscriptions_one_entitling_per_user_mode` refuses a second `active` or
+`trialing` subscription for one user in one Stripe account — on the insert and
+on the upsert's update, naming the index in its 23505 — while leaving the other
+account, another user, a cancelled subscription's replacement and the live
+subscription's own updates alone; `claim_stripe_event` claims a fresh event,
+answers with the state and the stamp it wrote, tells a second delivery that the
+event is `processing` rather than merely refusing it (a live claim means nobody
+has applied the event, so the webhook answers Stripe 409 and is delivered
+again, where a bare null bought a 200 and Stripe forgot it), says `done` for one
+already applied, takes over a claim left `processing` past its staleness window
+(which is what makes Stripe's retry of an event whose isolate died recoverable
+rather than a permanent `200 duplicate`), and is the service role's alone, as is
+the table; the `subscriptions_refuse_stale_event` trigger drops an update
+carrying an older `last_event_created_at` than the row holds, applies a newer or
+equal one, and lets an unstamped write through without losing the stamp the row
+already had; `begin_checkout_attempt` / `finish_checkout_attempt` /
+`release_checkout_attempt` hold one checkout attempt per buyer per Stripe
+account — an overlapping request gets nothing, the other account and other
+buyers are unaffected, the session an attempt opened is remembered and handed to
+the next request, a lease left by a dead isolate is taken over only once stale,
+and the dead attempt can no longer record a session over the live one; and
+`claim_subscription_write` / `release_subscription_write` do the same for one
+subscription's writer, which is what orders two deliveries Stripe stamped in the
+same second.
+
+It then proves the three things the QA round 4 review of #56 added to those
+guards. `stage_checkout_attempt` records the attempt id a Checkout Session's
+Stripe idempotency key is derived from BEFORE the session is created with it, so
+an isolate killed around the create leaves a key the next attempt reads back and
+replays instead of minting a fresh one and being handed a second payable session
+— the key is readable back, the lock is deliberately still held (the create has
+not happened yet), the stored session id is cleared because by then it has been
+handed back or expired, and an attempt whose lease was taken over cannot stage
+and therefore never reaches the create at all, which is what stops the lease
+length from being the only thing standing between a takeover and two sessions.
+`write_subscription_under_lock` makes the subscription write conditional on
+still holding that subscription's write lease, in the same statement: the holder
+writes, a delivery whose lease was taken over is answered `lost_lock` and writes
+nothing (so a customer who has just fixed their card is not put back to
+`past_due` by a stalled delivery's minutes-old read), a write with no lease at
+all is refused too, the staleness trigger still drops an older event stamp and
+still answers `written`, a second entitling subscription answers `duplicate`
+named from Postgres's own `constraint_name` diagnostics rather than from the text
+of an error message, a deleted account answers `missing_user`, and any OTHER
+unique violation is raised rather than swallowed. `duplicate_refunds` with
+`record_` / `settle_` / `pending_duplicate_refund` keeps a duplicate's unmade
+refund owed after the event that found it is gone — pending until it is settled,
+counted on every attempt that reports back, mode-filtered like every other
+billing lookup, never reopened once resolved, never retried once it is a human's
+(`needs_human`), and kept when the account goes — its foreign key nulls the user
+rather than cascading, because an account going away does not make a refund we
+never issued stop being owed.
+All three are the service role's alone, as is the ledger table. Like the others
+it reports its checks on the last line and rolls back.
+
+One environment note for that file: every billing table predates
+`20260827140000_core_table_grants.sql` and carries no `service_role` grant, which
+only the hosted image's permissive default ACL hides. Against a plain local
+cluster its `subscriptions` checks used to fail with `42501 permission denied`
+until `grant all on table public.subscriptions to service_role` was run by hand;
+`20261013120101` now carries that grant, because the write function it adds is
+SECURITY INVOKER and would otherwise answer 42501 before it reached the lease
+check. Proven against PostgreSQL 17.11 on 2026-10-12 (53 checks) and again, with
+the review's additions, on 2026-10-13: all 98 checks passed.
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's

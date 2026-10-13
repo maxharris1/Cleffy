@@ -270,3 +270,213 @@ describe('billing-correctness RPC privileges', () => {
         expect(after).toMatch(/s\.mode\s*=\s*any\s*\(public\.entitling_billing_modes\s*\(\s*\)\)/i);
     });
 });
+
+/**
+ * The three guards behind the double-charge fix (QA round 4, D1-D3). Their
+ * behaviour is proven against Postgres in tests/sql/billing_double_charge.sql,
+ * run by hand like the rest of that directory; what CI can hold without a
+ * database is that the migrations still declare them, and that the names the
+ * webhook matches on are the names the SQL creates — a rename on one side alone
+ * turns the duplicate-subscription branch into an unhandled 23505, which is a
+ * Stripe retry every few hours against a constraint that will never yield.
+ */
+describe('the double-charge guards', () => {
+    const declaring = (pattern: RegExp): { name: string; sql: string } => {
+        const found = migrations().filter((m) => pattern.test(m.sql));
+        expect(found.length, `migrations declaring ${pattern.source}`).toBe(1);
+        return found[0] as { name: string; sql: string };
+    };
+
+    const ENTITLING_INDEX = 'subscriptions_one_entitling_per_user_mode';
+
+    it('creates the partial unique index on the statuses that entitle', () => {
+        const migration = declaring(new RegExp(`create unique index if not exists ${ENTITLING_INDEX}`, 'i'));
+        expect(migration.sql).toMatch(
+            new RegExp(
+                `create\\s+unique\\s+index\\s+if\\s+not\\s+exists\\s+${ENTITLING_INDEX}\\s+on\\s+public\\.subscriptions\\s*\\(user_id,\\s*mode\\)\\s+where\\s+status\\s+in\\s*\\('active',\\s*'trialing'\\)`,
+                'i',
+            ),
+        );
+        // A violating row must stop the push with something a human can act on,
+        // not with Postgres's own message about a duplicated key.
+        expect(migration.sql).toMatch(/raise\s+exception/i);
+        expect(migration.sql).toMatch(/errcode\s*=\s*'23505'/i);
+        expect(migration.sql).toMatch(/having\s+count\s*\(\*\)\s*>\s*1/i);
+    });
+
+    it('names that index in the write function, and re-raises any other unique violation', () => {
+        // The match used to live in the Edge Function, over the text of
+        // PostgREST's error message -- neither a documented contract. It is now
+        // Postgres's own diagnostics, inside the statement that hits the index
+        // (QA round 4 review of #56, finding 3).
+        const def = definition(latestDefining('write_subscription_under_lock'), 'write_subscription_under_lock');
+        expect(def).toMatch(/get\s+stacked\s+diagnostics\s+v_constraint\s*=\s*constraint_name\s*;/i);
+        expect(def).toContain(ENTITLING_INDEX);
+        expect(def).toMatch(new RegExp(`if\\s+v_constraint\\s*=\\s*'${ENTITLING_INDEX}'`, 'i'));
+        // Anything else: a primary key, a constraint added later. Swallowing one
+        // would turn a bug into an acknowledged event.
+        expect(def).toMatch(/when\s+unique_violation\s+then[\s\S]*?\braise\s*;/i);
+        // And the deleted-account FK keeps its own answer rather than throwing.
+        expect(def).toMatch(/when\s+foreign_key_violation\s+then\s*\n\s*return\s+'missing_user'\s*;/i);
+    });
+
+    it('checks the write lease in the same statement as the write, holding the lease row', () => {
+        // Finding 3: only release_subscription_write ever checked whose lease it
+        // was, so a delivery whose lease had gone stale still wrote the state it
+        // had read minutes earlier over the newer state that replaced it.
+        const sql = latestDefining('write_subscription_under_lock');
+        const def = definition(sql, 'write_subscription_under_lock');
+        expect(def).toMatch(
+            /from\s+public\.subscription_writes\s+where\s+stripe_subscription_id\s*=\s*p_subscription_id\s+and\s+holder\s*=\s*p_holder\s+for\s+update/i,
+        );
+        expect(def).toMatch(/if\s+not\s+found\s+then\s*\n\s*return\s+'lost_lock'\s*;/i);
+        // The conflict target stays the primary key: a second entitling
+        // subscription is not the same subscription, so there is no row for it
+        // to merge into.
+        expect(def).toMatch(/on\s+conflict\s*\(stripe_subscription_id\)\s*do\s+update/i);
+        expect(def).not.toMatch(/security\s+definer/i);
+        expect(def).toMatch(/set\s+search_path\s*=\s*public/i);
+        // SECURITY INVOKER means the service role needs the table grant that
+        // `subscriptions` never got (it predates core_table_grants).
+        expect(sql).toMatch(/grant\s+all\s+on\s+table\s+public\.subscriptions\s+to\s+service_role\s*;/i);
+        expect(sql).toMatch(
+            /revoke\s+all\s+on\s+function\s+public\.write_subscription_under_lock[\s\S]*?from\s+public,\s*anon,\s*authenticated\s*;/i,
+        );
+        expect(sql).toMatch(
+            /grant\s+execute\s+on\s+function\s+public\.write_subscription_under_lock[\s\S]*?to\s+service_role\s*;/i,
+        );
+    });
+
+    it('lets the webhook branch on all four answers and nothing else', () => {
+        const source = readFileSync(resolve(process.cwd(), 'supabase/functions/stripe-webhook/index.ts'), 'utf8');
+        expect(source).toContain("admin.rpc('write_subscription_under_lock'");
+        // The holder is threaded in: a write that did not carry one could not be
+        // refused, which is the whole fix.
+        expect(source).toMatch(/p_holder:\s*holder/);
+        for (const answer of ['written', 'lost_lock', 'duplicate', 'missing_user']) {
+            expect(source, answer).toContain(`case '${answer}':`);
+        }
+        // An answer this does not model is a throw, not a silent success.
+        expect(source).toMatch(/default:\s*\n\s*throw new Error\(/);
+        // And the row is no longer written through PostgREST, which could not
+        // carry the condition at all.
+        expect(source).not.toMatch(/\.from\('subscriptions'\)\s*\n?\s*\.upsert\(/);
+    });
+
+    it('stages the checkout idempotency key under the holder, before Stripe sees it', () => {
+        // Finding 1: the attempt id the key is derived from lived only in the
+        // isolate's memory until finish_checkout_attempt, so a death around the
+        // Stripe create left a session nothing could replay the key for -- and
+        // the next attempt, minting a fresh key, got a second one.
+        const sql = latestDefining('stage_checkout_attempt');
+        const def = definition(sql, 'stage_checkout_attempt');
+        expect(def).toMatch(/update\s+public\.checkout_attempts/i);
+        expect(def).toMatch(/attempt_id\s*=\s*p_attempt_id/i);
+        expect(def).toMatch(/price_id\s*=\s*p_price_id/i);
+        // Cleared: by now the stored session has been handed back or expired, and
+        // a null session beside a non-null attempt is what marks the key as
+        // replayable.
+        expect(def).toMatch(/session_id\s*=\s*null/i);
+        // Scoped to the lease, which is what stops an attempt whose lease was
+        // taken over from reaching the create at all.
+        expect(def).toMatch(/where\s+user_id\s*=\s*p_user\s+and\s+mode\s*=\s*p_mode\s+and\s+holder\s*=\s*p_holder/i);
+        // And it does NOT give the lock back: the create still has to happen
+        // under it.
+        expect(def).not.toMatch(/holder\s*=\s*null/i);
+        expect(def).toMatch(/return\s+found\s*;/i);
+        expect(sql).toMatch(
+            /revoke\s+all\s+on\s+function\s+public\.stage_checkout_attempt\s*\(uuid,\s*text,\s*uuid,\s*uuid,\s*text\)\s+from\s+public,\s*anon,\s*authenticated\s*;/i,
+        );
+        expect(sql).toMatch(
+            /grant\s+execute\s+on\s+function\s+public\.stage_checkout_attempt\s*\(uuid,\s*text,\s*uuid,\s*uuid,\s*text\)\s+to\s+service_role\s*;/i,
+        );
+    });
+
+    it('keeps the duplicate refund owed in a table, service-role only', () => {
+        // Finding 2: the debt was a property of an event, and the retry of that
+        // event never reaches the duplicate branch again -- the cancel has made
+        // the subscription `canceled`, which the index has nothing to refuse.
+        const migration = declaring(/create table if not exists public\.duplicate_refunds/i);
+        expect(migration.sql).toMatch(
+            /state\s+text\s+not\s+null\s+check\s*\(state\s+in\s*\('pending',\s*'resolved',\s*'needs_human'\)\)/i,
+        );
+        // Keyed on the subscription and the mode, not on the event: the event id
+        // changes with every delivery and the status changes under the retry.
+        expect(migration.sql).toMatch(/primary\s+key\s*\(stripe_subscription_id,\s*mode\)/i);
+        // An account deletion must not erase a refund we never issued.
+        expect(migration.sql).toMatch(/user_id\s+uuid\s+references\s+auth\.users\s*\(id\)\s+on\s+delete\s+set\s+null/i);
+        expect(migration.sql).toMatch(
+            /alter\s+table\s+public\.duplicate_refunds\s+enable\s+row\s+level\s+security\s*;/i,
+        );
+        expect(migration.sql).toMatch(/grant\s+all\s+on\s+table\s+public\.duplicate_refunds\s+to\s+service_role\s*;/i);
+        // No policy at all, so RLS refuses every client role outright.
+        expect(migration.sql).not.toMatch(/create\s+policy/i);
+
+        // Only `pending` is retried, and a settled debt is never reopened.
+        const pending = definition(latestDefining('pending_duplicate_refund'), 'pending_duplicate_refund');
+        expect(pending).toMatch(/d\.state\s*=\s*'pending'/i);
+        const record = definition(latestDefining('record_duplicate_refund'), 'record_duplicate_refund');
+        expect(record).toMatch(/case\s+when\s+d\.state\s*=\s*'resolved'\s+then\s+d\.state\s+else\s+'pending'\s+end/i);
+        // Counted where the outcome arrives, the failures included: a high count
+        // still `pending` is the refund no delivery will ever manage.
+        const settle = definition(latestDefining('settle_duplicate_refund'), 'settle_duplicate_refund');
+        expect(settle).toMatch(/attempts\s*=\s*attempts\s*\+\s*1/i);
+        expect(record).not.toMatch(/attempts\s*=/i);
+
+        for (const [fn, args] of [
+            ['record_duplicate_refund', 'text, text, uuid'],
+            ['settle_duplicate_refund', 'text, text, text, boolean, text, text'],
+            ['pending_duplicate_refund', 'text, text'],
+        ] as const) {
+            const sql = latestDefining(fn);
+            expect(grants(sql, fn, 'revoke', 'public,\\s*anon,\\s*authenticated'), `${fn} revoke`).toBe(true);
+            expect(grants(sql, fn, 'grant', 'service_role'), `${fn} grant`).toBe(true);
+            expect(definition(sql, fn), `${fn} (${args})`).not.toMatch(/security\s+definer/i);
+        }
+    });
+
+    it('gives stripe_events a claim state, defaulting the rows that predate it to done', () => {
+        const migration = declaring(/add column if not exists status text not null default 'done'/i);
+        expect(migration.sql).toMatch(/check\s*\(status\s+in\s*\('processing',\s*'done'\)\)/i);
+        expect(migration.sql).toMatch(/add column if not exists claimed_at timestamptz not null default now\(\)/i);
+    });
+
+    it('claims an event in one statement, taking over only a stale claim', () => {
+        const sql = latestDefining('claim_stripe_event');
+        const def = definition(sql, 'claim_stripe_event');
+        // One INSERT ... ON CONFLICT: two deliveries racing cannot both win.
+        expect(def).toMatch(/insert\s+into\s+public\.stripe_events/i);
+        expect(def).toMatch(/on\s+conflict\s*\(id\)\s*do\s+update/i);
+        expect(def).toMatch(
+            /where\s+e\.status\s*=\s*'processing'\s+and\s+e\.claimed_at\s*<\s*now\s*\(\)\s*-\s*p_stale_after/i,
+        );
+        expect(def).toMatch(/set\s+search_path\s*=\s*public/i);
+        // No SECURITY DEFINER: the service role already owns this table, and a
+        // definer function would hand the claim to anyone who could call it.
+        expect(def).not.toMatch(/security\s+definer/i);
+        expect(sql).toMatch(
+            /revoke\s+all\s+on\s+function\s+public\.claim_stripe_event\s*\(text,\s*text,\s*interval\)\s+from\s+public,\s*anon,\s*authenticated\s*;/i,
+        );
+        expect(sql).toMatch(
+            /grant\s+execute\s+on\s+function\s+public\.claim_stripe_event\s*\(text,\s*text,\s*interval\)\s+to\s+service_role\s*;/i,
+        );
+    });
+
+    it('refuses a stale subscription write in a BEFORE UPDATE trigger that returns OLD', () => {
+        const sql = latestDefining('subscriptions_refuse_stale_event');
+        const def = definition(sql, 'subscriptions_refuse_stale_event');
+        expect(sql).toMatch(/add column if not exists last_event_created_at timestamptz/i);
+        expect(sql).toMatch(
+            /create\s+trigger\s+subscriptions_refuse_stale_event\s+before\s+update\s+on\s+public\.subscriptions/i,
+        );
+        expect(def).toMatch(/returns\s+trigger/i);
+        // OLD, not NULL: the statement still reports a row, so PostgREST answers
+        // the webhook 200 and Stripe is not asked to retry an event too old to
+        // matter.
+        expect(def).toMatch(/return\s+old\s*;/i);
+        // Both NULL cases let the write through, and an unstamped write keeps
+        // the stamp the row already has.
+        expect(def).toMatch(/new\.last_event_created_at\s*:=\s*old\.last_event_created_at/i);
+        expect(def).toMatch(/old\.last_event_created_at\s+is\s+not\s+null/i);
+    });
+});

@@ -374,6 +374,13 @@ export type SubscriptionRow = {
     price_id: string | null;
     current_period_end: string | null;
     cancel_at_period_end: boolean;
+    /**
+     * The `created` stamp of the Stripe event this row was last written from.
+     * The subscriptions_refuse_stale_event trigger drops a write carrying an
+     * older one, so two webhook deliveries racing cannot leave the row showing
+     * whichever of them happened to write second.
+     */
+    last_event_created_at: string | null;
     created_at: string;
     updated_at: string;
 };

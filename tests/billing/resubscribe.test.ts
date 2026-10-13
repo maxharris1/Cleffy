@@ -42,11 +42,17 @@ class BillingBackedStore implements WebhookStore {
 
     claimEvent = async (id: string) => {
         if (this.events.has(id)) {
-            return false;
+            return 'done' as const;
         }
         this.events.add(id);
-        return true;
+        return 'claimed' as const;
     };
+    /**
+     * Whether an applied event is marked done is webhook.test.ts's subject (the
+     * three claim states live in its fake); here a claimed id is simply never
+     * claimed again, which is all these tests need of it.
+     */
+    markEventDone = async () => undefined;
     releaseEvent = async (id: string) => {
         this.events.delete(id);
     };
@@ -60,6 +66,11 @@ class BillingBackedStore implements WebhookStore {
             status: r.status,
             current_period_end: r.current_period_end,
         }));
+        // Never the duplicate the partial unique index refuses, and never the
+        // lost lease write_subscription_under_lock refuses: one teacher, one
+        // subscription, one delivery at a time is the premise of every test
+        // below. Both live in webhook.test.ts.
+        return { outcome: 'written' as const };
     };
     fetchSubscription = async (id: string) => this.remote.get(id) ?? null;
     userIdForSubscription = async (id: string) => this.rows.get(id)?.user_id ?? null;
@@ -70,6 +81,23 @@ class BillingBackedStore implements WebhookStore {
     restorePlanArchivedScores = async (userId: string) => {
         this.restoredCounts.push(await this.billing.restorePlanArchivedScores(userId));
     };
+    /**
+     * The per-subscription write lock. Nothing here is concurrent -- one
+     * delivery at a time is the premise -- so it is always free; what it is for
+     * lives in webhook.test.ts.
+     */
+    lockSubscription = async () => 'lock';
+    unlockSubscription = async () => undefined;
+    /** Never reached: no test here produces the duplicate the index refuses. */
+    cancelDuplicateSubscription = async () => ({
+        stopped: true,
+        refund: 'nothing_to_refund' as const,
+        detail: 'not reached',
+    });
+    /** Nor the ledger behind it: nothing here is ever owed a refund. */
+    pendingDuplicateUndo = async () => null;
+    recordPendingDuplicateUndo = async () => undefined;
+    settleDuplicateUndo = async () => undefined;
     log = () => undefined;
 }
 

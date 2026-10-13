@@ -8655,3 +8655,897 @@ $$;
 
 revoke all on function public.refund_edge_rate_limit (text) from public, anon, authenticated;
 grant execute on function public.refund_edge_rate_limit (text) to service_role;
+
+-- ===== supabase/migrations/20261012120100_one_entitling_subscription_per_user.sql =====
+-- At most one entitling subscription per user per Stripe account.
+--
+-- The double charge this closes (QA round 4, D1): stripe-checkout refused a
+-- second purchase by reading this table, but it read it when a Checkout Session
+-- was CREATED, not when one was PAID. Two sessions opened before either was
+-- paid both passed the guard -- two tabs, a double-click, a back button and a
+-- retry; a session stays payable for 24 hours -- and paying both left the
+-- customer with two `active` subscriptions whose billed periods overlapped
+-- completely, $38 for one plan's worth of service. Nothing told them: the
+-- entitlements RPC takes the highest tier and stops (`order by tier ... limit
+-- 1`), so the app looked exactly as it does for one subscription, and the
+-- second renewed every month unnoticed.
+--
+-- stripe-checkout now expires the customer's open sessions before it opens
+-- another and passes Stripe a deterministic idempotency key, so two sessions
+-- should no longer exist to be paid. This index is the layer that does not
+-- depend on an Edge Function having run at all: whatever a client, a Stripe
+-- retry or a future code path does, the webhook's upsert cannot land a SECOND
+-- entitling row beside one that is already there. Entitlement is computed from
+-- rows with these statuses, so a status nobody is entitled by is not something
+-- to serialise -- a cancelled subscription and the new one replacing it must
+-- both be allowed to sit here.
+--
+-- What the webhook does when it hits this index is deliberate and is NOT to
+-- cancel the loser in Stripe (see stripe-webhook/index.ts): the row is left
+-- absent, the event is acknowledged, and a single ALERT line names the user and
+-- both subscriptions for a human to reconcile.
+
+-- Fail the push rather than skip the index.
+--
+-- `create unique index` on a table that already violates it aborts the whole
+-- `db push` with Postgres's own message, which names the duplicated KEY but not
+-- the user, and leaves whoever is deploying to work out what to do. This says
+-- it instead -- and it still fails, on purpose. The alternative, creating the
+-- index only when the data allows it, would mean the one database that has
+-- already double-charged somebody is the one database left unprotected, and the
+-- failure would be a line in a log nobody reads rather than a stopped deploy.
+-- Reconcile in Stripe first (cancel the duplicate subscription, refund it),
+-- then push.
+--
+-- Checked read-only against production (jibgwgosihadbjgxdsfe) on 2026-10-12:
+-- no user holds more than one entitling subscription in either mode, out of one
+-- subscription row in total.
+do $$
+declare
+    v_dup record;
+begin
+    select s.user_id, s.mode, count(*) as n
+    into v_dup
+    from public.subscriptions s
+    where s.status in ('active', 'trialing')
+    group by s.user_id, s.mode
+    having count(*) > 1
+    limit 1;
+
+    if found then
+        raise exception
+            'user % already holds % entitling subscriptions in % mode; cancel and refund the duplicate in Stripe, then push this migration',
+            v_dup.user_id, v_dup.n, v_dup.mode
+            using errcode = '23505';
+    end if;
+end
+$$;
+
+create unique index if not exists subscriptions_one_entitling_per_user_mode
+    on public.subscriptions (user_id, mode)
+    where status in ('active', 'trialing');
+
+-- ===== supabase/migrations/20261012120101_stripe_event_claim_recovery.sql =====
+-- Make a webhook event's claim recoverable (QA round 4, D2).
+--
+-- stripe-webhook claims an event id before it processes the event, so two
+-- concurrent deliveries of the same event cannot both apply it. The claim was a
+-- committed row and the only compensation was an in-process delete: if the
+-- isolate died between claiming and finishing -- a timeout on the Stripe
+-- read-back, an OOM, a deploy restarting the worker -- no catch ran, the row
+-- stayed, and every one of Stripe's retries for the next three days answered
+-- `200 duplicate`. For checkout.session.completed that is a customer who paid
+-- and was never entitled, and nothing swept for claims that had never been
+-- applied.
+--
+-- So a claim now records that it is in progress and when it was taken. An
+-- unfinished one goes stale and Stripe's own retry re-claims it; a finished one
+-- is a duplicate forever, as before.
+
+-- Every row that exists was written by the old claim, which processed the event
+-- in the same invocation and had no other state to be in -- so 'done' is what
+-- they are, and the default is what backfills them. Nothing inserts without
+-- naming a status (claim_stripe_event below always does), so the default only
+-- ever decides for these historical rows.
+alter table public.stripe_events
+    add column if not exists status text not null default 'done' check (status in ('processing', 'done')),
+    add column if not exists claimed_at timestamptz not null default now();
+
+-- Claim an event, or say that someone else holds it.
+--
+-- Why a function rather than the upsert this replaces: the claim has to stay a
+-- SINGLE statement, or two deliveries racing can both read "not claimed" and
+-- both process. PostgREST's upsert can express "insert, ignore a conflict" but
+-- not "insert, or take the row over when the claim on it has gone stale", which
+-- is a conditional `on conflict do update ... where`.
+--
+-- It answers with the stamp it wrote rather than a boolean, so the answer says
+-- both "do I own this?" (non-null) and WHICH claim is mine. The webhook needs
+-- the second part: releasing a claim after a failure must delete the row only
+-- while it is still this invocation's claim -- if the claim went stale and
+-- another delivery took it over, deleting would strand that one and let a third
+-- delivery in beside it.
+--
+--  * no row            -> claimed, and this invocation processes the event;
+--  * 'done'            -> null; it has been applied, and a replay must not
+--                         re-apply it;
+--  * 'processing', recent -> null; another delivery is genuinely in flight, and
+--                         both applying it is what the claim exists to stop;
+--  * 'processing', stale -> claimed; whoever took it never finished, so this
+--                         delivery takes it over and processes it.
+--
+-- Re-processing a taken-over event is safe: every write the handler makes is an
+-- upsert keyed on the Stripe id, or an RPC (apply_free_tier_archival /
+-- restore_plan_archived_scores) that recomputes from the entitlements the
+-- database holds now rather than stepping a counter.
+--
+-- `type` is refreshed on a takeover for the same reason the insert records it:
+-- it is only ever read by a human looking at the row.
+create or replace function public.claim_stripe_event (p_id text, p_type text, p_stale_after interval)
+returns timestamptz language plpgsql set search_path = public as $$
+declare
+    v_claimed_at timestamptz;
+begin
+    insert into public.stripe_events as e (id, type, status, claimed_at)
+    values (p_id, p_type, 'processing', now())
+    on conflict (id) do update
+    set status = 'processing',
+        claimed_at = now(),
+        type = excluded.type
+    where e.status = 'processing'
+      and e.claimed_at < now() - p_stale_after
+    returning claimed_at into v_claimed_at;
+
+    return v_claimed_at;
+end;
+$$;
+
+-- Service role only, like every other billing write: to anyone else this would
+-- be a way to claim an event Stripe has not delivered yet and have the real
+-- delivery answered as a duplicate -- a purchase acknowledged and dropped.
+revoke all on function public.claim_stripe_event (text, text, interval) from public, anon, authenticated;
+
+grant execute on function public.claim_stripe_event (text, text, interval) to service_role;
+
+-- ===== supabase/migrations/20261012120102_subscriptions_refuse_stale_event.sql =====
+-- Refuse a subscription write that carries an older Stripe event than the row
+-- already holds (QA round 4, D3).
+--
+-- `customer.subscription.created` / `.updated` already re-read the subscription
+-- from Stripe instead of applying the copy embedded in the event, which removes
+-- most of the damage reordering can do. What it cannot remove is two deliveries
+-- in flight at once: A reads `active`, B reads the newer `past_due`, B writes,
+-- and then A's write lands and puts `active` back. The row then says a customer
+-- whose card failed is paid up, until the next event about them -- a month away
+-- on a monthly plan, a year on an annual one.
+--
+-- So each write now carries the `created` timestamp of the event that triggered
+-- it, and the row keeps the newest one it has seen. Stripe stamps `created` on
+-- every event, and it is the account's clock for both deliveries, so comparing
+-- them is meaningful in a way that comparing our own two write times is not.
+--
+-- It has to be a trigger: the webhook writes through PostgREST's upsert, which
+-- has no way to carry a conditional `where`, and splitting it into a read and a
+-- write would reintroduce the same race one level up.
+alter table public.subscriptions
+    add column if not exists last_event_created_at timestamptz;
+
+-- BEFORE UPDATE returning OLD rather than NULL: the write is dropped, but the
+-- statement still reports a row, so PostgREST answers the webhook 200 and
+-- Stripe is not asked to retry an event that is simply too old to matter.
+--
+-- Both NULL cases let the write through, and both are real:
+--  * the row has no stamp -- every row written before this migration, and any
+--    row a code path other than the webhook touches. There is nothing to
+--    compare against, and refusing would freeze those rows permanently.
+--  * the write has no stamp -- an event without `created` (nothing Stripe sends
+--    today), or a future caller that does not thread one through. A guard that
+--    swallowed those would silently drop legitimate writes, which is strictly
+--    worse than the staleness it is guarding against; it keeps the stamp the
+--    row already has instead, so one unstamped write cannot wipe out the
+--    high-water mark and reopen the window for the next stale event.
+--
+-- Equal stamps pass. Re-processing the SAME event has to stay possible: a retry
+-- after a failure that landed its upsert but not the archival after it depends
+-- on being able to write the same state again.
+create or replace function public.subscriptions_refuse_stale_event () returns trigger
+language plpgsql set search_path = public as $$
+begin
+    if new.last_event_created_at is null then
+        new.last_event_created_at := old.last_event_created_at;
+        return new;
+    end if;
+
+    if old.last_event_created_at is not null and new.last_event_created_at < old.last_event_created_at then
+        return old;
+    end if;
+
+    return new;
+end;
+$$;
+
+revoke all on function public.subscriptions_refuse_stale_event () from public, anon, authenticated;
+
+drop trigger if exists subscriptions_refuse_stale_event on public.subscriptions;
+
+create trigger subscriptions_refuse_stale_event
+    before update on public.subscriptions
+    for each row
+    execute function public.subscriptions_refuse_stale_event ();
+
+-- ===== supabase/migrations/20261012120103_checkout_attempt_lock.sql =====
+-- One checkout attempt at a time per buyer per Stripe account (QA round 4, D1
+-- follow-up).
+--
+-- What the first round of fixes missed: expiring the customer's open sessions
+-- before creating another, and keying creation on an idempotency key, only
+-- serialise a double-submit that happens to agree about the purchase. Two
+-- requests that disagree -- Teacher in one tab, Academy in the other -- or that
+-- straddle the key's time bucket get DIFFERENT idempotency keys, so Stripe
+-- creates two sessions; and because the two isolates interleave (both list,
+-- both find the other's session absent or already kept, both create), the expire
+-- step can leave both open. Two open sessions are two payable sessions, which is
+-- the double charge again by another road.
+--
+-- Edge isolates share no memory, so the mutual exclusion has to live here. A
+-- transaction-scoped advisory lock cannot: the critical section spans several
+-- Stripe round trips, and PostgREST ends the transaction with the statement. So
+-- the lock is a leased row instead -- taken by `begin_checkout_attempt`,
+-- released by `finish_checkout_attempt` (recording the session it opened) or by
+-- `release_checkout_attempt` (recording nothing), and reclaimable once the lease
+-- goes stale, so an isolate that dies mid-checkout does not lock a buyer out of
+-- paying us.
+--
+-- The row outlives the lock on purpose. It remembers the session the last
+-- attempt opened, which is what lets the next request hand the buyer back the
+-- session they already have instead of minting a second one, and it remembers
+-- the attempt id that session's idempotency key was derived from, so a NEW
+-- attempt always gets a new key -- Stripe replays a key for 24 hours, and
+-- replaying a key whose session we have since expired would send the buyer to a
+-- dead Checkout page.
+create table if not exists public.checkout_attempts (
+    user_id uuid not null references auth.users (id) on delete cascade,
+    mode text not null check (mode in ('live', 'test')),
+    -- Non-null exactly while a request is inside the critical section. The
+    -- value is the token that request has to present to release it, so a
+    -- request whose lease went stale cannot release the one that took over.
+    holder uuid,
+    claimed_at timestamptz not null default now(),
+    -- The session the last attempt opened, and the attempt id its Stripe
+    -- idempotency key was built from. Null until a session has been opened.
+    attempt_id uuid,
+    price_id text,
+    session_id text,
+    updated_at timestamptz not null default now(),
+    primary key (user_id, mode)
+);
+
+-- Service role only, like every other billing table: the client never reads or
+-- writes this, and a buyer who could would be a buyer who could park a lock on
+-- their own account or point it at someone else's session. No policy, so RLS
+-- refuses every client role outright.
+alter table public.checkout_attempts enable row level security;
+
+-- service_role bypasses RLS but still needs the table-level grant (see
+-- 20260827140000_core_table_grants.sql): on the local image the default ACL for
+-- a table `postgres` created gives nobody DML, so without this the functions
+-- below answer 42501 before RLS is ever consulted.
+grant all on table public.checkout_attempts to service_role;
+
+-- Take the lock, and answer with what the last attempt left behind.
+--
+-- One statement, so two isolates racing cannot both win: the conditional
+-- `on conflict do update ... where` is what decides, and Postgres takes a row
+-- lock for the duration of it. An empty result means someone else holds the
+-- lease and has not let go of it yet -- stripe-checkout answers that request
+-- with a 409 rather than opening a session beside theirs.
+--
+-- `attempt_id` / `price_id` / `session_id` come back as they were stored: the
+-- update deliberately leaves them alone, because the caller needs the PREVIOUS
+-- attempt's session to decide whether to reuse it.
+create or replace function public.begin_checkout_attempt (p_user uuid, p_mode text, p_stale_after interval)
+returns table (holder uuid, attempt_id uuid, price_id text, session_id text)
+language plpgsql set search_path = public as $$
+declare
+    v_holder uuid := gen_random_uuid();
+    v_row public.checkout_attempts;
+begin
+    insert into public.checkout_attempts as c (user_id, mode, holder, claimed_at, updated_at)
+    values (p_user, p_mode, v_holder, now(), now())
+    on conflict (user_id, mode) do update
+    set holder = v_holder,
+        claimed_at = now(),
+        updated_at = now()
+    where c.holder is null
+       or c.claimed_at < now() - p_stale_after
+    returning * into v_row;
+
+    if not found then
+        return;
+    end if;
+
+    return query select v_holder, v_row.attempt_id, v_row.price_id, v_row.session_id;
+end;
+$$;
+
+-- Release the lock, recording the session this attempt opened.
+--
+-- Scoped to our own lease (`holder = p_holder`), like the webhook's claim: if
+-- ours went stale and another request took it over, that request's session is
+-- the live one and overwriting it would point the next reuse at a session we
+-- had already abandoned. `false` says exactly that happened.
+create or replace function public.finish_checkout_attempt (
+    p_user uuid,
+    p_mode text,
+    p_holder uuid,
+    p_attempt_id uuid,
+    p_price_id text,
+    p_session_id text
+) returns boolean language plpgsql set search_path = public as $$
+begin
+    update public.checkout_attempts
+    set holder = null,
+        attempt_id = p_attempt_id,
+        price_id = p_price_id,
+        session_id = p_session_id,
+        updated_at = now()
+    where user_id = p_user and mode = p_mode and holder = p_holder;
+
+    return found;
+end;
+$$;
+
+-- Release the lock having opened nothing, leaving the stored session as it was:
+-- every refusal and every failure between taking the lock and creating a
+-- session. Without it the buyer would wait out the lease before they could try
+-- again.
+create or replace function public.release_checkout_attempt (p_user uuid, p_mode text, p_holder uuid)
+returns boolean language plpgsql set search_path = public as $$
+begin
+    update public.checkout_attempts
+    set holder = null,
+        updated_at = now()
+    where user_id = p_user and mode = p_mode and holder = p_holder;
+
+    return found;
+end;
+$$;
+
+revoke all on function public.begin_checkout_attempt (uuid, text, interval) from public, anon, authenticated;
+revoke all on function public.finish_checkout_attempt (uuid, text, uuid, uuid, text, text) from public, anon, authenticated;
+revoke all on function public.release_checkout_attempt (uuid, text, uuid) from public, anon, authenticated;
+
+grant execute on function public.begin_checkout_attempt (uuid, text, interval) to service_role;
+grant execute on function public.finish_checkout_attempt (uuid, text, uuid, uuid, text, text) to service_role;
+grant execute on function public.release_checkout_attempt (uuid, text, uuid) to service_role;
+
+-- ===== supabase/migrations/20261012120104_stripe_event_claim_state.sql =====
+-- Tell a webhook delivery WHY it did not get the claim (QA round 4, D2
+-- follow-up).
+--
+-- claim_stripe_event (migration 20261012120101) answers with the stamp it wrote
+-- and null for everything else, and null conflates the two outcomes that want
+-- opposite answers:
+--
+--  * 'done'       -- the event has been applied. A redelivery is a duplicate and
+--                    200 is right: nothing is lost by acknowledging it.
+--  * 'processing' -- another delivery holds the claim and has not finished. A
+--                    200 here tells Stripe the event landed, and Stripe stops
+--                    retrying it. If that other delivery then dies -- the very
+--                    case 120101 exists for -- the claim goes stale with nobody
+--                    left to retry it: for checkout.session.completed, a
+--                    customer charged and never entitled. The staleness window
+--                    only helps if Stripe is still delivering.
+--
+-- So the claim now says which of the three it is, and stripe-webhook answers a
+-- live claim with a 409 (Stripe retries) instead of a 200 (Stripe forgets). The
+-- 409 is the honest answer either way: this delivery did nothing, and the event
+-- has not been applied by anyone yet.
+--
+-- The losing read is a second statement, which is harmless: mutual exclusion is
+-- entirely the conditional upsert's, and a losing caller is only describing a
+-- row it is not allowed to touch. A row that vanishes between the two (a
+-- release by the holder) reads as 'absent', which the caller treats like a live
+-- claim -- a retry, which re-claims it.
+-- The ledger has never carried a grant of its own, which the hosted image's
+-- permissive default ACL hid: locally, a table `postgres` created gives nobody
+-- DML, so the claim below -- and the webhook's own update of `status` through
+-- PostgREST -- answers 42501 before RLS is consulted. Idempotent, and the
+-- claim states this migration adds are the first thing a local run would have
+-- needed it for.
+grant all on table public.stripe_events to service_role;
+
+drop function if exists public.claim_stripe_event (text, text, interval);
+
+create or replace function public.claim_stripe_event (p_id text, p_type text, p_stale_after interval)
+returns table (state text, claimed_at timestamptz) language plpgsql set search_path = public as $$
+declare
+    v_claimed_at timestamptz;
+    v_status text;
+begin
+    insert into public.stripe_events as e (id, type, status, claimed_at)
+    values (p_id, p_type, 'processing', now())
+    on conflict (id) do update
+    set status = 'processing',
+        claimed_at = now(),
+        type = excluded.type
+    where e.status = 'processing'
+      and e.claimed_at < now() - p_stale_after
+    returning e.claimed_at into v_claimed_at;
+
+    if v_claimed_at is not null then
+        return query select 'claimed'::text, v_claimed_at;
+        return;
+    end if;
+
+    -- Lost it. Which way decides whether Stripe should keep trying.
+    select e.status into v_status from public.stripe_events e where e.id = p_id;
+
+    return query select coalesce(v_status, 'absent')::text, null::timestamptz;
+end;
+$$;
+
+revoke all on function public.claim_stripe_event (text, text, interval) from public, anon, authenticated;
+
+grant execute on function public.claim_stripe_event (text, text, interval) to service_role;
+
+-- ===== supabase/migrations/20261012120105_subscription_write_lock.sql =====
+-- Serialise the webhook's read-back-and-write per subscription (QA round 4, D3
+-- follow-up).
+--
+-- The `subscriptions_refuse_stale_event` trigger (migration 20261012120102)
+-- compares the Stripe `created` stamp of the event each write carries and keeps
+-- the newest. That closes reordering between events Stripe stamped a second or
+-- more apart, and nothing finer: `created` has one-second resolution, so two
+-- events created inside the same second compare EQUAL, and equal has to pass --
+-- a retry of one event must be able to write the same state again. So the
+-- window the trigger cannot see is exactly the one that matters:
+-- `customer.subscription.updated` for a card failure and one for the retry
+-- succeeding, both stamped 17:04:09, delivered concurrently. A reads `active`
+-- from Stripe, B reads `past_due`, B writes, A writes -- and the row says a
+-- customer whose card failed is paid up until the next event about them, a month
+-- or a year away.
+--
+-- Widening the comparison to `<=` would not fix it (it would refuse the equal
+-- stamp a retry needs, and still not order the two) and neither would a finer
+-- clock, because the race is not in the comparison: it is that the Stripe READ
+-- and the DB WRITE are two steps with a gap between them. What removes it is
+-- making the pair atomic per subscription -- whoever holds the lock reads the
+-- subscription as Stripe holds it NOW and writes that, and the other delivery
+-- does its own read afterwards and therefore reads the same or newer state.
+--
+-- Same shape as the event claim, for the same reason (an Edge isolate shares no
+-- memory with the next one, and PostgREST cannot hold a transaction open across
+-- a Stripe round trip): a leased row, reclaimable once stale so a dead isolate
+-- cannot wedge a subscription, and a delivery that cannot get it is answered
+-- with a 503 so Stripe redelivers it rather than a 200 that drops it.
+create table if not exists public.subscription_writes (
+    stripe_subscription_id text primary key,
+    holder uuid not null,
+    claimed_at timestamptz not null default now()
+);
+
+-- Service role only, like the event ledger beside it: no policy, and the
+-- table-level grant service_role needs even though it bypasses RLS (see
+-- 20260827140000_core_table_grants.sql).
+alter table public.subscription_writes enable row level security;
+
+grant all on table public.subscription_writes to service_role;
+
+-- Take the lock for one subscription, or answer null because someone holds it.
+--
+-- One statement, so two deliveries cannot both win. The lease is what keeps an
+-- isolate that died mid-write from locking a subscription out of every later
+-- event; `p_stale_after` is the caller's (STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER).
+create or replace function public.claim_subscription_write (p_subscription_id text, p_stale_after interval)
+returns uuid language plpgsql set search_path = public as $$
+declare
+    v_holder uuid := gen_random_uuid();
+    v_won uuid;
+begin
+    insert into public.subscription_writes as w (stripe_subscription_id, holder, claimed_at)
+    values (p_subscription_id, v_holder, now())
+    on conflict (stripe_subscription_id) do update
+    set holder = v_holder,
+        claimed_at = now()
+    where w.claimed_at < now() - p_stale_after
+    returning w.holder into v_won;
+
+    return v_won;
+end;
+$$;
+
+-- Give it back, but only while it is still ours: a lease that went stale and was
+-- taken over belongs to the delivery holding it now, and releasing that one
+-- would let a third delivery in beside it.
+create or replace function public.release_subscription_write (p_subscription_id text, p_holder uuid)
+returns boolean language plpgsql set search_path = public as $$
+begin
+    delete from public.subscription_writes
+    where stripe_subscription_id = p_subscription_id and holder = p_holder;
+
+    return found;
+end;
+$$;
+
+revoke all on function public.claim_subscription_write (text, interval) from public, anon, authenticated;
+revoke all on function public.release_subscription_write (text, uuid) from public, anon, authenticated;
+
+grant execute on function public.claim_subscription_write (text, interval) to service_role;
+grant execute on function public.release_subscription_write (text, uuid) to service_role;
+
+-- ===== supabase/migrations/20261013120100_checkout_attempt_durable_key.sql =====
+-- Persist a checkout attempt's Stripe idempotency key BEFORE the session is
+-- created with it (QA round 4 review of #56, finding 1).
+--
+-- What 20261012120103 left open. The attempt id that the Stripe idempotency key
+-- is derived from was minted in the Edge Function's memory one line above
+-- `checkout.sessions.create`, and only written to `checkout_attempts` by
+-- `finish_checkout_attempt` AFTER the create returned. Everything between those
+-- two points -- which is the slowest call in the whole flow -- was therefore
+-- unrecoverable: an isolate killed there left a session Stripe had created and
+-- this database had never heard of, and the buyer's next attempt minted a FRESH
+-- key, so Stripe made them a second one. Two payable sessions, which is the
+-- double charge again.
+--
+-- The second half of the same finding is the lease. Two minutes was shorter than
+-- the wall-clock ceiling an invocation may legally reach, so a create that was
+-- merely SLOW -- Stripe retrying behind the SDK -- outlived its own lease, and a
+-- second request took the lock from a request that was still running, found no
+-- open session yet (the first create had not returned), expired nothing, and
+-- opened its own. checkoutFlow.ts now asks for five minutes
+-- (CHECKOUT_ATTEMPT_STALE_AFTER); the interval is the caller's argument, so
+-- nothing here changes for it.
+--
+-- `stage_checkout_attempt` is what makes both safe, and it does it without
+-- betting on arithmetic about how long an invocation may run:
+--
+--   * it writes the attempt id and price under the CURRENT lease and keeps the
+--     lease, so the key reaching Stripe is one a later attempt can read back and
+--     replay -- Stripe answers a repeated key with its original response for 24
+--     hours, so the session the dead attempt opened comes back instead of a
+--     second one;
+--   * it is scoped to `holder`, like finish and release, so an attempt whose
+--     lease HAS been taken over cannot stage and therefore never reaches the
+--     create at all. A takeover can no longer produce two sessions however the
+--     lease length compares to the invocation ceiling.
+--
+-- `session_id` is cleared on purpose. By the time this runs the stored session
+-- has either been handed back to the buyer (layer 4) or expired (layer 5), so
+-- leaving the id would point the next attempt's reuse at a session that is dead
+-- -- and a null session id beside a non-null attempt id is exactly the state
+-- layer 4b recognises as "this key may need replaying".
+--
+-- `claimed_at` is deliberately NOT re-stamped: the lease is one window from
+-- `begin_checkout_attempt`, which is what keeps the bound on how long a buyer
+-- can be locked out by a dead isolate readable (one lease, not two).
+create or replace function public.stage_checkout_attempt (
+    p_user uuid,
+    p_mode text,
+    p_holder uuid,
+    p_attempt_id uuid,
+    p_price_id text
+) returns boolean language plpgsql set search_path = public as $$
+begin
+    update public.checkout_attempts
+    set attempt_id = p_attempt_id,
+        price_id = p_price_id,
+        session_id = null,
+        updated_at = now()
+    where user_id = p_user and mode = p_mode and holder = p_holder;
+
+    return found;
+end;
+$$;
+
+revoke all on function public.stage_checkout_attempt (uuid, text, uuid, uuid, text) from public, anon, authenticated;
+
+grant execute on function public.stage_checkout_attempt (uuid, text, uuid, uuid, text) to service_role;
+
+-- ===== supabase/migrations/20261013120101_subscription_write_under_lock.sql =====
+-- Check the write lease in the same statement as the write (QA round 4 review of
+-- #56, finding 3).
+--
+-- What 20261012120105 left open. The lease made the Stripe read and the row
+-- write one step per subscription -- but only by convention: the webhook took
+-- the lease, read Stripe, wrote the row through PostgREST, and gave the lease
+-- back, and `release_subscription_write` was the ONLY statement that checked
+-- whose lease it was. So the sequence that defeats it is:
+--
+--   A  claims the lease on sub_X, reads `past_due` from Stripe, and stalls
+--      (Stripe slow, the SDK retrying -- the read is the long call here).
+--   .. A's lease goes stale, because two minutes is shorter than the wall-clock
+--      ceiling an invocation may reach.
+--   B  takes the lease over, reads `active` from Stripe, writes it, releases.
+--   A  wakes up and writes the `past_due` it read minutes ago. Nothing refuses
+--      it: the upsert carried no lease, and `subscriptions_refuse_stale_event`
+--      cannot order two events Stripe stamped in the same second (that is why
+--      the lease exists).
+--
+-- The row then says a customer whose card failed is paid up -- or, with the
+-- statuses the other way round, that a paying customer has lapsed and their
+-- scores are archived -- until the next event about them, a month or a year
+-- away. Exactly D3, through the lock instead of around it.
+--
+-- Lengthening the lease (checkoutFlow.ts and stripeEvents.ts both now ask for
+-- five minutes) makes the race rarer and nothing more, because "rarer than the
+-- ceiling" is a bet on a platform limit we do not set. What closes it is making
+-- the WRITE conditional on still holding the lease, in one statement, so there
+-- is no gap between the check and the write for a takeover to land in.
+--
+-- Hence this function rather than PostgREST's upsert: a cross-table condition is
+-- not something PostgREST can express, and splitting it into a read and a write
+-- would reintroduce the same race one level down.
+--
+-- `for update` on the lease row is the other half. It holds the row for the rest
+-- of this transaction, so `claim_subscription_write` -- whose
+-- `on conflict do update` needs the same row lock -- cannot take the lease over
+-- WHILE this write is in flight. A takeover therefore happens strictly before
+-- (and this function answers `lost_lock`) or strictly after (and the write has
+-- already landed), never during.
+--
+-- The three answers the caller branches on, so none of them is an error string
+-- it has to parse:
+--
+--   written       the row is this delivery's state
+--   lost_lock     the lease is someone else's; nothing was written, and the
+--                 delivery asks Stripe to redeliver (503)
+--   duplicate     subscriptions_one_entitling_per_user_mode refused a SECOND
+--                 entitling subscription for this user and account. Matched on
+--                 `constraint_name` from the diagnostics rather than on the text
+--                 of the message, which is what the Edge Function used to do.
+--                 Any OTHER unique violation is re-raised: swallowing one would
+--                 turn a bug into an acknowledged event.
+--   missing_user  the FK to auth.users: the account was deleted while this
+--                 subscription was live. There is no row to write, and
+--                 stripe-webhook cancels whatever can still bill.
+--
+-- The `subscriptions_refuse_stale_event` trigger still sits on the update and
+-- still wins where it can speak: it drops a write carrying an older event stamp,
+-- which this function reports as `written` exactly as the PostgREST upsert
+-- reported it as a success. The two guard different windows -- that trigger
+-- orders events a second or more apart, this one orders what the clock cannot.
+
+-- The grant service_role needs even though it bypasses RLS
+-- (20260827140000_core_table_grants.sql). `subscriptions` predates that
+-- migration and never got one; on hosted Supabase the platform's default ACL
+-- hides it, and the function below is SECURITY INVOKER, so on a bare cluster it
+-- would answer 42501 before it ever reached the lease check. (This is the
+-- environment note at the end of tests/sql/README.md, fixed.)
+grant all on table public.subscriptions to service_role;
+
+create or replace function public.write_subscription_under_lock (
+    p_holder uuid,
+    p_subscription_id text,
+    p_user uuid,
+    p_mode text,
+    p_tier text,
+    p_status text,
+    p_price_id text,
+    p_current_period_end timestamptz,
+    p_cancel_at_period_end boolean,
+    p_last_event_created_at timestamptz
+) returns text language plpgsql set search_path = public as $$
+declare
+    v_constraint text;
+begin
+    -- Ours, and held for the rest of the transaction. Outside the exception
+    -- block below on purpose: a subtransaction rollback would give the row lock
+    -- back, and the point of it is that it outlives the write.
+    perform 1
+    from public.subscription_writes
+    where stripe_subscription_id = p_subscription_id and holder = p_holder
+    for update;
+
+    if not found then
+        return 'lost_lock';
+    end if;
+
+    begin
+        insert into public.subscriptions (
+            stripe_subscription_id,
+            user_id,
+            mode,
+            tier,
+            status,
+            price_id,
+            current_period_end,
+            cancel_at_period_end,
+            last_event_created_at,
+            updated_at
+        ) values (
+            p_subscription_id,
+            p_user,
+            p_mode,
+            p_tier,
+            p_status,
+            p_price_id,
+            p_current_period_end,
+            p_cancel_at_period_end,
+            p_last_event_created_at,
+            now()
+        )
+        -- The primary key, as before: a redelivery updates the subscription's
+        -- own row. The partial unique index is NOT a conflict target -- a second
+        -- entitling subscription is not the same subscription, so there is no
+        -- row for it to merge into.
+        on conflict (stripe_subscription_id) do update
+        set user_id = excluded.user_id,
+            mode = excluded.mode,
+            tier = excluded.tier,
+            status = excluded.status,
+            price_id = excluded.price_id,
+            current_period_end = excluded.current_period_end,
+            cancel_at_period_end = excluded.cancel_at_period_end,
+            last_event_created_at = excluded.last_event_created_at,
+            updated_at = now();
+    exception
+        when unique_violation then
+            get stacked diagnostics v_constraint = constraint_name;
+            if v_constraint = 'subscriptions_one_entitling_per_user_mode' then
+                return 'duplicate';
+            end if;
+            raise;
+        when foreign_key_violation then
+            return 'missing_user';
+    end;
+
+    return 'written';
+end;
+$$;
+
+revoke all on function public.write_subscription_under_lock (
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz
+) from public, anon, authenticated;
+
+grant execute on function public.write_subscription_under_lock (
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz
+) to service_role;
+
+-- ===== supabase/migrations/20261013120102_duplicate_refund_ledger.sql =====
+-- Money we owe a double-charged customer, written down where an event cannot
+-- lose it (QA round 4 review of #56, finding 2).
+--
+-- What 20261012120100's handler left open. When the partial unique index refuses
+-- a SECOND entitling subscription, the double charge has already happened in
+-- Stripe, so stripe-webhook cancels that subscription and refunds it. If the
+-- refund fails in a way a retry might get past, it answers Stripe 500 and
+-- releases the event claim, so the delivery comes again.
+--
+-- The retry does come -- and it never reaches the refund, because the CANCEL
+-- succeeded. The redelivery re-reads the subscription from Stripe, which now
+-- says `canceled`; `canceled` is not an entitling status, so the index has
+-- nothing to refuse; so the row is written as an ordinary cancellation and the
+-- event is acknowledged 200. The duplicate branch -- the only code that has ever
+-- attempted a refund -- is never entered again. The customer keeps paying for a
+-- plan they were charged twice for, and after the 200 nothing anywhere records
+-- that a refund was owed. One ALERT line, three days old, in a log.
+--
+-- So the debt stops being a property of an EVENT and becomes a row. It is keyed
+-- on the subscription, because that is the identifier that does not change: the
+-- event id changes with every delivery, the subscription's status changes under
+-- the retry, the ledger key does neither. stripeEvents.ts writes it before
+-- either Stripe call is attempted and retries it from every later delivery about
+-- that subscription, whatever that subscription's status has become
+-- (finishPendingDuplicateUndo).
+--
+-- Both halves are safe to repeat, which is what makes retrying from an arbitrary
+-- later delivery correct rather than merely hopeful: a subscription already ended
+-- is recognised and left alone, and the refund carries an idempotency key per
+-- invoice, so Stripe answers a repeat with the original refund instead of making
+-- a second one (_shared/stripe.ts, cancelAndRefundDuplicate).
+create table if not exists public.duplicate_refunds (
+    stripe_subscription_id text not null,
+    -- Mode-keyed like billing_customers, and read mode-filtered, for the reason
+    -- the D4 note in stripe-webhook/index.ts gives: Stripe ids are globally
+    -- unique, but that is a property of Stripe's id space rather than an
+    -- invariant of this table, and every other billing lookup is filtered.
+    mode text not null check (mode in ('live', 'test')),
+    -- `set null` rather than `cascade`: an account being deleted does not make a
+    -- refund we never issued stop being owed, and this row is the only record of
+    -- it. The subscription id in it is still enough for a human to find the
+    -- charge in Stripe.
+    user_id uuid references auth.users (id) on delete set null,
+    -- `pending` is the only one anything retries. `needs_human` is a paid
+    -- invoice whose payment cannot be identified -- it reads the same way on
+    -- every attempt, so retrying it would bury the alert instead of surfacing
+    -- it. See DuplicateUndoState in _shared/stripeEvents.ts.
+    state text not null check (state in ('pending', 'resolved', 'needs_human')),
+    -- Whether the duplicate can still bill, and what came of the refund half:
+    -- 'refunded' / 'nothing_to_refund' / 'needs_human' / 'failed', null before
+    -- the first attempt has answered.
+    stopped boolean not null default false,
+    refund text,
+    -- cancelAndRefundDuplicate's own notes, which is what a human reconciling
+    -- this row reads.
+    detail text,
+    -- How many attempts have reported back (one per settle, so one per pair of
+    -- Stripe calls). A row with a high count still `pending` is the shape of a
+    -- refund no delivery will ever manage, which is the one a human has to take.
+    attempts integer not null default 0,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    primary key (stripe_subscription_id, mode)
+);
+
+-- What a reconciliation reads: everything still owed, oldest first.
+create index if not exists duplicate_refunds_unsettled
+    on public.duplicate_refunds (created_at)
+    where state <> 'resolved';
+
+-- Service role only, like every other billing table: the client never reads or
+-- writes this. No policy, so RLS refuses every client role outright.
+alter table public.duplicate_refunds enable row level security;
+
+-- service_role bypasses RLS but still needs the table-level grant (see
+-- 20260827140000_core_table_grants.sql).
+grant all on table public.duplicate_refunds to service_role;
+
+-- Open the debt. Called BEFORE the Stripe calls are attempted, so an isolate
+-- that dies between them has still left the row.
+--
+-- An already `resolved` row is left resolved: the undo is idempotent, so
+-- re-attempting it is harmless, but reopening a settled ledger entry would make
+-- money we have handed back look outstanding. `attempts` is left alone too --
+-- the attempt this call precedes is counted when it reports back, below.
+create or replace function public.record_duplicate_refund (
+    p_subscription_id text,
+    p_mode text,
+    p_user uuid
+) returns void language plpgsql set search_path = public as $$
+begin
+    insert into public.duplicate_refunds as d (stripe_subscription_id, mode, user_id, state)
+    values (p_subscription_id, p_mode, p_user, 'pending')
+    on conflict (stripe_subscription_id, mode) do update
+    set user_id = coalesce(excluded.user_id, d.user_id),
+        state = case when d.state = 'resolved' then d.state else 'pending' end,
+        updated_at = now();
+end;
+$$;
+
+-- Close it, or record that this attempt did not. Scoped to nothing: whichever
+-- delivery last spoke to Stripe holds the freshest answer, and all of them are
+-- asking Stripe about the same subscription.
+--
+-- Every settle counts an attempt, including the ones that leave the row
+-- `pending`, because that count is what distinguishes a refund Stripe refused
+-- once from one it will refuse forever.
+create or replace function public.settle_duplicate_refund (
+    p_subscription_id text,
+    p_mode text,
+    p_state text,
+    p_stopped boolean,
+    p_refund text,
+    p_detail text
+) returns void language plpgsql set search_path = public as $$
+begin
+    update public.duplicate_refunds
+    set state = p_state,
+        stopped = p_stopped,
+        refund = p_refund,
+        detail = p_detail,
+        attempts = attempts + 1,
+        updated_at = now()
+    where stripe_subscription_id = p_subscription_id and mode = p_mode;
+end;
+$$;
+
+-- Is anything still owed on this subscription? Answers the row, so the caller's
+-- alert can name the user the duplicate belonged to -- which the delivery doing
+-- the retry has no other way of knowing, since it is usually an event about a
+-- subscription that no longer looks like a duplicate at all.
+create or replace function public.pending_duplicate_refund (p_subscription_id text, p_mode text)
+returns table (user_id uuid, attempts integer) language sql stable set search_path = public as $$
+select d.user_id, d.attempts
+from public.duplicate_refunds d
+where d.stripe_subscription_id = p_subscription_id and d.mode = p_mode and d.state = 'pending'
+$$;
+
+revoke all on function public.record_duplicate_refund (text, text, uuid) from public, anon, authenticated;
+revoke all on function public.settle_duplicate_refund (text, text, text, boolean, text, text)
+    from public, anon, authenticated;
+revoke all on function public.pending_duplicate_refund (text, text) from public, anon, authenticated;
+
+grant execute on function public.record_duplicate_refund (text, text, uuid) to service_role;
+grant execute on function public.settle_duplicate_refund (text, text, text, boolean, text, text) to service_role;
+grant execute on function public.pending_duplicate_refund (text, text) to service_role;
