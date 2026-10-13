@@ -66,9 +66,11 @@ class BillingBackedStore implements WebhookStore {
             status: r.status,
             current_period_end: r.current_period_end,
         }));
-        // Never the duplicate the partial unique index refuses: one teacher,
-        // one subscription at a time is the premise of every test below.
-        return { duplicate: false as const };
+        // Never the duplicate the partial unique index refuses, and never the
+        // lost lease write_subscription_under_lock refuses: one teacher, one
+        // subscription, one delivery at a time is the premise of every test
+        // below. Both live in webhook.test.ts.
+        return { outcome: 'written' as const };
     };
     fetchSubscription = async (id: string) => this.remote.get(id) ?? null;
     userIdForSubscription = async (id: string) => this.rows.get(id)?.user_id ?? null;
@@ -92,6 +94,10 @@ class BillingBackedStore implements WebhookStore {
         refund: 'nothing_to_refund' as const,
         detail: 'not reached',
     });
+    /** Nor the ledger behind it: nothing here is ever owed a refund. */
+    pendingDuplicateUndo = async () => null;
+    recordPendingDuplicateUndo = async () => undefined;
+    settleDuplicateUndo = async () => undefined;
     log = () => undefined;
 }
 

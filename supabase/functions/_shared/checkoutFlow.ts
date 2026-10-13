@@ -44,9 +44,16 @@ import type * as StripeEvents from './stripeEvents.ts';
  *  4. the session the last attempt opened, remembered in the same row: still
  *     open for the same price, the buyer is handed it back instead of a second
  *     one; paid and still resolving, they are asked to wait;
+ *  4b. the attempt that staged a key and recorded no session -- an isolate that
+ *     died around the create. Its key is replayed rather than a new one minted,
+ *     so Stripe answers with the session it opened (if it opened one) instead of
+ *     a second one beside it;
  *  5. everything else open is expired before a new session is created, and the
  *     new session's idempotency key carries a FRESH attempt id, so Stripe never
- *     replays the URL of a session we have since expired.
+ *     replays the URL of a session we have since expired. The key is written to
+ *     `checkout_attempts` BEFORE the create, under our own lease, which is both
+ *     what makes 4b possible and what stops an attempt whose lease has been
+ *     taken over from creating anything.
  *
  * Underneath all of it, a partial unique index on (user_id, mode) where the
  * status entitles (migration 20261012120100) makes a second entitling row
@@ -65,20 +72,43 @@ import type * as StripeEvents from './stripeEvents.ts';
 export const CHECKOUT_RATE = { limit: 10, windowMs: 60_000 } as const;
 
 /**
- * How long a checkout attempt may hold the (user, mode) lock before another
- * request may take it over.
- *
- * Written as a Postgres interval because that is where the comparison happens
- * (begin_checkout_attempt, migration 20261012120103). It has to clear the
- * slowest honest attempt -- a Stripe subscription list, a session read, the
- * expiries and the create, so a handful of round trips -- or a buyer whose first
- * request is still in flight takes the lock from it and opens a second session
- * beside theirs. And it has to be short enough that an isolate killed
- * mid-checkout does not lock a buyer out of paying us for long. Two minutes sits
- * between the two: well past any sequence of Stripe calls that is still running,
- * and inside the patience of someone who just pressed a button twice.
+ * The wall-clock ceiling an Edge Function invocation can reach before the
+ * platform kills it. Here only to be compared against the lease below, which is
+ * the comparison that was wrong.
  */
-export const CHECKOUT_ATTEMPT_STALE_AFTER = '2 minutes';
+export const EDGE_FUNCTION_WALL_CLOCK_MS = 150_000;
+
+/**
+ * How long a checkout attempt may hold the (user, mode) lock before another
+ * request may take it over, in the two forms that have to agree: the Postgres
+ * interval the comparison is actually made in (begin_checkout_attempt, migration
+ * 20261012120103) and the milliseconds a test can compare against the ceiling
+ * above.
+ *
+ * Two minutes was SHORTER than the invocation that holds it may legally run
+ * (QA round 4 review of #56): a buyer's first request stalled inside
+ * `checkout.sessions.create` -- Stripe slow, or retrying behind the SDK -- is
+ * still running at 2:01, by which point its lease is stale and a second request
+ * takes the lock from it. The second request then lists, finds no open session
+ * yet (the first one's create has not returned), expires nothing, and opens a
+ * session of its own. Both are payable, which is the double charge the lock
+ * exists to stop, reached through the lock rather than around it.
+ *
+ * Five minutes clears the ceiling with room for the clock skew between the
+ * isolate and the database, and is still inside the patience of someone whose
+ * isolate died mid-checkout -- they wait out the remainder of the lease rather
+ * than losing the purchase.
+ *
+ * It is deliberately no longer the only thing standing between a takeover and a
+ * second session: a plan whose ceiling is higher than this would make the lease
+ * too short again, so `stage_checkout_attempt` persists the idempotency key
+ * under this lease before the create, and refuses to do so once the lease is
+ * someone else's (see `stageAttempt`). A takeover therefore either replays the
+ * dead attempt's key -- one session -- or stops the dead attempt from creating
+ * anything at all.
+ */
+export const CHECKOUT_ATTEMPT_STALE_AFTER_MS = 5 * 60_000;
+export const CHECKOUT_ATTEMPT_STALE_AFTER = '5 minutes';
 
 /**
  * What identifies this purchase attempt to Stripe's idempotency layer: the
@@ -93,6 +123,10 @@ export const CHECKOUT_ATTEMPT_STALE_AFTER = '2 minutes';
  * recomputed, so every attempt that reaches Stripe creates its own session, and
  * the attempt that wants the PREVIOUS session is served by reading it back out
  * of `checkout_attempts` instead (layer 4).
+ *
+ * The id is written to `checkout_attempts` before it is handed to Stripe, so
+ * "cannot be recomputed" does not also mean "is lost when the isolate dies":
+ * the attempt that follows a death reads it back and replays it (layer 4b).
  */
 export const checkoutIdempotencyKey = (userId: string, mode: StripeMode, priceId: string, attemptId: string): string =>
     `checkout:${mode}:${userId}:${priceId}:${attemptId}`;
@@ -175,7 +209,13 @@ export interface CheckoutSessionState {
 /** null `session` means Stripe has no session with that id (ours, long gone). */
 export type SessionLookup = { ok: true; session: CheckoutSessionState | null } | { ok: false; error: unknown };
 
-/** What the last attempt for this (user, mode) left behind, if any. */
+/**
+ * What the last attempt for this (user, mode) left behind, if any.
+ *
+ * An `attemptId` with NO `sessionId` is the recoverable state: that attempt
+ * persisted the key it was about to create with and then did not get as far as
+ * recording a session. See the recovery step in `openSessionUnderLock`.
+ */
 export interface StoredAttempt {
     attemptId: string | null;
     priceId: string | null;
@@ -234,13 +274,35 @@ export interface CheckoutDeps {
      * attempt opened; `in_flight` when another request holds it.
      */
     beginAttempt: (userId: string, mode: StripeMode) => Promise<AttemptStart>;
-    /** Releases the lock, recording the session this attempt opened. */
+    /**
+     * Persists the attempt id this request is about to key the Stripe create on,
+     * WITHOUT giving the lock up. Answers false when the lease is no longer
+     * ours, which is the one case in which no session may be created.
+     *
+     * Why it exists (QA round 4 review of #56): the key used to be minted in
+     * memory a line above the create, so an isolate that died between the two
+     * left a session Stripe had made and we had never heard of, and the next
+     * attempt -- a fresh key -- asked Stripe for another one. Persisted first,
+     * the next attempt replays the SAME key, and Stripe answers with the session
+     * the dead one opened instead of a second one.
+     */
+    stageAttempt: (
+        userId: string,
+        mode: StripeMode,
+        holder: string,
+        attempt: { attemptId: string; priceId: string },
+    ) => Promise<boolean>;
+    /**
+     * Releases the lock, recording the session this attempt opened. False when
+     * the lease had already been taken over, so nothing was recorded -- see the
+     * call site for why that is not a session to hand out.
+     */
     finishAttempt: (
         userId: string,
         mode: StripeMode,
         holder: string,
         attempt: { attemptId: string; priceId: string; sessionId: string | null },
-    ) => Promise<void>;
+    ) => Promise<boolean>;
     /** Releases the lock having opened nothing, leaving the stored session alone. */
     releaseAttempt: (userId: string, mode: StripeMode, holder: string) => Promise<void>;
     /** A fresh attempt id (crypto.randomUUID in the handler). */
@@ -357,27 +419,80 @@ const openSessionUnderLock = async (
         }
     }
 
-    // Layer 5. Expiring is what makes "only one session can be paid" true, so it
-    // must not be possible for it to fail quietly and let the purchase through
-    // anyway: a buyer asked to retry is strictly better than a buyer charged
-    // twice. Hence the refusal rather than a logged warning -- we will not mint a
-    // session we could not de-duplicate. Nothing is kept: the session the buyer
-    // might have wanted back was handed to them above, and this attempt's key is
-    // one no previous attempt could have used.
-    try {
-        const expired = await deps.expireOpenSessions(customerId, mode);
-        if (expired > 0) {
-            deps.log(`checkout: expired ${expired} open session(s) for ${customerId} before opening another`);
+    // Layer 4b: the attempt that staged a key and never recorded a session.
+    //
+    // An isolate killed between `stage_checkout_attempt` and
+    // `finish_checkout_attempt` -- the window that covers the Stripe create
+    // itself, which is the slowest call in this function -- leaves exactly that
+    // row: an attempt id, the price it was for, and no session. Stripe may or
+    // may not have made the session; from here the two are indistinguishable.
+    //
+    // Replaying that attempt's key answers both at once. Stripe keeps a key's
+    // original response for 24 hours, so a create that landed comes back as the
+    // SAME session, and one that never reached Stripe is made now. Either way
+    // the buyer ends up with one payable session rather than a second one beside
+    // an orphan nobody knew about.
+    //
+    // The expiry below is skipped on this path, and must be: the session the
+    // replay is about to hand back is open, and expiring it first would make
+    // Stripe replay the URL of a session we had just killed -- a dead Checkout
+    // page, which is the exact failure the per-attempt key replaced the old
+    // time-bucket key to avoid. Nothing else can be open for it to miss: the
+    // attempt that staged this key ran the expiry before staging, and opening a
+    // session needs this lock.
+    const resumed =
+        stored.attemptId !== null && stored.sessionId === null && stored.priceId === priceId ? stored.attemptId : null;
+
+    // Layer 5, for every attempt that is NOT a replay. Expiring is what makes
+    // "only one session can be paid" true, so it must not be possible for it to
+    // fail quietly and let the purchase through anyway: a buyer asked to retry is
+    // strictly better than a buyer charged twice. Hence the refusal rather than a
+    // logged warning -- we will not mint a session we could not de-duplicate.
+    // Nothing is kept: the session the buyer might have wanted back was handed to
+    // them above, and the key minted below is one no previous attempt could have
+    // used.
+    if (resumed === null) {
+        try {
+            const expired = await deps.expireOpenSessions(customerId, mode);
+            if (expired > 0) {
+                deps.log(`checkout: expired ${expired} open session(s) for ${customerId} before opening another`);
+            }
+        } catch (err) {
+            deps.logError('expire_open_sessions_failed', err);
+            return unrecorded(
+                deps.json({ error: 'Could not start checkout. Please try again.', code: 'checkout_unavailable' }, 502),
+            );
         }
-    } catch (err) {
-        deps.logError('expire_open_sessions_failed', err);
-        return unrecorded(
-            deps.json({ error: 'Could not start checkout. Please try again.', code: 'checkout_unavailable' }, 502),
-        );
     }
 
-    const attemptId = deps.newAttemptId();
+    const attemptId = resumed ?? deps.newAttemptId();
     const idempotencyKey = checkoutIdempotencyKey(caller.userId, mode, priceId, attemptId);
+
+    // The key goes to the DATABASE before it goes to Stripe, which is what makes
+    // the paragraph above possible at all -- a key only this isolate's memory
+    // ever held is a key no later attempt can replay.
+    //
+    // It is also the second guard on a lease takeover, and the one that does not
+    // depend on arithmetic about how long an invocation may run: the statement is
+    // scoped to our holder, so an attempt whose lease has been taken over cannot
+    // stage, and therefore cannot create. A takeover is then either a replay of
+    // this attempt's key (one session) or a request that refuses to open one.
+    //
+    // A failure to persist it is a refusal, for the same reason the failed expiry
+    // above is: the alternative is a session whose key nothing can recover.
+    let staged: boolean;
+    try {
+        staged = await deps.stageAttempt(caller.userId, mode, holder, { attemptId, priceId });
+    } catch (err) {
+        return unrecorded(unavailable(deps, 'checkout_attempt_stage_failed', err));
+    }
+    if (!staged) {
+        deps.log(
+            `checkout: the attempt lease for ${caller.userId} was taken over before a session was opened (${mode})`,
+        );
+        return unrecorded(deps.json(CHECKOUT_IN_PROGRESS, 409));
+    }
+
     const origin = deps.appOrigin(req);
     const session = await deps.createSession(
         {
@@ -410,11 +525,24 @@ const openSessionUnderLock = async (
     // session the buyer can already pay: the next attempt expires it and opens
     // its own, which is one payable session either way.
     try {
-        await deps.finishAttempt(caller.userId, mode, holder, {
+        const recorded = await deps.finishAttempt(caller.userId, mode, holder, {
             attemptId,
             priceId,
             sessionId: session.id ?? null,
         });
+        if (!recorded) {
+            // The lease was taken over while this create was in flight, which
+            // means another request has run the expiry since -- so the URL just
+            // returned may already be dead, and the live session is the other
+            // request's. Handing this one out would send the buyer to a Checkout
+            // page that refuses them; asking them to try again hands them the
+            // live session on the next request (layer 4).
+            deps.log(
+                `checkout: the attempt lease for ${caller.userId} was taken over before ` +
+                    `session ${session.id ?? 'unknown'} could be recorded (${mode})`,
+            );
+            return unrecorded(deps.json(CHECKOUT_IN_PROGRESS, 409));
+        }
         return { response: deps.json({ url: session.url }), recorded: true };
     } catch (err) {
         deps.logError('checkout_attempt_record_failed', err);

@@ -142,8 +142,26 @@ Deno.serve((req) =>
                 },
             };
         },
+        // The idempotency key, durable before it is handed to Stripe, and only
+        // while this request still holds the lease (migration 20261013120100).
+        // `false` is the lease having been taken over, which is the one answer
+        // the flow must not read as a failure: it means another request owns the
+        // critical section and this one must open nothing.
+        stageAttempt: async (userId, mode, holder, attempt) => {
+            const { data, error } = await billing(mode).admin.rpc('stage_checkout_attempt', {
+                p_user: userId,
+                p_mode: mode,
+                p_holder: holder,
+                p_attempt_id: attempt.attemptId,
+                p_price_id: attempt.priceId,
+            });
+            if (error) {
+                throw new Error(`could not stage the checkout attempt: ${error.message}`);
+            }
+            return data === true;
+        },
         finishAttempt: async (userId, mode, holder, attempt) => {
-            const { error } = await billing(mode).admin.rpc('finish_checkout_attempt', {
+            const { data, error } = await billing(mode).admin.rpc('finish_checkout_attempt', {
                 p_user: userId,
                 p_mode: mode,
                 p_holder: holder,
@@ -154,6 +172,7 @@ Deno.serve((req) =>
             if (error) {
                 throw new Error(`could not record the checkout attempt: ${error.message}`);
             }
+            return data === true;
         },
         releaseAttempt: async (userId, mode, holder) => {
             const { error } = await billing(mode).admin.rpc('release_checkout_attempt', {

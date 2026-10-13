@@ -6,12 +6,17 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
     CHECKOUT_ATTEMPT_STALE_AFTER,
+    CHECKOUT_ATTEMPT_STALE_AFTER_MS,
     checkoutIdempotencyKey,
+    EDGE_FUNCTION_WALL_CLOCK_MS,
     handleCheckout,
     type CheckoutDeps,
     type CheckoutSessionParams,
 } from '../../supabase/functions/_shared/checkoutFlow';
-import { holdsRunningSubscription } from '../../supabase/functions/_shared/stripeEvents';
+import {
+    EDGE_FUNCTION_WALL_CLOCK_MS as WEBHOOK_WALL_CLOCK_MS,
+    holdsRunningSubscription,
+} from '../../supabase/functions/_shared/stripeEvents';
 
 /**
  * The checkout flow, run for real against a fake Stripe that models open
@@ -160,7 +165,12 @@ class FakeStripe {
     };
 }
 
-/** How long begin_checkout_attempt lets a lease sit; see the migration. */
+/**
+ * How long begin_checkout_attempt lets a lease sit. Derived from the interval
+ * the function actually passes Postgres, and cross-checked against the
+ * milliseconds constant beside it, so the fake cannot model a lease the flow no
+ * longer asks for.
+ */
 const LEASE_MS = 60_000 * Number(CHECKOUT_ATTEMPT_STALE_AFTER.split(' ')[0]);
 
 /**
@@ -200,6 +210,22 @@ class FakeAttempts {
         };
     };
 
+    /**
+     * stage_checkout_attempt: the idempotency key persisted under the CURRENT
+     * lease, keeping the lock. Scoped to the holder like finish and release, so
+     * an attempt whose lease has been taken over cannot stage -- which is what
+     * stops it reaching the Stripe create at all.
+     */
+    stage = (holder: string, attempt: { attemptId: string; priceId: string }): boolean => {
+        if (this.holder !== holder) {
+            return false;
+        }
+        this.attemptId = attempt.attemptId;
+        this.priceId = attempt.priceId;
+        this.sessionId = null;
+        return true;
+    };
+
     finish = (holder: string, attempt: { attemptId: string; priceId: string; sessionId: string | null }): boolean => {
         if (this.holder !== holder) {
             return false;
@@ -231,6 +257,12 @@ const harness = (
         now?: () => number;
         /** Suspends the flow just before it creates a session in Stripe. */
         pauseBeforeCreate?: Latch;
+        /**
+         * Suspends the FIRST request to reach the staging of its idempotency
+         * key, and only that one, so a second request can run past it from end
+         * to end -- which is what a lease takeover mid-attempt looks like.
+         */
+        pauseBeforeStage?: Latch;
     } = {},
 ) => {
     const stripe = new FakeStripe();
@@ -240,6 +272,7 @@ const harness = (
     const logs: string[] = [];
     const errors: string[] = [];
     let attemptIds = 0;
+    let paused = false;
     let customerId = options.customerId ?? null;
     const deps: CheckoutDeps = {
         json,
@@ -285,9 +318,18 @@ const harness = (
                   }
                 : { ok: false as const, reason: 'in_flight' as const };
         }),
+        stageAttempt: vi.fn(async (_userId, _mode, holder: string, attempt) => {
+            calls.push('stage-attempt');
+            if (options.pauseBeforeStage && !paused) {
+                paused = true;
+                options.pauseBeforeStage.arrive();
+                await options.pauseBeforeStage.released;
+            }
+            return attempts.stage(holder, attempt);
+        }),
         finishAttempt: vi.fn(async (_userId, _mode, holder: string, attempt) => {
             calls.push('finish-attempt');
-            attempts.finish(holder, attempt);
+            return attempts.finish(holder, attempt);
         }),
         releaseAttempt: vi.fn(async (_userId, _mode, holder: string) => {
             calls.push('release-attempt');
@@ -375,6 +417,9 @@ describe('stripe-checkout flow', () => {
             'create-customer',
             'stripe-subscriptions',
             'expire',
+            // The key is durable BEFORE Stripe is asked to make a session with
+            // it, which is what a dead isolate's successor replays.
+            'stage-attempt',
             'create-session',
             'finish-attempt',
         ]);
@@ -543,6 +588,188 @@ describe('stripe-checkout flow', () => {
             expect(h.stripe.openSessions()).toHaveLength(1);
             // And the dead isolate's lease is not its to give back any more.
             expect(h.attempts.release(dead?.holder ?? '')).toBe(false);
+        });
+    });
+
+    /**
+     * The lease was shorter than the invocation holding it could legally run, and
+     * the idempotency key existed only in that invocation's memory. Either one on
+     * its own is a second payable session (QA round 4 review of #56, finding 1).
+     */
+    describe('an attempt that outlives, or dies inside, its own lease', () => {
+        it('agrees with stripeEvents.ts about what an invocation can run for', () => {
+            // The number is stated twice because neither module may import the
+            // other at runtime -- Deno wants the `.ts` extension and vitest
+            // wants it gone, which is why checkoutFlow.ts takes
+            // holdsRunningSubscription through `deps` rather than importing it.
+            // Two copies of a platform limit is exactly the kind of thing that
+            // drifts, and both leases are sized against it.
+            expect(EDGE_FUNCTION_WALL_CLOCK_MS).toBe(WEBHOOK_WALL_CLOCK_MS);
+        });
+
+        it('leases the lock for longer than an invocation can run', () => {
+            // Two minutes was the bug stated as a number: an invocation may run
+            // longer than that, so a request that was merely SLOW inside
+            // `checkout.sessions.create` had its lock taken off it while it was
+            // still going to create a session.
+            expect(CHECKOUT_ATTEMPT_STALE_AFTER_MS).toBeGreaterThan(EDGE_FUNCTION_WALL_CLOCK_MS);
+            // And the two spellings of the lease agree, because the interval is
+            // what Postgres compares and the number is what this file models.
+            expect(LEASE_MS).toBe(CHECKOUT_ATTEMPT_STALE_AFTER_MS);
+        });
+
+        it('replays the dead attempt key instead of opening a second session', async () => {
+            // The isolate dies between the Stripe create and the record of it:
+            // Stripe has a payable session, `checkout_attempts` has no session
+            // id, and nothing in the old design could connect the two -- the key
+            // was gone with the isolate, so the buyer's next attempt minted a
+            // fresh one and Stripe made them a SECOND session. Both payable.
+            const h = harness({ customerId: 'cus_1' });
+            const realCreate = h.deps.createSession;
+            h.deps.createSession = async (params, sessionOptions, mode) => {
+                // Stripe makes the session, and then this invocation is gone.
+                await realCreate(params, sessionOptions, mode);
+                throw new Error('isolate terminated');
+            };
+
+            const died = await handleCheckout(post(), h.deps);
+            expect(died.status).toBe(502);
+            // Stripe's side of the half-finished attempt: one payable session
+            // nobody recorded.
+            expect(h.stripe.openSessions()).toHaveLength(1);
+            // Our side: the key it was created with, which is the whole fix.
+            expect(h.attempts.attemptId).toBe('attempt-1');
+            expect(h.attempts.sessionId).toBeNull();
+            expect(h.attempts.holder).toBeNull();
+
+            h.deps.createSession = realCreate;
+            const next = await handleCheckout(post(), h.deps);
+
+            expect(next.status).toBe(200);
+            // The SAME key, so Stripe answers with the session it already made.
+            expect(h.stripe.keysUsed).toEqual([
+                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
+            ]);
+            expect(h.stripe.sessions).toHaveLength(1);
+            expect(h.stripe.openSessions()).toHaveLength(1);
+            expect(await body(next)).toEqual({ url: 'https://checkout.stripe.com/cs_1' });
+            // And it is recorded this time, so the attempt after it is layer 4.
+            expect(h.attempts.sessionId).toBe('cs_1');
+        });
+
+        it('does not expire the session it is about to replay the key for', async () => {
+            // The trap in the paragraph above: expiring first and then replaying
+            // the key hands the buyer the URL of a session we have just killed --
+            // exactly the dead Checkout page the per-attempt key replaced the old
+            // time-bucket key to avoid.
+            const h = harness({ customerId: 'cus_1' });
+            const realCreate = h.deps.createSession;
+            h.deps.createSession = async (params, sessionOptions, mode) => {
+                await realCreate(params, sessionOptions, mode);
+                throw new Error('isolate terminated');
+            };
+            await handleCheckout(post(), h.deps);
+            h.deps.createSession = realCreate;
+            const expiresBefore = (h.deps.expireOpenSessions as ReturnType<typeof vi.fn>).mock.calls.length;
+
+            const next = await handleCheckout(post(), h.deps);
+
+            expect((h.deps.expireOpenSessions as ReturnType<typeof vi.fn>).mock.calls.length).toBe(expiresBefore);
+            expect(h.stripe.openSessions()).toHaveLength(1);
+            expect(await body(next)).toEqual({ url: h.stripe.openSessions()[0]?.url });
+        });
+
+        it('still expires, and uses a fresh key, when the dead attempt was for another plan', async () => {
+            // The replay is only right for the SAME purchase. Teacher died
+            // half-done and the buyer now wants Academy: Teacher's orphan session
+            // has to be expired, and Academy needs a key of its own.
+            const h = harness({ customerId: 'cus_1' });
+            const realCreate = h.deps.createSession;
+            h.deps.createSession = async (params, sessionOptions, mode) => {
+                await realCreate(params, sessionOptions, mode);
+                throw new Error('isolate terminated');
+            };
+            await handleCheckout(post(), h.deps);
+            h.deps.createSession = realCreate;
+
+            const academy = await handleCheckout(postAcademy(), h.deps);
+
+            expect(academy.status).toBe(200);
+            expect(h.stripe.keysUsed).toEqual([
+                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', ACADEMY_PRICE, 'attempt-2'),
+            ]);
+            // Two sessions made over the two attempts, exactly one payable.
+            expect(h.stripe.sessions).toHaveLength(2);
+            expect(h.stripe.openSessions()).toHaveLength(1);
+            expect(h.stripe.openSessions()[0]?.id).toBe('cs_2');
+        });
+
+        it('opens nothing for an attempt whose lease was taken over while it ran', async () => {
+            // The review's own scenario, end to end: A stalls inside the Stripe
+            // create long enough for its lease to go stale, B takes the lock
+            // over. Before the fix B saw no open session yet (A's create had not
+            // returned), expired nothing, and opened its own -- two payable
+            // sessions, reached THROUGH the lock. Now A cannot stage its key
+            // under a lease it no longer holds, so it never reaches the create.
+            const gate = latch();
+            const h = harness({ customerId: 'cus_1', pauseBeforeStage: gate });
+            // A is suspended at the staging of its key, one step before the
+            // create...
+            const stalled = handleCheckout(post(), h.deps);
+            await gate.arrived;
+            // ...and its lease goes stale while it is there, so B takes the lock
+            // over and runs the whole flow for a different plan.
+            h.attempts.clock += LEASE_MS + 1_000;
+            const tookOver = await handleCheckout(postAcademy(), h.deps);
+            gate.release();
+            const stalledResponse = await stalled;
+
+            expect(tookOver.status).toBe(200);
+            expect(stalledResponse.status).toBe(409);
+            expect(await body(stalledResponse)).toMatchObject({ code: 'checkout_in_progress' });
+            // One create, one session, one payable session.
+            expect(h.deps.createSession).toHaveBeenCalledTimes(1);
+            expect(h.stripe.sessions).toHaveLength(1);
+            expect(h.stripe.openSessions()).toHaveLength(1);
+            expect(h.params.map((p) => p.line_items[0]?.price)).toEqual([ACADEMY_PRICE]);
+            expect(h.logs.some((line) => line.includes('taken over before a session was opened'))).toBe(true);
+        });
+
+        it('asks the buyer to retry rather than hand out a session it could not record', async () => {
+            // The narrower version of the same thing: the lease is lost while the
+            // create is in flight, so by the time it returns another request has
+            // run the expiry and the URL may already be dead. A 409 costs the
+            // buyer a click; a dead Checkout page costs them the purchase.
+            const h = harness({ customerId: 'cus_1' });
+            h.deps.finishAttempt = async () => false;
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(409);
+            expect(await body(response)).toMatchObject({ code: 'checkout_in_progress' });
+            expect(h.logs.some((line) => line.includes('taken over before session cs_1 could be recorded'))).toBe(true);
+        });
+
+        it('refuses the checkout when the key cannot be made durable', async () => {
+            // Fail closed, for the same reason the failed expiry does: a session
+            // created under a key nothing can read back is a session the next
+            // attempt cannot recognise, and it would open a second one beside it.
+            const h = harness({ customerId: 'cus_1' });
+            h.deps.stageAttempt = async () => {
+                throw new Error('connection reset');
+            };
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(502);
+            expect(await body(response)).toMatchObject({ code: 'checkout_unavailable' });
+            expect(h.deps.createSession).not.toHaveBeenCalled();
+            expect(h.errors).toEqual(['checkout_attempt_stage_failed']);
+            // The lock is handed back, so the retry we just asked for is not
+            // refused as an attempt in flight.
+            expect(h.attempts.holder).toBeNull();
         });
     });
 

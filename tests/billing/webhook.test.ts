@@ -4,15 +4,19 @@ import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+    duplicateUndoStateOf,
+    EDGE_FUNCTION_WALL_CLOCK_MS,
     handleStripeEvent,
     holdsRunningSubscription,
     isEntitlingStatus,
     STRIPE_EVENT_CLAIM_STALE_AFTER,
     STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER,
+    STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER_MS,
     SUBSCRIPTION_MISSING,
     subscriptionRowFrom,
     type ClaimOutcome,
     type DuplicateUndo,
+    type DuplicateUndoState,
     type StripeEventLike,
     type StripeSubscriptionLike,
     type SubscriptionUpsert,
@@ -55,8 +59,12 @@ const PRICE_TIERS = {
 /** How long claim_stripe_event lets a claim sit unfinished; see the migration. */
 const STALE_AFTER_MS = 10 * 60_000;
 
-/** How long claim_subscription_write lets a write lock sit; see the migration. */
-const LOCK_STALE_AFTER_MS = 2 * 60_000;
+/**
+ * How long claim_subscription_write lets a write lock sit. Taken from the
+ * constant the function passes it rather than restated, so a change to the lease
+ * cannot leave the fake modelling the old one.
+ */
+const LOCK_STALE_AFTER_MS = STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER_MS;
 
 /** A `stripe_events` row, in the three states the table can hold it in. */
 interface FakeEvent {
@@ -84,6 +92,8 @@ class FakeStore implements WebhookStore {
     held: number | null = null;
     /** Writes the staleness trigger dropped, for the assertions about it. */
     staleWritesRefused: string[] = [];
+    /** Writes write_subscription_under_lock refused for want of the lease. */
+    writesRefusedWithoutLease: string[] = [];
 
     /**
      * claim_stripe_event, modelled: a fresh event is claimed, a finished one is
@@ -129,7 +139,16 @@ class FakeStore implements WebhookStore {
      * SQL proof is tests/sql/billing_double_charge.sql -- and both change what
      * this handler must do, so the fake has to have them.
      */
-    upsertSubscription = async (row: SubscriptionUpsert): Promise<SubscriptionWriteOutcome> => {
+    upsertSubscription = async (row: SubscriptionUpsert, holder: string): Promise<SubscriptionWriteOutcome> => {
+        // The lease check, in the same step as the write
+        // (write_subscription_under_lock, migration 20261013120101). Before it,
+        // the write carried no lease at all and a delivery whose lease had been
+        // taken over still landed its older read on top of the newer one.
+        if (this.locks.get(row.stripe_subscription_id)?.holder !== holder) {
+            this.writesRefusedWithoutLease.push(row.stripe_subscription_id);
+            return { outcome: 'lost_lock' };
+        }
+
         const other = [...this.subscriptions.values()].find(
             (existing) =>
                 existing.user_id === row.user_id &&
@@ -137,7 +156,7 @@ class FakeStore implements WebhookStore {
                 isEntitlingStatus(existing.status),
         );
         if (other && isEntitlingStatus(row.status)) {
-            return { duplicate: true, otherSubscriptionId: other.stripe_subscription_id };
+            return { outcome: 'duplicate', otherSubscriptionId: other.stripe_subscription_id };
         }
 
         const current = this.subscriptions.get(row.stripe_subscription_id);
@@ -148,16 +167,16 @@ class FakeStore implements WebhookStore {
                     ...row,
                     last_event_created_at: current.last_event_created_at,
                 });
-                return { duplicate: false };
+                return { outcome: 'written' };
             }
             if (current.last_event_created_at !== null && row.last_event_created_at < current.last_event_created_at) {
                 this.staleWritesRefused.push(row.stripe_subscription_id);
-                return { duplicate: false };
+                return { outcome: 'written' };
             }
         }
 
         this.subscriptions.set(row.stripe_subscription_id, row);
-        return { duplicate: false };
+        return { outcome: 'written' };
     };
     fetchSubscription = async (id: string) =>
         this.missing.has(id) ? SUBSCRIPTION_MISSING : (this.remote.get(id) ?? null);
@@ -210,6 +229,36 @@ class FakeStore implements WebhookStore {
             refund: this.refundOutcome,
             detail: `stopped=${stopped} refund=${this.refundOutcome}`,
         };
+    };
+    /**
+     * `duplicate_refunds` and its three functions, modelled (migration
+     * 20261013120102): the durable record of a duplicate whose cancel-and-refund
+     * has not finished, which is what survives the event that found it.
+     */
+    ledger = new Map<string, { userId: string | null; state: DuplicateUndoState; attempts: number; detail: string }>();
+    pendingDuplicateUndo = async (subscriptionId: string): Promise<{ userId: string | null } | null> => {
+        const row = this.ledger.get(subscriptionId);
+        return row?.state === 'pending' ? { userId: row.userId } : null;
+    };
+    recordPendingDuplicateUndo = async (subscriptionId: string, userId: string | null) => {
+        const row = this.ledger.get(subscriptionId);
+        this.ledger.set(subscriptionId, {
+            userId: userId ?? row?.userId ?? null,
+            // A settled debt is not reopened by another attempt at it.
+            state: row?.state === 'resolved' ? 'resolved' : 'pending',
+            attempts: row?.attempts ?? 0,
+            detail: row?.detail ?? '',
+        });
+    };
+    settleDuplicateUndo = async (subscriptionId: string, state: DuplicateUndoState, undone: DuplicateUndo) => {
+        const row = this.ledger.get(subscriptionId);
+        this.ledger.set(subscriptionId, {
+            userId: row?.userId ?? null,
+            state,
+            // One per attempt that reported back, the failures included.
+            attempts: (row?.attempts ?? 0) + 1,
+            detail: undone.detail,
+        });
     };
     /**
      * Mirrors the real store: the claim is forgotten, so a redelivery is fresh
@@ -963,6 +1012,184 @@ describe('stripe event handling', () => {
             expect(alert).toContain(outcome);
         });
 
+        describe('a refund the event that found it could not finish', () => {
+            /**
+             * QA round 4 review of #56, finding 2. Asking Stripe to redeliver is
+             * only a fix if the redelivery comes back to the refund, and it does
+             * not: the CANCEL half succeeded, so the duplicate reads `canceled`
+             * on the retry, `canceled` is not an entitling status, the partial
+             * unique index has nothing to refuse, and the duplicate branch --
+             * the only code that ever attempted a refund -- is never entered
+             * again. The event is acknowledged 200 and the money stays ours.
+             */
+            const duplicateWithFailedRefund = async () => {
+                await deliver(store, subscriptionEvent('evt_owed_one', 'customer.subscription.created'));
+                store.refundOutcome = 'failed';
+                const refused = await deliver(
+                    store,
+                    subscriptionEvent('evt_owed_two', 'customer.subscription.created', { id: 'sub_2' }),
+                );
+                return refused;
+            };
+
+            it('writes the debt down before it touches Stripe', async () => {
+                // Before, not after: an isolate that dies between the cancel and
+                // the refund has still charged the customer twice, and this row
+                // is the only thing that would know.
+                const order: string[] = [];
+                const realRecord = store.recordPendingDuplicateUndo;
+                store.recordPendingDuplicateUndo = async (id, userId) => {
+                    order.push('record');
+                    return realRecord(id, userId);
+                };
+                const realCancel = store.cancelDuplicateSubscription;
+                store.cancelDuplicateSubscription = async (id) => {
+                    order.push('stripe');
+                    return realCancel(id);
+                };
+
+                await duplicateWithFailedRefund();
+
+                expect(order).toEqual(['record', 'stripe']);
+                expect(store.ledger.get('sub_2')).toMatchObject({ userId: 'teacher-1', state: 'pending' });
+            });
+
+            it('retries the refund from a later delivery, when nothing looks like a duplicate any more', async () => {
+                const refused = await duplicateWithFailedRefund();
+                expect(refused.status).toBeGreaterThanOrEqual(500);
+                expect(store.refundedInStripe).toEqual([]);
+                expect(store.ledger.get('sub_2')?.state).toBe('pending');
+
+                // Stripe redelivers. By now our own cancel has landed, so the
+                // duplicate is `canceled` in Stripe -- which is exactly why the
+                // old code never got back to the refund.
+                store.refundOutcome = 'refunded';
+                store.remote.set('sub_2', {
+                    id: 'sub_2',
+                    status: 'canceled',
+                    customer: 'cus_1',
+                    items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                    metadata: { user_id: 'teacher-1' },
+                });
+                const redelivery = await handleStripeEvent(
+                    subscriptionEvent('evt_owed_two', 'customer.subscription.created', {
+                        id: 'sub_2',
+                        status: 'canceled',
+                    }),
+                    store,
+                    PRICE_TIERS,
+                );
+
+                // The duplicate branch is NOT what did it: the write went
+                // through as an ordinary cancellation.
+                expect(redelivery.status).toBe(200);
+                expect(redelivery.body).toMatchObject({ applied: 'subscription_upserted' });
+                // And the money is back.
+                expect(store.refundedInStripe).toEqual(['sub_2']);
+                expect(store.ledger.get('sub_2')?.state).toBe('resolved');
+                expect(store.logs.some((line) => line.includes('was still owed an undo'))).toBe(true);
+                // The subscription that was recorded is untouched throughout.
+                expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'active', tier: 'teacher' });
+            });
+
+            it('is retried by an unrelated event about the duplicate too', async () => {
+                // The cancel we issued produces its own events, and any of them
+                // is another chance -- which matters because Stripe eventually
+                // stops retrying the event that found the duplicate.
+                await duplicateWithFailedRefund();
+                store.refundOutcome = 'refunded';
+
+                const deleted = await deliver(
+                    store,
+                    subscriptionEvent('evt_owed_deleted', 'customer.subscription.deleted', { id: 'sub_2' }),
+                );
+
+                expect(deleted.status).toBe(200);
+                expect(store.refundedInStripe).toEqual(['sub_2']);
+                expect(store.ledger.get('sub_2')?.state).toBe('resolved');
+            });
+
+            it('keeps asking while the refund keeps failing, and keeps the debt written down', async () => {
+                await duplicateWithFailedRefund();
+
+                const again = await deliver(
+                    store,
+                    subscriptionEvent('evt_owed_again', 'customer.subscription.deleted', { id: 'sub_2' }),
+                );
+
+                expect(again.status).toBeGreaterThanOrEqual(500);
+                expect(again.body).toMatchObject({ error: 'duplicate_not_undone', retry: true });
+                expect(store.released).toContain('evt_owed_again');
+                expect(store.ledger.get('sub_2')).toMatchObject({ state: 'pending' });
+                // Every attempt is counted, which is how a human tells "Stripe
+                // had a bad minute" from "no delivery will ever manage this".
+                expect(store.ledger.get('sub_2')?.attempts).toBeGreaterThan(1);
+                // Nothing was applied off the back of it.
+                expect(store.subscriptions.has('sub_2')).toBe(false);
+            });
+
+            it('stops retrying a refund only a human can make, and says so in the ledger', async () => {
+                await deliver(store, subscriptionEvent('evt_human_one', 'customer.subscription.created'));
+                store.refundOutcome = 'needs_human';
+                const refused = await deliver(
+                    store,
+                    subscriptionEvent('evt_human_two', 'customer.subscription.created', { id: 'sub_2' }),
+                );
+
+                // Acknowledged, as before -- an unidentifiable payment reads the
+                // same way on every retry, and three days of 500s would bury the
+                // alert rather than surface it.
+                expect(refused.status).toBe(200);
+                expect(store.ledger.get('sub_2')?.state).toBe('needs_human');
+
+                // And nothing retries it, so a later event about that
+                // subscription is not held up by a debt no delivery can settle.
+                store.cancelDuplicateSubscription = async () => {
+                    throw new Error('should not be retried');
+                };
+                const later = await deliver(
+                    store,
+                    subscriptionEvent('evt_human_later', 'customer.subscription.deleted', { id: 'sub_2' }),
+                );
+                expect(later.status).toBe(200);
+            });
+
+            it('leaves the ledger clean when the first attempt settles it', async () => {
+                // The common case, and the one that must not become slower: no
+                // row left pending, and no retry asked for.
+                await deliver(store, subscriptionEvent('evt_clean_one', 'customer.subscription.created'));
+                const second = await deliver(
+                    store,
+                    subscriptionEvent('evt_clean_two', 'customer.subscription.created', { id: 'sub_2' }),
+                );
+
+                expect(second.status).toBe(200);
+                expect(store.ledger.get('sub_2')?.state).toBe('resolved');
+                expect(store.released).toEqual([]);
+                // A later event about it asks Stripe for nothing.
+                store.cancelDuplicateSubscription = async () => {
+                    throw new Error('should not be retried');
+                };
+                expect((await deliver(store, subscriptionEvent('evt_clean_later', 'invoice.paid'))).status).toBe(200);
+            });
+
+            it.each([
+                ['refunded', 'refunded' as const, 'resolved' as const],
+                // Caught while still trialing: billed nothing, so nothing is owed.
+                ['nothing was taken', 'nothing_to_refund' as const, 'resolved' as const],
+                ['only a human can refund it', 'needs_human' as const, 'needs_human' as const],
+                ['the refund failed', 'failed' as const, 'pending' as const],
+            ])('records %s as %s', (_name, refund, state) => {
+                expect(duplicateUndoStateOf({ stopped: true, refund, detail: '' })).toBe(state);
+            });
+
+            it('records a cancel that did not stop as still owed, whatever the refund did', () => {
+                // A duplicate that can still bill is not undone even if the
+                // money for the period already billed is back.
+                expect(duplicateUndoStateOf({ stopped: false, refund: 'refunded', detail: '' })).toBe('pending');
+            });
+        });
+
         it('does not stand in the way of a new subscription after a cancellation', async () => {
             await deliver(store, subscriptionEvent('evt_old', 'customer.subscription.created'));
             await deliver(store, subscriptionEvent('evt_old_gone', 'customer.subscription.deleted'));
@@ -1103,6 +1330,93 @@ describe('stripe event handling', () => {
             expect(STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER).toBe(`${LOCK_STALE_AFTER_MS / 60_000} minutes`);
         });
 
+        it('leases the write for longer than an invocation can run', () => {
+            // "An Edge Function cannot run for anything like two minutes" was
+            // the old comment, and it was wrong (QA round 4 review of #56,
+            // finding 3): a delivery stalled inside the Stripe read this lock is
+            // held across outlived its own lease.
+            expect(STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER_MS).toBeGreaterThan(EDGE_FUNCTION_WALL_CLOCK_MS);
+        });
+
+        it('refuses the write of a delivery whose lease was taken over', async () => {
+            // The whole of finding 3, in order. A reads `past_due` and stalls on
+            // its way to the write for longer than its own lease. B takes the
+            // lease over, reads the newer `active`, writes it, releases. A then
+            // writes -- and before the fix nothing refused it, because only the
+            // RELEASE ever checked whose lease it was and the staleness trigger
+            // cannot order two events Stripe stamped in the same second. The row
+            // ended up saying a customer whose card had just been fixed was
+            // past_due, until the next event about them a month or a year later.
+            store.remote.set('sub_1', remote(pastDueRemote));
+            const gate = latch();
+            const realUpsert = store.upsertSubscription;
+            let suspend = true;
+            store.upsertSubscription = async (row, holder) => {
+                if (suspend) {
+                    suspend = false;
+                    gate.arrive();
+                    await gate.released;
+                }
+                return realUpsert(row, holder);
+            };
+
+            const stalled = handleStripeEvent(
+                subscriptionEvent('evt_lease_a', 'customer.subscription.updated', pastDueRemote),
+                store,
+                PRICE_TIERS,
+            );
+            await gate.arrived;
+
+            // A is still inside its write when its lease goes stale.
+            store.clock += LOCK_STALE_AFTER_MS + 1_000;
+            store.remote.set('sub_1', remote(activeRemote));
+            const tookOver = await handleStripeEvent(
+                subscriptionEvent('evt_lease_b', 'customer.subscription.updated', activeRemote),
+                store,
+                PRICE_TIERS,
+            );
+
+            expect(tookOver.body).toMatchObject({ applied: 'subscription_upserted' });
+            expect(store.subscriptions.get('sub_1')?.status).toBe('active');
+
+            gate.release();
+            const stalledResult = await stalled;
+
+            // Nothing was written, so the 503 is honest and the redelivery can
+            // read Stripe again rather than re-applying a minutes-old answer.
+            expect(stalledResult.status).toBe(503);
+            expect(stalledResult.body).toMatchObject({ error: 'subscription_write_lease_lost', retry: true });
+            expect(store.writesRefusedWithoutLease).toEqual(['sub_1']);
+            expect(store.subscriptions.get('sub_1')?.status).toBe('active');
+            // The claim goes with it: a 503 Stripe will redeliver must not read
+            // as a duplicate when it does. (Only the call is asserted, not the
+            // row: `held` on this fake is one claim stamp for the whole store,
+            // where the real one closes over it per request, so across an
+            // overlap it is the second delivery's.)
+            expect(store.released).toEqual(['evt_lease_a']);
+            // And the trigger never fired: the two stamps are equal, which is
+            // exactly why the lease had to be checked at the write.
+            expect(store.staleWritesRefused).toEqual([]);
+        });
+
+        it('carries the holder into the write, so there is a lease to check', async () => {
+            // The mechanism the test above turns on: a write that did not carry
+            // the lease token could not be refused by one.
+            store.remote.set('sub_1', remote(activeRemote));
+            const seen: string[] = [];
+            const realUpsert = store.upsertSubscription;
+            store.upsertSubscription = async (row, holder) => {
+                seen.push(holder);
+                return realUpsert(row, holder);
+            };
+
+            await deliverLate(store, subscriptionEvent('evt_holder', 'customer.subscription.updated'));
+
+            expect(seen).toHaveLength(1);
+            // The token claim_subscription_write answered with, and no other.
+            expect(seen[0]).toBe(`lock-${store.locksTaken}`);
+        });
+
         it('refuses the second delivery and asks Stripe to redeliver it', async () => {
             // A reads `active` and is suspended on its way to the write. The
             // card then fails in Stripe, in the same second, and B arrives
@@ -1114,13 +1428,13 @@ describe('stripe event handling', () => {
             const gate = latch();
             const realUpsert = store.upsertSubscription;
             let suspend = true;
-            store.upsertSubscription = async (row) => {
+            store.upsertSubscription = async (row, holder) => {
                 if (suspend) {
                     suspend = false;
                     gate.arrive();
                     await gate.released;
                 }
-                return realUpsert(row);
+                return realUpsert(row, holder);
             };
 
             const first = handleStripeEvent(

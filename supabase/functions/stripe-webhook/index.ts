@@ -43,20 +43,16 @@ import { type SignatureFailure, verifyStripeSignature } from '../_shared/stripeS
  * All the decision logic lives in _shared/stripeEvents.ts so it can be unit
  * tested; this file is only I/O.
  */
-/** Postgres unique_violation. 23503, its foreign-key sibling, lives in deletedAccountBilling.ts. */
-const UNIQUE_VIOLATION = '23505';
-
-/** The partial unique index from migration 20261012120100. */
-const DUPLICATE_ENTITLING_INDEX = 'subscriptions_one_entitling_per_user_mode';
-
 /**
- * Whether a 23505 came from THAT index. PostgREST puts the constraint name in
- * `message` and sometimes repeats it in `details`; both are checked because
- * neither is a documented contract, and a miss here would turn a real bug into
- * an acknowledged event.
+ * What write_subscription_under_lock answers with (migration 20261013120101).
+ *
+ * The duplicate-index and deleted-account cases used to be recognised here by
+ * matching the constraint name inside PostgREST's error message -- neither a
+ * documented contract, and a miss would have turned a real bug into an
+ * acknowledged event. They are now named by the function, which reads the
+ * constraint name out of Postgres's own diagnostics.
  */
-const namesDuplicateEntitlingIndex = (error: { message?: string; details?: string | null }): boolean =>
-    `${error.message ?? ''} ${error.details ?? ''}`.includes(DUPLICATE_ENTITLING_INDEX);
+type SubscriptionWriteAnswer = 'written' | 'lost_lock' | 'duplicate' | 'missing_user';
 
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
@@ -261,44 +257,61 @@ Deno.serve(async (req) => {
                 throw new Error(`could not link customer ${customerId}: ${error.message}`);
             }
         },
-        upsertSubscription: async (row): Promise<SubscriptionWriteOutcome> => {
-            // The conflict target stays stripe_subscription_id, the primary key:
-            // it is what makes a redelivery update the subscription's own row
-            // instead of adding another. The new partial unique index is NOT a
-            // conflict target -- a second entitling subscription is not the same
-            // subscription, so there is no row for it to merge into.
-            const { error } = await admin
-                .from('subscriptions')
-                .upsert(
-                    { ...row, mode, updated_at: new Date().toISOString() },
-                    { onConflict: 'stripe_subscription_id' },
-                );
+        // The row is written by an RPC rather than by PostgREST's upsert because
+        // the write has to be CONDITIONAL on this delivery still holding the
+        // subscription's write lease, in the same statement (QA round 4 review of
+        // #56, finding 3). Before, only the release checked whose lease it was,
+        // so a delivery whose lease had gone stale -- a Stripe read slower than
+        // the lease, which is shorter than an invocation may run -- still wrote
+        // the state it had read minutes earlier, over the newer state the
+        // delivery that took the lease over had just written.
+        upsertSubscription: async (row, holder): Promise<SubscriptionWriteOutcome> => {
+            const { data, error } = await admin.rpc('write_subscription_under_lock', {
+                p_holder: holder,
+                p_subscription_id: row.stripe_subscription_id,
+                p_user: row.user_id,
+                p_mode: mode,
+                p_tier: row.tier,
+                p_status: row.status,
+                p_price_id: row.price_id,
+                p_current_period_end: row.current_period_end,
+                p_cancel_at_period_end: row.cancel_at_period_end,
+                p_last_event_created_at: row.last_event_created_at,
+            });
             if (error) {
-                // 23503 on the only FK here (user_id → auth.users): the account was
-                // deleted. Usually this is delete-account's own cancellation being
-                // reported; if the subscription can still bill, it is cancelled now.
-                // Either way there is no row to write.
-                if (error.code === FOREIGN_KEY_VIOLATION) {
+                // 23503 on the only FK here (user_id → auth.users) is answered by
+                // the function as `missing_user`, so an error that still carries
+                // it is one raised somewhere this does not model. Everything else
+                // is a failure the caller turns into a released claim and a 500.
+                throw new Error(`could not write subscription ${row.stripe_subscription_id}: ${error.message}`);
+            }
+            switch (data as SubscriptionWriteAnswer) {
+                case 'written':
+                    return { outcome: 'written' };
+                case 'lost_lock':
+                    return { outcome: 'lost_lock' };
+                case 'duplicate':
+                    // This user already holds an entitling subscription in this
+                    // account, so the double charge D1 describes has happened in
+                    // Stripe even though no row records it.
+                    return { outcome: 'duplicate', otherSubscriptionId: await entitlingSubscriptionId(row.user_id) };
+                case 'missing_user':
+                    // The account was deleted. Usually this is delete-account's
+                    // own cancellation being reported; if the subscription can
+                    // still bill, it is cancelled now. Either way there is no row
+                    // to write, and the event is finished with.
                     await stopDeletedAccountSubscription(
                         row.stripe_subscription_id,
                         row.status,
                         deletedAccountStripe,
                         (message) => console.log(message),
                     );
-                    return { duplicate: false };
-                }
-                // 23505 on the partial unique index and ON THAT INDEX ONLY: this
-                // user already holds an entitling subscription in this account,
-                // so the double charge D1 describes has happened in Stripe even
-                // though no row records it. Matched by constraint name rather
-                // than by code, because another 23505 here -- a primary key, a
-                // constraint added later -- is a bug this must not swallow.
-                if (error.code === UNIQUE_VIOLATION && namesDuplicateEntitlingIndex(error)) {
-                    return { duplicate: true, otherSubscriptionId: await entitlingSubscriptionId(row.user_id) };
-                }
-                throw new Error(`could not upsert subscription ${row.stripe_subscription_id}: ${error.message}`);
+                    return { outcome: 'written' };
+                default:
+                    throw new Error(
+                        `write_subscription_under_lock answered ${String(data)} for ${row.stripe_subscription_id}`,
+                    );
             }
-            return { duplicate: false };
         },
         fetchSubscription: async (subscriptionId) => {
             try {
@@ -378,6 +391,56 @@ Deno.serve(async (req) => {
             }
         },
         cancelDuplicateSubscription: (subscriptionId) => cancelAndRefundDuplicate(stripe, subscriptionId),
+        // The duplicate-undo ledger (migration 20261013120102). What it is for:
+        // a refund that fails asks Stripe to redeliver, but by then the cancel
+        // has succeeded, so the redelivery reads the subscription back as
+        // `canceled`, the duplicate index has nothing to refuse, and the refund
+        // is never attempted again -- with nothing left recording that it was
+        // owed (QA round 4 review of #56, finding 2).
+        pendingDuplicateUndo: async (subscriptionId) => {
+            const { data, error } = await admin.rpc('pending_duplicate_refund', {
+                p_subscription_id: subscriptionId,
+                p_mode: mode,
+            });
+            if (error) {
+                // Thrown rather than treated as "nothing owed": a read we could
+                // not make is not an answer, and the caller turns this into a
+                // released claim and a 500, so the next delivery asks again.
+                throw new Error(`could not read the duplicate-refund ledger for ${subscriptionId}: ${error.message}`);
+            }
+            const row = (data as Array<{ user_id?: string | null }> | null)?.[0];
+            return row ? { userId: row.user_id ?? null } : null;
+        },
+        recordPendingDuplicateUndo: async (subscriptionId, userId) => {
+            const { error } = await admin.rpc('record_duplicate_refund', {
+                p_subscription_id: subscriptionId,
+                p_mode: mode,
+                p_user: userId,
+            });
+            if (error) {
+                // Before the Stripe calls, and loudly: a duplicate we cannot
+                // write down is one we would lose track of the moment this
+                // invocation ends, which is the whole failure being fixed.
+                throw new Error(`could not record the duplicate refund owed on ${subscriptionId}: ${error.message}`);
+            }
+        },
+        settleDuplicateUndo: async (subscriptionId, state, undone) => {
+            const { error } = await admin.rpc('settle_duplicate_refund', {
+                p_subscription_id: subscriptionId,
+                p_mode: mode,
+                p_state: state,
+                p_stopped: undone.stopped,
+                p_refund: undone.refund,
+                p_detail: undone.detail,
+            });
+            if (error) {
+                // NOT thrown. The Stripe half is already done; a ledger row left
+                // `pending` is retried by the next delivery, and both halves are
+                // safe to repeat. Throwing would instead lose the 200 that says
+                // the duplicate was dealt with.
+                console.error(`could not settle the duplicate refund on ${subscriptionId}: ${error.message}`);
+            }
+        },
         releaseEvent: async (id) => {
             if (!claimedAt) {
                 return;

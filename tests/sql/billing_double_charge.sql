@@ -1,9 +1,14 @@
--- The double-charge guards (migrations 20261012120100 through 120105): at most
--- one entitling subscription per user per Stripe account, a webhook claim that
--- can be taken over when its delivery died and that says WHY it was refused, a
--- subscription write that cannot be overwritten by an older Stripe event, and
--- the two leased locks that serialise what no comparison can -- one checkout
--- attempt per buyer, one writer per subscription.
+-- The double-charge guards (migrations 20261012120100 through 120105, and
+-- 20261013120100 through 120102): at most one entitling subscription per user
+-- per Stripe account, a webhook claim that can be taken over when its delivery
+-- died and that says WHY it was refused, a subscription write that cannot be
+-- overwritten by an older Stripe event, the two leased locks that serialise what
+-- no comparison can -- one checkout attempt per buyer, one writer per
+-- subscription -- and the three things the QA round 4 review of #56 added to
+-- them: a checkout idempotency key made durable under its own lease before
+-- Stripe is asked to use it, a subscription write that refuses a lease it no
+-- longer holds, and a ledger that keeps a duplicate's unmade refund owed after
+-- the event that found it has been acknowledged.
 --
 -- Same harness and same reading as column_integrity.sql (see README.md): one
 -- transaction ending in ROLLBACK, every check a row in integrity_results, and a
@@ -102,7 +107,8 @@ $$;
 insert into auth.users (id, aud, role, email)
 values
     ('d1c00000-0000-4000-8000-0000000000a1', 'authenticated', 'authenticated', 'd1-teacher@example.invalid'),
-    ('d1c00000-0000-4000-8000-0000000000a2', 'authenticated', 'authenticated', 'd1-other@example.invalid');
+    ('d1c00000-0000-4000-8000-0000000000a2', 'authenticated', 'authenticated', 'd1-other@example.invalid'),
+    ('d1c00000-0000-4000-8000-0000000000a3', 'authenticated', 'authenticated', 'd1-third@example.invalid');
 
 select pg_temp.act_as ('service_role');
 
@@ -502,6 +508,149 @@ select pg_temp.holds (
 );
 
 -- ===========================================================================
+-- stage_checkout_attempt: the idempotency key, durable before Stripe sees it
+-- ===========================================================================
+-- What the lock above still left open (QA round 4 review of #56, finding 1).
+-- The attempt id the Stripe idempotency key is derived from lived in the Edge
+-- isolate's memory until finish_checkout_attempt recorded it, which is AFTER
+-- `checkout.sessions.create` returned. An isolate killed in that window left a
+-- payable session in Stripe that nothing here knew about, and the buyer's next
+-- attempt minted a fresh key -- so Stripe made them a second one. Staged first,
+-- the next attempt reads the key back and replays it, and Stripe answers with
+-- the session the dead attempt opened.
+--
+-- The other half of the same finding was the lease being SHORTER than an
+-- invocation may run. That is a number in checkoutFlow.ts
+-- (CHECKOUT_ATTEMPT_STALE_AFTER) and not something SQL can hold; what SQL holds
+-- is the consequence -- staging is scoped to `holder`, so a request whose lease
+-- was taken over cannot stage, and therefore never reaches the create at all,
+-- however the lease compares to the ceiling.
+insert into attempts (label, holder, session_id, price_id)
+select 'staging', holder, session_id, price_id
+from public.begin_checkout_attempt (
+    'd1c00000-0000-4000-8000-0000000000a3', 'live', interval '5 minutes'
+);
+
+select pg_temp.holds (
+    'staging records the key and the price while KEEPING the lock',
+    $q$select public.stage_checkout_attempt (
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'live',
+           (select holder from attempts where label = 'staging'),
+           '22222222-0000-4000-8000-000000000001',
+           'price_teacher_annual'
+       )$q$
+);
+
+select pg_temp.holds (
+    'the key is readable back, and the lock is still held',
+    $q$select attempt_id = '22222222-0000-4000-8000-000000000001'
+          and price_id = 'price_teacher_annual'
+          and session_id is null
+          and holder = (select holder from attempts where label = 'staging')
+       from public.checkout_attempts
+       where user_id = 'd1c00000-0000-4000-8000-0000000000a3' and mode = 'live'$q$
+);
+
+-- So an overlapping request is still refused the lock, which is the point of
+-- not releasing it: the Stripe create has not happened yet.
+select pg_temp.holds (
+    'and an overlapping request still gets nothing',
+    $q$select not exists (
+           select 1 from public.begin_checkout_attempt (
+               'd1c00000-0000-4000-8000-0000000000a3', 'live', interval '5 minutes'
+           )
+       )$q$
+);
+
+-- The recovery state the flow looks for: a key with no session. This is what
+-- layer 4b in checkoutFlow.ts replays rather than minting a new one.
+-- Pushed back rather than waited out, and by the clock rather than by the
+-- interval argument: `now()` is the transaction's start time, so `claimed_at <
+-- now() - interval '0 seconds'` is false for a lease this transaction took.
+update public.checkout_attempts
+set claimed_at = now() - interval '1 hour'
+where user_id = 'd1c00000-0000-4000-8000-0000000000a3' and mode = 'live';
+
+select pg_temp.holds (
+    'an attempt that staged and died leaves its key for the next one to replay',
+    $q$select attempt_id = '22222222-0000-4000-8000-000000000001' and session_id is null
+       from public.begin_checkout_attempt (
+           'd1c00000-0000-4000-8000-0000000000a3', 'live', interval '5 minutes'
+       )$q$
+);
+
+-- The lease takeover, which is the half that makes the lease length stop
+-- mattering: the first holder above has just been superseded by the one the
+-- stale-lease claim above issued.
+select pg_temp.holds (
+    'a request whose lease was taken over cannot stage, so it never creates',
+    $q$select not public.stage_checkout_attempt (
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'live',
+           (select holder from attempts where label = 'staging'),
+           '22222222-0000-4000-8000-000000000002',
+           'price_academy_annual'
+       )$q$
+);
+
+select pg_temp.holds (
+    'and the key it tried to stage was not written',
+    $q$select attempt_id = '22222222-0000-4000-8000-000000000001'
+       from public.checkout_attempts
+       where user_id = 'd1c00000-0000-4000-8000-0000000000a3' and mode = 'live'$q$
+);
+
+-- Staging clears the stored session on purpose: by then it has either been
+-- handed back to the buyer or expired, and leaving the id would point the next
+-- reuse at a session that is dead.
+select pg_temp.holds (
+    'staging clears a session id the previous attempt had recorded',
+    $q$select public.finish_checkout_attempt (
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'live',
+           (select holder from public.checkout_attempts
+            where user_id = 'd1c00000-0000-4000-8000-0000000000a3' and mode = 'live'),
+           '22222222-0000-4000-8000-000000000003',
+           'price_teacher_annual',
+           'cs_test_staged'
+       )$q$
+);
+
+insert into attempts (label, holder, session_id, price_id)
+select 'restaging', holder, session_id, price_id
+from public.begin_checkout_attempt (
+    'd1c00000-0000-4000-8000-0000000000a3', 'live', interval '5 minutes'
+);
+
+select pg_temp.holds (
+    'the next attempt is handed that session, then stages over it',
+    $q$select session_id = 'cs_test_staged' from attempts where label = 'restaging'$q$
+);
+
+-- Its own statement, and the result read in the next one: an uncorrelated
+-- subquery beside the function call is free to be evaluated before it (see the
+-- note above the claim_stripe_event section, where that cost a check its
+-- meaning).
+select pg_temp.holds (
+    'that attempt stages its own key over the stored session',
+    $q$select public.stage_checkout_attempt (
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'live',
+           (select holder from attempts where label = 'restaging'),
+           '22222222-0000-4000-8000-000000000004',
+           'price_teacher_annual'
+       )$q$
+);
+
+select pg_temp.holds (
+    'and after staging there is no session id left to reuse',
+    $q$select session_id is null and attempt_id = '22222222-0000-4000-8000-000000000004'
+       from public.checkout_attempts
+       where user_id = 'd1c00000-0000-4000-8000-0000000000a3' and mode = 'live'$q$
+);
+
+-- ===========================================================================
 -- claim_subscription_write: one writer per subscription
 -- ===========================================================================
 -- What the staleness trigger above cannot do (QA round 4, D3 follow-up): Stripe
@@ -550,6 +699,361 @@ update public.subscription_writes set claimed_at = now() - interval '1 hour' whe
 select pg_temp.holds (
     'a lease left by a dead isolate is taken over once stale',
     $q$select public.claim_subscription_write ('sub_d1_first', interval '2 minutes') is not null$q$
+);
+
+-- ===========================================================================
+-- write_subscription_under_lock: the lease, checked where the write happens
+-- ===========================================================================
+-- What the lease above still left open (QA round 4 review of #56, finding 3).
+-- Only release_subscription_write ever asked whose lease it was, so a delivery
+-- whose lease had gone stale -- the Stripe read this lock is held across can
+-- outlive it -- still wrote the state it had read minutes earlier, on top of the
+-- newer state written by the delivery that took the lease over. The staleness
+-- trigger cannot order those two: Stripe stamps `created` to the second and
+-- equal stamps have to pass. So the write itself is now conditional on the
+-- lease, in one statement.
+--
+-- One session cannot show that the `for update` closes the gap between the check
+-- and the write -- that needs two -- but it can show the condition itself, which
+-- is what was missing entirely.
+insert into writes (label, holder)
+values ('under', public.claim_subscription_write ('sub_d1_under', interval '5 minutes'));
+
+select pg_temp.holds (
+    'the lease holder writes the subscription',
+    $q$select public.write_subscription_under_lock (
+           (select holder from writes where label = 'under'),
+           'sub_d1_under',
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'test',
+           'teacher',
+           'past_due',
+           'price_teacher_annual',
+           now() + interval '1 month',
+           false,
+           '2026-10-12T17:04:09Z'
+       ) = 'written'$q$
+);
+
+select pg_temp.holds (
+    'and the row says what it wrote',
+    $q$select status = 'past_due' and tier = 'teacher' and mode = 'test'
+       from public.subscriptions where stripe_subscription_id = 'sub_d1_under'$q$
+);
+
+-- The race, as the review tells it: the stalled delivery comes back and tries
+-- to write the `past_due` it read, after the delivery that took its lease over
+-- has written `active`. Same Stripe `created` second, so the trigger has
+-- nothing to say about it.
+update public.subscription_writes
+set claimed_at = now() - interval '1 hour'
+where stripe_subscription_id = 'sub_d1_under';
+
+insert into writes (label, holder)
+values ('tookover', public.claim_subscription_write ('sub_d1_under', interval '5 minutes'));
+
+select pg_temp.holds (
+    'the delivery that took the lease over writes the newer state',
+    $q$select public.write_subscription_under_lock (
+           (select holder from writes where label = 'tookover'),
+           'sub_d1_under',
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'test',
+           'teacher',
+           'active',
+           'price_teacher_annual',
+           now() + interval '1 month',
+           false,
+           '2026-10-12T17:04:09Z'
+       ) = 'written'$q$
+);
+
+select pg_temp.holds (
+    'the stalled delivery is refused, because the lease is not its any more',
+    $q$select public.write_subscription_under_lock (
+           (select holder from writes where label = 'under'),
+           'sub_d1_under',
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'test',
+           'teacher',
+           'past_due',
+           'price_teacher_annual',
+           now() + interval '1 month',
+           false,
+           '2026-10-12T17:04:09Z'
+       ) = 'lost_lock'$q$
+);
+
+select pg_temp.holds (
+    'so the customer who fixed their card is still recorded as paid up',
+    $q$select status = 'active'
+       from public.subscriptions where stripe_subscription_id = 'sub_d1_under'$q$
+);
+
+-- A lease that was never taken at all is the same answer: there is no row to
+-- match, so nothing is written.
+select pg_temp.holds (
+    'a write for a subscription nobody holds the lease on is refused',
+    $q$select public.write_subscription_under_lock (
+           '00000000-0000-4000-8000-000000000999',
+           'sub_d1_unlocked',
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'test',
+           'teacher',
+           'active',
+           'price_teacher_annual',
+           now() + interval '1 month',
+           false,
+           null
+       ) = 'lost_lock'$q$
+);
+
+select pg_temp.holds (
+    'and no row appeared for it',
+    $q$select not exists (
+           select 1 from public.subscriptions where stripe_subscription_id = 'sub_d1_unlocked'
+       )$q$
+);
+
+-- The staleness trigger still wins where it can speak, through the function:
+-- an older event stamp is dropped and the answer is still `written`, exactly as
+-- the PostgREST upsert reported it as a success.
+select pg_temp.holds (
+    'an older event stamp is still dropped, and still answers written',
+    $q$select public.write_subscription_under_lock (
+           (select holder from writes where label = 'tookover'),
+           'sub_d1_under',
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'test',
+           'free',
+           'unpaid',
+           'price_teacher_annual',
+           now() + interval '1 month',
+           false,
+           '2026-10-12T17:04:08Z'
+       ) = 'written'$q$
+);
+
+select pg_temp.holds (
+    'and the row kept the newer state',
+    $q$select status = 'active'
+       from public.subscriptions where stripe_subscription_id = 'sub_d1_under'$q$
+);
+
+-- The duplicate index, named from Postgres's own diagnostics rather than from
+-- the text of an error message, which is what the Edge Function used to do.
+insert into writes (label, holder)
+values ('dup', public.claim_subscription_write ('sub_d1_dup', interval '5 minutes'));
+
+select pg_temp.holds (
+    'a second entitling subscription for one user and account answers duplicate',
+    $q$select public.write_subscription_under_lock (
+           (select holder from writes where label = 'dup'),
+           'sub_d1_dup',
+           'd1c00000-0000-4000-8000-0000000000a1',
+           'live',
+           'academy',
+           'active',
+           'price_academy_annual',
+           now() + interval '1 month',
+           false,
+           null
+       ) = 'duplicate'$q$
+);
+
+select pg_temp.holds (
+    'and the duplicate is NOT recorded',
+    $q$select not exists (
+           select 1 from public.subscriptions where stripe_subscription_id = 'sub_d1_dup'
+       )$q$
+);
+
+-- The deleted account, which is the only foreign key on this table.
+insert into writes (label, holder)
+values ('gone', public.claim_subscription_write ('sub_d1_gone', interval '5 minutes'));
+
+select pg_temp.holds (
+    'a subscription whose user was deleted answers missing_user',
+    $q$select public.write_subscription_under_lock (
+           (select holder from writes where label = 'gone'),
+           'sub_d1_gone',
+           'd1c00000-0000-4000-8000-0000000000ff',
+           'live',
+           'teacher',
+           'active',
+           'price_teacher_annual',
+           now() + interval '1 month',
+           false,
+           null
+       ) = 'missing_user'$q$
+);
+
+-- Any OTHER unique violation is re-raised rather than reported as a duplicate:
+-- swallowing one would turn a bug into an acknowledged event, and a Stripe
+-- retry every few hours against a constraint that will never yield. Proven with
+-- an index that exists only inside this transaction -- partial on a tier no row
+-- here holds, so it constrains nothing already written -- created as the owner,
+-- because service_role does not own the table.
+select pg_temp.act_as_server ();
+
+create unique index subscriptions_academy_once_d1 on public.subscriptions (user_id) where tier = 'academy';
+
+select pg_temp.act_as ('service_role');
+
+insert into writes (label, holder)
+values ('other_a', public.claim_subscription_write ('sub_d1_other_a', interval '5 minutes')),
+       ('other_b', public.claim_subscription_write ('sub_d1_other_b', interval '5 minutes'));
+
+select pg_temp.holds (
+    'the first row the throwaway index allows is written',
+    $q$select public.write_subscription_under_lock (
+           (select holder from writes where label = 'other_a'),
+           'sub_d1_other_a',
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'live',
+           'academy',
+           'canceled',
+           'price_academy_annual',
+           now() + interval '1 month',
+           false,
+           null
+       ) = 'written'$q$
+);
+
+-- `canceled`, so it is the throwaway index that refuses this and not
+-- subscriptions_one_entitling_per_user_mode.
+select pg_temp.refused (
+    'a unique violation on anything else is raised, not reported as duplicate',
+    $q$select public.write_subscription_under_lock (
+           (select holder from writes where label = 'other_b'),
+           'sub_d1_other_b',
+           'd1c00000-0000-4000-8000-0000000000a3',
+           'live',
+           'academy',
+           'canceled',
+           'price_academy_annual',
+           now() + interval '1 month',
+           false,
+           null
+       )$q$,
+    '23505',
+    '%subscriptions_academy_once_d1%'
+);
+
+-- ===========================================================================
+-- duplicate_refunds: money we owe, after the event that found it is gone
+-- ===========================================================================
+-- QA round 4 review of #56, finding 2. A refund that failed asked Stripe to
+-- redeliver -- but the CANCEL half had succeeded, so the redelivery read the
+-- duplicate back as `canceled`, the partial unique index had nothing to refuse,
+-- the row was written as an ordinary cancellation, and the event was
+-- acknowledged 200. The duplicate branch -- the only code that ever attempted a
+-- refund -- was never entered again, and nothing anywhere recorded that one was
+-- owed.
+select pg_temp.allowed (
+    'opening the debt leaves it pending, with the user it belongs to',
+    $q$select public.record_duplicate_refund (
+           'sub_d1_dup', 'live', 'd1c00000-0000-4000-8000-0000000000a1'
+       )$q$
+);
+
+select pg_temp.holds (
+    'and a later delivery can see that something is still owed',
+    $q$select user_id = 'd1c00000-0000-4000-8000-0000000000a1' and attempts = 0
+       from public.pending_duplicate_refund ('sub_d1_dup', 'live')$q$
+);
+
+-- Mode-keyed like billing_customers, and read mode-filtered, so a sandbox
+-- ledger row is never answered to a live delivery.
+select pg_temp.holds (
+    'the other Stripe account is not owed anything',
+    $q$select not exists (select 1 from public.pending_duplicate_refund ('sub_d1_dup', 'test'))$q$
+);
+
+select pg_temp.allowed (
+    'an attempt that failed keeps the debt open, and is counted',
+    $q$select public.settle_duplicate_refund (
+           'sub_d1_dup', 'live', 'pending', true, 'failed', 'stopped=true refund=failed'
+       )$q$
+);
+
+select pg_temp.holds (
+    'so the next delivery is still asked to retry it',
+    $q$select attempts = 1 from public.pending_duplicate_refund ('sub_d1_dup', 'live')$q$
+);
+
+select pg_temp.allowed (
+    'and a second opening does not reset the count',
+    $q$select public.record_duplicate_refund ('sub_d1_dup', 'live', null)$q$
+);
+
+select pg_temp.holds (
+    'the user it belongs to survives an opening that does not know it',
+    $q$select user_id = 'd1c00000-0000-4000-8000-0000000000a1' and attempts = 1
+       from public.pending_duplicate_refund ('sub_d1_dup', 'live')$q$
+);
+
+select pg_temp.allowed (
+    'a refund that landed closes the debt',
+    $q$select public.settle_duplicate_refund (
+           'sub_d1_dup', 'live', 'resolved', true, 'refunded', 'refunded re_test'
+       )$q$
+);
+
+select pg_temp.holds (
+    'so nothing is owed any more',
+    $q$select not exists (select 1 from public.pending_duplicate_refund ('sub_d1_dup', 'live'))$q$
+);
+
+-- A settled debt must not be reopened by another attempt at the same duplicate:
+-- the undo is idempotent, so re-attempting is harmless, but money we have handed
+-- back must not read as outstanding.
+select pg_temp.allowed (
+    'and reopening it does not make a refunded duplicate look unpaid',
+    $q$select public.record_duplicate_refund (
+           'sub_d1_dup', 'live', 'd1c00000-0000-4000-8000-0000000000a1'
+       )$q$
+);
+
+select pg_temp.holds (
+    'the ledger still says resolved',
+    $q$select state = 'resolved' and attempts = 2
+       from public.duplicate_refunds
+       where stripe_subscription_id = 'sub_d1_dup' and mode = 'live'$q$
+);
+
+-- `needs_human` is the one outcome nothing retries: a paid invoice whose payment
+-- cannot be identified reads the same way every time, so retrying would bury the
+-- alert rather than surface it. The row is what a human reconciles from.
+select pg_temp.allowed (
+    'a refund only a human can make is recorded and not retried',
+    $q$select public.record_duplicate_refund (
+           'sub_d1_human', 'live', 'd1c00000-0000-4000-8000-0000000000a2'
+       )$q$
+);
+
+select pg_temp.allowed (
+    'settled as needs_human',
+    $q$select public.settle_duplicate_refund (
+           'sub_d1_human', 'live', 'needs_human', true, 'needs_human', 'refund it by hand'
+       )$q$
+);
+
+select pg_temp.holds (
+    'and no delivery is asked to try it again',
+    $q$select not exists (select 1 from public.pending_duplicate_refund ('sub_d1_human', 'live'))$q$
+);
+
+-- `on delete set null`, not cascade: an account being deleted does not make a
+-- refund we never issued stop being owed, and this row is the only record of it.
+select pg_temp.holds (
+    'and deleting the account leaves the debt, with the subscription id to find it by',
+    $q$select exists (
+           select 1 from pg_constraint c
+           join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+           where c.conrelid = 'public.duplicate_refunds'::regclass
+             and c.contype = 'f' and a.attname = 'user_id' and c.confdeltype = 'n'
+       )$q$
 );
 
 -- ===========================================================================
@@ -630,6 +1134,65 @@ select pg_temp.refused (
 select pg_temp.refused (
     'or read the write locks table',
     $q$select count(*) from public.subscription_writes$q$,
+    '42501'
+);
+
+-- And the three things the review added, for the same reasons. A buyer who
+-- could stage could point their own lock at a key of their choosing; one who
+-- could write a subscription row could entitle themselves; one who could reach
+-- the refund ledger could make a debt we owe read as settled.
+select pg_temp.refused (
+    'nor stage a checkout idempotency key',
+    $q$select public.stage_checkout_attempt (
+           'd1c00000-0000-4000-8000-0000000000a1',
+           'live',
+           '00000000-0000-4000-8000-000000000999',
+           '22222222-0000-4000-8000-00000000009f',
+           'price_teacher_annual'
+       )$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor write a subscription row under a lease',
+    $q$select public.write_subscription_under_lock (
+           '00000000-0000-4000-8000-000000000999',
+           'sub_d1_forged',
+           'd1c00000-0000-4000-8000-0000000000a1',
+           'live',
+           'academy',
+           'active',
+           'price_academy_annual',
+           now() + interval '1 year',
+           false,
+           null
+       )$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor open a duplicate refund',
+    $q$select public.record_duplicate_refund ('sub_d1_dup', 'live', null)$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor settle one',
+    $q$select public.settle_duplicate_refund (
+           'sub_d1_dup', 'live', 'resolved', true, 'refunded', 'forged'
+       )$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor ask what is still owed',
+    $q$select * from public.pending_duplicate_refund ('sub_d1_dup', 'live')$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor read the refund ledger',
+    $q$select count(*) from public.duplicate_refunds$q$,
     '42501'
 );
 
