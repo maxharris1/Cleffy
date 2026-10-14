@@ -77,6 +77,16 @@ const TAG_CHIP_LIMIT = 8;
 const INLINE_TAG_LIMIT = 3;
 /** Quiet time after the last keystroke before the search goes to the server. */
 const SEARCH_DEBOUNCE_MS = 300;
+/**
+ * Rows rendered per task — a few screens' worth — whenever the list has more
+ * than are on the page: its first paint, and each "load more" page. A hundred
+ * cards in one commit took half a second with the CPU slowed 4x; nothing else
+ * could happen meanwhile, not the first covers starting, not a scroll. Plain
+ * updates, one slice per task, rather than a transition: rows entering the
+ * viewport update state as a reader scrolls, and each of those restarted a
+ * transition's render, so an appended page could wait seconds to land.
+ */
+const ROWS_PER_TASK = 24;
 /** How long the first cards get to queue their covers before the viewer prefetch looks. */
 const COVERS_FIRST_MS = 400;
 /** The viewer prefetch waits for the covers at most this long. */
@@ -490,6 +500,32 @@ export const LibraryPage = () => {
               : [{ label: null, documents: sorted }]
         : null;
 
+    // How many rows may be on the page; grows by ROWS_PER_TASK per task while
+    // the list has more (see ROWS_PER_TASK). Never shrinks, so a list that
+    // was whole once (a search cleared) comes back whole at once.
+    const [rowBudget, setRowBudget] = useState(ROWS_PER_TASK);
+    // Within the row budget; a group past it waits for a later slice.
+    let budgetLeft = rowBudget;
+    const shownGroups =
+        groups?.flatMap((group) => {
+            if (budgetLeft <= 0) {
+                return [];
+            }
+            const shown = group.documents.length <= budgetLeft ? group.documents : group.documents.slice(0, budgetLeft);
+            budgetLeft -= shown.length;
+            return [{ ...group, documents: shown }];
+        }) ?? null;
+    const allRowsShown = (groups ?? []).reduce((n, group) => n + group.documents.length, 0) <= rowBudget;
+    useEffect(() => {
+        if (allRowsShown) {
+            return;
+        }
+        // One slice per task: between them the browser paints, scrolls,
+        // delivers the cards' visibility and starts their covers.
+        const next = setTimeout(() => setRowBudget((budget) => budget + ROWS_PER_TASK), 0);
+        return () => clearTimeout(next);
+    }, [rowBudget, allRowsShown]);
+
     const canLoadMore = remoteResults ? remoteResults.hasMore : !serverMode && hasMore;
 
     /**
@@ -578,8 +614,11 @@ export const LibraryPage = () => {
     const sentinelRef = useRef<HTMLDivElement | null>(null);
     useEffect(() => {
         const node = sentinelRef.current;
+        // The sentinel mounts with the last slice of rows (allRowsShown), so
+        // that is also when there is first something to observe.
         if (
             !node ||
+            !allRowsShown ||
             !canLoadMore ||
             loadingMore ||
             loadMoreError ||
@@ -602,7 +641,7 @@ export const LibraryPage = () => {
         );
         observer.observe(node);
         return () => observer.disconnect();
-    }, [canLoadMore, loadingMore, loadMoreError, autoLoadPaused]);
+    }, [canLoadMore, loadingMore, loadMoreError, autoLoadPaused, allRowsShown]);
 
     const hasScores = documents !== null && documents.length > 0;
     // A shelf with scores on it is a score about to be opened: bring in the
@@ -1115,7 +1154,7 @@ export const LibraryPage = () => {
                                         : `No scores match “${query.trim()}”.`}
                             </p>
                         ) : (
-                            groups?.map((group) => (
+                            shownGroups?.map((group) => (
                                 <section key={group.label ?? 'all'}>
                                     {group.label ? (
                                         <h3 className="mt-7 border-b border-stone-300/50 pb-1.5 text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
@@ -1135,7 +1174,7 @@ export const LibraryPage = () => {
                                                     actions={actions}
                                                 />
                                             ))}
-                                            {showAddTile ? (
+                                            {showAddTile && allRowsShown ? (
                                                 <AddScoreTile
                                                     uploading={uploading}
                                                     quotaExhausted={quotaExhausted}
@@ -1163,7 +1202,9 @@ export const LibraryPage = () => {
                             ))
                         )}
 
-                        {canLoadMore ? (
+                        {/* Not before every row is rendered: a sentinel under a
+                            partial list would ask for the next page at once. */}
+                        {canLoadMore && allRowsShown ? (
                             <div className="mt-8 flex flex-col items-center gap-2">
                                 <div ref={sentinelRef} aria-hidden="true" />
                                 {loadMoreError ? (
