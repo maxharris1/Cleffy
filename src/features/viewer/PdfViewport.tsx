@@ -891,7 +891,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                     {overlayMode === 'history' ? (
                         <div
                             data-ui-overlay
-                            className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center"
+                            // Phones: below the pager/zoom strip (PHONE_CONTROLS_STRIP), not over it.
+                            className="pointer-events-none absolute inset-x-0 top-14 z-20 flex justify-center sm:top-3"
                         >
                             <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950 shadow">
                                 <span>Viewing day starting point</span>
