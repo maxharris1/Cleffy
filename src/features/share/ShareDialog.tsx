@@ -310,14 +310,15 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                             type="button"
                                             disabled={expired}
                                             onClick={() => void copy(link.token)}
-                                            className="rounded px-2 py-1 text-xs text-accent transition hover:bg-accent-soft disabled:opacity-40"
+                                            className="rounded px-2 py-1 text-xs text-accent transition hover:bg-accent-soft disabled:opacity-40 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                                         >
                                             {copiedToken === link.token ? 'Copied!' : 'Copy'}
                                         </button>
+                                        {/* On touch, extra room between Copy and the destructive Revoke. */}
                                         <button
                                             type="button"
                                             onClick={() => setRevokeTarget(link)}
-                                            className="rounded px-2 py-1 text-xs text-danger transition hover:bg-red-50"
+                                            className="rounded px-2 py-1 text-xs text-danger transition hover:bg-red-50 pointer-coarse:ml-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                                         >
                                             Revoke
                                         </button>
