@@ -11,6 +11,7 @@ import { isImslpImportCancelled, type ImslpDownloadStage } from '@/features/imsl
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import {
     fetchLibraryBootstrap,
+    recentLibraryBootstrap,
     prependCachedLibraryDocument,
     readCachedLibraryList,
     type LibraryListSnapshot,
@@ -251,6 +252,15 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 refreshCap(docs);
             }
         };
+        // The answer that brought these entitlements usually just landed:
+        // count from it rather than ask for the whole library again.
+        const known = recentLibraryBootstrap(userId);
+        if (known) {
+            apply(known.documents);
+            return () => {
+                cancelled = true;
+            };
+        }
         void readCachedLibraryList(userId)
             .then((snap) => {
                 if (snap) {
