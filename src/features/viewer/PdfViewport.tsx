@@ -762,7 +762,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         return () => window.removeEventListener('keydown', onKeyDown);
     }, [annotationStore, turnPage]);
 
-    const commitText = (text: string) => {
+    const commitText = (text: string, at?: { nx: number; ny: number }) => {
         if (!textIntent || textIntentHandled.current) {
             return;
         }
@@ -779,7 +779,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                 return;
             }
             // Live payload keeps a font change made while this editor is open.
-            const next = editedTextPayload(base, trimmed);
+            const edited = editedTextPayload(base, trimmed);
+            // Typed in an editor moved in from the edge: the note goes where it was typed.
+            const next = at && typeof edited === 'object' ? { ...edited, x: at.nx, y: at.ny } : edited;
             if (next === 'delete') {
                 void annotationStore.delete(existing.id);
             } else if (next !== 'unchanged') {
@@ -798,7 +800,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
             page: textIntent.pageIndex,
             kind: 'text',
             color: useViewerStore.getState().color,
-            payload: { x: textIntent.nx, y: textIntent.ny, text: trimmed, size: DEFAULT_TEXT_SIZE },
+            payload: { x: at?.nx ?? textIntent.nx, y: at?.ny ?? textIntent.ny, text: trimmed, size: DEFAULT_TEXT_SIZE },
             createdBy: null,
             createdAt: now,
             updatedAt: now,

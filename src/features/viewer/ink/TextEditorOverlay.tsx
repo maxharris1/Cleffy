@@ -4,7 +4,13 @@ import { pagePointToViewport } from '@/features/viewer/geometry';
 import type { PageLayout } from '@/features/viewer/geometry';
 import type { TextIntent } from '@/features/viewer/ink/InkController';
 import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
-import { TEXT_LINE_HEIGHT, textDrawSpec, textForEditor, textWrapEm } from '@/features/viewer/ink/musicFont';
+import {
+    hardWrapText,
+    TEXT_LINE_HEIGHT,
+    textDrawSpec,
+    textForEditor,
+    textWrapEm,
+} from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { isTextPayload, MAX_TEXT_NOTE_CHARS } from '@/types/models';
 import type { ViewState } from '@/types/models';
@@ -21,8 +27,11 @@ export interface TextEditorOverlayProps {
     bottomInset?: number;
     /** Also keep clear of the safe-area inset (floating controls sit above it). */
     bottomInsetSafe?: boolean;
-    /** Commit the edit. Empty text on an existing note deletes it. */
-    onCommit: (text: string) => void;
+    /**
+     * Commit the edit. Empty text on an existing note deletes it. `at` is set
+     * when the editor sat away from the note's point (moved in from an edge).
+     */
+    onCommit: (text: string, at?: { nx: number; ny: number }) => void;
     onCancel: () => void;
 }
 
@@ -79,8 +88,10 @@ export const TextEditorOverlay = ({
     // The box sits back by its padding and border, so the typed glyphs start
     // where the committed note will draw them. Sizes below are on screen.
     const anchor = pagePointToViewport(view, layout, nx, ny);
-    let left = anchor.x - (BOX_EXTRA / 2) * k;
-    let top = anchor.y - (BOX_EXTRA / 2) * k;
+    const anchorLeft = anchor.x - (BOX_EXTRA / 2) * k;
+    const anchorTop = anchor.y - (BOX_EXTRA / 2) * k;
+    let left = anchorLeft;
+    let top = anchorTop;
     // As wide as the committed note may run (up to the page's right edge, see
     // textNoteLines), so the text wraps where it will be drawn — but never
     // past the viewer, where typing would scroll the score sideways. When
@@ -104,6 +115,34 @@ export const TextEditorOverlay = ({
         const safe = bottomInsetSafe ? ' - var(--safe-bottom)' : '';
         maxHeight = `max(${MIN_EDITOR_HEIGHT / k}px, calc((${bottom - top}px${safe}) / ${k}))`;
     }
+
+    // Zoomed in near an edge the box is narrower than the note's page room,
+    // or moved: commit what was typed where it was typed, with the box's line
+    // breaks, rather than rewrapping it at the page edge off to the right.
+    const commit = (value: string) => {
+        // Narrower than the page room at the note's point, or moved left into
+        // more of it: either way the page would wrap it wider than the box.
+        const narrowed = width < wantWidth - 0.5 || left < anchorLeft - 0.5;
+        const moved = Math.abs(left - anchorLeft) > 0.5 || Math.abs(top - anchorTop) > 0.5;
+        const original = existingPayload ? textForEditor(existingPayload.text) : '';
+        if ((!narrowed && !moved) || value === original || value.trim() === '') {
+            onCommit(value);
+            return;
+        }
+        // The inverse of pagePointToViewport, at the box's text origin.
+        const at = {
+            nx: ((view.scrollX + left + (BOX_EXTRA / 2) * k) / view.scale - layout.left) / layout.width,
+            ny: ((view.scrollY + top + (BOX_EXTRA / 2) * k) / view.scale - layout.top) / layout.height,
+        };
+        const boxEm = (width - BOX_EXTRA * k) / fontPx;
+        const prose = {
+            font: proseFace ? styledPayload?.font : undefined,
+            bold: styledPayload?.bold,
+            italic: styledPayload?.italic,
+        };
+        const wrapped = hardWrapText({ x: at.nx, y: at.ny, size, text: value.trim(), ...prose }, boxEm);
+        onCommit(narrowed ? wrapped : value, at);
+    };
 
     // Grow with the text instead of scrolling it inside a fixed two rows.
     const fitHeight = (el: HTMLTextAreaElement) => {
@@ -151,7 +190,7 @@ export const TextEditorOverlay = ({
             onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
-                    onCommit(e.currentTarget.value);
+                    commit(e.currentTarget.value);
                 } else if (e.key === 'Escape') {
                     e.preventDefault();
                     onCancel();
@@ -159,7 +198,7 @@ export const TextEditorOverlay = ({
                 e.stopPropagation();
             }}
             onInput={(e) => fitHeight(e.currentTarget)}
-            onBlur={(e) => onCommit(e.currentTarget.value)}
+            onBlur={(e) => commit(e.currentTarget.value)}
             onPointerDown={(e) => e.stopPropagation()}
         />
     );

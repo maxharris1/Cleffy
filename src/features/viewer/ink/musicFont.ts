@@ -280,16 +280,49 @@ const graphemes = (text: string): string[] =>
         ? Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (s) => s.segment)
         : Array.from(text);
 
+/** Graphemes a line may break before or after without a space (emoji, CJK), as the browser does. */
+const BREAK_AROUND =
+    /[\p{Extended_Pictographic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+/** Closing and trailing punctuation never starts a line; opening punctuation never ends one. */
+const NO_BREAK_BEFORE = /^[\p{Pe}\p{Pf}\p{Po}]/u;
+const NO_BREAK_AFTER = /[\p{Ps}\p{Pi}]$/u;
+
 /**
- * Greedy wrap of one line at `maxEm`: breaks between words, and inside a word
- * (by grapheme, so an emoji or accented letter is never split) only when the
- * word alone is wider than the line — the same way the editor's textarea wraps.
+ * A space-free run cut at the places the browser may also break it: around
+ * emoji and CJK, and after a hyphen inside a word (`a-b`, not `-5`).
+ */
+const breakSegments = (word: string): string[] => {
+    const parts = graphemes(word);
+    const out: string[] = [];
+    let current = '';
+    parts.forEach((g, i) => {
+        const prev = parts[i - 1] ?? '';
+        const opportunity =
+            BREAK_AROUND.test(g) || BREAK_AROUND.test(prev) || (prev === '-' && i >= 2 && g !== '-' && !/^\d/.test(g));
+        if (current !== '' && opportunity && !NO_BREAK_BEFORE.test(g) && !NO_BREAK_AFTER.test(prev)) {
+            out.push(current);
+            current = '';
+        }
+        current += g;
+    });
+    if (current !== '') {
+        out.push(current);
+    }
+    return out;
+};
+
+/**
+ * Greedy wrap of one line at `maxEm`: breaks between words (and around emoji
+ * and CJK, see breakSegments), and inside a word (by grapheme, so an emoji or
+ * accented letter is never split) only when the word alone is wider than the
+ * line — the same way the editor's textarea wraps.
  */
 const wrapLine = (line: string, maxEm: number, measureEm: (s: string) => number): string[] => {
     const fits = (s: string) => measureEm(s) <= maxEm;
     const out: string[] = [];
     let current = '';
-    for (const token of line.split(/(\s+)/)) {
+    const tokens = line.split(/(\s+)/).flatMap((t) => (t.trim() === '' ? [t] : breakSegments(t)));
+    for (const token of tokens) {
         if (token === '') {
             continue;
         }
@@ -346,6 +379,23 @@ export const textNoteLines = (
     }
     const maxEm = textWrapEm(payload);
     return lines.flatMap((line) => wrapLine(line, maxEm, measureEm));
+};
+
+/**
+ * `text` with the lines it wraps to at `maxEm` (instead of at the page edge)
+ * made explicit, for a note typed into an editor narrower than the page room
+ * so it keeps the breaks the writer saw. Music glyphs come back unchanged.
+ */
+export const hardWrapText = (payload: TextPayload, maxEm: number): string => {
+    const spec = textDrawSpec(payload.text, payload.hw === 1, payload);
+    if (spec.music) {
+        return payload.text;
+    }
+    const measureEm = (s: string) => advanceEm(s, spec);
+    return spec.glyphs
+        .split('\n')
+        .flatMap((line) => wrapLine(line, maxEm, measureEm))
+        .join('\n');
 };
 
 /**
