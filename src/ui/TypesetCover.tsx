@@ -145,7 +145,10 @@ export const TypesetCover = ({
             <div className="absolute inset-[3px] rounded-[2px] border-[0.5px] border-ink/10" />
         </div>
         <div className="min-h-0">
-            <p className="font-display text-sm font-semibold leading-snug text-stone-800 line-clamp-4">{title}</p>
+            {/* A word wider than the cover breaks (hyphenated where the browser can) instead of being cut mid-glyph. */}
+            <p className="font-display text-sm font-semibold leading-snug text-stone-800 hyphens-auto line-clamp-4 [overflow-wrap:anywhere]">
+                {title}
+            </p>
             <svg viewBox="0 0 46 8" className="mx-auto mt-2.5 w-11 text-ink/25" aria-hidden="true">
                 <path d="M0 4h16M30 4h16" stroke="currentColor" strokeWidth={0.7} />
                 <path d="M23 0.8 26 4l-3 3.2L20 4z" fill="currentColor" />

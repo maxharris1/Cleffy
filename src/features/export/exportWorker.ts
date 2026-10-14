@@ -19,6 +19,7 @@ import {
     pdfFallbackGlyphs,
     SERIF_FONT_FAMILY,
     textDrawSpec,
+    textNoteLines,
     type TextDrawSpec,
 } from '@/features/viewer/ink/musicFont';
 import { FREEHAND_OPTIONS, getSvgPathFromStroke, HIGHLIGHT_ALPHA } from '@/features/viewer/ink/strokeRenderer';
@@ -156,7 +157,18 @@ export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: Expo
             }
             const ascent = useMusic ? music!.ascent : STANDARD_ASCENT;
             const source = useMusic ? spec.glyphs : pdfFallbackGlyphs(text, spec);
-            const lines = (useMusic ? source : sanitizeWinAnsi(source)).split('\n');
+            const drawable = useMusic ? source : sanitizeWinAnsi(source);
+            // Prose wraps at the page's right edge exactly as on screen (UI-13),
+            // measured with the face the PDF actually draws in.
+            const lines = spec.music
+                ? drawable.split('\n')
+                : textNoteLines(annotation.payload, { ...spec, glyphs: drawable }, (s) => {
+                      try {
+                          return drawFont.widthOfTextAtSize(s, 1);
+                      } catch {
+                          return Array.from(s).length * 0.55;
+                      }
+                  });
             lines.forEach((line, i) => {
                 // Anchor each line in DISPLAY space (top-left + baseline drop),
                 // then map — handles every page rotation uniformly.

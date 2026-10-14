@@ -1,7 +1,7 @@
 import { getStroke } from 'perfect-freehand';
 
 import { canvasFont, SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
-import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec } from '@/features/viewer/ink/musicFont';
+import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec, textNoteLines } from '@/features/viewer/ink/musicFont';
 import { isTextPayload, type Annotation, type StrokePayload } from '@/types/models';
 
 /** Ink alpha/composite for the highlighter so it reads over dark scans. */
@@ -163,7 +163,8 @@ export const drawAnnotation = (
         ctx.fillStyle = annotation.color;
         ctx.font = canvasFont(spec, fontPx);
         ctx.textBaseline = 'top';
-        const lines = spec.glyphs.split('\n');
+        // Wrapped at the page's right edge, as the editor wrapped it.
+        const lines = textNoteLines(annotation.payload, spec);
         lines.forEach((line, i) => {
             ctx.fillText(line, x * pageWpx, y * pageHpx + i * fontPx * 1.25);
         });

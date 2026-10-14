@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { useSession } from '@/features/auth/session';
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
@@ -26,6 +26,9 @@ import { buttonClassName } from '@/ui/classNames';
 const PricingDialog = lazy(() =>
     import('@/features/billing/PricingDialog').then((m) => ({ default: m.PricingDialog })),
 );
+
+/** Matches the 0.75rem the menu's max width leaves on each side. */
+const MENU_GUTTER = 12;
 
 interface ShareExportMenuProps {
     docId: string;
@@ -91,6 +94,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
     const [notSent, setNotSent] = useState(false);
     const [pricingOpen, setPricingOpen] = useState(false);
     const rootRef = useRef<HTMLDivElement | null>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
     const focusedPageIndex = useViewerStore((s) => s.focusedPageIndex);
     const { session } = useSession();
 
@@ -261,6 +265,27 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
 
     const pageLabel = focusedPageIndex + 1;
     const status = refusal ?? (notSent ? EXPORT_NOT_SENT_MESSAGE : null);
+    const wide = Boolean(limit || status || error);
+
+    // The menu hangs from the button's right edge, which on a phone sits near
+    // the middle of the toolbar: widened for a notice it would run off the
+    // left of the screen, so nudge it back inside the gutter.
+    useLayoutEffect(() => {
+        const menu = menuRef.current;
+        if (!open || !menu) {
+            return;
+        }
+        const place = () => {
+            menu.style.transform = '';
+            const { left } = menu.getBoundingClientRect();
+            if (left < MENU_GUTTER) {
+                menu.style.transform = `translateX(${MENU_GUTTER - left}px)`;
+            }
+        };
+        place();
+        window.addEventListener('resize', place);
+        return () => window.removeEventListener('resize', place);
+    }, [open, wide]);
 
     return (
         <div ref={rootRef} className="relative">
@@ -285,8 +310,9 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
             </button>
             {open ? (
                 <div
-                    className={`absolute right-0 z-30 mt-1 rounded-xl border border-stone-200 bg-white py-1 shadow-lg ${
-                        limit || status || error ? 'w-80' : 'w-64'
+                    ref={menuRef}
+                    className={`absolute right-0 z-30 mt-1 max-w-[calc(100vw-1.5rem)] rounded-xl border border-stone-200 bg-white py-1 shadow-lg ${
+                        wide ? 'w-80' : 'w-64'
                     }`}
                 >
                     {/* The notice is a sibling of the menu, not an item in it. */}

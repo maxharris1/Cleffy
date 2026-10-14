@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
 
 import { RequireRegistered } from '@/features/auth/AuthGates';
@@ -138,6 +138,24 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const [capReached, setCapReached] = useState(false);
     const [pricingOpen, setPricingOpen] = useState(false);
     const { entitlements } = useEntitlements(userId, { viaLibraryBootstrap: true });
+    const headerRef = useRef<HTMLElement | null>(null);
+    const [barHeight, setBarHeight] = useState<number | null>(null);
+
+    // Publish the bar's real height to whatever sticks below it (the IMSLP
+    // search bar). The rem fallback in index.css can't know the safe-area
+    // inset the bar pads itself with, or how its nav row wraps, so a guess
+    // left a slit (or, on a notched phone, an overlap) under it.
+    useEffect(() => {
+        const header = headerRef.current;
+        if (!header || typeof ResizeObserver === 'undefined') {
+            return;
+        }
+        const measure = () => setBarHeight(header.getBoundingClientRect().height);
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(header);
+        return () => observer.disconnect();
+    }, []);
     const tier = entitlements?.tier ?? 'free';
     // Hidden until the plan is known rather than shown and withdrawn: entitlements
     // come back from the Dexie cache on any repeat visit, so the wait is a frame,
@@ -388,7 +406,10 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         <main className="paper-page min-h-full">
             {/* Translucent so the paper wash reads through; sticky so upload
                 progress and the account menu stay reachable from any page. */}
-            <header className="sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur">
+            <header
+                ref={headerRef}
+                className="sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur"
+            >
                 <div
                     className={`${SHELL_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-6 sm:py-0`}
                 >
@@ -467,7 +488,10 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             </header>
 
             <div className={`library-layout ${SHELL_CONTAINER} py-8 lg:py-10`}>
-                <div className="library-shell min-w-0">
+                <div
+                    className="library-shell min-w-0"
+                    style={barHeight ? ({ '--shell-bar-height': `${barHeight}px` } as CSSProperties) : undefined}
+                >
                     <Outlet context={outlet} />
                 </div>
             </div>

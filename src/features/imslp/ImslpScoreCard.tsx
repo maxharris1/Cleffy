@@ -58,7 +58,7 @@ export const ImslpScoreCard = ({
                   `display: -webkit-box`, and the two utilities set the same
                   property (see ScoreCard's identical note).
                 */}
-                <span className="text-sm font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover">
+                <span className="text-sm font-medium text-stone-800 transition line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover">
                     {title}
                 </span>
                 {composer ? <span className="mt-0.5 block truncate text-xs text-stone-500">{composer}</span> : null}
@@ -75,7 +75,7 @@ export const ImslpScoreCard = ({
                     </span>
                 ) : null}
                 {description ? (
-                    <span className="mt-1 block text-xs leading-relaxed text-stone-500/90 line-clamp-2">
+                    <span className="mt-1 block text-xs leading-relaxed text-stone-500/90 line-clamp-2 [overflow-wrap:anywhere]">
                         {description}
                     </span>
                 ) : null}

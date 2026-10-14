@@ -41,7 +41,7 @@ import { HandwritingController } from '@/features/viewer/ink/handwriting/handwri
 import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
 import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
-import { editedTextPayload } from '@/features/viewer/ink/musicFont';
+import { editedTextPayload, MIN_TEXT_NOTE_WIDTH, TEXT_NOTE_EDGE } from '@/features/viewer/ink/musicFont';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
@@ -62,7 +62,7 @@ import {
 } from '@/sync/syncEngine';
 import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
-import { clampTextNote, isTextPayload } from '@/types/models';
+import { clampTextNote, isTextPayload, type ViewState } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
@@ -82,6 +82,19 @@ const RENDER_SETTLE_MS = 200;
 
 /** Default text-note size as a fraction of page width. */
 const DEFAULT_TEXT_SIZE = 0.018;
+
+/** Tailwind's `sm` breakpoint (px): below it the viewer uses its phone layout. */
+const SM_BREAKPOINT = 640;
+
+/**
+ * Phones: the strip (px) the pager and zoom row cover at the top of the
+ * viewport (top-2 + one 44px control + 4px), kept clear of page 1 the way a
+ * toolbar docked at the top is.
+ */
+const PHONE_CONTROLS_STRIP = 56;
+
+/** Larger screens: the strip (px) the pager and zoom row cover above the bottom safe area. */
+const FLOATING_CONTROLS_STRIP = 60;
 
 /**
  * A tap in the left/right margin strip of the viewport turns the page (the
@@ -176,7 +189,7 @@ export interface PdfViewportProps {
 export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, authorId, sync }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
     const view = useViewerStore((s) => s.view);
-    const pageColumns = useViewerStore((s) => s.pageColumns);
+    const preferredColumns = useViewerStore((s) => s.pageColumns);
     const spreadCover = useViewerStore((s) => s.spreadCover);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const inkRef = useRef<InkController | null>(null);
@@ -193,6 +206,13 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
     useLockedPageZoom();
     /** Viewport the current view was last fitted/re-fitted for. */
     const fittedViewportRef = useRef<ViewportSize | null>(null);
+    /** Columns of the layout that view was in (a rotation across `sm` changes them). */
+    const fittedColumnsRef = useRef<PageColumns | null>(null);
+
+    // Two pages side by side would be thumbnails on a phone: one column there,
+    // without touching the saved preference (a rotation back brings it back).
+    const narrow = viewportSize.width > 0 && viewportSize.width < SM_BREAKPOINT;
+    const pageColumns: PageColumns = narrow ? 1 : preferredColumns;
 
     const layout: DocumentLayout = useMemo(
         () => computeDocumentLayout(pageSizes, pageColumns, spreadCover),
@@ -235,10 +255,22 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
     // the document and reports (child effects first) in the same commit as the
     // first fit, which must already see it. Syncing it from state in the effect
     // above would put the stale value back before the fit reads it.
-    const reportObscured = useCallback((edges: ObscuredEdges) => {
+    // Phones add the pager/zoom strip to the top edge (see PHONE_CONTROLS_STRIP).
+    const toolbarEdgesRef = useRef<ObscuredEdges>(NO_OBSCURED);
+    const controlsStripRef = useRef(0);
+    const applyObscured = useCallback(() => {
+        const toolbar = toolbarEdgesRef.current;
+        const edges = { top: Math.max(toolbar.top, controlsStripRef.current), bottom: toolbar.bottom };
         obscuredRef.current = edges;
         setObscured((prev) => (prev.top === edges.top && prev.bottom === edges.bottom ? prev : edges));
     }, []);
+    const reportObscured = useCallback(
+        (edges: ObscuredEdges) => {
+            toolbarEdgesRef.current = edges;
+            applyObscured();
+        },
+        [applyObscured],
+    );
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
     // These live in state, not refs: the overlay divs only exist once the PDF
@@ -292,13 +324,16 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         const measure = () => {
             const width = el.clientWidth;
             const height = el.clientHeight;
+            // Before the size reaches state, so the first fit already sees it.
+            controlsStripRef.current = width > 0 && width < SM_BREAKPOINT ? PHONE_CONTROLS_STRIP : 0;
+            applyObscured();
             setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
         };
         const observer = new ResizeObserver(measure);
         observer.observe(el);
         measure();
         return () => observer.disconnect();
-    }, []);
+    }, [applyObscured]);
 
     // Fit the widest page to the viewport width once the document is ready.
     useEffect(() => {
@@ -307,6 +342,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         }
         didFitRef.current = true;
         fittedViewportRef.current = viewportSize;
+        fittedColumnsRef.current = pageColumns;
         const scale = fitPageWidthScale(layout, viewportSize.width);
         // Start with the top of page 1 below a toolbar docked at the top.
         const edges = obscuredRef.current;
@@ -319,7 +355,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         );
         useViewerStore.getState().resetView(fitted);
         setRenderScale(scale);
-    }, [status, viewportSize, layout]);
+    }, [status, viewportSize, layout, pageColumns]);
 
     // Rotation (or any later resize): keep the zoom RELATIVE to fit-width, so a
     // spread fitted in landscape does not arrive in portrait 2× too large (and
@@ -336,21 +372,37 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         }
         fittedViewportRef.current = viewportSize;
         const { view: v, setView } = useViewerStore.getState();
-        const ratio = fitPageWidthScale(layout, viewportSize.width) / fitPageWidthScale(layout, prev.width);
-        const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * ratio));
-        const cx = (v.scrollX + prev.width / 2) / v.scale;
-        const cy = (v.scrollY + prev.height / 2) / v.scale;
-        setView(
-            clampScroll(
-                { scale, scrollX: cx * scale - viewportSize.width / 2, scrollY: cy * scale - viewportSize.height / 2 },
-                layout,
-                viewportSize.width,
-                viewportSize.height,
-                obscuredRef.current,
-            ),
-        );
-        setRenderScale(scale);
-    }, [viewportSize, layout]);
+        const prevColumns = fittedColumnsRef.current ?? pageColumns;
+        fittedColumnsRef.current = pageColumns;
+        let next: ViewState;
+        if (prevColumns !== pageColumns) {
+            // A rotation across `sm` switched between one and two columns: the
+            // page that was being read starts the view, as a layout switch
+            // does, at the same multiple of fit-width.
+            const prevLayout = computeDocumentLayout(pageSizes, prevColumns, spreadCover);
+            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts);
+            const relative = v.scale / fitPageWidthScale(prevLayout, prev.width);
+            const scale = Math.min(
+                MAX_SCALE,
+                Math.max(MIN_SCALE, fitPageWidthScale(layout, viewportSize.width) * relative),
+            );
+            const top = layout.layouts[focused]?.top ?? PAGE_GAP;
+            next = { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - obscuredRef.current.top };
+        } else {
+            const ratio = fitPageWidthScale(layout, viewportSize.width) / fitPageWidthScale(layout, prev.width);
+            const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * ratio));
+            const cx = (v.scrollX + prev.width / 2) / v.scale;
+            const cy = (v.scrollY + prev.height / 2) / v.scale;
+            next = {
+                scale,
+                scrollX: cx * scale - viewportSize.width / 2,
+                scrollY: cy * scale - viewportSize.height / 2,
+            };
+        }
+        next = clampScroll(next, layout, viewportSize.width, viewportSize.height, obscuredRef.current);
+        setView(next);
+        setRenderScale(next.scale);
+    }, [viewportSize, layout, pageColumns, pageSizes, spreadCover]);
 
     // Page sizes changing under a loaded document (a streamed first open
     // corrects the pages whose size differs from page 1's as pdf.js reads
@@ -412,6 +464,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         const scale = fitPageWidthScale(nextLayout, width);
         const top = nextLayout.layouts[focused]?.top ?? PAGE_GAP;
         fittedViewportRef.current = viewportSize;
+        fittedColumnsRef.current = columns;
         setPageColumns(columns);
         setSpreadCover(coverPage);
         setView(
@@ -475,7 +528,10 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
             toLocal,
             onTextIntent: (intent) => {
                 textIntentHandled.current = false;
-                setTextIntent(intent);
+                // A new note tapped near the right edge starts far enough in to
+                // wrap inside the page rather than in a sliver beside it.
+                const maxNx = 1 - TEXT_NOTE_EDGE - MIN_TEXT_NOTE_WIDTH;
+                setTextIntent(intent.existing || intent.nx <= maxNx ? intent : { ...intent, nx: maxNx });
             },
             // The fingering tool is unreachable with the feature off (no toolbar
             // button, no view-only pill); dropping the callback too means a stray
@@ -706,7 +762,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         return () => window.removeEventListener('keydown', onKeyDown);
     }, [annotationStore, turnPage]);
 
-    const commitText = (text: string) => {
+    const commitText = (text: string, at?: { nx: number; ny: number }) => {
         if (!textIntent || textIntentHandled.current) {
             return;
         }
@@ -723,7 +779,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                 return;
             }
             // Live payload keeps a font change made while this editor is open.
-            const next = editedTextPayload(base, trimmed);
+            const edited = editedTextPayload(base, trimmed);
+            // Typed in an editor moved in from the edge: the note goes where it was typed.
+            const next = at && typeof edited === 'object' ? { ...edited, x: at.nx, y: at.ny } : edited;
             if (next === 'delete') {
                 void annotationStore.delete(existing.id);
             } else if (next !== 'unchanged') {
@@ -742,7 +800,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
             page: textIntent.pageIndex,
             kind: 'text',
             color: useViewerStore.getState().color,
-            payload: { x: textIntent.nx, y: textIntent.ny, text: trimmed, size: DEFAULT_TEXT_SIZE },
+            payload: { x: at?.nx ?? textIntent.nx, y: at?.ny ?? textIntent.ny, text: trimmed, size: DEFAULT_TEXT_SIZE },
             createdBy: null,
             createdAt: now,
             updatedAt: now,
@@ -789,7 +847,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
     // NOTE: the ref'd container must render in every state — the ResizeObserver
     // and GestureController bind once and would otherwise attach to nothing.
     return (
-        <div ref={containerRef} className="ink-surface relative h-full overflow-hidden bg-stone-200">
+        // overflow-clip, not -hidden: a hidden box still scrolls to show a focused
+        // caret, which slid the whole viewer sideways while typing a note.
+        <div ref={containerRef} className="ink-surface relative h-full overflow-clip bg-stone-200">
             {status === 'loading' ? (
                 <div className="flex h-full items-center justify-center">
                     <LoadingText>Loading score…</LoadingText>
@@ -831,7 +891,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                     {overlayMode === 'history' ? (
                         <div
                             data-ui-overlay
-                            className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center"
+                            // Phones: below the pager/zoom strip (PHONE_CONTROLS_STRIP), not over it.
+                            className="pointer-events-none absolute inset-x-0 top-14 z-20 flex justify-center sm:top-3"
                         >
                             <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950 shadow">
                                 <span>Viewing day starting point</span>
@@ -853,6 +914,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                             layout={textIntentLayout}
                             view={view}
                             store={annotationStore}
+                            viewportWidth={viewportSize.width}
+                            viewportHeight={viewportSize.height}
+                            // Larger screens float the pager and zoom row at the
+                            // bottom (1rem above the safe area, one 44px control).
+                            bottomInset={Math.max(
+                                obscured.bottom,
+                                viewportSize.width >= SM_BREAKPOINT ? FLOATING_CONTROLS_STRIP : 0,
+                            )}
+                            bottomInsetSafe={viewportSize.width >= SM_BREAKPOINT}
                             onCommit={commitText}
                             onCancel={() => {
                                 textIntentHandled.current = true;
@@ -880,7 +950,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                             const zoomed = zoomAt(v, v.scale * factor, viewportSize.width / 2, viewportSize.height / 2);
                             setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height, obscured));
                         }}
-                        pageColumns={layout.layouts.length > 1 ? pageColumns : null}
+                        pageColumns={layout.layouts.length > 1 && !narrow ? pageColumns : null}
                         onTogglePageColumns={togglePageColumns}
                         spreadCover={spreadCover}
                         onToggleSpreadCover={toggleSpreadCover}
@@ -996,7 +1066,7 @@ const ZoomControls = ({
     onToggleSpreadCover,
 }: {
     onZoomBy: (factor: number) => void;
-    /** Null hides the one/two-page toggle (single-page documents). */
+    /** Null hides the one/two-page toggle (single-page documents, phones). */
     pageColumns: 1 | 2 | null;
     onTogglePageColumns: () => void;
     spreadCover: boolean;
@@ -1005,9 +1075,12 @@ const ZoomControls = ({
     return (
         <div
             data-ui-overlay
-            // Phones: top-right, clear of the bottom toolbar whose wrapped rows
-            // would otherwise cover the zoom buttons. Larger screens: bottom-right.
-            className="absolute right-2 top-2 flex flex-col gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-4 sm:top-auto"
+            // Phones: a row at the top-right, beside the pager, clear of the
+            // bottom toolbar; page 1 starts below the strip they share
+            // (PHONE_CONTROLS_STRIP). Larger screens: a column at the
+            // bottom-right — a row again on short landscape screens, where the
+            // column would climb under the toolbar.
+            className="absolute right-2 top-2 flex flex-row gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-4 sm:top-auto sm:flex-col sm:[@media(max-height:500px)]:flex-row"
         >
             {pageColumns !== null ? (
                 <button
