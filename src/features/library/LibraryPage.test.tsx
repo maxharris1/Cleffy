@@ -1381,6 +1381,7 @@ describe('pagination and server search', () => {
                 // A sentinel already in view reports at once, as browsers do.
                 queueMicrotask(() => observers.at(-1)?.([{ isIntersecting: true }]));
             }
+            unobserve() {}
             disconnect() {}
         }
         vi.stubGlobal('IntersectionObserver', FakeObserver);

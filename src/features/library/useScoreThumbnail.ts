@@ -6,6 +6,41 @@ import { getThumbnail } from '@/features/library/thumbnailService';
 const NEAR_VIEWPORT_MARGIN = '200px';
 
 /**
+ * One observer for every card on the shelf. A library of six hundred scores
+ * used to create six hundred IntersectionObservers, and the browser checks
+ * each one separately on every scrolled frame; one observer watching six
+ * hundred targets is a single pass.
+ */
+let sharedObserver: IntersectionObserver | null = null;
+const nearCallbacks = new Map<Element, () => void>();
+
+const observeNear = (el: Element, onNear: () => void): (() => void) => {
+    sharedObserver ??= new IntersectionObserver(
+        (entries) => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) {
+                    continue;
+                }
+                const callback = nearCallbacks.get(entry.target);
+                if (callback) {
+                    nearCallbacks.delete(entry.target);
+                    sharedObserver?.unobserve(entry.target);
+                    callback();
+                }
+            }
+        },
+        { rootMargin: NEAR_VIEWPORT_MARGIN },
+    );
+    nearCallbacks.set(el, onNear);
+    sharedObserver.observe(el);
+    return () => {
+        if (nearCallbacks.delete(el)) {
+            sharedObserver?.unobserve(el);
+        }
+    };
+};
+
+/**
  * True once the element has been on (or within a couple of hundred pixels of)
  * the screen, and stays true: a cover fetched once is kept, so there is nothing
  * to gain by forgetting. Browsers without IntersectionObserver — and the test
@@ -19,17 +54,7 @@ export const useNearViewport = (ref: RefObject<Element | null>): boolean => {
         if (near || !el || typeof IntersectionObserver === 'undefined') {
             return;
         }
-        const observer = new IntersectionObserver(
-            (entries) => {
-                if (entries.some((entry) => entry.isIntersecting)) {
-                    setNear(true);
-                    observer.disconnect();
-                }
-            },
-            { rootMargin: NEAR_VIEWPORT_MARGIN },
-        );
-        observer.observe(el);
-        return () => observer.disconnect();
+        return observeNear(el, () => setNear(true));
     }, [ref, near]);
 
     return near;

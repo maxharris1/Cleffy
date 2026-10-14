@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
 import { HomeScreenPromptBanner } from '@/features/install/HomeScreenPromptBanner';
@@ -40,6 +40,7 @@ import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
 import { ScoreCard } from '@/features/library/ScoreCard';
+import { sameDocRow, useEntranceDelay, type ScoreActions } from '@/features/library/scoreRow';
 import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import { ScoreThumb } from '@/features/library/ScoreThumb';
 import { TagAssignDialog } from '@/features/library/TagAssignDialog';
@@ -177,7 +178,7 @@ export const LibraryPage = () => {
      * is the write that puts the list the page knows is true.
      */
     const [persistTick, setPersistTick] = useState(0);
-    const persistSnapshot = () => setPersistTick((t) => t + 1);
+    const persistSnapshot = useCallback(() => setPersistTick((t) => t + 1), []);
 
     useEffect(() => {
         if (persistTick === 0 || documents === null) {
@@ -403,7 +404,6 @@ export const LibraryPage = () => {
         return () => window.removeEventListener('online', refresh);
     }, [error]);
 
-    const tagsById = new Map(tags.map((t) => [t.id, t]));
     const isCachedListNotice = error !== null && CACHED_LIST_NOTICES.has(error);
     // Either the browser says so, or the library itself could only be painted
     // from this device's snapshot. A server search would just fail.
@@ -632,33 +632,55 @@ export const LibraryPage = () => {
         writeLibraryView(next);
     };
 
-    const toggleFavorite = (doc: DocumentRow) => {
-        const next = !favorites.has(doc.id);
-        setActionError(null);
-        setFavorites((prev) => {
-            const set = new Set(prev);
-            if (next) {
-                set.add(doc.id);
-            } else {
-                set.delete(doc.id);
-            }
-            return set;
-        });
-        setDocumentFavorite(doc.id, userId, next)
-            .then(persistSnapshot)
-            .catch((err: unknown) => {
-                setFavorites((prev) => {
-                    const set = new Set(prev);
-                    if (next) {
-                        set.delete(doc.id);
-                    } else {
-                        set.add(doc.id);
-                    }
-                    return set;
-                });
-                setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
+    // Stable for the life of the page (setters and userId only), so the row
+    // actions built from it never change and memoized rows stay put.
+    const toggleFavorite = useCallback(
+        (doc: DocumentRow, next: boolean) => {
+            setActionError(null);
+            setFavorites((prev) => {
+                if (prev.has(doc.id) === next) {
+                    return prev;
+                }
+                const set = new Set(prev);
+                if (next) {
+                    set.add(doc.id);
+                } else {
+                    set.delete(doc.id);
+                }
+                return set;
             });
-    };
+            setDocumentFavorite(doc.id, userId, next)
+                .then(persistSnapshot)
+                .catch((err: unknown) => {
+                    setFavorites((prev) => {
+                        const set = new Set(prev);
+                        if (next) {
+                            set.delete(doc.id);
+                        } else {
+                            set.add(doc.id);
+                        }
+                        return set;
+                    });
+                    setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
+                });
+        },
+        [userId, persistSnapshot],
+    );
+
+    /** Everything a row can ask for, as one object every row shares (see ScoreActions). */
+    const actions = useMemo<ScoreActions>(
+        () => ({
+            toggleFavorite,
+            rename: setRenameTarget,
+            share: setShareTarget,
+            assign: canManageStudents ? setAssignTarget : undefined,
+            remove: setDeleteTarget,
+            leave: setLeaveTarget,
+            editTags: setTagTarget,
+            filterTag: (tagId) => setActiveTagId((id) => (id === tagId ? null : tagId)),
+        }),
+        [toggleFavorite, canManageStudents],
+    );
 
     const patchAssignment = (documentId: string, tagId: string, assigned: boolean) => {
         setAssignments((prev) => {
@@ -846,10 +868,20 @@ export const LibraryPage = () => {
         }
     };
 
-    const docTags = (docId: string): LibraryTagRow[] => {
-        const ids = assignments.get(docId) ?? [];
-        return ids.map((id) => tagsById.get(id)).filter((t): t is LibraryTagRow => t !== undefined);
-    };
+    // One array per score, rebuilt only when tags or assignments change: a
+    // fresh array per render would defeat the memoized rows below.
+    const tagsByDoc = useMemo(() => {
+        const tagsById = new Map(tags.map((t) => [t.id, t]));
+        const byDoc = new Map<string, LibraryTagRow[]>();
+        for (const [docId, ids] of assignments) {
+            byDoc.set(
+                docId,
+                ids.map((id) => tagsById.get(id)).filter((t): t is LibraryTagRow => t !== undefined),
+            );
+        }
+        return byDoc;
+    }, [tags, assignments]);
+    const docTags = (docId: string): LibraryTagRow[] => tagsByDoc.get(docId) ?? NO_TAGS;
 
     let rowIndex = 0;
 
@@ -1063,17 +1095,9 @@ export const LibraryPage = () => {
                                                     doc={doc}
                                                     index={rowIndex++}
                                                     stripComposer={groupComposer && group.label !== null}
-                                                    assignedTags={docTags(doc.id)}
                                                     isFavorite={favorites.has(doc.id)}
                                                     isOwner={doc.owner_id === userId}
-                                                    onToggleFavorite={() => toggleFavorite(doc)}
-                                                    onRename={() => setRenameTarget(doc)}
-                                                    onShare={() => setShareTarget(doc)}
-                                                    onAssign={
-                                                        canManageStudents ? () => setAssignTarget(doc) : undefined
-                                                    }
-                                                    onDelete={() => setDeleteTarget(doc)}
-                                                    onLeave={() => setLeaveTarget(doc)}
+                                                    actions={actions}
                                                 />
                                             ))}
                                             {showAddTile ? (
@@ -1095,18 +1119,7 @@ export const LibraryPage = () => {
                                                     assignedTags={docTags(doc.id)}
                                                     isFavorite={favorites.has(doc.id)}
                                                     isOwner={doc.owner_id === userId}
-                                                    onToggleFavorite={() => toggleFavorite(doc)}
-                                                    onTags={() => setTagTarget(doc)}
-                                                    onFilterTag={(tagId) =>
-                                                        setActiveTagId((id) => (id === tagId ? null : tagId))
-                                                    }
-                                                    onRename={() => setRenameTarget(doc)}
-                                                    onShare={() => setShareTarget(doc)}
-                                                    onAssign={
-                                                        canManageStudents ? () => setAssignTarget(doc) : undefined
-                                                    }
-                                                    onDelete={() => setDeleteTarget(doc)}
-                                                    onLeave={() => setLeaveTarget(doc)}
+                                                    actions={actions}
                                                 />
                                             ))}
                                         </ul>
@@ -1281,136 +1294,144 @@ const AddScoreTile = ({
     </label>
 );
 
-const ScoreRow = ({
-    doc,
-    index,
-    stripComposer,
-    assignedTags,
-    isFavorite,
-    isOwner,
-    onToggleFavorite,
-    onTags,
-    onFilterTag,
-    onRename,
-    onShare,
-    onAssign,
-    onDelete,
-    onLeave,
-}: {
+/** Shared by every untagged row, so their props compare equal between renders. */
+const NO_TAGS: LibraryTagRow[] = [];
+
+interface ScoreRowProps {
     doc: DocumentRow;
+    /** Position in the list when the row mounted — only the entrance stagger reads it. */
     index: number;
     stripComposer: boolean;
     assignedTags: LibraryTagRow[];
     isFavorite: boolean;
     isOwner: boolean;
-    onToggleFavorite: () => void;
-    onTags: () => void;
-    onFilterTag: (tagId: string) => void;
-    onRename: () => void;
-    onShare: () => void;
-    onAssign?: () => void;
-    onDelete: () => void;
-    /** A score shared with you: its menu offers to take it out of your library. */
-    onLeave: () => void;
-}) => {
-    const hasTags = assignedTags.length > 0;
-    const visibleTags = assignedTags.slice(0, INLINE_TAG_LIMIT);
-    const overflow = assignedTags.length - visibleTags.length;
+    actions: ScoreActions;
+}
 
-    return (
-        <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
-            <div className="group relative flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40 hover:bg-ink/[0.03]">
-                {/*
-                  Sibling of the text block, not a child of it: that block turns
-                  into a column on phones, which would stack the thumbnail above
-                  the title instead of beside it.
-                */}
-                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} thumbRev={doc.thumb_rev ?? null} />
-                <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-4 sm:py-3">
-                    <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 items-center gap-2">
-                            <Link
-                                to={`/doc/${doc.id}`}
-                                className="min-w-0 font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover sm:line-clamp-none sm:block sm:truncate after:absolute after:inset-0 after:content-['']"
-                            >
-                                {stripComposer ? displayTitleOf(doc.title) : doc.title}
-                            </Link>
-                            {/* Past the free cap: still readable and exportable, just not writable. */}
-                            {doc.archived_at ? (
-                                <span className="relative shrink-0" title="Read-only — over your plan’s score limit">
-                                    <Badge tone="warn">Archived</Badge>
-                                </span>
-                            ) : null}
-                        </div>
-                        {hasTags ? (
-                            <div className="relative mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                                {visibleTags.map((tag, i) => (
-                                    <span key={tag.id} className="inline-flex items-center gap-1.5">
-                                        {i > 0 ? (
-                                            <span className="text-stone-300" aria-hidden="true">
-                                                ·
-                                            </span>
-                                        ) : null}
-                                        <button
-                                            type="button"
-                                            onClick={() => onFilterTag(tag.id)}
-                                            className="max-w-[8rem] truncate text-xs text-stone-500 transition hover:text-stone-700 hover:underline"
-                                            title={`Filter by ${tag.name}`}
-                                        >
-                                            {tag.name}
-                                        </button>
-                                    </span>
-                                ))}
-                                {overflow > 0 ? (
-                                    <button
-                                        type="button"
-                                        onClick={onTags}
-                                        className="text-xs text-stone-400 transition hover:text-stone-600"
-                                        aria-label={`Edit tags, ${overflow} more`}
+/** The list view's row. Memoized like ScoreCard, for the same reason. */
+const ScoreRow = memo(
+    ({ doc, index, stripComposer, assignedTags, isFavorite, isOwner, actions }: ScoreRowProps) => {
+        const hasTags = assignedTags.length > 0;
+        const visibleTags = assignedTags.slice(0, INLINE_TAG_LIMIT);
+        const overflow = assignedTags.length - visibleTags.length;
+        const entranceDelay = useEntranceDelay(index);
+        const onTags = () => actions.editTags(doc);
+
+        return (
+            <li
+                className={`library-list-item${entranceDelay === null ? ' library-card-settled' : ''}`}
+                style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
+            >
+                <div className="group relative flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40 hover:bg-ink/[0.03]">
+                    {/*
+                      Sibling of the text block, not a child of it: that block turns
+                      into a column on phones, which would stack the thumbnail above
+                      the title instead of beside it.
+                    */}
+                    <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} thumbRev={doc.thumb_rev ?? null} />
+                    <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-4 sm:py-3">
+                        <div className="min-w-0 flex-1">
+                            <div className="flex min-w-0 items-center gap-2">
+                                <Link
+                                    to={`/doc/${doc.id}`}
+                                    className="min-w-0 font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover sm:line-clamp-none sm:block sm:truncate after:absolute after:inset-0 after:content-['']"
+                                >
+                                    {stripComposer ? displayTitleOf(doc.title) : doc.title}
+                                </Link>
+                                {/* Past the free cap: still readable and exportable, just not writable. */}
+                                {doc.archived_at ? (
+                                    <span
+                                        className="relative shrink-0"
+                                        title="Read-only — over your plan’s score limit"
                                     >
-                                        +{overflow}
-                                    </button>
+                                        <Badge tone="warn">Archived</Badge>
+                                    </span>
                                 ) : null}
                             </div>
-                        ) : null}
+                            {hasTags ? (
+                                <div className="relative mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                    {visibleTags.map((tag, i) => (
+                                        <span key={tag.id} className="inline-flex items-center gap-1.5">
+                                            {i > 0 ? (
+                                                <span className="text-stone-300" aria-hidden="true">
+                                                    ·
+                                                </span>
+                                            ) : null}
+                                            <button
+                                                type="button"
+                                                onClick={() => actions.filterTag(tag.id)}
+                                                className="max-w-[8rem] truncate text-xs text-stone-500 transition hover:text-stone-700 hover:underline"
+                                                title={`Filter by ${tag.name}`}
+                                            >
+                                                {tag.name}
+                                            </button>
+                                        </span>
+                                    ))}
+                                    {overflow > 0 ? (
+                                        <button
+                                            type="button"
+                                            onClick={onTags}
+                                            className="text-xs text-stone-400 transition hover:text-stone-600"
+                                            aria-label={`Edit tags, ${overflow} more`}
+                                        >
+                                            +{overflow}
+                                        </button>
+                                    ) : null}
+                                </div>
+                            ) : null}
+                        </div>
+                        <span className="text-xs text-stone-500 sm:shrink-0">
+                            {doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : ''}
+                            {formatUpdated(doc.updated_at)}
+                        </span>
                     </div>
-                    <span className="text-xs text-stone-500 sm:shrink-0">
-                        {doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : ''}
-                        {formatUpdated(doc.updated_at)}
-                    </span>
+                    <button
+                        type="button"
+                        aria-pressed={isFavorite}
+                        aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                        title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                        onClick={() => actions.toggleFavorite(doc, !isFavorite)}
+                        className={`relative rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 ${
+                            isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
+                        }`}
+                    >
+                        <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
+                    </button>
+                    <button
+                        type="button"
+                        aria-label={hasTags ? 'Edit tags' : 'Add tags'}
+                        title={hasTags ? 'Edit tags' : 'Add tags'}
+                        onClick={onTags}
+                        className={`relative rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 ${
+                            hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
+                        }`}
+                    >
+                        <TagIcon size={16} />
+                    </button>
+                    {isOwner ? (
+                        <RowMenu
+                            onRename={() => actions.rename(doc)}
+                            onShare={() => actions.share(doc)}
+                            onAssign={actions.assign ? () => actions.assign?.(doc) : undefined}
+                            onDelete={() => actions.remove(doc)}
+                        />
+                    ) : (
+                        <SharedScoreMenu onLeave={() => actions.leave(doc)} />
+                    )}
                 </div>
-                <button
-                    type="button"
-                    aria-pressed={isFavorite}
-                    aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                    title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                    onClick={onToggleFavorite}
-                    className={`relative rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 ${
-                        isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
-                    }`}
-                >
-                    <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
-                </button>
-                <button
-                    type="button"
-                    aria-label={hasTags ? 'Edit tags' : 'Add tags'}
-                    title={hasTags ? 'Edit tags' : 'Add tags'}
-                    onClick={onTags}
-                    className={`relative rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 ${
-                        hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
-                    }`}
-                >
-                    <TagIcon size={16} />
-                </button>
-                {isOwner ? (
-                    <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
-                ) : (
-                    <SharedScoreMenu onLeave={onLeave} />
-                )}
-            </div>
-        </li>
-    );
-};
+            </li>
+        );
+    },
+    (prev, next) =>
+        prev.stripComposer === next.stripComposer &&
+        prev.assignedTags === next.assignedTags &&
+        prev.isFavorite === next.isFavorite &&
+        prev.isOwner === next.isOwner &&
+        prev.actions === next.actions &&
+        sameDocRow(prev.doc, next.doc),
+);
+
+ScoreRow.displayName = 'ScoreRow';
 
 const RenameDialog = ({
     doc,
