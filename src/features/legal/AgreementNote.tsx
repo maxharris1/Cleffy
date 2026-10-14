@@ -6,7 +6,8 @@ interface AgreementNoteProps {
     className?: string;
 }
 
-const LINK = `${linkClassName} text-xs`;
+// No wrap on touch: a link split across two lines can't carry linkClassName's enlarged hit area.
+const LINK = `${linkClassName} text-xs pointer-coarse:whitespace-nowrap`;
 
 /**
  * "By creating an account you agree to the Terms of Service and Privacy Policy."
@@ -19,7 +20,8 @@ const LINK = `${linkClassName} text-xs`;
  * dialog is mounted from places that have none in tests).
  */
 export const AgreementNote = ({ action, className = '' }: AgreementNoteProps) => (
-    <p className={`text-xs leading-relaxed text-stone-500 ${className}`}>
+    // Looser lines on touch so the two links' enlarged hit areas don't cover each other when they stack.
+    <p className={`text-xs leading-relaxed text-stone-500 pointer-coarse:leading-8 ${className}`}>
         By {action} you agree to the{' '}
         <a href="/terms" target="_blank" rel="noopener noreferrer" className={LINK}>
             Terms of Service
