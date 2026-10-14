@@ -5,12 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AccountPage } from '@/features/account/AccountPage';
 import type * as OfflineStorageModule from '@/features/account/offlineStorage';
+import type * as InstallSurfaceModule from '@/features/install/installSurface';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { EntitlementLimits, Entitlements } from '@/types/database';
 
 const updateDisplayName = vi.fn();
 const updatePassword = vi.fn();
 const signOut = vi.fn();
+const syncBeforeSignOut = vi.fn();
 const useSession = vi.fn();
 
 const loadUsage = vi.fn();
@@ -23,6 +25,11 @@ const redirectTo = vi.fn();
 
 const readOfflineStorage = vi.fn();
 const clearOfflineStorage = vi.fn();
+const resolveInstallSurface = vi.fn((_canPromptInstall = false): InstallSurfaceModule.InstallSurface => 'other');
+
+/** Release flags, flipped per test; the page reads them at render. */
+const flags = vi.hoisted(() => ({ playalong: false, fingering: false, printHandwriting: false }));
+vi.mock('@/lib/features', () => ({ features: flags }));
 
 // The real session module reaches for a Supabase client at import time of its
 // callers; only the pieces this page uses are stubbed, with displayNameOf and
@@ -40,6 +47,9 @@ vi.mock('@/features/auth/session', () => ({
     updateDisplayName: (...args: unknown[]) => updateDisplayName(...args),
     updatePassword: (...args: unknown[]) => updatePassword(...args),
     signOut: (...args: unknown[]) => signOut(...args),
+    syncBeforeSignOut: () => syncBeforeSignOut(),
+    userTypeOf: (session: { user?: { app_metadata?: Record<string, unknown> } } | null) =>
+        session?.user?.app_metadata?.['user_type'] === 'student' ? 'student' : null,
 }));
 
 vi.mock('@/features/billing/entitlementsService', () => ({
@@ -72,6 +82,14 @@ vi.mock('@/features/billing/StudioSeats', () => ({
 vi.mock('@/features/billing/PricingDialog', () => ({
     PricingDialog: () => <div data-testid="pricing-dialog" />,
 }));
+
+vi.mock('@/features/install/installSurface', async () => {
+    const actual = await vi.importActual<typeof InstallSurfaceModule>('@/features/install/installSurface');
+    return {
+        ...actual,
+        resolveInstallSurface: (canPromptInstall?: boolean) => resolveInstallSurface(canPromptInstall),
+    };
+});
 
 const FREE_LIMITS: EntitlementLimits = {
     cloud_scores: 3,
@@ -137,6 +155,7 @@ const renderSettled = async () => {
 beforeEach(() => {
     vi.clearAllMocks();
     useSession.mockReturnValue({ session: sessionFor(), loading: false, lastEvent: null });
+    syncBeforeSignOut.mockResolvedValue({ pending: 0, refused: 0 });
     loadEntitlements.mockResolvedValue(entitlements());
     readCachedEntitlements.mockResolvedValue(null);
     loadUsage.mockResolvedValue({ omr_runs: 2 });
@@ -146,6 +165,7 @@ beforeEach(() => {
     updatePassword.mockResolvedValue(undefined);
     clearCachedEntitlements.mockResolvedValue(undefined);
     signOut.mockResolvedValue(undefined);
+    resolveInstallSurface.mockReturnValue('other');
 });
 
 afterEach(cleanup);
@@ -190,8 +210,8 @@ describe('AccountPage', () => {
         const user = userEvent.setup();
         await renderSettled();
 
-        await user.type(screen.getByLabelText('New password'), 'correct-horse');
-        await user.type(screen.getByLabelText('Confirm new password'), 'correct-hoarse');
+        await user.type(screen.getByLabelText('New password'), 'correct-horse-1');
+        await user.type(screen.getByLabelText('Confirm new password'), 'correct-hoarse-1');
         await user.click(screen.getByRole('button', { name: 'Change password' }));
 
         expect(await screen.findByText('Those two passwords do not match.')).toBeInTheDocument();
@@ -206,8 +226,38 @@ describe('AccountPage', () => {
         await user.type(screen.getByLabelText('Confirm new password'), 'short');
         await user.click(screen.getByRole('button', { name: 'Change password' }));
 
-        expect(await screen.findByText('Use at least 8 characters.')).toBeInTheDocument();
+        expect(await screen.findByText('Password must be at least 8 characters.')).toBeInTheDocument();
         expect(updatePassword).not.toHaveBeenCalled();
+    });
+
+    it('refuses a password without both a letter and a number, as Supabase Auth would', async () => {
+        const user = userEvent.setup();
+        await renderSettled();
+
+        await user.type(screen.getByLabelText('New password'), 'correct-horse');
+        await user.type(screen.getByLabelText('Confirm new password'), 'correct-horse');
+        await user.click(screen.getByRole('button', { name: 'Change password' }));
+
+        expect(
+            await screen.findByText('Password must include at least one letter and one number.'),
+        ).toBeInTheDocument();
+        expect(updatePassword).not.toHaveBeenCalled();
+    });
+
+    it('words a server refusal instead of passing the raw Auth message through', async () => {
+        const user = userEvent.setup();
+        updatePassword.mockRejectedValueOnce(
+            Object.assign(new Error('New password should be different from the old password.'), {
+                code: 'same_password',
+            }),
+        );
+        await renderSettled();
+
+        await user.type(screen.getByLabelText('New password'), 'correct-horse-1');
+        await user.type(screen.getByLabelText('Confirm new password'), 'correct-horse-1');
+        await user.click(screen.getByRole('button', { name: 'Change password' }));
+
+        expect(await screen.findByText('Choose a password different from your current one.')).toBeInTheDocument();
     });
 
     it('changes the password once and clears both fields', async () => {
@@ -216,36 +266,113 @@ describe('AccountPage', () => {
 
         const next = screen.getByLabelText('New password');
         const confirm = screen.getByLabelText('Confirm new password');
-        await user.type(next, 'correct-horse');
-        await user.type(confirm, 'correct-horse');
+        await user.type(next, 'correct-horse-1');
+        await user.type(confirm, 'correct-horse-1');
         await user.click(screen.getByRole('button', { name: 'Change password' }));
 
-        expect(updatePassword).toHaveBeenCalledExactlyOnceWith('correct-horse');
+        expect(updatePassword).toHaveBeenCalledExactlyOnceWith('correct-horse-1');
         expect(await screen.findByText('Password changed.')).toBeInTheDocument();
         expect(next).toHaveValue('');
         expect(confirm).toHaveValue('');
     });
 
     it('meters a capped allowance and writes "unlimited" with no bar for an uncapped one', async () => {
-        loadEntitlements.mockResolvedValue(entitlements({ omr_runs: -1 }));
+        loadEntitlements.mockResolvedValue(entitlements({ smart_imports: -1 }));
+        loadUsage.mockResolvedValue({ pdf_exports: 1 });
         await renderSettled();
 
         expect(await screen.findByText('unlimited')).toBeInTheDocument();
-        // Three capped metered rows remain; the unlimited one contributes no bar.
-        await waitFor(() => expect(screen.getAllByRole('progressbar')).toHaveLength(3));
-        expect(
-            screen.queryByRole('progressbar', { name: 'Play-along analyses used this month' }),
-        ).not.toBeInTheDocument();
-        expect(screen.getByRole('progressbar', { name: 'AI fingering reads used this month' })).toBeInTheDocument();
+        // Two capped metered rows remain; the unlimited one contributes no bar.
+        await waitFor(() => expect(screen.getAllByRole('progressbar')).toHaveLength(2));
+        expect(screen.queryByRole('progressbar', { name: 'IMSLP imports used this month' })).not.toBeInTheDocument();
+        expect(screen.getByRole('progressbar', { name: 'PDF exports used this month' })).toBeInTheDocument();
+        expect(screen.getByRole('progressbar', { name: 'AI page reads used this month' })).toBeInTheDocument();
+    });
+
+    describe('plan period', () => {
+        const endsAt = '2026-11-08T12:00:00Z';
+        const paid = (over: Partial<Entitlements>): Entitlements => ({
+            ...entitlements({ cloud_scores: -1, pdf_exports: -1 }),
+            tier: 'personal',
+            status: 'active',
+            source: 'subscription',
+            current_period_end: endsAt,
+            ...over,
+        });
+
+        it('says a renewing plan renews', async () => {
+            loadEntitlements.mockResolvedValue(paid({ cancel_at_period_end: false }));
+            await renderSettled();
+
+            expect(await screen.findByText(`Renews ${new Date(endsAt).toLocaleDateString()}`)).toBeInTheDocument();
+            expect(screen.getByRole('button', { name: 'Manage subscription' })).toBeInTheDocument();
+        });
+
+        it('says a plan cancelled at period end ends then, and offers to resume it in the portal', async () => {
+            const user = userEvent.setup();
+            createPortalSession.mockResolvedValue('https://billing.stripe.com/session');
+            loadEntitlements.mockResolvedValue(paid({ cancel_at_period_end: true }));
+            await renderSettled();
+
+            expect(await screen.findByText(/^Ends .* your plan won’t renew/)).toBeInTheDocument();
+            expect(screen.queryByText(/^Renews/)).not.toBeInTheDocument();
+
+            await user.click(screen.getByRole('button', { name: 'Resume subscription' }));
+            expect(createPortalSession).toHaveBeenCalledTimes(1);
+            expect(redirectTo).toHaveBeenCalledWith('https://billing.stripe.com/session');
+        });
+
+        it("tells a seated teacher their academy's plan is ending, with nothing of theirs to resume", async () => {
+            loadEntitlements.mockResolvedValue(
+                paid({ tier: 'academy', source: 'studio_member', cancel_at_period_end: true }),
+            );
+            await renderSettled();
+
+            expect(await screen.findByText(/^Your academy’s plan ends/)).toBeInTheDocument();
+            expect(screen.queryByRole('button', { name: 'Resume subscription' })).not.toBeInTheDocument();
+        });
+
+        it('reads entitlements from a server without the flag as renewing', async () => {
+            loadEntitlements.mockResolvedValue(paid({}));
+            await renderSettled();
+            expect(await screen.findByText(/^Renews /)).toBeInTheDocument();
+        });
     });
 
     it('fills a meter in proportion to what was used', async () => {
+        loadUsage.mockResolvedValue({ smart_imports: 1 });
         await renderSettled();
 
-        // omr_runs: 2 of 3.
-        const bar = await screen.findByRole('progressbar', { name: 'Play-along analyses used this month' });
-        expect(bar).toHaveAttribute('aria-valuenow', '67');
-        expect(screen.getByText('2 of 3 used this month')).toBeInTheDocument();
+        // smart_imports (IMSLP imports): 1 of 2.
+        const bar = await screen.findByRole('progressbar', { name: 'IMSLP imports used this month' });
+        expect(bar).toHaveAttribute('aria-valuenow', '50');
+        expect(screen.getByText('1 of 2 used this month')).toBeInTheDocument();
+    });
+
+    it('shows no allowance for play-along or fingering while those features are switched off', async () => {
+        await renderSettled();
+
+        await waitFor(() => expect(screen.getAllByRole('progressbar')).toHaveLength(3));
+        expect(screen.queryByText('Play-along analyses')).not.toBeInTheDocument();
+        expect(screen.queryByText(/play-along|fingering/i)).not.toBeInTheDocument();
+        expect(screen.getByText(/Annotation is unlimited on every plan/)).toBeInTheDocument();
+    });
+
+    it('meters play-along again, and names the fingering optimizer, in a build that ships them', async () => {
+        flags.playalong = true;
+        flags.fingering = true;
+        try {
+            await renderSettled();
+
+            // omr_runs: 2 of 3.
+            const bar = await screen.findByRole('progressbar', { name: 'Play-along analyses used this month' });
+            expect(bar).toHaveAttribute('aria-valuenow', '67');
+            expect(screen.getAllByRole('progressbar')).toHaveLength(4);
+            expect(screen.getByText(/fingering optimizer are unlimited/)).toBeInTheDocument();
+        } finally {
+            flags.playalong = false;
+            flags.fingering = false;
+        }
     });
 
     it('reports what this device is holding', async () => {
@@ -280,7 +407,41 @@ describe('AccountPage', () => {
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
 
+        await waitFor(() => expect(signOut).toHaveBeenCalledOnce());
         expect(clearCachedEntitlements).toHaveBeenCalledWith('teacher-1');
-        expect(signOut).toHaveBeenCalledOnce();
+    });
+
+    it('asks before signing out over unsynced marks, and Stay signed in keeps the session', async () => {
+        const user = userEvent.setup();
+        syncBeforeSignOut.mockResolvedValue({ pending: 2, refused: 0 });
+        await renderSettled();
+
+        await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+        const dialog = await screen.findByRole('dialog', { name: 'Sign out with unsynced changes?' });
+        expect(dialog).toHaveTextContent('You have 2 unsynced changes');
+        await user.click(screen.getByRole('button', { name: 'Stay signed in' }));
+        expect(signOut).not.toHaveBeenCalled();
+        expect(clearCachedEntitlements).not.toHaveBeenCalled();
+    });
+
+    it('offers Add to Home Screen in Preferences', async () => {
+        const user = userEvent.setup();
+        await renderSettled();
+
+        expect(screen.getByRole('heading', { name: 'Home screen' })).toBeInTheDocument();
+        expect(screen.getByText(/Put your library on an iPhone or iPad like an app/)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Add to Home Screen' }));
+        expect(screen.getByRole('dialog', { name: 'Add to Home Screen' })).toBeInTheDocument();
+        expect(screen.getByText('On the iPhone or iPad, open cleffy.io in Safari.')).toBeInTheDocument();
+    });
+
+    it('says the library is already an app when this session is standalone', async () => {
+        resolveInstallSurface.mockReturnValue('standalone');
+        await renderSettled();
+
+        expect(screen.getByRole('heading', { name: 'Home screen' })).toBeInTheDocument();
+        expect(screen.getByText('The library is already running as an app on this Home Screen.')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Add to Home Screen' })).not.toBeInTheDocument();
     });
 });

@@ -1,9 +1,10 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as sessionModule from '@/features/auth/session';
+import { resetTurnstileLoaderForTests, type TurnstileRenderOptions } from '@/features/auth/turnstile';
 import { StudentClaimPage } from '@/features/student/StudentClaimPage';
 import { StudentAuthError } from '@/features/student/studentApi';
 import type * as studentApiModule from '@/features/student/studentApi';
@@ -58,6 +59,10 @@ beforeEach(() => {
 
 afterEach(() => {
     cleanup();
+    vi.unstubAllEnvs();
+    resetTurnstileLoaderForTests();
+    delete (window as { turnstile?: unknown }).turnstile;
+    document.getElementById('cf-turnstile-script')?.remove();
 });
 
 describe('StudentClaimPage', () => {
@@ -89,6 +94,9 @@ describe('StudentClaimPage', () => {
             code: 'ABCD-EFGH-JKMN',
             username: 'ada_lovelace',
             password: 'hunter2hunter2',
+            // Null on a build with no site key, which is this one: the widget
+            // renders nothing and the claim is exactly what it was.
+            captchaToken: null,
         });
         expect(await screen.findByText('your pieces')).toBeInTheDocument();
     });
@@ -142,6 +150,23 @@ describe('StudentClaimPage', () => {
         expect(claimStudentAccount).not.toHaveBeenCalled();
     });
 
+    it('blocks a password without a digit client-side, before the code is spent', async () => {
+        const user = userEvent.setup();
+        renderClaim();
+
+        await enterCode(user);
+        // Long enough, but Supabase Auth requires letters AND digits; letting it
+        // through would turn into a "could not set up the account" from the
+        // function's updateUserById instead of a sentence a child can act on.
+        await fillCredentials(user, 'ada_lovelace', 'pianopiano');
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+        expect(screen.getByRole('status')).toHaveTextContent('at least one letter and one number');
+        expect(claimStudentAccount).not.toHaveBeenCalled();
+        // The rule is stated up front, not only on refusal.
+        expect(screen.getByText('At least 8 characters, with a letter and a number.')).toBeInTheDocument();
+    });
+
     it('keeps everything typed when the server says the username is taken', async () => {
         const user = userEvent.setup();
         claimStudentAccount.mockRejectedValue(new StudentAuthError('That username is taken', 'username_taken'));
@@ -185,5 +210,114 @@ describe('StudentClaimPage', () => {
         expect(screen.queryByRole('button', { name: 'Create my account' })).not.toBeInTheDocument();
         await user.click(screen.getByRole('link', { name: 'Go to sign in' }));
         expect(await screen.findByText('sign in')).toBeInTheDocument();
+    });
+});
+
+/**
+ * Turnstile switched on with a stubbed `window.turnstile`, as
+ * tests/auth/turnstileField.test.tsx does it. Cloudflare's always-passes test
+ * site key; `rendered` collects the widgets in mount order.
+ */
+const withTurnstile = () => {
+    vi.stubEnv('VITE_TURNSTILE_SITE_KEY', '1x00000000000000000000AA');
+    const rendered: TurnstileRenderOptions[] = [];
+    Object.assign(window, {
+        turnstile: {
+            render: (_host: HTMLElement, options: TurnstileRenderOptions) => {
+                rendered.push(options);
+                return `widget-${rendered.length}`;
+            },
+            remove: () => undefined,
+            reset: () => undefined,
+        },
+    });
+    return rendered;
+};
+
+describe('StudentClaimPage with Turnstile on', () => {
+    // student-claim signs the student in with a password grant, and GoTrue's
+    // captcha is project-wide: without a token here, switching it on would
+    // refuse every claim at that grant (QA round 4 review of #57).
+    it('renders nothing at all without a site key, which is every build today', async () => {
+        const user = userEvent.setup();
+        renderClaim();
+        await enterCode(user);
+        expect(screen.queryByTestId('turnstile-field')).not.toBeInTheDocument();
+    });
+
+    it('puts the check on the step that posts, not on the code step', async () => {
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        renderClaim();
+
+        // Step one never leaves the browser: a challenge in front of a child
+        // typing a code off paper would be a gate on nothing.
+        expect(rendered).toHaveLength(0);
+        await enterCode(user);
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        expect(rendered[0]).toMatchObject({ action: 'student-claim' });
+    });
+
+    it('sends the solved token with the claim', async () => {
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        renderClaim();
+        await enterCode(user);
+        await fillCredentials(user);
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        rendered[0]!.callback('cf-token');
+
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+        expect(claimStudentAccount).toHaveBeenCalledWith(
+            expect.objectContaining({ code: 'ABCD-EFGH-JKMN', captchaToken: 'cf-token' }),
+        );
+    });
+
+    it('asks for the check last, and spends no code without it', async () => {
+        withTurnstile();
+        const user = userEvent.setup();
+        renderClaim();
+        await enterCode(user);
+        await fillCredentials(user, 'ada_lovelace', 'short', 'short');
+
+        // The password rule first: a form with a typo in it is not first told
+        // off about the robot check.
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+        expect(screen.getByRole('status')).not.toHaveTextContent('I’m human');
+
+        await user.clear(screen.getByLabelText('Password'));
+        await user.clear(screen.getByLabelText('Confirm password'));
+        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
+        await user.type(screen.getByLabelText('Confirm password'), 'hunter2hunter2');
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+        expect(screen.getByRole('status')).toHaveTextContent('Finish the “I’m human” check');
+        expect(claimStudentAccount).not.toHaveBeenCalled();
+    });
+
+    it('puts up a fresh challenge after a refusal, because the card is still live', async () => {
+        // Every refusal the claim can answer with now leaves the code unspent —
+        // student-claim signs the student in BEFORE it spends it — so every one
+        // of them is retryable, and a retry needs a new token: the old one is
+        // spent the moment it is redeemed.
+        claimStudentAccount.mockRejectedValue(
+            new StudentAuthError('That “I’m human” check didn’t go through. Try it again.', 'captcha_failed'),
+        );
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        renderClaim();
+        await enterCode(user);
+        await fillCredentials(user);
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        rendered[0]!.callback('cf-token');
+
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+        expect(await screen.findByText(/didn’t go through/)).toBeInTheDocument();
+        // Still on the credential step with the code intact behind it, and a
+        // second widget mounted for the retry.
+        expect(screen.getByRole('button', { name: 'Create my account' })).toBeInTheDocument();
+        await waitFor(() => expect(rendered).toHaveLength(2));
     });
 });

@@ -2,6 +2,9 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
+import { TurnstileField } from '@/features/auth/TurnstileField';
+import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { AgreementNote } from '@/features/legal/AgreementNote';
 import { StudentAuthError, claimStudentAccount } from '@/features/student/studentApi';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
@@ -9,20 +12,24 @@ import { ErrorText } from '@/ui/ErrorText';
 import { TextField } from '@/ui/TextField';
 import { fieldClassName, fieldLabelClassName, linkClassName } from '@/ui/classNames';
 
-// Imported across the app/server boundary on purpose: studentCodes.ts is written
-// dependency-free precisely so Deno, vitest and this browser bundle can all load
-// the one copy of these rules. A page whose job is to pre-empt a 422 has to be
+// Imported across the app/server boundary on purpose: studentCodes.ts and
+// passwordPolicy.ts are written dependency-free precisely so Deno, vitest and
+// this browser bundle can all load the one copy of these rules. A page whose
+// job is to pre-empt a 422 has to be
 // checking the rule the function will actually apply, and a second copy here
 // would be a rule that drifts silently the first time the server's is edited.
 import {
-    STUDENT_PASSWORD_MIN,
+    PASSWORD_HINT,
+    passwordProblem,
+    passwordProblemMessage,
+} from '../../../supabase/functions/_shared/passwordPolicy';
+import {
     USERNAME_MAX,
     USERNAME_MIN,
     isPlausibleLoginCode,
     isValidUsername,
     normalizeLoginCode,
     normalizeUsername,
-    studentPasswordProblem,
 } from '../../../supabase/functions/_shared/studentCodes';
 
 /**
@@ -67,6 +74,21 @@ const ClaimFlow = () => {
     const [usernameError, setUsernameError] = useState<string | null>(null);
     const [strandedMessage, setStrandedMessage] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    /**
+     * The Turnstile token the claim carries, or null on a build with no site
+     * key — every build today, and why this page is unchanged until Max sets
+     * one.
+     *
+     * student-claim signs the student in with a password grant once the code is
+     * spent, and GoTrue's captcha is project-wide: switching it on without a
+     * token here would leave every claim refused at that grant. The widget sits
+     * on step TWO, which is the step that posts — step one never leaves the
+     * browser, and a challenge in front of a child typing a code off paper
+     * would be a gate on nothing.
+     */
+    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+    const [captchaRound, setCaptchaRound] = useState(0);
+    const captchaRequired = isTurnstileEnabled();
     const usernameRef = useRef<HTMLInputElement | null>(null);
 
     // Focus follows the complaint, but only once the field is enabled again —
@@ -93,22 +115,24 @@ const ClaimFlow = () => {
             setUsernameError(`Pick a username of ${USERNAME_HINT}.`);
             return;
         }
-        // The shared helper rather than `.length`, which is the wrong unit for
-        // both bounds: the function counts characters against the floor and
-        // BYTES against the ceiling, so five emoji are ten here and five there.
-        // A page whose job is to pre-empt the 422 has to ask the same question,
-        // including the ceiling this line never mirrored at all.
-        const passwordProblem = studentPasswordProblem(password);
-        if (passwordProblem === 'too_short') {
-            setError(`Password must be at least ${STUDENT_PASSWORD_MIN} characters.`);
-            return;
-        }
-        if (passwordProblem === 'too_long') {
-            setError('That password is too long — pick a shorter one.');
+        // The shared policy rather than `.length`, which is the wrong unit for
+        // both bounds: it counts characters against the floor and BYTES against
+        // the ceiling, so five emoji are ten here and five there. A page whose
+        // job is to pre-empt the 422 has to ask the same question the function
+        // (and GoTrue behind it) will.
+        const problem = passwordProblem(password);
+        if (problem) {
+            setError(passwordProblemMessage(problem));
             return;
         }
         if (password !== confirm) {
             setError('Passwords do not match.');
+            return;
+        }
+        // Last of the form checks, so a mistyped password is not answered with
+        // a complaint about the robot check. Never reached without a site key.
+        if (captchaRequired && !captchaToken) {
+            setError('Finish the “I’m human” check, then try again.');
             return;
         }
         setError(null);
@@ -118,10 +142,19 @@ const ClaimFlow = () => {
             // The code goes as typed — the function folds case and dashes itself.
             // The username goes normalized, because that spelling is the one the
             // student was just shown, and it is what they will type to sign in.
-            await claimStudentAccount({ code, username: normalizedUsername, password });
+            await claimStudentAccount({ code, username: normalizedUsername, password, captchaToken });
             navigate('/assignments', { replace: true });
         } catch (err) {
             setBusy(false);
+            if (captchaRequired) {
+                // Spent on redemption whatever else the request met, so the
+                // retry this failure invites needs a fresh challenge. Done for
+                // every failure, including the ones handled below: the code is
+                // still live in all of them (student-claim signs the student in
+                // BEFORE it spends it), so every one of them is retryable.
+                setCaptchaToken(null);
+                setCaptchaRound((round) => round + 1);
+            }
             if (err instanceof StudentAuthError) {
                 // The code is the only thing step one owns, so a refusal of it
                 // sends them back there with what they typed still in the field.
@@ -138,6 +171,13 @@ const ClaimFlow = () => {
                 // is real, only the automatic sign-in fell over. Anything that
                 // looks like "try again" would be a lie, so this stops and points
                 // at the door their new password already opens.
+                //
+                // student-claim no longer produces this: it signs the student in
+                // before it spends the code, so a failed sign-in leaves the card
+                // live and is answered with something retryable instead. Kept
+                // because a rolling deploy can still have the old function
+                // answering, and because being stranded is the one failure here
+                // that must never read as "try again".
                 if (err.code === 'claimed_sign_in_failed') {
                     setStrandedMessage(err.message);
                     return;
@@ -243,6 +283,7 @@ const ClaimFlow = () => {
                             autoComplete="new-password"
                             spaced
                         />
+                        <p className="mt-1.5 text-xs text-stone-500">{PASSWORD_HINT}</p>
                         <TextField
                             id="claim-confirm"
                             label="Confirm password"
@@ -253,9 +294,11 @@ const ClaimFlow = () => {
                             autoComplete="new-password"
                             spaced
                         />
+                        <TurnstileField key={captchaRound} action="student-claim" onToken={setCaptchaToken} />
                         <Button type="submit" disabled={busy} className="mt-4 w-full">
                             {busy ? 'Setting up…' : 'Create my account'}
                         </Button>
+                        <AgreementNote action="creating your account" className="mt-3 text-center" />
                     </>
                 )}
                 {error ? <ErrorText className="mt-2.5">{error}</ErrorText> : null}

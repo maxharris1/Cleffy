@@ -19,6 +19,7 @@ import {
     type RosterAssignment,
     type TimelineEntry,
 } from '@/features/roster/rosterService';
+import { getDb } from '@/sync/db';
 import type { AssignmentAccess, AssignmentRow, EffectiveTier, ManagedStudentRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -27,6 +28,7 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { RosterSkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
 import { MoreVerticalIcon } from '@/ui/icons';
@@ -69,7 +71,7 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
     if (student.auth_method === 'email') {
         return {
             title: 'Email a new sign-in link?',
-            body: `${student.display_name}’s current password stops working straight away, and the link lets them choose a new one. Their scores, annotations and notes are untouched.`,
+            body: `${student.display_name}’s current password stops working straight away and any device they are signed in on is signed out. The link lets them choose a new one. Their scores, annotations and notes are untouched.`,
             confirmLabel: 'Send link',
         };
     }
@@ -82,7 +84,7 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
     }
     return {
         title: 'Reset this student’s access?',
-        body: `${student.display_name}’s password stops working straight away, and the new setup code is how they choose another one. They keep their username, and their scores, annotations and notes are untouched.`,
+        body: `${student.display_name}’s password stops working straight away and any device they are signed in on is signed out. The new setup code is how they choose another one. Their scores, annotations and notes are untouched.`,
         confirmLabel: 'Reset access',
     };
 };
@@ -129,11 +131,33 @@ const noRosterOnThisPlan = (tier: EffectiveTier): LimitReachedError =>
  * seat back rather than claims one. Hiding those rows would leave live student
  * sign-ins with no control left anywhere that could turn them off.
  */
+const countsOf = (grouped: Map<string, RosterAssignment[]>): Array<[string, number]> =>
+    [...grouped.entries()].map(([id, rows]) => [id, rows.length]);
+
+/** Best-effort snapshot for the next mount's instant paint; a refused write costs nothing. */
+const persistRoster = (userId: string, students: ManagedStudentRow[], assignmentCounts: Array<[string, number]>) => {
+    void getDb()
+        .rosterCache.put({ userId, students, assignmentCounts, cachedAt: new Date().toISOString() })
+        .catch(() => undefined);
+};
+
 export const RosterPage = () => {
-    const { canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
+    const { userId, canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
+    /**
+     * Counts from the Dexie snapshot, shown until the network's assignments
+     * arrive (then null). Without them every cached row would read "No scores"
+     * — an affirmative claim the cache can't back.
+     */
+    const [cachedCounts, setCachedCounts] = useState<Map<string, number> | null>(null);
+    /**
+     * Whether `assignments` reflects the server. While 'loading' a row with a
+     * snapshot count shows a spinner in its panel; after 'failed' it must show
+     * a terminal notice instead — nothing on this mount will fill the panel.
+     */
+    const [assignmentsStatus, setAssignmentsStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
     const [loadError, setLoadError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
@@ -143,47 +167,87 @@ export const RosterPage = () => {
     const [archiveTarget, setArchiveTarget] = useState<ManagedStudentRow | null>(null);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const rosterGen = useRef(0);
 
     useEffect(() => {
         let mounted = true;
+        const gen = rosterGen.current;
+        let firstResolved = false;
+        const first = Promise.all([listRoster(), listAssignmentsForStudents().catch(() => null)]);
+        first.then(
+            () => {
+                firstResolved = true;
+            },
+            () => undefined,
+        );
         void (async () => {
+            const cached = await getDb()
+                .rosterCache.get(userId)
+                .catch(() => undefined);
+            await Promise.resolve();
+            if (mounted && !firstResolved && gen === rosterGen.current && cached && cached.students.length > 0) {
+                setStudents(cached.students);
+                setCachedCounts(new Map(cached.assignmentCounts));
+            }
+
             try {
-                const roster = await listRoster();
-                if (!mounted) {
+                const [roster, grouped] = await first;
+                if (!mounted || gen !== rosterGen.current) {
                     return;
                 }
                 setStudents(roster);
+                setAssignments(grouped ?? new Map());
+                setAssignmentsStatus(grouped ? 'ready' : 'failed');
+                if (grouped) {
+                    setCachedCounts(null);
+                }
+                setLoadError(null);
+                persistRoster(userId, roster, grouped ? countsOf(grouped) : (cached?.assignmentCounts ?? []));
             } catch (err) {
-                if (mounted) {
-                    setStudents([]);
-                    setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
+                if (!mounted || gen !== rosterGen.current) {
+                    return;
                 }
-                return;
-            }
-            // Best-effort, like the library's favourites and tags: a roster with
-            // no counts beside it is still a usable roster.
-            try {
-                const grouped = await listAssignmentsForStudents();
-                if (mounted) {
-                    setAssignments(grouped);
-                }
-            } catch {
-                // Counts stay at zero; the per-student panel says so too.
+                setStudents((prev) => prev ?? []);
+                setAssignmentsStatus('failed');
+                setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
             }
         })();
         return () => {
             mounted = false;
         };
-    }, []);
+    }, [userId]);
 
-    const reloadRoster = async () => setStudents(await listRoster());
-    const reloadAssignments = async () => setAssignments(await listAssignmentsForStudents());
+    /**
+     * Every roster mutation re-reads the server and rewrites the snapshot the
+     * mount effect paints from. Without the rewrite a remount would show the
+     * pre-action roster — an archived student active, a removed one back —
+     * until the network corrected it.
+     */
+    const currentCounts = (): Array<[string, number]> =>
+        assignmentsStatus === 'ready' ? countsOf(assignments) : [...(cachedCounts ?? new Map()).entries()];
+    const reloadRoster = async () => {
+        const gen = ++rosterGen.current;
+        const roster = await listRoster();
+        if (gen !== rosterGen.current) {
+            return;
+        }
+        setStudents(roster);
+        persistRoster(userId, roster, currentCounts());
+    };
+    const reloadAssignments = async () => {
+        const grouped = await listAssignmentsForStudents();
+        setAssignments(grouped);
+        setAssignmentsStatus('ready');
+        setCachedCounts(null);
+        persistRoster(userId, students ?? [], countsOf(grouped));
+    };
 
     /**
      * The three ways a roster action ends: it worked, the plan refused it, or it
      * broke. Only the middle one gets an upgrade prompt instead of red text.
      */
     const run = async (action: () => Promise<void>): Promise<void> => {
+        rosterGen.current += 1;
         setActionError(null);
         setLimit(null);
         setBusy(true);
@@ -318,7 +382,8 @@ export const RosterPage = () => {
             {canManageStudents ? (
                 <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-stone-600">
                     Each student gets their own sign-in: a printed setup code they turn into a username, or an email
-                    invite if they have an address. Assign scores from your library and their markings stay theirs.
+                    invite if they have an address. Assign scores from your library: with Edit access a student marks up
+                    the same score you do.
                 </p>
             ) : null}
 
@@ -335,8 +400,8 @@ export const RosterPage = () => {
             {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
 
             {students === null ? (
-                <LoadingText className="mt-10">Loading your roster…</LoadingText>
-            ) : loadError ? (
+                <RosterSkeleton label="Loading your roster…" />
+            ) : loadError && students.length === 0 ? (
                 <ErrorText className="mt-8">{loadError}</ErrorText>
             ) : students.length === 0 ? (
                 canManageStudents ? (
@@ -354,6 +419,10 @@ export const RosterPage = () => {
                 )
             ) : (
                 <section className="mt-8">
+                    {/* Above the list, not instead of it: the cached roster the
+                        effect just painted is exactly what a teacher on a bad
+                        connection came for. */}
+                    {loadError ? <ErrorText className="mb-4">{loadError}</ErrorText> : null}
                     {/* Nothing in the list is taken away with the form: archive and
                         reset ask student-provision for no seat, and restore — which
                         does — comes back 402 into the notice above.
@@ -379,6 +448,8 @@ export const RosterPage = () => {
                                 student={student}
                                 index={index}
                                 assignments={assignments.get(student.student_user_id) ?? []}
+                                cachedCount={cachedCounts?.get(student.student_user_id)}
+                                assignmentsStatus={assignmentsStatus}
                                 expanded={expandedId === student.id}
                                 busy={busy}
                                 onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
@@ -436,24 +507,35 @@ export const RosterPage = () => {
                 </Dialog>
             ) : null}
 
+            {/* Both prompts carry the student's name in the title and body. The
+                wrapper adds no box (`contents`); it only hands the inherited
+                overflow-wrap down, so a name with no spaces wraps inside the
+                dialog instead of running past it. */}
             {resetTarget ? (
-                <ConfirmDialog
-                    {...resetPromptFor(resetTarget)}
-                    busy={busy}
-                    onConfirm={() => void confirmReset()}
-                    onCancel={() => setResetTarget(null)}
-                />
+                <div className="contents [overflow-wrap:anywhere]">
+                    <ConfirmDialog
+                        {...resetPromptFor(resetTarget)}
+                        busy={busy}
+                        onConfirm={() => void confirmReset()}
+                        onCancel={() => setResetTarget(null)}
+                    />
+                </div>
             ) : null}
 
             {archiveTarget ? (
-                <ConfirmDialog
-                    title={`Archive ${archiveTarget.display_name}?`}
-                    body="Their seat frees up for another student and their sign-in stops working. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was."
-                    confirmLabel="Archive"
-                    busy={busy}
-                    onConfirm={() => void confirmArchive()}
-                    onCancel={() => setArchiveTarget(null)}
-                />
+                <div className="contents [overflow-wrap:anywhere]">
+                    <ConfirmDialog
+                        // The name goes in the body, as in the reset prompts: the title sits in a
+                        // sticky header, and a long name wrapping there would leave the body and
+                        // actions a sliver of scroll room on a short screen.
+                        title="Archive this student?"
+                        body={`${archiveTarget.display_name}’s seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was.`}
+                        confirmLabel="Archive"
+                        busy={busy}
+                        onConfirm={() => void confirmArchive()}
+                        onCancel={() => setArchiveTarget(null)}
+                    />
+                </div>
             ) : null}
         </div>
     );
@@ -620,6 +702,8 @@ const StudentRow = ({
     student,
     index,
     assignments,
+    cachedCount,
+    assignmentsStatus,
     expanded,
     busy,
     onToggle,
@@ -632,6 +716,9 @@ const StudentRow = ({
     student: ManagedStudentRow;
     index: number;
     assignments: RosterAssignment[];
+    /** Snapshot count while the network's assignments are still out (else undefined). */
+    cachedCount?: number;
+    assignmentsStatus: 'loading' | 'ready' | 'failed';
     expanded: boolean;
     busy: boolean;
     onToggle: () => void;
@@ -644,38 +731,44 @@ const StudentRow = ({
     const archived = student.archived_at !== null;
     const detailId = `student-detail-${student.id}`;
     const identifier = identifierOf(student);
+    const count = assignments.length > 0 ? assignments.length : (cachedCount ?? 0);
+    /** The badge shows a snapshot count whose rows haven't arrived (yet, or at all). */
+    const detailsMissing = assignments.length === 0 && (cachedCount ?? 0) > 0;
 
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
-            <div
-                className={`group border-b border-stone-300/50 transition hover:border-accent/40 ${
-                    archived ? 'opacity-60' : ''
-                }`}
-            >
+            {/* Archived rows dim their content, not the wrapper: opacity on the
+                wrapper would also wash out the ⋮ menu popover inside it. */}
+            <div className="group border-b border-stone-300/50 transition hover:border-accent/40">
                 <div className="flex items-center gap-0.5">
                     <button
                         type="button"
                         aria-expanded={expanded}
                         aria-controls={detailId}
                         onClick={onToggle}
-                        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-3.5 text-left"
+                        className={`flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-3.5 text-left ${
+                            archived ? 'opacity-60' : ''
+                        }`}
                     >
                         <span aria-hidden="true" className="w-3 shrink-0 text-xs text-stone-400">
                             {expanded ? '▾' : '▸'}
                         </span>
-                        <span className="truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
-                            {student.display_name}
+                        {/* Name first: on a phone the identifier drops to its own
+                            line instead of splitting one line with the name, which
+                            left an emoji name as "🎹🎻 …" beside a full email. */}
+                        <span className="flex min-w-0 flex-col sm:flex-row sm:items-center sm:gap-2">
+                            <span className="truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
+                                {student.display_name}
+                            </span>
+                            {/* What they type to get in, beside the name the teacher
+                                typed — the two are different strings on both paths. */}
+                            {identifier ? <span className="truncate text-xs text-stone-500">{identifier}</span> : null}
                         </span>
-                        {/* What they type to get in, beside the name the teacher
-                            typed — the two are different strings on both paths. */}
-                        {identifier ? <span className="truncate text-xs text-stone-500">{identifier}</span> : null}
                         {student.claimed_at === null && !archived ? <Badge tone="warn">Invited</Badge> : null}
                         {archived ? <Badge>Archived</Badge> : null}
                     </button>
-                    <span className="shrink-0 px-2 text-xs text-stone-500">
-                        {assignments.length === 0
-                            ? 'No scores'
-                            : `${assignments.length} ${assignments.length === 1 ? 'score' : 'scores'}`}
+                    <span className={`shrink-0 px-2 text-xs text-stone-500 ${archived ? 'opacity-60' : ''}`}>
+                        {count === 0 ? 'No scores' : `${count} ${count === 1 ? 'score' : 'scores'}`}
                     </span>
                     <RosterRowMenu
                         archived={archived}
@@ -688,11 +781,19 @@ const StudentRow = ({
                 </div>
 
                 {expanded ? (
-                    <div id={detailId} className="pb-5 pl-5">
+                    <div id={detailId} className={`pb-5 pl-5 ${archived ? 'opacity-60' : ''}`}>
                         <h3 className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
                             Assigned scores
                         </h3>
-                        {assignments.length === 0 ? (
+                        {detailsMissing && assignmentsStatus === 'loading' ? (
+                            <LoadingText className="mt-2">Loading assignments…</LoadingText>
+                        ) : detailsMissing ? (
+                            // Terminal, not a spinner: nothing on this mount will
+                            // fill the panel once the load has failed.
+                            <p className="mt-2 text-sm text-stone-500">
+                                The assignment list couldn’t be loaded — the count is from the last sync.
+                            </p>
+                        ) : assignments.length === 0 ? (
                             <p className="mt-2 text-sm text-stone-500">
                                 Nothing assigned yet — open a score’s menu in your library and pick “Assign to
                                 student…”.
@@ -704,9 +805,13 @@ const StudentRow = ({
                                         key={assignment.id}
                                         className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-stone-200 bg-white/70 px-3 py-2"
                                     >
+                                        {/* Its own line on a phone: sharing one with the
+                                            due date and both controls left a real title
+                                            as "Sona…". */}
                                         <Link
                                             to={`/doc/${assignment.document_id}`}
-                                            className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 transition hover:text-accent-hover"
+                                            title={documentTitle}
+                                            className="min-w-0 basis-full truncate text-sm font-medium text-stone-800 transition hover:text-accent-hover sm:basis-0 sm:flex-1"
                                         >
                                             {documentTitle}
                                         </Link>
@@ -729,7 +834,7 @@ const StudentRow = ({
                                             Unassign
                                         </Button>
                                         {assignment.note ? (
-                                            <p className="w-full text-xs leading-relaxed text-stone-600">
+                                            <p className="w-full text-xs leading-relaxed text-stone-600 [overflow-wrap:anywhere]">
                                                 {assignment.note}
                                             </p>
                                         ) : null}
@@ -822,11 +927,11 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
                             <p className="text-xs font-medium text-stone-500">{formatDay(day.day)}</p>
                             <ul className="mt-1.5 flex flex-col gap-1.5 border-l border-stone-300/70 pl-3">
                                 {day.entries.map(({ note, documentTitle }) => (
-                                    <li key={note.id}>
+                                    <li key={note.id} className="min-w-0">
                                         <div className="flex flex-wrap items-center gap-2">
                                             <Link
                                                 to={`/doc/${note.document_id}`}
-                                                className="text-xs text-stone-500 transition hover:text-stone-700 hover:underline"
+                                                className="min-w-0 text-xs text-stone-500 transition [overflow-wrap:anywhere] hover:text-stone-700 hover:underline"
                                             >
                                                 {documentTitle}
                                             </Link>
@@ -834,7 +939,7 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
                                                 {note.shared ? 'Shared' : 'Private'}
                                             </Badge>
                                         </div>
-                                        <p className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-stone-700">
+                                        <p className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-stone-700 [overflow-wrap:anywhere]">
                                             {note.body}
                                         </p>
                                     </li>
@@ -903,7 +1008,9 @@ const RosterRowMenu = ({
                 aria-label="Student actions"
                 disabled={busy}
                 onClick={() => setOpen((v) => !v)}
-                className="rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50"
+                className={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
+                    archived ? 'opacity-60' : ''
+                }`}
             >
                 <MoreVerticalIcon size={16} />
             </button>

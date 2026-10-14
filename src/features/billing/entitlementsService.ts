@@ -31,6 +31,7 @@ export const freeEntitlements = (userId: string): Entitlements => ({
     status: null,
     source: 'none',
     current_period_end: null,
+    cancel_at_period_end: false,
     limits: FREE_LIMITS,
 });
 

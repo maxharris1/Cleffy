@@ -2,6 +2,7 @@ import Anthropic from 'npm:@anthropic-ai/sdk';
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
@@ -316,7 +317,7 @@ Deno.serve(async (req) => {
 
         return jsonResponse({ ok: true, page, clusters: outClusters, runs: outRuns });
     } catch (err) {
-        console.error('analyze-annotations model call failed', err);
+        logError('analyze-annotations', err, { code: 'model_call_failed' });
         await giveBack();
         return jsonResponse({ error: 'Recognition unavailable', code: 'ai_unavailable' }, 502);
     }

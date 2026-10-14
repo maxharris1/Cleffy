@@ -1,6 +1,7 @@
 import { Link } from 'react-router';
 
 import { RequireGuest } from '@/features/auth/AuthGates';
+import { LegalLinks } from '@/features/legal/LegalLinks';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { HeroDemo } from '@/features/marketing/HeroDemo';
 import { ProductShowcase } from '@/features/marketing/ProductShowcase';
@@ -46,20 +47,23 @@ const Footer = () => (
             </p>
             <LocalOpenControl label="Open a score locally" subtle />
         </div>
+        <LegalLinks withContact className="mt-4 justify-center sm:justify-start" />
     </footer>
 );
 
 /** Cloud landing: top bar, self-annotating hero, how-it-works, features, CTA. */
 const CloudLanding = () => (
     <main className="landing-page min-h-full">
-        <div className="mx-auto w-full max-w-6xl px-6 lg:px-10">
-            <nav aria-label="Main" className="flex items-center justify-between pt-6">
+        <div className="safe-landing-gutter mx-auto w-full max-w-6xl">
+            <nav aria-label="Main" className="safe-landing-nav flex items-center justify-between gap-4">
                 <Wordmark />
                 <div className="flex items-center gap-3">
                     {/* Students arrive here too, sent by a teacher, and their door
                         is not the one marked "Log in" — it takes a username, not
-                        an account. Quiet, because most visitors are teachers. */}
-                    <Link to="/student" className={linkClassName}>
+                        an account. Quiet, because most visitors are teachers.
+                        A phone has no room for it beside the two buttons, so
+                        there it moves under the hero's calls to action. */}
+                    <Link to="/student" className={`hidden whitespace-nowrap sm:inline ${linkClassName}`}>
                         Student sign in
                     </Link>
                     {/* Ghost against the primary: two bordered buttons side by side
@@ -93,6 +97,12 @@ const CloudLanding = () => (
                             <p className="text-xs text-stone-500">Free for 3 cloud scores · plans from $7/month</p>
                         </div>
                         <LocalOpenControl label="Or open a PDF locally — no account" subtle />
+                        <Link
+                            to="/student"
+                            className={`inline-flex items-center pointer-coarse:min-h-11 sm:hidden ${linkClassName}`}
+                        >
+                            Student sign in
+                        </Link>
                     </div>
                 </div>
                 <HeroDemo />
@@ -159,8 +169,8 @@ const CloudLanding = () => (
 /** Local-only fallback when Supabase isn't configured. */
 const LocalLanding = () => (
     <main className="landing-page min-h-full">
-        <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 lg:px-10">
-            <nav aria-label="Main" className="flex items-center justify-between pt-6">
+        <div className="safe-landing-gutter mx-auto flex min-h-full w-full max-w-6xl flex-col">
+            <nav aria-label="Main" className="safe-landing-nav flex items-center justify-between">
                 <Wordmark />
             </nav>
             <section className="landing-hero flex flex-1 flex-col justify-center gap-12 py-14 lg:grid lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)] lg:items-center lg:gap-16">

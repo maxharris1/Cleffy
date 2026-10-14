@@ -15,6 +15,12 @@ jobs:
                   node-version: 22
                   cache: npm
             - run: npm ci
+            # Runtime dependencies only, high and critical: everything in
+            # `dependencies` ships to the browser (pdf.js parses every untrusted
+            # score), so a known hole there blocks the build. Dev tooling never
+            # reaches users and is left to routine upgrades.
+            - name: Audit production dependencies
+              run: npm audit --omit=dev --audit-level=high
             - run: npm run lint:check
             - run: npm run typecheck
             - run: npm run test

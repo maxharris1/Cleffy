@@ -93,4 +93,31 @@ describe('wire parsing', () => {
         expect(row?.seq).toBe(3);
         expect(parseDbChange({ operation: 'INSERT' })).toBeNull();
     });
+
+    it('accepts a row whose author has deleted their account', () => {
+        // The FK sets created_by to null, which is an UPDATE: it is broadcast
+        // like any other, and dropping it as malformed would leave every open
+        // client showing the old author until a full re-pull.
+        const row = parseDbChange({
+            operation: 'UPDATE',
+            schema: 'public',
+            table: 'annotations',
+            record: {
+                id: 'a1',
+                document_id: 'd1',
+                page: 0,
+                kind: 'stroke',
+                color: '#000',
+                payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+                created_by: null,
+                created_at: '2026-01-01T00:00:00Z',
+                updated_at: '2026-01-02T00:00:00Z',
+                deleted_at: null,
+                seq: 4,
+            },
+            old_record: null,
+        });
+        expect(row?.id).toBe('a1');
+        expect(row?.created_by).toBeNull();
+    });
 });

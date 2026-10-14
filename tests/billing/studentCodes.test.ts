@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import { passwordProblem } from '../../supabase/functions/_shared/passwordPolicy';
 import {
     CODE_ALPHABET,
     CODE_LENGTH,
@@ -11,14 +12,10 @@ import {
     generateProvisionPassword,
     hashLoginCode,
     isPlausibleLoginCode,
-    isValidStudentPassword,
     isValidUsername,
     normalizeLoginCode,
     normalizeUsername,
     RESERVED_USERNAMES,
-    STUDENT_PASSWORD_MAX_BYTES,
-    STUDENT_PASSWORD_MIN,
-    studentPasswordProblem,
     syntheticStudentEmail,
     USERNAME_MAX,
     USERNAME_MIN,
@@ -280,61 +277,6 @@ describe('isValidUsername', () => {
     });
 });
 
-describe('isValidStudentPassword', () => {
-    it('refuses one character below the minimum and accepts the minimum', () => {
-        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MIN - 1))).toBe(false);
-        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MIN))).toBe(true);
-        expect(STUDENT_PASSWORD_MIN).toBe(8);
-    });
-
-    it('stops at the bcrypt ceiling, which Supabase Auth rejects rather than truncates', () => {
-        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MAX_BYTES))).toBe(true);
-        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MAX_BYTES + 1))).toBe(false);
-        expect(STUDENT_PASSWORD_MAX_BYTES).toBe(72);
-    });
-
-    it('measures the ceiling in BYTES, so a multi-byte password cannot slip past it', () => {
-        // The bug this pins: '.length' counts UTF-16 units, so 25 piano emoji
-        // read as 50 and sailed under a 72 "character" bound while actually
-        // being 100 bytes — a password the server would refuse outright, after
-        // the student had already typed it twice.
-        const emoji = '🎹'.repeat(25);
-        expect(emoji.length).toBe(50);
-        expect(new TextEncoder().encode(emoji).length).toBe(100);
-        expect(isValidStudentPassword(emoji)).toBe(false);
-
-        // Accents are the quieter version of the same thing: two bytes each.
-        expect(isValidStudentPassword('é'.repeat(36))).toBe(true);
-        expect(isValidStudentPassword('é'.repeat(37))).toBe(false);
-    });
-
-    it('measures the floor in characters, so an emoji counts as the one key it was', () => {
-        // The other half of the mixed units. Eight emoji is eight characters to
-        // the student and 32 bytes to bcrypt; counting UTF-16 units would call
-        // four of them "eight" and let a four-key password through.
-        expect(isValidStudentPassword('🎹'.repeat(STUDENT_PASSWORD_MIN))).toBe(true);
-        expect(isValidStudentPassword('🎹'.repeat(STUDENT_PASSWORD_MIN - 1))).toBe(false);
-    });
-
-    it('says WHICH of the two bounds a password missed', () => {
-        // The bug this pins: both bounds answered with one sentence, so a
-        // student who typed 25 emoji was told "passwords are at least 8
-        // characters" under a password of 25 characters — the one refusal they
-        // cannot act on, on a form that is spent once.
-        expect(studentPasswordProblem('a'.repeat(STUDENT_PASSWORD_MIN - 1))).toBe('too_short');
-        expect(studentPasswordProblem('🎹'.repeat(25))).toBe('too_long'); // 25 characters, 100 bytes
-        expect(studentPasswordProblem('é'.repeat(37))).toBe('too_long'); // 37 characters, 74 bytes
-        expect(studentPasswordProblem('hunter2hunter2')).toBeNull();
-    });
-
-    it('takes the password exactly as typed, spaces and all', () => {
-        // Never trimmed anywhere in the stack — a password whose spaces are eaten
-        // on the way in is one the student cannot type on the way back.
-        expect(isValidStudentPassword('  pass  ')).toBe(true);
-        expect(isValidStudentPassword('')).toBe(false);
-    });
-});
-
 describe('generateProvisionPassword', () => {
     it('is 32 random bytes as lowercase hex', () => {
         const password = generateProvisionPassword();
@@ -351,10 +293,41 @@ describe('generateProvisionPassword', () => {
         expect(drawn.size).toBe(SAMPLES);
     });
 
-    it('is a password no rule in this file would reject as too long', () => {
-        // 64 characters, comfortably inside bcrypt's 72-byte ceiling, so GoTrue
-        // stores the whole scramble rather than refusing it.
-        expect(isValidStudentPassword(generateProvisionPassword())).toBe(true);
+    it('always meets the account password policy GoTrue enforces on the admin API', () => {
+        // 64 characters, comfortably inside bcrypt's 72-byte ceiling, and
+        // holding a letter and a digit — letters_digits applies to createUser
+        // and updateUserById too, so a scramble without both would fail
+        // provisioning outright.
+        for (let i = 0; i < SAMPLES; i += 1) {
+            expect(passwordProblem(generateProvisionPassword())).toBeNull();
+        }
+    });
+
+    it('redraws rather than return a scramble without both a letter and a digit', () => {
+        // All-zero bytes, then all-0xaa bytes (hex "aaaa…": no digit), then real
+        // randomness. Only the third draw may be returned.
+        const draws = [0x00, 0xaa];
+        const fake = (bytes: Uint8Array): Uint8Array => {
+            const fill = draws.shift();
+            if (fill === undefined) {
+                for (let i = 0; i < bytes.length; i += 1) {
+                    bytes[i] = (i * 37 + 11) & 0xff;
+                }
+            } else {
+                bytes.fill(fill);
+            }
+            return bytes;
+        };
+        const spy = vi
+            .spyOn(crypto, 'getRandomValues')
+            .mockImplementation(fake as unknown as typeof crypto.getRandomValues);
+        try {
+            const password = generateProvisionPassword();
+            expect(spy).toHaveBeenCalledTimes(3);
+            expect(passwordProblem(password)).toBeNull();
+        } finally {
+            spy.mockRestore();
+        }
     });
 });
 

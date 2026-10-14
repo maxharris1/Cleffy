@@ -1,3 +1,5 @@
+import { PAID_VISION_READS } from '@/features/billing/paidAllowances';
+import { features } from '@/lib/features';
 import type { BillingTier } from '@/types/database';
 
 /**
@@ -80,56 +82,77 @@ export interface TierCard {
     features: string[];
 }
 
-export const TIER_CARDS: TierCard[] = [
-    {
-        tier: 'free',
-        name: 'Free',
-        tagline: 'A taste of Personal — the whole practice tool for one player, in small amounts.',
-        features: [
-            '3 active cloud scores',
-            '3 play-along analyses a month',
-            '2 smart imports a month',
-            '5 AI fingering reads a month',
-            '1 PDF export a month',
-            'Unlimited annotation and fingering tools',
-        ],
-    },
-    {
-        tier: 'personal',
-        name: 'Personal',
-        tagline: 'Your personal practice tool — the whole app for one player, with no student features.',
-        features: [
-            'Unlimited cloud scores',
-            'Unlimited play-along analysis',
-            'Unlimited smart imports',
-            'Unlimited AI fingering reads',
-            'Unlimited PDF export',
-            'No roster — this plan is just for you',
-        ],
-    },
-    {
-        tier: 'teacher',
-        name: 'Teacher',
-        tagline: 'For a teaching studio: a class of twenty works out at under $1 per student.',
-        features: [
-            'Unlimited students',
-            'Everything unlimited, as in Personal',
-            'One roster for everyone you teach',
-            'Practice notes on every lesson',
-        ],
-    },
-    {
-        tier: 'academy',
-        name: 'Academy',
-        tagline: 'Teacher for every instructor on your team, up to five seats.',
-        features: [
-            'Everything in Teacher, for up to 5 teachers',
-            'One invoice for the whole academy',
-            'Add and remove teacher seats by email',
-            'Students always join free',
-        ],
-    },
-];
+/** The release flags the cards depend on (src/lib/features.ts). */
+export type TierCardFlags = Pick<typeof features, 'playalong' | 'fingering'>;
+
+/**
+ * The tier cards for a build. Play-along analyses (omr_runs) and fingering are
+ * still metered server-side, but a release that switches them off must not
+ * sell them: a line on a card is a promise to a paying customer. The two
+ * meters every build uses are named for what actually draws on them —
+ * `smart_imports` is spent by an IMSLP import, `vision_reads` by the AI pass of
+ * Import marks (and by fingering note reads where that ships).
+ */
+export const tierCards = (flags: TierCardFlags): TierCard[] => {
+    const playalong = flags.playalong;
+    const fingering = flags.fingering;
+    const aiReads = fingering ? 'AI page reads (Import marks and fingering)' : 'AI page reads for Import marks';
+    return [
+        {
+            tier: 'free',
+            name: 'Free',
+            tagline: 'A taste of Personal — the whole practice tool for one player, in small amounts.',
+            features: [
+                '3 active cloud scores',
+                ...(playalong ? ['3 play-along analyses a month'] : []),
+                '2 IMSLP imports a month',
+                `5 ${aiReads} a month`,
+                '1 PDF export a month',
+                fingering ? 'Unlimited annotation and fingering tools' : 'Unlimited annotation',
+            ],
+        },
+        {
+            tier: 'personal',
+            name: 'Personal',
+            tagline: 'Your personal practice tool — the whole app for one player, with no student features.',
+            features: [
+                'Unlimited cloud scores',
+                ...(playalong ? ['Unlimited play-along analysis'] : []),
+                'Unlimited IMSLP imports',
+                // Paid AI reads carry a fair-use ceiling (tier_limits() in SQL),
+                // so the card states it rather than promising "unlimited".
+                `${PAID_VISION_READS} ${aiReads} a month (fair use)`,
+                'Unlimited PDF export',
+                'No roster — this plan is just for you',
+            ],
+        },
+        {
+            tier: 'teacher',
+            name: 'Teacher',
+            tagline: 'For a teaching studio: a class of twenty works out at under $1 per student.',
+            features: [
+                'Unlimited students',
+                'Everything in Personal',
+                'One roster for everyone you teach',
+                'Practice notes on every lesson',
+            ],
+        },
+        {
+            tier: 'academy',
+            name: 'Academy',
+            tagline: 'Teacher for every instructor on your team, up to five seats.',
+            features: [
+                'Everything in Teacher, for up to 5 teachers',
+                'One invoice for the whole academy',
+                'Add and remove teacher seats by email',
+                'Students always join free',
+            ],
+        },
+    ];
+};
+
+/** The cards this build sells. */
+export const TIER_CARDS: TierCard[] = tierCards(features);
 
 export interface PriceDisplay {
     priceId: string | null;

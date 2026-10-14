@@ -1,6 +1,8 @@
+import Dexie from 'dexie';
 import { describe, expect, it } from 'vitest';
 
-import { ScribblerDb } from '@/sync/db';
+import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
+import { pickDuplicateSnapshots, ScribblerDb } from '@/sync/db';
 
 describe('ScribblerDb v3 (scoreCache)', () => {
     it('upgrades v2 data and round-trips a cached analysis', async () => {
@@ -66,5 +68,70 @@ describe('ScribblerDb v6 (thumbnails)', () => {
         expect(thumb?.height).toBe(256);
 
         await db.delete();
+    });
+});
+
+describe('ScribblerDb v8/v9 (one day snapshot per score and day)', () => {
+    const snap = (id: string, overrides: Partial<LocalAnnotationSnapshot> = {}): LocalAnnotationSnapshot => ({
+        id,
+        docId: 'doc-1',
+        capturedOn: '2026-10-01',
+        label: null,
+        payload: [],
+        createdAt: '2026-10-01T09:00:00Z',
+        createdBy: null,
+        pending: 0,
+        ...overrides,
+    });
+
+    it('dedupes existing day snapshots before building the unique index', async () => {
+        const name = `test-db-${crypto.randomUUID()}`;
+
+        // A v7 database as shipped, holding the duplicates the old non-unique
+        // index allowed: two devices' rows for the same day.
+        const v7 = new Dexie(name);
+        v7.version(7).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
+            entitlements: 'userId',
+            thumbnails: 'docId',
+            libraryList: 'userId',
+            rosterCache: 'userId',
+            assignmentsCache: 'userId',
+        });
+        await v7.open();
+        await v7
+            .table('annotationSnapshots')
+            .bulkPut([
+                snap('local-pending', { pending: 1, createdAt: '2026-10-01T08:00:00Z' }),
+                snap('server-later', { createdAt: '2026-10-01T09:30:00Z' }),
+                snap('server-first', { createdAt: '2026-10-01T09:00:00Z' }),
+                snap('other-day', { capturedOn: '2026-10-02', pending: 1 }),
+            ]);
+        await v7.table('pdfCache').put({ docId: 'doc-1', bytes: new ArrayBuffer(1), title: 'Sonata', cachedAt: 'x' });
+        v7.close();
+
+        const db = new ScribblerDb(name);
+        await db.open();
+
+        const rows = await db.annotationSnapshots.orderBy('id').toArray();
+        // Server-acked beats pending; then the earliest capture.
+        expect(rows.map((r) => r.id)).toEqual(['other-day', 'server-first']);
+        expect((await db.pdfCache.get('doc-1'))?.title).toBe('Sonata');
+
+        // The index is unique now: a second row for a day is refused.
+        await expect(db.annotationSnapshots.add(snap('dupe'))).rejects.toMatchObject({ name: 'ConstraintError' });
+
+        await db.delete();
+    });
+
+    it('pickDuplicateSnapshots keeps one row per score-day', () => {
+        const losers = pickDuplicateSnapshots([snap('a', { pending: 1 }), snap('b'), snap('c', { docId: 'doc-2' })]);
+        expect(losers.map((r) => r.id)).toEqual(['a']);
     });
 });

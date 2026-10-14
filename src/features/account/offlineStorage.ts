@@ -1,5 +1,5 @@
 import { getDb } from '@/sync/db';
-import { cachedPdfSize } from '@/sync/pdfCache';
+import { cachedPdfSize, cancelBackgroundPdfCache } from '@/sync/pdfCache';
 
 export interface OfflineStorageUsage {
     /** Scores whose PDF bytes are held on this device. */
@@ -40,6 +40,8 @@ export const readOfflineStorage = async (): Promise<OfflineStorageUsage> => {
  * download and nothing more.
  */
 export const clearOfflineStorage = async (): Promise<void> => {
+    // Nor may a download still finishing in the background put one back.
+    cancelBackgroundPdfCache();
     const db = getDb();
     await db.pdfCache.clear();
     await db.thumbnails.clear();

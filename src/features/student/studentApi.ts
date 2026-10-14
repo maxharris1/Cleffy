@@ -19,6 +19,15 @@ const REJECTION = 'That username and password did not work';
 const NETWORK_FAILURE = 'Could not reach Cleffy. Check the internet connection and try again.';
 
 /**
+ * An archived student signing in. student-login says it itself (ARCHIVED in
+ * its handler, only to the right password); an email-method student meets
+ * GoTrue's own `user_banned` instead — archiving is the only ban the app sets
+ * — and is told the same thing.
+ */
+export const STUDENT_ARCHIVED_MESSAGE =
+    "Your teacher has archived this account, so it can't sign in for now. Ask your teacher to restore it.";
+
+/**
  * A refusal the server chose to name — 'invalid_credentials', 'username_taken',
  * and the rest of the documented set. The code exists so a page can put the
  * message where it belongs (under the username field, back on the code step)
@@ -62,6 +71,15 @@ const rejectionFrom = async (response: Response): Promise<StudentAuthError> => {
  * IS the credential. So this is a bare fetch carrying the anon apikey and
  * nothing else; sending an Authorization header would only invite the function
  * to trust a caller-supplied identity it must ignore.
+ *
+ * `captchaToken` travels in the body like every other field, under the name
+ * supabase-js uses for it, and is forwarded by both functions to the password
+ * grant they call server-side. It is null on every build with no
+ * VITE_TURNSTILE_SITE_KEY — which is every build today — and both functions
+ * leave the grant's `options` off entirely without one, so nothing about these
+ * requests changes until the key is set. Nothing on this side verifies it:
+ * GoTrue is the one that redeems it, and a Turnstile token may only be redeemed
+ * once.
  *
  * Failures are not re-interpreted, only carried. Both functions answer with one
  * indistinguishable body per class of rejection so neither can become an oracle
@@ -127,13 +145,24 @@ const openStudentSession = async (fn: 'student-login' | 'student-claim', payload
  * for an address, and an address typed by a code student simply fails at GoTrue
  * exactly as a wrong password would.
  */
-export const loginStudent = async (identifier: string, password: string): Promise<string> => {
+export const loginStudent = async (
+    identifier: string,
+    password: string,
+    captchaToken?: string | null,
+): Promise<string> => {
     if (identifier.includes('@')) {
         const { data, error } = await getSupabase().auth.signInWithPassword({
             email: identifier.trim(),
             password,
+            ...(captchaToken ? { options: { captchaToken } } : {}),
         });
         if (error) {
+            // GoTrue answers a banned account before it checks the password,
+            // and says so in the response either way; the copy adds nothing
+            // to what the endpoint already tells anyone who asks it.
+            if (error.code === 'user_banned') {
+                throw new StudentAuthError(STUDENT_ARCHIVED_MESSAGE, 'student_archived');
+            }
             throw new Error(mapAuthError(error, 'Could not sign in.'));
         }
         const meta = data.session?.user.user_metadata as Record<string, unknown> | undefined;
@@ -142,7 +171,7 @@ export const loginStudent = async (identifier: string, password: string): Promis
     // Sent exactly as typed. The function normalizes case and surrounding space
     // itself, so reshaping it here could only ever turn a username that would
     // have worked into one that does not.
-    return openStudentSession('student-login', { username: identifier, password });
+    return openStudentSession('student-login', { username: identifier, password, captchaToken });
 };
 
 /**
@@ -156,6 +185,7 @@ export const claimStudentAccount = async (input: {
     code: string;
     username: string;
     password: string;
+    captchaToken?: string | null;
 }): Promise<string> => openStudentSession('student-claim', input);
 
 /** One assigned score: the teacher's assignment plus the document it points at. */
@@ -186,15 +216,18 @@ export const fetchMyAssignments = async (): Promise<AssignedScore[]> => {
     }
 
     const documentIds = [...new Set(assignments.map((assignment) => assignment.document_id))];
+    // Narrow columns — the student list only needs title + id for the card link.
     const { data: documents, error: documentsError } = await supabase
         .from('documents')
-        .select('*')
+        .select(
+            'id, owner_id, title, storage_path, page_count, content_rev, thumb_rev, created_at, updated_at, archived_at',
+        )
         .in('id', documentIds);
     if (documentsError) {
         throw new Error(`Could not load your pieces: ${documentsError.message}`);
     }
 
-    const documentsById = new Map(documents.map((doc) => [doc.id, doc]));
+    const documentsById = new Map((documents ?? []).map((doc) => [doc.id, doc]));
     // A missing document is a score the teacher deleted without unassigning it.
     // The row is stale, not an error: drop the pair rather than render a card
     // that leads nowhere.
@@ -222,4 +255,52 @@ export const fetchMyRosterProfile = async (): Promise<ManagedStudentRow | null> 
         throw new Error(`Could not load your profile: ${error.message}`);
     }
     return data;
+};
+
+/**
+ * Whether this sign-in still stands: false once the teacher archived the
+ * student, reset their access, or deleted the account behind it.
+ *
+ * Asked of the server (student_access_revoked, migration 20261010120300)
+ * because none of those signs the device out by itself: the access token stays
+ * valid until it expires, and every read under it just comes back empty — which
+ * would otherwise read as "Nothing here yet". `profile` is the roster row the
+ * caller already fetched; an archived one answers without the round trip.
+ *
+ * Null when the server could not be asked: the page keeps showing what it has
+ * rather than signing someone out over a dropped connection.
+ */
+export const fetchSignInStillValid = async (profile: ManagedStudentRow | null): Promise<boolean | null> => {
+    if (profile?.archived_at) {
+        return false;
+    }
+    const { data, error } = await getSupabase().rpc('student_access_revoked');
+    if (error || typeof data !== 'boolean') {
+        return null;
+    }
+    return !data;
+};
+
+/**
+ * Whether the account behind an ended sign-in is gone altogether: deleted with
+ * its teacher, as opposed to archived or reset (fetchSignInStillValid answers
+ * false for all three). Asked once the sign-in is known to be over, to choose
+ * between keeping what the device queued for the next sign-in and discarding
+ * it: a deleted account has no next sign-in.
+ *
+ * True only when the server says so on both counts under this token: it is
+ * refused as a student's (student_access_revoked, which reads true for a
+ * student token whose roster row is gone), and no roster row answers to it.
+ * Anything unanswered is false — keeping a deleted account's changes costs a
+ * little storage, discarding a live one's would lose them.
+ */
+export const fetchAccountDeleted = async (): Promise<boolean> => {
+    const [profile, revoked] = await Promise.allSettled([
+        fetchMyRosterProfile(),
+        (async () => {
+            const { data, error } = await getSupabase().rpc('student_access_revoked');
+            return !error && data === true;
+        })(),
+    ]);
+    return profile.status === 'fulfilled' && profile.value === null && revoked.status === 'fulfilled' && revoked.value;
 };

@@ -125,6 +125,12 @@ public = false
 file_size_limit = "50MiB"
 allowed_mime_types = ["application/pdf"]
 
+# Library covers published by the owner's browser: `{documentId}/{rev}.jpg`.
+[storage.buckets.thumbnails]
+public = false
+file_size_limit = "2MiB"
+allowed_mime_types = ["image/jpeg"]
+
 # Allow connections via S3 compatible clients
 [storage.s3_protocol]
 enabled = true
@@ -165,11 +171,31 @@ site_url = "http://localhost:5173"
 # their password — GoTrue enforces this list against the redirectTo that
 # student-provision passes through, so an origin missing here is an invite that
 # cannot be completed.
+#
+# The two entries the app's own auth mail needs, and what their absence costs:
+# GoTrue checks the `redirect_to` on a link against this list and, when it finds
+# no match, QUIETLY FALLS BACK TO site_url rather than refusing — so a missing
+# entry is not an error anybody sees, it is a confirmation link that opens the
+# wrong page.
+#  * /auth/callback — authCallbackUrl() in src/features/auth/session.ts, where
+#    a sign-up confirmation lands. Without it the link drops the user on the
+#    home page with the tokens still in the fragment and nothing to read them
+#    (AuthCallbackPage is the only route that does).
+#  * /update-password — requestPasswordReset() in the same file, where a reset
+#    link lands. Without it the recovery session arrives on a page with no
+#    new-password form, and the reset cannot be completed at all.
+# Production needs neither line: its list carries `https://cleffy.io/**`, whose
+# wildcard already covers both. This file does not configure production — see
+# the [remotes.dev] note at the foot of the file.
 additional_redirect_urls = [
   "http://localhost:5173",
   "http://localhost:4173",
   "http://localhost:5173/student/welcome",
   "http://localhost:4173/student/welcome",
+  "http://localhost:5173/auth/callback",
+  "http://localhost:4173/auth/callback",
+  "http://localhost:5173/update-password",
+  "http://localhost:4173/update-password",
 ]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
@@ -189,10 +215,14 @@ enable_anonymous_sign_ins = true
 # Allow/disallow testing manual linking of accounts
 enable_manual_linking = false
 # Passwords shorter than this value will be rejected as weak. Minimum 6, recommended 8 or more.
-minimum_password_length = 6
+# Mirrored by supabase/functions/_shared/passwordPolicy.ts, which every new-password
+# form and student-claim validate against first (tests/auth/passwordPolicy.test.ts
+# holds the two together). The hosted projects are set through the Management API —
+# see DEPLOY.md "Auth password policy"; this file only configures the local stack.
+minimum_password_length = 8
 # Passwords that do not meet the following requirements will be rejected as weak. Supported values
 # are: `letters_digits`, `lower_upper_letters_digits`, `lower_upper_letters_digits_symbols`
-password_requirements = ""
+password_requirements = "letters_digits"
 
 # Configure passkey sign-ins.
 # [auth.passkey]
@@ -226,10 +256,44 @@ token_verifications = 30
 web3 = 30
 
 # Configure one of the supported captcha providers: `hcaptcha`, `turnstile`.
+#
+# DELIBERATELY LEFT OFF, here and for [remotes.dev]. The block below is the
+# exact shape to enable, and enabling it is a decision with a blast radius
+# worth stating, because the setting is PROJECT-WIDE: GoTrue applies it to
+# every endpoint that can create or authenticate a user, not to the one someone
+# had in mind. Turning it on makes all of these demand a token at once:
+#
+#  * /signup and /recover — RegisterPage and ForgotPasswordPage, which send one
+#    (src/features/auth/AuthCredentialsForm.tsx, when VITE_TURNSTILE_SITE_KEY
+#    is set). So the SITE KEY MUST BE IN THE DEPLOYED BUILD FIRST, or sign-up
+#    and password reset begin refusing everybody the moment this flips.
+#  * /token, the password grant — which our own Edge Functions call
+#    SERVER-SIDE, with no browser in the loop to solve a challenge:
+#    student-login/index.ts and student-claim/index.ts. Both forward an
+#    optional caller-supplied `captchaToken`, and both student forms now send
+#    one when the site key is set (StudentLoginPage, StudentClaimPage), so the
+#    two survive this being on. Neither verifies the token itself: a Turnstile
+#    token is single-use, so GoTrue is the verifier there and ours would spend
+#    it first. student-claim signs the student in BEFORE it spends their setup
+#    code, so a refused challenge costs a retry rather than the card.
+#  * /signup with anonymous: true — the share-link join page
+#    (src/features/share/JoinPage.tsx), which also sends one when the site key
+#    is set.
+#
+# Left off for the LOCAL stack specifically so `npm run local:up` needs no
+# Cloudflare account and the student-login / student-claim tests that drive the
+# real password grant keep passing. For the hosted projects it is off because
+# flipping it is a hosted-config change, and therefore Max's call; what this
+# branch ships is the code that works once he makes it.
+#
+# Use provider = "turnstile" with Cloudflare's test secret locally
+# (1x0000000000000000000000000000000AA always passes,
+# 2x0000000000000000000000000000000AA always fails) — a real secret is paired
+# with a site key bound to real hostnames and cannot be solved from localhost.
 # [auth.captcha]
 # enabled = true
-# provider = "hcaptcha"
-# secret = ""
+# provider = "turnstile"
+# secret = "env(TURNSTILE_SECRET_KEY)"
 
 [auth.email]
 # Allow/disallow new user signups via email to your project.
@@ -410,6 +474,12 @@ verify_jwt = true
 [functions.imslp-download]
 verify_jwt = true
 
+# pg_cron / pg_net have no Supabase JWT — imslp-sync authenticates with
+# x-imslp-sync-secret (or a service-role bearer for hand triggers).
+# Deploy with `supabase functions deploy imslp-sync --no-verify-jwt`.
+[functions.imslp-sync]
+verify_jwt = false
+
 # Metered analysis endpoints — JWT required; each one meters the caller.
 [functions.score-analyze]
 verify_jwt = true
@@ -451,8 +521,10 @@ verify_jwt = true
 # set a username and a password of the student's own, and student-login takes
 # those from then on. Open is not the same as an oracle — both are hard
 # rate-limited (60/min per IP; student-claim guards ~59-bit codes, student-login
-# a user-chosen password behind GoTrue's own per-account throttling) and both
-# answer every failure a guess can reach with one indistinguishable 401. Deploy
+# a user-chosen password behind per-username limits — a backoff per username
+# and address plus a ceiling per username — since GoTrue's own throttling only
+# ever sees the function's IP) and both answer every
+# failure a guess can reach with one indistinguishable 401. Deploy
 # with the flag, as with stripe-webhook above:
 # `supabase functions deploy student-claim --no-verify-jwt`
 # `supabase functions deploy student-login --no-verify-jwt`
@@ -461,6 +533,24 @@ verify_jwt = false
 
 [functions.student-login]
 verify_jwt = false
+
+# Self-serve account deletion. The caller's own JWT is the only identity it
+# acts for, and the function additionally re-verifies the account password and
+# a typed confirmation before cancelling billing and deleting anything.
+[functions.delete-account]
+verify_jwt = true
+
+# A share-link guest attaching an email address. The browser no longer calls
+# updateUser({ email }): with mailer_autoconfirm on, GoTrue confirmed that
+# instantly, so a guest could claim anyone's address. start mails a one-time
+# code; confirm checks it and only then attaches the email and a password with
+# the admin API. Both take the guest's own (anonymous) JWT and refuse everyone
+# else; the flow is in functions/_shared/guestEmail.ts.
+[functions.guest-email-start]
+verify_jwt = true
+
+[functions.guest-email-confirm]
+verify_jwt = true
 
 [analytics]
 enabled = true
@@ -502,9 +592,17 @@ project_id = "qdbnlrgylelelvwbkvnm"
 
 [remotes.dev.auth]
 site_url = "https://dev.cleffy.io"
+# The branch project's list has no wildcard (production's does — see the base
+# [auth] note), so every page an auth link may land on has to be spelled out.
+# /auth/callback and /update-password were missing, which is why a sign-up
+# confirmation or a reset link on dev lands on the dev home page instead of the
+# page that can finish it: GoTrue falls back to site_url on a redirect_to it
+# cannot match, silently.
 additional_redirect_urls = [
   "https://dev.cleffy.io",
   "https://dev.cleffy.io/student/welcome",
+  "https://dev.cleffy.io/auth/callback",
+  "https://dev.cleffy.io/update-password",
   "http://localhost:5173",
 ]
 

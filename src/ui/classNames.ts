@@ -19,7 +19,7 @@ const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
     primary: 'landing-cta text-white',
     secondary: 'border border-stone-300/90 bg-white/70 text-stone-800 hover:bg-white',
     ghost: 'text-stone-600 hover:bg-ink/5',
-    danger: 'bg-danger text-white hover:bg-red-500',
+    danger: 'bg-danger text-white hover:bg-red-800',
     dangerGhost: 'text-danger hover:bg-red-50',
 };
 
@@ -56,5 +56,10 @@ export const chipClassName = (active: boolean, extra = ''): string =>
 
 export const fieldLabelClassName = 'block text-xs font-medium uppercase tracking-[0.08em] text-stone-600';
 
+/**
+ * Inline text link. On touch screens an invisible ::after widens the hit area
+ * to ~44px tall without moving the text, so callers' own margins and display
+ * still hold and desktop is unchanged.
+ */
 export const linkClassName =
-    'text-sm text-accent underline decoration-accent/30 underline-offset-2 transition hover:text-accent-hover hover:decoration-accent/60';
+    'relative text-sm text-accent underline decoration-accent/30 underline-offset-2 transition hover:text-accent-hover hover:decoration-accent/60 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';

@@ -159,7 +159,7 @@ const LessonHistoryDialog = ({
                                         type="button"
                                         disabled={busy}
                                         onClick={() => void viewDay(row.id)}
-                                        className="rounded-lg px-2.5 py-1 text-sm text-accent transition hover:bg-accent-soft disabled:opacity-50"
+                                        className="rounded-lg px-2.5 py-1 text-sm text-accent transition hover:bg-accent-soft disabled:opacity-50 pointer-coarse:min-h-11"
                                     >
                                         View
                                     </button>
@@ -169,7 +169,7 @@ const LessonHistoryDialog = ({
                                             size="sm"
                                             disabled={busy}
                                             onClick={() => setConfirmRestoreId(row.id)}
-                                            className="px-2.5 py-1"
+                                            className="px-2.5 py-1 pointer-coarse:min-h-11"
                                         >
                                             Restore
                                         </Button>

@@ -1,12 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { StudentAuthError, claimStudentAccount, loginStudent } from '@/features/student/studentApi';
+import { ARCHIVED } from '../../../supabase/functions/student-login/handler';
+import {
+    STUDENT_ARCHIVED_MESSAGE,
+    StudentAuthError,
+    claimStudentAccount,
+    fetchAccountDeleted,
+    fetchSignInStillValid,
+    loginStudent,
+} from '@/features/student/studentApi';
+import type { ManagedStudentRow } from '@/types/database';
 
 const signInWithPassword = vi.fn();
 const setSession = vi.fn();
+const rpc = vi.fn();
+/** What the caller's own managed_students read answers. */
+const rosterRead = vi.fn();
 
 vi.mock('@/lib/supabase', () => ({
     getSupabase: () => ({
+        rpc: (...args: unknown[]) => rpc(...args),
+        from: () => ({
+            select: () => ({ limit: () => ({ maybeSingle: () => rosterRead() }) }),
+        }),
         auth: {
             signInWithPassword: (...args: unknown[]) => signInWithPassword(...args),
             setSession: (...args: unknown[]) => setSession(...args),
@@ -57,6 +73,31 @@ describe('loginStudent', () => {
         });
 
         await expect(loginStudent('kid@example.com', 'nope')).rejects.toThrow('Email or password is incorrect.');
+    });
+
+    it('tells an archived email student why, in the same words student-login uses', async () => {
+        // GoTrue refuses a banned account before it checks the password.
+        signInWithPassword.mockResolvedValue({
+            data: { session: null },
+            error: Object.assign(new Error('User is banned'), { code: 'user_banned' }),
+        });
+
+        await expect(loginStudent('kid@example.com', 'hunter2hunter2')).rejects.toMatchObject({
+            message: STUDENT_ARCHIVED_MESSAGE,
+            code: 'student_archived',
+        });
+        expect(STUDENT_ARCHIVED_MESSAGE).toBe(ARCHIVED.error);
+        expect(ARCHIVED.code).toBe('student_archived');
+    });
+
+    it('carries student-login’s archived answer through', async () => {
+        fetchMock.mockResolvedValue(jsonResponse(ARCHIVED, 403));
+
+        await expect(loginStudent('ada_lovelace', 'hunter2hunter2')).rejects.toMatchObject({
+            message: STUDENT_ARCHIVED_MESSAGE,
+            code: 'student_archived',
+        });
+        expect(setSession).not.toHaveBeenCalled();
     });
 
     it('posts a username to student-login with the anon key and no Authorization header', async () => {
@@ -117,5 +158,84 @@ describe('claimStudentAccount', () => {
         await expect(
             claimStudentAccount({ code: 'ABCD-EFGH-JKLM', username: 'ada_lovelace', password: 'hunter2hunter2' }),
         ).rejects.toMatchObject({ message: 'That username is taken', code: 'username_taken' });
+    });
+});
+
+describe('fetchSignInStillValid', () => {
+    const row = (archivedAt: string | null): ManagedStudentRow => ({
+        id: 'roster-1',
+        teacher_id: 'teacher-1',
+        student_user_id: 'student-1',
+        display_name: 'Ada',
+        parent_email: null,
+        auth_method: 'code',
+        username: 'ada',
+        student_email: null,
+        claimed_at: '2026-08-02T00:00:00Z',
+        archived_at: archivedAt,
+        created_at: '2026-08-01T00:00:00Z',
+        updated_at: '2026-08-01T00:00:00Z',
+    });
+
+    beforeEach(() => rpc.mockReset());
+
+    it('answers from an archived roster row without asking the server', async () => {
+        await expect(fetchSignInStillValid(row('2026-10-10T00:00:00Z'))).resolves.toBe(false);
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('asks the server, which knows when a reset ended this session', async () => {
+        rpc.mockResolvedValue({ data: true, error: null });
+        await expect(fetchSignInStillValid(row(null))).resolves.toBe(false);
+        expect(rpc).toHaveBeenCalledWith('student_access_revoked');
+
+        rpc.mockResolvedValue({ data: false, error: null });
+        await expect(fetchSignInStillValid(null)).resolves.toBe(true);
+    });
+
+    it('says it does not know when the server cannot answer', async () => {
+        rpc.mockResolvedValue({ data: null, error: { message: 'Failed to fetch' } });
+        await expect(fetchSignInStillValid(row(null))).resolves.toBeNull();
+    });
+});
+
+describe('fetchAccountDeleted', () => {
+    const rosterRow = { id: 'roster-1', archived_at: '2026-10-10T00:00:00Z' };
+
+    beforeEach(() => {
+        rpc.mockReset();
+        rosterRead.mockReset();
+    });
+
+    it('is true only when the token is refused as a student’s AND no roster row answers it', async () => {
+        rpc.mockResolvedValue({ data: true, error: null });
+        rosterRead.mockResolvedValue({ data: null, error: null });
+        await expect(fetchAccountDeleted()).resolves.toBe(true);
+        expect(rpc).toHaveBeenCalledWith('student_access_revoked');
+    });
+
+    it('is false for an archived or reset student: the row is still there', async () => {
+        rpc.mockResolvedValue({ data: true, error: null });
+        rosterRead.mockResolvedValue({ data: rosterRow, error: null });
+        await expect(fetchAccountDeleted()).resolves.toBe(false);
+    });
+
+    it('is false when no row answers but the token is not refused (a signed-out client reads nothing)', async () => {
+        rpc.mockResolvedValue({ data: false, error: null });
+        rosterRead.mockResolvedValue({ data: null, error: null });
+        await expect(fetchAccountDeleted()).resolves.toBe(false);
+    });
+
+    it('is false whenever either question goes unanswered', async () => {
+        rpc.mockResolvedValue({ data: null, error: { message: 'offline' } });
+        rosterRead.mockResolvedValue({ data: null, error: null });
+        await expect(fetchAccountDeleted()).resolves.toBe(false);
+
+        rpc.mockResolvedValue({ data: true, error: null });
+        rosterRead.mockResolvedValue({ data: null, error: { message: 'offline' } });
+        await expect(fetchAccountDeleted()).resolves.toBe(false);
+
+        rosterRead.mockRejectedValue(new TypeError('Failed to fetch'));
+        await expect(fetchAccountDeleted()).resolves.toBe(false);
     });
 });

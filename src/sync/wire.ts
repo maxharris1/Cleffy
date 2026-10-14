@@ -1,5 +1,4 @@
-import { z } from 'zod';
-
+import { z } from '@/lib/zod';
 import type { AnnotationRow } from '@/types/database';
 
 /**
@@ -44,7 +43,8 @@ export const parseDocumentChange = (payload: unknown): { id: string; content_rev
     return parsed.success ? parsed.data.record : null;
 };
 
-// Provenance flags (`src` smart-import, `sf` suggested fingering) MUST be
+// Provenance flags (`src` smart-import, `sf` suggested fingering, `hw`
+// converted handwriting) and prose style (`font`, `bold`, `italic`) MUST be
 // declared here: zod strips unknown keys, so omitting one would silently
 // diverge peer payloads from the writer's.
 const strokePayloadSchema = z.object({
@@ -61,6 +61,10 @@ const textPayloadSchema = z.object({
     size: z.number().positive(),
     src: z.literal(1).optional(),
     sf: z.literal(1).optional(),
+    hw: z.literal(1).optional(),
+    font: z.enum(['sans', 'serif']).optional(),
+    bold: z.literal(1).optional(),
+    italic: z.union([z.literal(0), z.literal(1)]).optional(),
 });
 
 /** Envelope produced by realtime.broadcast_changes() for annotation writes. */
@@ -71,7 +75,8 @@ const annotationRowSchema = z.object({
     kind: z.enum(['stroke', 'highlight', 'text']),
     color: z.string(),
     payload: z.union([strokePayloadSchema, textPayloadSchema]),
-    created_by: z.string(),
+    // Null after the author deleted their account; the mark itself stays.
+    created_by: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),
     deleted_at: z.string().nullable(),
@@ -123,6 +128,31 @@ export const parseScoreAnalysisBroadcast = (payload: unknown): ScoreAnalysisBroa
     const parsed = scoreAnalysisBroadcastSchema.safeParse(payload);
     if (!parsed.success) {
         console.warn('Ignoring malformed score_analysis broadcast', parsed.error.issues[0]?.message);
+        return null;
+    }
+    return parsed.data;
+};
+
+/**
+ * A member's role changed or their membership ended (document_members_broadcast
+ * trigger). `role` null means removed. Treated as a hint only: the receiver
+ * re-reads its own role over PostgREST rather than trusting the payload.
+ */
+export const MEMBERSHIP_EVENT = 'membership';
+
+const membershipChangeSchema = z.object({
+    table: z.literal('document_members'),
+    document_id: z.string().min(1),
+    user_id: z.string().min(1),
+    role: z.enum(['owner', 'editor', 'viewer']).nullable(),
+});
+
+export type MembershipChange = z.infer<typeof membershipChangeSchema>;
+
+export const parseMembershipChange = (payload: unknown): MembershipChange | null => {
+    const parsed = membershipChangeSchema.safeParse(payload);
+    if (!parsed.success) {
+        console.warn('Ignoring malformed membership broadcast', parsed.error.issues[0]?.message);
         return null;
     }
     return parsed.data;

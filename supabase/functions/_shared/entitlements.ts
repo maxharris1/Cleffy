@@ -41,6 +41,13 @@ export interface Entitlements {
     status: string | null;
     source: EntitlementSource;
     current_period_end: string | null;
+    /**
+     * The plan stops at current_period_end instead of renewing (Stripe's
+     * cancel_at_period_end, or a cancel_at inside the period — see
+     * stripeEvents.subscriptionRowFrom — from the subscription that entitles:
+     * the owner's, for an Academy seat). False whenever there is no period to end.
+     */
+    cancel_at_period_end: boolean;
     limits: EntitlementLimits;
 }
 
@@ -119,9 +126,10 @@ export const isUnlimited = (limit: number): boolean => limit < 0;
 export const limitFor = (tier: EffectiveTier, metric: UsageMetric): number => limitsFor(tier)[metric];
 
 /**
- * Paid tiers advertise "unlimited" vision reads but carry a generous fair-use
- * ceiling. Hitting it is an anomaly worth logging, not an upsell moment, so it
- * reports a different code and the UI points at support rather than at Checkout.
+ * Paid tiers carry a generous fair-use ceiling on vision reads, and the
+ * pricing card states the number. Hitting it is an anomaly worth logging, not
+ * an upsell moment, so it reports a different code and the UI points at
+ * support rather than at Checkout.
  *
  * Only the metered budgets reach here: `students` is a stock, refused where a
  * seat is provisioned, and never travels the quota path. A student's zeroes are
@@ -160,6 +168,7 @@ export const freeEntitlements = (userId: string): Entitlements => ({
     status: null,
     source: 'none',
     current_period_end: null,
+    cancel_at_period_end: false,
     limits: TIER_LIMITS.free,
 });
 
@@ -175,6 +184,7 @@ export const studentEntitlements = (userId: string): Entitlements => ({
     status: null,
     source: 'managed',
     current_period_end: null,
+    cancel_at_period_end: false,
     limits: STUDENT_LIMITS,
 });
 
@@ -273,6 +283,8 @@ export interface SubscriptionLike {
     tier: BillingTier;
     status: string;
     current_period_end: string | null;
+    /** Absent reads as false: the column's default. */
+    cancel_at_period_end?: boolean;
 }
 
 export interface EntitlementInput {
@@ -317,6 +329,7 @@ export const resolveEntitlements = (input: EntitlementInput, nowMs: number): Ent
             status: own.status,
             source: 'subscription',
             current_period_end: own.current_period_end,
+            cancel_at_period_end: own.cancel_at_period_end === true,
             limits: TIER_LIMITS[own.tier],
         };
     }
@@ -333,6 +346,7 @@ export const resolveEntitlements = (input: EntitlementInput, nowMs: number): Ent
             status: seat.status,
             source: 'studio_member',
             current_period_end: seat.current_period_end,
+            cancel_at_period_end: seat.cancel_at_period_end === true,
             limits: TIER_LIMITS.academy,
         };
     }

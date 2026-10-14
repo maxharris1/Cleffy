@@ -1,4 +1,5 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 import { isOwnForward } from '../_shared/supportMail.ts';
 import { type SvixFailure, verifySvixSignature } from '../_shared/svixSignature.ts';
@@ -168,7 +169,7 @@ Deno.serve(async (req) => {
         }
     } catch (err) {
         bodyError = String(err).slice(0, 200);
-        console.error(`fetching inbound email ${emailId} failed: ${String(err)}`);
+        logError('resend-inbound', err, { code: 'body_fetch_failed', emailId });
     }
 
     const text = truncate(email.text);
@@ -221,7 +222,10 @@ Deno.serve(async (req) => {
         if (!res.ok) {
             const detail = `${res.status} ${await res.text()}`.slice(0, 500);
             await admin.from('support_messages').update({ forward_error: detail }).eq('id', rowId);
-            console.error(`forwarding ${emailId} failed: ${detail}`);
+            logError('resend-inbound', new Error(`forward returned ${res.status}`), {
+                code: 'forward_failed',
+                emailId,
+            });
             // 200 on purpose: the message IS stored, so a Svix retry would only
             // hit the duplicate path and never retry the forward. The null
             // forwarded_at is the durable signal instead.

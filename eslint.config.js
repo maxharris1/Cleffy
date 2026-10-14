@@ -5,7 +5,8 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-    { ignores: ['dist', 'dev-dist', 'coverage', 'node_modules', 'services/omr-service/dist'] },
+    // supabase/.temp is CLI-generated whenever the local stack runs.
+    { ignores: ['dist', 'dev-dist', 'coverage', 'node_modules', 'services/omr-service/dist', 'supabase/.temp'] },
     {
         files: ['**/*.{ts,tsx}'],
         extends: [
@@ -24,6 +25,21 @@ export default tseslint.config(
                 { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
             ],
             '@typescript-eslint/consistent-type-imports': ['error', { prefer: 'type-imports' }],
+        },
+    },
+    {
+        // zod must be configured jitless before any schema parses, or the
+        // production CSP reports an eval violation — see src/lib/zod.ts.
+        files: ['src/**/*.{ts,tsx}'],
+        ignores: ['src/lib/zod.ts'],
+        rules: {
+            'no-restricted-imports': [
+                'error',
+                {
+                    paths: [{ name: 'zod', message: "Import { z } from '@/lib/zod' (jitless, CSP-safe)." }],
+                    patterns: [{ group: ['zod/*'], message: "Import { z } from '@/lib/zod' (jitless, CSP-safe)." }],
+                },
+            ],
         },
     },
     {
