@@ -1,5 +1,6 @@
 import type { FontSpec } from '@/features/import/textFit';
 import {
+    canvasFont,
     MAX_MUSIC_TEXT_SIZE,
     MAX_TEXT_SIZE,
     measureInkText,
@@ -229,6 +230,121 @@ export const maxTextSizeFor = (payload: TextPayload): number =>
 /** Line pitch as a multiple of the font size (shared by renderer, hit test and export). */
 export const TEXT_LINE_HEIGHT = 1.25;
 
+/** Gap (page widths) a prose note's wrapped lines keep from the page's right edge. */
+export const TEXT_NOTE_EDGE = 0.02;
+/** Room (page widths) a new note keeps to its right: one tapped at the edge starts further in. */
+export const MIN_TEXT_NOTE_WIDTH = 0.25;
+/** Narrowest wrap (em): an older note hard against the edge overruns it rather than stacking letters. */
+const MIN_WRAP_EM = 6;
+/** Advance guess per character where the canvas cannot measure (jsdom). */
+const FALLBACK_ADVANCE_EM = 0.55;
+
+/** Widest a prose note's line may be, in em: up to the page's right edge, less the margin. */
+export const textWrapEm = (payload: Pick<TextPayload, 'x' | 'size'>): number =>
+    Math.max(MIN_WRAP_EM, (1 - TEXT_NOTE_EDGE - payload.x) / Math.max(payload.size, 1e-6));
+
+let advanceProbe: CanvasRenderingContext2D | null | undefined;
+const advanceCache = new Map<string, number>();
+
+/** Advance width of a string / font size (one shared probe canvas, cached). */
+const advanceEm = (text: string, font: FontSpec): number => {
+    const key = `${canvasFont(font, 100)}|${text}`;
+    const hit = advanceCache.get(key);
+    if (hit !== undefined) {
+        return hit;
+    }
+    if (advanceProbe === undefined) {
+        try {
+            advanceProbe = typeof document === 'undefined' ? null : document.createElement('canvas').getContext('2d');
+        } catch {
+            advanceProbe = null;
+        }
+    }
+    let em = Array.from(text).length * FALLBACK_ADVANCE_EM;
+    if (advanceProbe) {
+        advanceProbe.font = canvasFont(font, 100);
+        const width = advanceProbe.measureText(text).width;
+        if (Number.isFinite(width)) {
+            em = width / 100;
+        }
+    }
+    if (advanceCache.size > 2000) {
+        advanceCache.clear();
+    }
+    advanceCache.set(key, em);
+    return em;
+};
+
+const graphemes = (text: string): string[] =>
+    typeof Intl !== 'undefined' && 'Segmenter' in Intl
+        ? Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (s) => s.segment)
+        : Array.from(text);
+
+/**
+ * Greedy wrap of one line at `maxEm`: breaks between words, and inside a word
+ * (by grapheme, so an emoji or accented letter is never split) only when the
+ * word alone is wider than the line — the same way the editor's textarea wraps.
+ */
+const wrapLine = (line: string, maxEm: number, font: FontSpec): string[] => {
+    const fits = (s: string) => advanceEm(s, font) <= maxEm;
+    const out: string[] = [];
+    let current = '';
+    for (const token of line.split(/(\s+)/)) {
+        if (token === '') {
+            continue;
+        }
+        const candidate = current + token;
+        if (fits(candidate.trimEnd())) {
+            current = candidate;
+            continue;
+        }
+        if (current.trim() !== '') {
+            out.push(current.trimEnd());
+        }
+        current = '';
+        if (token.trim() === '') {
+            continue;
+        }
+        let rest = token;
+        while (!fits(rest)) {
+            const parts = graphemes(rest);
+            // Longest prefix that fits, at least one grapheme so the loop always advances.
+            let lo = 1;
+            let hi = parts.length - 1;
+            while (lo < hi) {
+                const mid = Math.ceil((lo + hi) / 2);
+                if (fits(parts.slice(0, mid).join(''))) {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            out.push(parts.slice(0, lo).join(''));
+            rest = parts.slice(lo).join('');
+        }
+        current = rest;
+    }
+    out.push(current.trimEnd());
+    return out;
+};
+
+/**
+ * The lines a text note is drawn as: its own line breaks, and prose wrapped so
+ * it stays inside the page (shared by the renderer, hit test and selection
+ * box). Music glyphs are single marks and never wrap.
+ */
+export const textNoteLines = (
+    payload: TextPayload,
+    spec: TextDrawSpec = textDrawSpec(payload.text, payload.hw === 1, payload),
+): string[] => {
+    const lines = spec.glyphs.split('\n');
+    if (spec.music) {
+        return lines;
+    }
+    const maxEm = textWrapEm(payload);
+    return lines.flatMap((line) => wrapLine(line, maxEm, spec));
+};
+
 /**
  * Visual bounds of a text payload as drawn — measured glyph box, not an
  * em-per-character guess — in normalized page coords (`aspect` = page height
@@ -238,7 +354,7 @@ export const TEXT_LINE_HEIGHT = 1.25;
 export const textBoundsNorm = (payload: TextPayload, aspect: number): Bbox => {
     const { x, y, size, hw } = payload;
     const spec = textDrawSpec(payload.text, hw === 1, payload);
-    const lines = spec.glyphs.split('\n');
+    const lines = textNoteLines(payload, spec);
     let width = 0;
     let top = Infinity;
     let bottom = -Infinity;

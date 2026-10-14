@@ -87,23 +87,24 @@ describe('Toolbar', () => {
         expect(style).toHaveFocus();
     });
 
-    it('folds colours and sizes only on phones: from sm (a portrait iPad) they stay inline, one tap each', async () => {
+    it('folds colours and sizes below lg: inline, they wrapped a portrait iPad bar to two rows', async () => {
         await renderToolbar();
 
         // jsdom applies no CSS, so the breakpoints are read off the classes:
-        // the style button and its divider exist below sm only…
+        // the style button and its divider exist below lg only…
         const style = screen.getByRole('button', { name: 'Pen colour and size' });
-        expect(style).toHaveClass('sm:hidden');
-        expect(style.previousElementSibling).toHaveClass('sm:hidden');
-        // …and the inline colours and sizes take over from sm, not from lg.
+        expect(style).toHaveClass('lg:hidden');
+        expect(style).not.toHaveClass('sm:hidden');
+        expect(style.previousElementSibling).toHaveClass('lg:hidden');
+        // …and the inline colours and sizes take over from lg, one tap each.
         const inlineColors = screen.getAllByRole('button', { name: /^Color #/ });
         const inlineSizes = screen.getAllByRole('button', { name: /^Pen size / });
         expect(inlineColors).toHaveLength(7);
         expect(inlineSizes).toHaveLength(3);
         for (const button of [...inlineColors, ...inlineSizes]) {
-            expect(button.parentElement).toHaveClass('hidden', 'sm:contents');
+            expect(button.parentElement).toHaveClass('hidden', 'lg:contents');
         }
-        expect(document.querySelector('[class*="lg:"]')).toBeNull();
+        expect(document.querySelector('[class*="sm:contents"]')).toBeNull();
     });
 
     it('closes the style popover on a tap outside it or a tool change, and names what the tool styles', async () => {
