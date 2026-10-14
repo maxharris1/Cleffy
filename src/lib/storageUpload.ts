@@ -1,5 +1,3 @@
-import * as tus from 'tus-js-client';
-
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 /** Above this size, use the resumable (TUS) endpoint per Supabase guidance. */
@@ -39,6 +37,11 @@ export const uploadPdfToStorage = async (
         throw new Error('Not signed in');
     }
     const { url: projectUrl } = requireSupabaseConfig();
+    // Loaded here, on the first large upload: the resumable client and its
+    // dependencies were 60 KB of the app's entry chunk, about a sixth of it,
+    // downloaded and run before the first paint for a path most sessions
+    // never take.
+    const tus = await import('tus-js-client');
 
     await new Promise<void>((resolve, reject) => {
         const upload = new tus.Upload(file, {
