@@ -7,7 +7,7 @@ import {
 } from '@/features/library/thumbnailRemote';
 import { THUMB_MAX_SIDE } from '@/features/library/thumbnailSize';
 import { getDb } from '@/sync/db';
-import { getCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
+import { getCachedPdf, getCachedPdfMeta, readCachedPdfBytes } from '@/sync/pdfCache';
 
 /**
  * Renders in flight, keyed by docId — concurrent rows asking for the same
@@ -100,7 +100,7 @@ const resolveThumbnail = async (docId: string, contentRev: number, thumbRev: num
                 // Rendered here earlier, never published (the feature is newer
                 // than the render, or the upload failed on another device).
                 void publishThumbnail(docId, thumb.contentRev, thumb.blob);
-            } else if (await getCachedPdf(docId)) {
+            } else if (await getCachedPdfMeta(docId)) {
                 // A PNG from before the JPEG encoder; the bucket takes JPEG only.
                 // Fall through to render it again from the bytes, once — the
                 // publish attempt is remembered whether or not it succeeds.
@@ -119,7 +119,7 @@ const resolveThumbnail = async (docId: string, contentRev: number, thumbRev: num
         return thumb?.blob ?? null;
     }
 
-    const cached = await getCachedPdf(docId);
+    const cached = await getCachedPdfMeta(docId);
     if (!cached) {
         // Not on this device. The published copy, if there is one newer than
         // what we hold — else a stale thumbnail beats an empty box: the title
@@ -230,7 +230,9 @@ const renderAndStore = async (
     const db = getDb();
     const key = `${docId}:${contentRev}`;
     const tooSmall = (thumb?.maxSide ?? 0) < THUMB_MAX_SIDE;
-    const cached = await getCachedPdf(docId);
+    // Metadata only: the file itself is read inside the render queue, and only
+    // when a render actually runs.
+    const cached = await getCachedPdfMeta(docId);
     if (!cached) {
         return thumb?.blob ?? null;
     }
@@ -259,8 +261,14 @@ const renderAndStore = async (
         let png: { blob: Blob; width: number; height: number };
         try {
             // Dynamic: this is the boundary that keeps pdf.js out of the shell.
-            const { renderFirstPageJpeg } = await import('@/features/library/thumbnailRender');
-            png = await renderFirstPageJpeg(await readCachedPdfBytes(cached.bytes));
+            const [{ renderFirstPageJpeg }, row] = await Promise.all([
+                import('@/features/library/thumbnailRender'),
+                getCachedPdf(docId),
+            ]);
+            if (!row) {
+                throw new Error('The cached score is gone');
+            }
+            png = await renderFirstPageJpeg(await readCachedPdfBytes(row.bytes));
         } catch {
             // Best-effort decoration: a thumbnail is never worth an error state.
             failed.add(key);

@@ -15,6 +15,8 @@ vi.mock('@/lib/storageUpload', () => ({
 // fake-indexeddb's structured clone strips jsdom Blob methods, so the Dexie
 // layer is replaced by an in-memory map that keeps real Blobs readable.
 const memCache = vi.hoisted(() => new Map<string, unknown>());
+// pdfMeta: each cached copy's metadata, written beside its bytes (sync/pdfCache.ts).
+const memMeta = vi.hoisted(() => new Map<string, unknown>());
 const memThumbs = vi.hoisted(() => new Map<string, unknown>());
 // userId -> { entitlements }: the cached plan the cap refusal's wording falls back on.
 const memEntitlements = vi.hoisted(() => new Map<string, unknown>());
@@ -33,6 +35,14 @@ vi.mock('@/sync/db', () => {
             pdfCache: table({
                 get: (id: string) =>
                     cacheFailure.get ? Promise.reject(cacheFailure.get) : Promise.resolve(memCache.get(id)),
+                where: () => ({
+                    equals: (id: string) => ({
+                        count: () =>
+                            cacheFailure.get
+                                ? Promise.reject(cacheFailure.get)
+                                : Promise.resolve(memCache.has(id) ? 1 : 0),
+                    }),
+                }),
                 put: (row: { docId: string }) => {
                     if (cacheFailure.put) {
                         return Promise.reject(cacheFailure.put);
@@ -46,6 +56,32 @@ vi.mock('@/sync/db', () => {
                 },
                 clear: () => {
                     memCache.clear();
+                    return Promise.resolve();
+                },
+            }),
+            pdfMeta: table({
+                get: (id: string) =>
+                    cacheFailure.get ? Promise.reject(cacheFailure.get) : Promise.resolve(memMeta.get(id)),
+                put: (row: { docId: string }) => {
+                    if (cacheFailure.put) {
+                        return Promise.reject(cacheFailure.put);
+                    }
+                    memMeta.set(row.docId, row);
+                    return Promise.resolve(row.docId);
+                },
+                add: (row: { docId: string }) => {
+                    if (memMeta.has(row.docId)) {
+                        return Promise.reject(new Error('ConstraintError'));
+                    }
+                    memMeta.set(row.docId, row);
+                    return Promise.resolve(row.docId);
+                },
+                delete: (id: string) => {
+                    memMeta.delete(id);
+                    return Promise.resolve();
+                },
+                clear: () => {
+                    memMeta.clear();
                     return Promise.resolve();
                 },
             }),
@@ -80,7 +116,8 @@ vi.mock('@/sync/db', () => {
             }),
             libraryList: table({ clear: libraryListClear }),
             entitlements: table({ get: (id: string) => Promise.resolve(memEntitlements.get(id)) }),
-            transaction: (_mode: string, _table: unknown, fn: () => unknown) => Promise.resolve(fn()),
+            // The scope callback is always last, after however many tables.
+            transaction: (...args: unknown[]) => Promise.resolve((args[args.length - 1] as () => unknown)()),
         }),
     };
 });
@@ -118,9 +155,17 @@ import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import { importImslpPdfToStorage } from '@/features/imslp/imslpApi';
 import { uploadPdfToStorage } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
-import { cancelBackgroundPdfCache } from '@/sync/pdfCache';
+import { cancelBackgroundPdfCache, getCachedPdf } from '@/sync/pdfCache';
 
-const putCache = (row: CachedPdf) => getDb().pdfCache.put(row);
+/**
+ * A copy already on the device, written as an earlier build left it: the row
+ * alone, its metadata read from it on first use. Any stale metadata goes, as
+ * a real write of the row would have replaced it.
+ */
+const putCache = (row: CachedPdf) => {
+    memMeta.delete(row.docId);
+    return getDb().pdfCache.put(row);
+};
 
 const doc = (over: Partial<DocumentRow> = {}): DocumentRow => ({
     id: 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1',
@@ -378,6 +423,7 @@ beforeEach(async () => {
     cacheFailure.get = null;
     memEntitlements.clear();
     await getDb().pdfCache.clear();
+    await getDb().pdfMeta.clear();
 });
 
 describe('loadDocumentBytes content_rev staleness', () => {
@@ -502,9 +548,9 @@ describe('loadDocumentBytes remembers the role for offline opens', () => {
         });
 
         await loadDocumentBytes(d, { userId: 'user-1', role: 'viewer' });
-        expect((await getDb().pdfCache.get(d.id))?.myRole).toBe('viewer');
+        expect((await getCachedPdf(d.id))?.myRole).toBe('viewer');
         await loadDocumentBytes(d, { userId: 'user-1' });
-        expect((await getDb().pdfCache.get(d.id))?.myRole).toBe('viewer');
+        expect((await getCachedPdf(d.id))?.myRole).toBe('viewer');
         expect(calls.download).not.toHaveBeenCalled();
     });
 
@@ -526,7 +572,7 @@ describe('loadDocumentBytes remembers the role for offline opens', () => {
             userId: 'user-1',
             role: 'editor',
         });
-        expect((await getDb().pdfCache.get(d.id))?.myRole).toBe('editor');
+        expect((await getCachedPdf(d.id))?.myRole).toBe('editor');
     });
 });
 
@@ -568,7 +614,7 @@ describe('loadDocumentBytes preloaded bytes (warm open)', () => {
         });
         const held = new TextEncoder().encode('held-bytes').buffer as ArrayBuffer;
         await loadDocumentBytes(d, { preloaded: { bytes: held, contentRev: 1, archivedAt: null } });
-        expect((await getDb().pdfCache.get(d.id))?.archivedAt).toBe('2026-08-30T00:00:00Z');
+        expect((await getCachedPdf(d.id))?.archivedAt).toBe('2026-08-30T00:00:00Z');
     });
 });
 
@@ -627,7 +673,7 @@ describe('loadDocumentSource (viewer open)', () => {
         const source = await loadDocumentSource(d, { prefetch: prefetchScoreUrl(d.id), userId: 'user-1' });
         expect(new TextDecoder().decode(source.bytes)).toBe('whole-bytes');
         expect(calls.download).toHaveBeenCalledTimes(1);
-        expect((memCache.get(d.id) as CachedPdf | undefined)?.userId).toBe('user-1');
+        expect((await getCachedPdf(d.id))?.userId).toBe('user-1');
     });
 });
 
@@ -710,7 +756,7 @@ describe('cacheStreamedDocument (a first open closed mid-download)', () => {
         cacheStreamedDocument(d, first, { userId: 'user-1', role: 'owner' });
         first.finish('streamed');
         await settle();
-        expect((memCache.get(d.id) as CachedPdf).myRole).toBeUndefined();
+        expect((await getCachedPdf(d.id))?.myRole).toBeUndefined();
 
         await putCache({
             docId: d.id,
@@ -723,7 +769,7 @@ describe('cacheStreamedDocument (a first open closed mid-download)', () => {
         cacheStreamedDocument(d, second, { userId: 'user-1', role: 'owner' });
         second.finish('streamed');
         await settle();
-        expect((memCache.get(d.id) as CachedPdf).myRole).toBe('viewer');
+        expect((await getCachedPdf(d.id))?.myRole).toBe('viewer');
     });
 
     it('is stopped by purging the score, and writes nothing back', async () => {

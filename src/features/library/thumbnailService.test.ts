@@ -15,6 +15,15 @@ vi.mock('@/sync/db', () => ({
     getDb: () => ({
         pdfCache: {
             get: (docId: string) => Promise.resolve(pdfCache.get(docId)),
+            where: () => ({
+                equals: (docId: string) => ({ count: () => Promise.resolve(pdfCache.has(docId) ? 1 : 0) }),
+            }),
+        },
+        // No metadata rows: every cached copy here is read as a pre-pdfMeta
+        // row, its metadata taken from it (sync/pdfCache.ts).
+        pdfMeta: {
+            get: () => Promise.resolve(undefined),
+            add: () => Promise.resolve(),
         },
         thumbnails: {
             get: (docId: string) => Promise.resolve(thumbnails.get(docId)),

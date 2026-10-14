@@ -1,5 +1,6 @@
 import type { PendingOp, ScribblerDb } from '@/sync/db';
 import { isCloudDocId } from '@/sync/docIds';
+import { readCachedPdfMeta } from '@/sync/pdfCache';
 
 /**
  * Which queued ops an account may treat as its own: upload under its name,
@@ -43,7 +44,7 @@ export const opOwnerFor = async (
         const key = `${userId}\u0000${docId}`;
         const known = cache?.get(key);
         if (known === undefined) {
-            const cached = await db.pdfCache.get(docId).catch(() => undefined);
+            const cached = await readCachedPdfMeta(db, docId).catch(() => null);
             legacyOurs = cached?.userId === userId;
             cache?.set(key, legacyOurs);
         } else {
