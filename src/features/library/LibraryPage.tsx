@@ -589,7 +589,11 @@ export const LibraryPage = () => {
                     onSentinelVisible();
                 }
             },
-            { rootMargin: '600px 0px' },
+            // About three screens ahead: the next page is asked for while
+            // the reader is still a good way from the end, so a steady scroll
+            // reaches older scores already on the shelf instead of waiting at
+            // the bottom for them. Appending is cheap now that rows are memoized.
+            { rootMargin: '2400px 0px' },
         );
         observer.observe(node);
         return () => observer.disconnect();
