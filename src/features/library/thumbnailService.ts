@@ -1,6 +1,7 @@
 import {
     fetchPublishedThumbnail,
     noteThumbnailObjectMissing,
+    probePublishedThumbnail,
     publishThumbnail,
     shouldPublishThumbnail,
 } from '@/features/library/thumbnailRemote';
@@ -146,8 +147,8 @@ const verifyPublishedOrRepublish = async (docId: string, contentRev: number, loc
         return;
     }
     publishedProbed.add(key);
-    const published = await fetchPublishedThumbnail(docId, contentRev);
-    switch (published.status) {
+    const status = await probePublishedThumbnail(docId, contentRev);
+    switch (status) {
         case 'found':
             return;
         case 'unavailable':
@@ -159,7 +160,7 @@ const verifyPublishedOrRepublish = async (docId: string, contentRev: number, loc
             }
             return;
         default: {
-            const _exhaustive: never = published;
+            const _exhaustive: never = status;
             return _exhaustive;
         }
     }

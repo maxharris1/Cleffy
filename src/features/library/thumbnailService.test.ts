@@ -39,6 +39,7 @@ vi.mock('@/features/library/thumbnailRender', () => ({ renderFirstPageJpeg }));
 // documents.thumb_rev. The real thumbnailRemote module runs over this stub.
 const storageUpload = vi.hoisted(() => vi.fn());
 const storageDownload = vi.hoisted(() => vi.fn());
+const storageExists = vi.hoisted(() => vi.fn());
 const rowUpdate = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/supabase', () => ({
     getSupabase: () => ({
@@ -46,6 +47,7 @@ vi.mock('@/lib/supabase', () => ({
             from: (bucket: string) => ({
                 upload: (...args: unknown[]) => storageUpload(bucket, ...args),
                 download: (...args: unknown[]) => storageDownload(bucket, ...args),
+                exists: (...args: unknown[]) => storageExists(bucket, ...args),
             }),
         },
         from: (table: string) => ({
@@ -105,6 +107,9 @@ beforeEach(() => {
     storageUpload.mockResolvedValue({ data: null, error: null });
     storageDownload.mockReset();
     storageDownload.mockResolvedValue({ data: null, error: { message: 'Object not found' } });
+    storageExists.mockReset();
+    // storage-js's exists(): false for a 400/404, a throw for anything else.
+    storageExists.mockResolvedValue({ data: false, error: { message: 'Object not found', status: 404 } });
     rowUpdate.mockReset();
     rowUpdate.mockResolvedValue({ data: null, error: null });
 });
@@ -324,7 +329,7 @@ describe('published covers', () => {
         expect(await getThumbnail('d1', 3, 3)).toBe(stored);
         await settle();
 
-        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
+        expect(storageExists).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
         expect(storageUpload).toHaveBeenCalledTimes(1);
         expect(storageUpload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg', stored, expect.anything());
         expect(rowUpdate).toHaveBeenCalledWith('documents', { thumb_rev: 3 }, 'id', 'd1');
@@ -332,10 +337,8 @@ describe('published covers', () => {
 
     it('does not republish when the published-object probe returns 503', async () => {
         const stored = pngBlob();
-        storageDownload.mockResolvedValue({
-            data: null,
-            error: { message: 'Service unavailable', statusCode: '503' },
-        });
+        // exists() throws for every status but 400/404.
+        storageExists.mockRejectedValue(Object.assign(new Error('Service unavailable'), { status: 503 }));
         cacheThumb('d1', 3, stored);
         cachePdf('d1', 3);
         const { getThumbnail } = await loadService();
@@ -343,14 +346,14 @@ describe('published covers', () => {
         expect(await getThumbnail('d1', 3, 3)).toBe(stored);
         await settle();
 
-        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
+        expect(storageExists).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
         expect(storageUpload).not.toHaveBeenCalled();
         expect(rowUpdate).not.toHaveBeenCalled();
     });
 
-    it('does not republish when the published-object download throws', async () => {
+    it('does not republish when the published-object probe throws', async () => {
         const stored = pngBlob();
-        storageDownload.mockRejectedValue(new Error('network down'));
+        storageExists.mockRejectedValue(new Error('network down'));
         cacheThumb('d1', 3, stored);
         cachePdf('d1', 3);
         const { getThumbnail } = await loadService();
@@ -358,15 +361,14 @@ describe('published covers', () => {
         expect(await getThumbnail('d1', 3, 3)).toBe(stored);
         await settle();
 
-        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
+        expect(storageExists).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
         expect(storageUpload).not.toHaveBeenCalled();
         expect(rowUpdate).not.toHaveBeenCalled();
     });
 
     it('does not republish a current local JPEG when the published object is still there', async () => {
         const stored = pngBlob();
-        const published = new Blob(['published-jpeg'], { type: 'image/jpeg' });
-        storageDownload.mockResolvedValue({ data: published, error: null });
+        storageExists.mockResolvedValue({ data: true, error: null });
         cacheThumb('d1', 3, stored);
         cachePdf('d1', 3);
         const { getThumbnail } = await loadService();
@@ -374,8 +376,22 @@ describe('published covers', () => {
         expect(await getThumbnail('d1', 3, 3)).toBe(stored);
         await settle();
 
-        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
+        expect(storageExists).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
         expect(storageUpload).not.toHaveBeenCalled();
+    });
+
+    it('confirms a cover it already holds without downloading it again', async () => {
+        const stored = pngBlob();
+        storageExists.mockResolvedValue({ data: true, error: null });
+        cacheThumb('d1', 3, stored);
+        cachePdf('d1', 3);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 3, 3)).toBe(stored);
+        await settle();
+
+        expect(storageExists).toHaveBeenCalledTimes(1);
+        expect(storageDownload).not.toHaveBeenCalled();
     });
 
     it('publishes an earlier JPEG render found in the cache without rendering again', async () => {

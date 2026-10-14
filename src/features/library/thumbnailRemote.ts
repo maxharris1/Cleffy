@@ -16,10 +16,7 @@ import { getSupabase } from '@/lib/supabase';
 
 const BUCKET = 'thumbnails';
 
-export type PublishedThumbnail =
-    | { status: 'found'; blob: Blob }
-    | { status: 'missing' }
-    | { status: 'unavailable' };
+export type PublishedThumbnail = { status: 'found'; blob: Blob } | { status: 'missing' } | { status: 'unavailable' };
 
 type StorageErrorLike = {
     message?: string;
@@ -134,4 +131,30 @@ export const fetchPublishedThumbnail = async (docId: string, rev: number): Promi
     } finally {
         release();
     }
+};
+
+/**
+ * Probes run one at a time, on a lane of their own: they only guard against a
+ * rare missing object, and must never hold up a download a card is waiting on.
+ */
+let probeLane: Promise<unknown> = Promise.resolve();
+
+/**
+ * Whether the published cover at this revision is still in the bucket. A HEAD
+ * request: confirming a cover this device already holds used to download the
+ * whole image again, for every cover on screen, on every launch.
+ */
+export const probePublishedThumbnail = (docId: string, rev: number): Promise<PublishedThumbnail['status']> => {
+    const probe = probeLane.then(async (): Promise<PublishedThumbnail['status']> => {
+        try {
+            const { data } = await getSupabase().storage.from(BUCKET).exists(thumbnailObjectPath(docId, rev));
+            // exists() answers false only for a 400/404 and throws on anything
+            // else (a 503, a dropped connection), which is not "missing".
+            return data ? 'found' : 'missing';
+        } catch {
+            return 'unavailable';
+        }
+    });
+    probeLane = probe.catch(() => undefined);
+    return probe;
 };
