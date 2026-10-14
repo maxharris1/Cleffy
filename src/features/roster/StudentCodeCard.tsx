@@ -45,13 +45,15 @@ export const StudentCodeCard = ({ displayName, loginCode, username = null, class
         <p className="student-code-card-label text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
             Cleffy setup card
         </p>
-        <p className="student-code-card-name mt-1 font-display text-2xl font-semibold text-stone-800">{displayName}</p>
+        <p className="student-code-card-name mt-1 font-display text-2xl font-semibold text-stone-800 [overflow-wrap:anywhere]">
+            {displayName}
+        </p>
         <p className="student-code-card-code mt-5 break-words font-mono text-2xl font-semibold tracking-widest text-ink sm:text-3xl">
             {loginCode}
         </p>
         {username ? (
             <p className="student-code-card-hint mt-4 text-sm text-stone-600">
-                Your username: <span className="font-medium text-stone-800">{username}</span>
+                Your username: <span className="font-medium text-stone-800 [overflow-wrap:anywhere]">{username}</span>
             </p>
         ) : null}
         <p className="student-code-card-hint mt-5 text-sm leading-relaxed text-stone-600">
