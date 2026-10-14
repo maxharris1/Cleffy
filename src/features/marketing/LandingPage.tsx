@@ -55,13 +55,15 @@ const Footer = () => (
 const CloudLanding = () => (
     <main className="landing-page min-h-full">
         <div className="safe-landing-gutter mx-auto w-full max-w-6xl">
-            <nav aria-label="Main" className="safe-landing-nav flex items-center justify-between">
+            <nav aria-label="Main" className="safe-landing-nav flex items-center justify-between gap-4">
                 <Wordmark />
                 <div className="flex items-center gap-3">
                     {/* Students arrive here too, sent by a teacher, and their door
                         is not the one marked "Log in" — it takes a username, not
-                        an account. Quiet, because most visitors are teachers. */}
-                    <Link to="/student" className={linkClassName}>
+                        an account. Quiet, because most visitors are teachers.
+                        A phone has no room for it beside the two buttons, so
+                        there it moves under the hero's calls to action. */}
+                    <Link to="/student" className={`hidden whitespace-nowrap sm:inline ${linkClassName}`}>
                         Student sign in
                     </Link>
                     {/* Ghost against the primary: two bordered buttons side by side
@@ -95,6 +97,12 @@ const CloudLanding = () => (
                             <p className="text-xs text-stone-500">Free for 3 cloud scores · plans from $7/month</p>
                         </div>
                         <LocalOpenControl label="Or open a PDF locally — no account" subtle />
+                        <Link
+                            to="/student"
+                            className={`inline-flex items-center pointer-coarse:min-h-11 sm:hidden ${linkClassName}`}
+                        >
+                            Student sign in
+                        </Link>
                     </div>
                 </div>
                 <HeroDemo />
