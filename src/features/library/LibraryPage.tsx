@@ -35,6 +35,7 @@ import { FileDropZone } from '@/features/library/FileDropZone';
 import { formatUpdated } from '@/features/library/libraryFormat';
 import { readLibraryView, writeLibraryView, type LibraryView } from '@/features/library/libraryPrefs';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { prefetchWhenIdle } from '@/lib/idlePrefetch';
 import { perfLogIfDev, perfMark } from '@/lib/perf';
 import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
@@ -595,6 +596,13 @@ export const LibraryPage = () => {
     }, [canLoadMore, loadingMore, loadMoreError, autoLoadPaused]);
 
     const hasScores = documents !== null && documents.length > 0;
+    // A shelf with scores on it is a score about to be opened: bring in the
+    // viewer (and pdf.js) while the teacher looks, not after the tap.
+    useEffect(() => {
+        if (hasScores) {
+            prefetchWhenIdle('viewer', () => import('@/features/viewer/ViewerPage'));
+        }
+    }, [hasScores]);
     const statusError = uploadError ?? actionError ?? error;
     const useTagSelect = tags.length > TAG_CHIP_LIMIT;
     /**
