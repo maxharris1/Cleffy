@@ -25,7 +25,7 @@ export const ConfirmDialog = ({
     onCancel,
 }: ConfirmDialogProps) => (
     <Dialog label={title} onClose={onCancel}>
-        <p className="text-sm leading-relaxed text-stone-600">{body}</p>
+        <p className="text-sm leading-relaxed text-stone-600 [overflow-wrap:anywhere]">{body}</p>
         <div className="mt-5 flex justify-end gap-2">
             <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
                 {cancelLabel}
