@@ -1038,7 +1038,10 @@ export const LibraryPage = () => {
                         ) : null}
 
                         {visible && visible.length === 0 ? (
-                            <p className="mt-8 text-sm text-stone-500" role={searching ? 'status' : undefined}>
+                            <p
+                                className="mt-8 text-sm text-stone-500 [overflow-wrap:anywhere]"
+                                role={searching ? 'status' : undefined}
+                            >
                                 {searching
                                     ? 'Searching all of your scores…'
                                     : activeTagId && !query.trim() && !favoritesOnly
@@ -1051,7 +1054,7 @@ export const LibraryPage = () => {
                             groups?.map((group) => (
                                 <section key={group.label ?? 'all'}>
                                     {group.label ? (
-                                        <h3 className="mt-7 border-b border-stone-300/50 pb-1.5 text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
+                                        <h3 className="mt-7 border-b border-stone-300/50 pb-1.5 text-xs font-medium uppercase tracking-[0.08em] text-stone-500 [overflow-wrap:anywhere]">
                                             {group.label}
                                         </h3>
                                     ) : null}
@@ -1228,7 +1231,9 @@ const SortToggle = ({ sort, onChange }: { sort: LibrarySort; onChange: (s: Libra
                 type="button"
                 aria-pressed={sort === value}
                 onClick={() => onChange(value)}
-                className={`h-full rounded-md px-2.5 font-medium transition ${
+                // On touch the hit area reaches past the 26px pill, up and down
+                // into the gaps around the toolbar row.
+                className={`relative h-full rounded-md px-2.5 font-medium transition pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2.5 ${
                     sort === value ? 'bg-accent-soft text-accent' : 'text-stone-600 hover:text-stone-800'
                 }`}
             >
@@ -1344,21 +1349,27 @@ const ScoreRow = ({
                         </div>
                         {hasTags ? (
                             <div className="relative mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                {/* The separator trails its chip rather than leading the
+                                    next one, so a wrapped line never starts with a
+                                    stray '·'. On touch each chip's hit area is
+                                    stretched invisibly to 40px tall. */}
                                 {visibleTags.map((tag, i) => (
-                                    <span key={tag.id} className="inline-flex items-center gap-1.5">
-                                        {i > 0 ? (
+                                    <span key={tag.id} className="inline-flex min-w-0 items-center gap-1.5">
+                                        <button
+                                            type="button"
+                                            onClick={() => onFilterTag(tag.id)}
+                                            className="relative max-w-[8rem] text-xs text-stone-500 transition hover:text-stone-700 hover:underline pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-3"
+                                            title={`Filter by ${tag.name}`}
+                                        >
+                                            {/* Truncated inside, not on the button: its overflow
+                                                would clip the hit area as well as the text. */}
+                                            <span className="block truncate">{tag.name}</span>
+                                        </button>
+                                        {i < visibleTags.length - 1 ? (
                                             <span className="text-stone-300" aria-hidden="true">
                                                 ·
                                             </span>
                                         ) : null}
-                                        <button
-                                            type="button"
-                                            onClick={() => onFilterTag(tag.id)}
-                                            className="max-w-[8rem] truncate text-xs text-stone-500 transition hover:text-stone-700 hover:underline"
-                                            title={`Filter by ${tag.name}`}
-                                        >
-                                            {tag.name}
-                                        </button>
                                     </span>
                                 ))}
                                 {overflow > 0 ? (
@@ -1385,7 +1396,7 @@ const ScoreRow = ({
                     aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                     title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                     onClick={onToggleFavorite}
-                    className={`relative rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 ${
+                    className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
                         isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
                     }`}
                 >
@@ -1396,16 +1407,16 @@ const ScoreRow = ({
                     aria-label={hasTags ? 'Edit tags' : 'Add tags'}
                     title={hasTags ? 'Edit tags' : 'Add tags'}
                     onClick={onTags}
-                    className={`relative rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 ${
+                    className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
                         hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
                     }`}
                 >
                     <TagIcon size={16} />
                 </button>
                 {isOwner ? (
-                    <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
+                    <RowMenu inline onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
                 ) : (
-                    <SharedScoreMenu onLeave={onLeave} />
+                    <SharedScoreMenu inline onLeave={onLeave} />
                 )}
             </div>
         </li>

@@ -108,7 +108,8 @@ export const ScoreCard = ({
                         aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                         title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                         onClick={onToggleFavorite}
-                        className={`rounded-full bg-white/85 p-1.5 backdrop-blur transition hover:bg-white ${
+                        // The pill stays small on touch; an invisible ring takes the hit area to 44px.
+                        className={`relative grid place-items-center rounded-full bg-white/85 p-1.5 backdrop-blur transition hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2 ${
                             isFavorite ? 'text-amber-500' : 'text-stone-500 hover:text-stone-700'
                         }`}
                     >
