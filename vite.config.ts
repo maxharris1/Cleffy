@@ -208,6 +208,10 @@ export default defineConfig({
         buildConstantsPlugin(),
         VitePWA({
             registerType: 'autoUpdate',
+            // Registered by the app (src/lib/serviceWorker.ts), not the
+            // plugin's snippet: a first visit defers the precache until the
+            // page's own content has loaded.
+            injectRegister: false,
             includeAssets: ['icons/apple-touch-icon.png', 'favicon.svg'],
             manifest: {
                 name: 'Cleffy',
