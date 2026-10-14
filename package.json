@@ -9,6 +9,8 @@
         "local:up": "bash scripts/local-up.sh",
         "local:down": "bash scripts/local-down.sh",
         "local:status": "bash .cursor/health-check.sh",
+        "cloud:up": "bash scripts/cloud-up.sh",
+        "cloud:down": "bash scripts/cloud-up.sh --down",
         "functions:serve": "bash scripts/supabase.sh functions serve --env-file supabase/functions/.env --no-verify-jwt",
         "imslp:seed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/imslp-seed.mjs",
         "imslp:export-catalog": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/imslp-export-catalog.mjs",

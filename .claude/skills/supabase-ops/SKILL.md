@@ -26,6 +26,24 @@ npm run local:status      # health check
 npm run local:down
 ```
 
+### In a Claude Code cloud session
+
+`npm run cloud:up` does the whole list above (minus `imslp:seed`) in one
+idempotent command, logging to `/tmp/cleffy-*.log`. Things that differ from a
+laptop:
+
+- **Docker is installed but its daemon is not running** in a fresh container —
+  `local:up` then fails with "start Docker Desktop". The SessionStart hook
+  (`.claude/hooks/session-start.sh`) starts it, and `cloud:up` does too; by hand
+  it is `ensure_docker_access` from `.cursor/lib/boot-common.sh` (or `dockerd &`).
+- **First boot is slow** (image pulls + every migration): several minutes. Run it
+  in the background and do other work meanwhile.
+- `cloud:up` passes `--no-omr`; boot OMR with `npm run local:up` only when the
+  task is play-along/score analysis.
+- Chromium reaches the **local** stack fine. The TLS-fingerprinting problem in
+  "Sandbox network rules" below applies only to **hosted** Supabase.
+- To drive the UI (screenshots, responsive checks), see the `ui-check` skill.
+
 `.claude/launch.json` is not a shortcut around this list: it runs `dev:local`
 alone, so the backend must already be up, and edge functions are still served by
 `functions:serve` — which passes `--no-verify-jwt`, unlike the runtime
