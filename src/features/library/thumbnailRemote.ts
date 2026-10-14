@@ -109,10 +109,30 @@ const acquire = (): Promise<void> =>
         });
     });
 
+/** Callers waiting for the download queue to go quiet (coverDownloadsSettled). */
+let settledWaiters: Array<() => void> = [];
+
 const release = (): void => {
     active -= 1;
     waiting.shift()?.();
+    if (active === 0 && waiting.length === 0 && settledWaiters.length > 0) {
+        const done = settledWaiters;
+        settledWaiters = [];
+        done.forEach((resolve) => resolve());
+    }
 };
+
+/**
+ * Resolves once no cover is downloading or queued — at once if none is. For
+ * work that should not share the connection with the first screen of covers
+ * (see LibraryPage's viewer prefetch).
+ */
+export const coverDownloadsSettled = (): Promise<void> =>
+    active === 0 && waiting.length === 0
+        ? Promise.resolve()
+        : new Promise((resolve) => {
+              settledWaiters.push(resolve);
+          });
 
 /** The published cover at this revision: found, 404-missing, or otherwise unavailable. */
 export const fetchPublishedThumbnail = async (docId: string, rev: number): Promise<PublishedThumbnail> => {

@@ -19,6 +19,7 @@ import {
     writeCachedLibraryList,
 } from '@/features/library/libraryBootstrap';
 import { libraryMutationEpoch } from '@/features/library/libraryCache';
+import { coverDownloadsSettled } from '@/features/library/thumbnailRemote';
 import {
     appendPage,
     applyLibraryFilters,
@@ -76,6 +77,10 @@ const TAG_CHIP_LIMIT = 8;
 const INLINE_TAG_LIMIT = 3;
 /** Quiet time after the last keystroke before the search goes to the server. */
 const SEARCH_DEBOUNCE_MS = 300;
+/** How long the first cards get to queue their covers before the viewer prefetch looks. */
+const COVERS_FIRST_MS = 400;
+/** The viewer prefetch waits for the covers at most this long. */
+const VIEWER_PREFETCH_MAX_WAIT_MS = 5000;
 
 /**
  * One server-side answer for the current sort + filters, used while the
@@ -601,11 +606,29 @@ export const LibraryPage = () => {
 
     const hasScores = documents !== null && documents.length > 0;
     // A shelf with scores on it is a score about to be opened: bring in the
-    // viewer (and pdf.js) while the teacher looks, not after the tap.
+    // viewer (and pdf.js) while the teacher looks, not after the tap. Covers
+    // first, though: on a first visit those few hundred KB would share the
+    // connection with the shelf's first covers and slow them down. Once their
+    // downloads go quiet (at once when they come from this device), or after
+    // a few seconds at most.
     useEffect(() => {
-        if (hasScores) {
-            prefetchWhenIdle('viewer', () => import('@/features/viewer/ViewerPage'));
+        if (!hasScores) {
+            return;
         }
+        let cancelled = false;
+        const prefetch = () => {
+            if (!cancelled) {
+                prefetchWhenIdle('viewer', () => import('@/features/viewer/ViewerPage'));
+            }
+        };
+        // Lets the first cards ask for their covers before the queue is read.
+        const settle = setTimeout(() => void coverDownloadsSettled().then(prefetch), COVERS_FIRST_MS);
+        const latest = setTimeout(prefetch, VIEWER_PREFETCH_MAX_WAIT_MS);
+        return () => {
+            cancelled = true;
+            clearTimeout(settle);
+            clearTimeout(latest);
+        };
     }, [hasScores]);
     const statusError = uploadError ?? actionError ?? error;
     const useTagSelect = tags.length > TAG_CHIP_LIMIT;
