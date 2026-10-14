@@ -285,8 +285,8 @@ const graphemes = (text: string): string[] =>
  * (by grapheme, so an emoji or accented letter is never split) only when the
  * word alone is wider than the line — the same way the editor's textarea wraps.
  */
-const wrapLine = (line: string, maxEm: number, font: FontSpec): string[] => {
-    const fits = (s: string) => advanceEm(s, font) <= maxEm;
+const wrapLine = (line: string, maxEm: number, measureEm: (s: string) => number): string[] => {
+    const fits = (s: string) => measureEm(s) <= maxEm;
     const out: string[] = [];
     let current = '';
     for (const token of line.split(/(\s+)/)) {
@@ -331,18 +331,21 @@ const wrapLine = (line: string, maxEm: number, font: FontSpec): string[] => {
 /**
  * The lines a text note is drawn as: its own line breaks, and prose wrapped so
  * it stays inside the page (shared by the renderer, hit test and selection
- * box). Music glyphs are single marks and never wrap.
+ * box, and the PDF export). Music glyphs are single marks and never wrap.
+ * `measureEm` (advance width / font size) defaults to the shared canvas probe;
+ * the export passes its embedded font's metrics so the PDF wraps exactly.
  */
 export const textNoteLines = (
     payload: TextPayload,
     spec: TextDrawSpec = textDrawSpec(payload.text, payload.hw === 1, payload),
+    measureEm: (s: string) => number = (s) => advanceEm(s, spec),
 ): string[] => {
     const lines = spec.glyphs.split('\n');
     if (spec.music) {
         return lines;
     }
     const maxEm = textWrapEm(payload);
-    return lines.flatMap((line) => wrapLine(line, maxEm, spec));
+    return lines.flatMap((line) => wrapLine(line, maxEm, measureEm));
 };
 
 /**

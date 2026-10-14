@@ -359,12 +359,12 @@ body {
  * from here rather than hard-coded into each surface.
  */
 .library-shell {
-    --shell-bar-height: 6.125rem;
+    --shell-bar-height: calc(6.0625rem + var(--safe-top));
 }
 
 @media (min-width: 40rem) {
     .library-shell {
-        --shell-bar-height: 4rem;
+        --shell-bar-height: calc(4.0625rem + var(--safe-top));
     }
 }
 

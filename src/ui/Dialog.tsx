@@ -105,7 +105,7 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
                 onClick={(event) => event.stopPropagation()}
                 className={`w-full max-w-md overscroll-contain rounded-2xl border border-stone-200 bg-white p-5 shadow-xl outline-none ${
                     sheet
-                        ? 'max-h-[80vh] overflow-auto pb-[max(1.25rem,var(--safe-bottom))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
+                        ? 'max-h-[80vh] overflow-y-auto overflow-x-hidden pb-[max(1.25rem,var(--safe-bottom))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
                         : // Fits any viewport (the scrim's p-4 is the 2rem) and scrolls inside, so a
                           // tall dialog on a short phone or landscape screen never pushes its title,
                           // Close or actions off-screen — the page behind cannot scroll to reveal them.
