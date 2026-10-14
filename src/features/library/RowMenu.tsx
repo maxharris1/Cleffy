@@ -13,9 +13,9 @@ import { MoreVerticalIcon } from '@/ui/icons';
  * (`has-[[aria-expanded=true]]:…`) to keep an open menu painted above its
  * neighbours.
  *
- * `inline` is for a trigger that sits in a row of other icon buttons: on touch
- * the button itself grows to 44px, because the invisible hit area the shelf
- * card uses would overlap its neighbours there.
+ * `inline` is for a trigger that ends a row of other icon buttons: on touch its
+ * invisible 40x44 hit area runs past its right edge only, since the all-round
+ * ring the shelf card uses would overlap the neighbour on its left.
  */
 export const RowMenu = ({
     onRename,
@@ -162,7 +162,7 @@ const MenuPopover = ({
                 onClick={() => setOpen((v) => !v)}
                 className={`relative grid place-items-center rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 ${
                     inline
-                        ? 'pointer-coarse:min-h-11 pointer-coarse:min-w-11'
+                        ? 'pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-3 pointer-coarse:before:-inset-y-2'
                         : 'pointer-coarse:before:absolute pointer-coarse:before:-inset-2'
                 }`}
             >

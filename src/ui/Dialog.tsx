@@ -127,14 +127,16 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
                         <h2 className="min-w-0 text-lg font-semibold text-stone-800 [overflow-wrap:anywhere]">
                             {label}
                         </h2>
-                        {/* 44px hit area on touch; the negative margin keeps the icon where it sits on desktop. */}
+                        {/* 44px hit area on touch; the negative margin keeps the icon where it sits on desktop.
+                            Sized explicitly rather than by padding: a dialog rendered inside a toolbar
+                            (ViewerHeader's [&_button]:px-*) would otherwise inherit its button padding. */}
                         <button
                             type="button"
                             aria-label="Close"
                             onClick={onClose}
-                            className="shrink-0 rounded-lg p-1.5 text-stone-500 transition hover:bg-stone-100 pointer-coarse:-m-[7px] pointer-coarse:p-[13px]"
+                            className="inline-flex size-7.5 shrink-0 items-center justify-center rounded-lg text-stone-500 transition hover:bg-stone-100 pointer-coarse:-m-[7px] pointer-coarse:size-11"
                         >
-                            <CloseIcon size={18} />
+                            <CloseIcon size={18} className="shrink-0" />
                         </button>
                     </div>
                 ) : null}

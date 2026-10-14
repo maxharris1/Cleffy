@@ -1348,17 +1348,19 @@ const ScoreRow = ({
                             ) : null}
                         </div>
                         {hasTags ? (
-                            <div className="relative mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                            <div className="relative mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pointer-coarse:mt-2 pointer-coarse:gap-y-4 pointer-coarse:pb-1">
                                 {/* The separator trails its chip rather than leading the
                                     next one, so a wrapped line never starts with a
                                     stray '·'. On touch each chip's hit area is
-                                    stretched invisibly to 40px tall. */}
+                                    stretched invisibly to 32px tall, and the margin,
+                                    padding and wrap gap grow to match so that ring
+                                    never reaches the title, the date or the next line. */}
                                 {visibleTags.map((tag, i) => (
                                     <span key={tag.id} className="inline-flex min-w-0 items-center gap-1.5">
                                         <button
                                             type="button"
                                             onClick={() => onFilterTag(tag.id)}
-                                            className="relative max-w-[8rem] text-xs text-stone-500 transition hover:text-stone-700 hover:underline pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-3"
+                                            className="relative max-w-[8rem] text-xs text-stone-500 transition hover:text-stone-700 hover:underline pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2"
                                             title={`Filter by ${tag.name}`}
                                         >
                                             {/* Truncated inside, not on the button: its overflow
@@ -1390,13 +1392,19 @@ const ScoreRow = ({
                         {formatUpdated(doc.updated_at)}
                     </span>
                 </div>
+                {/*
+                  On touch the icons stay 32px (no sm: shrink) and each gets an
+                  invisible 40x44 hit area over itself and the gap to its right;
+                  the gaps widen just enough for that. Growing the buttons
+                  instead cost the title ~40px on phones.
+                */}
                 <button
                     type="button"
                     aria-pressed={isFavorite}
                     aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                     title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                     onClick={onToggleFavorite}
-                    className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
+                    className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
                         isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
                     }`}
                 >
@@ -1407,7 +1415,7 @@ const ScoreRow = ({
                     aria-label={hasTags ? 'Edit tags' : 'Add tags'}
                     title={hasTags ? 'Edit tags' : 'Add tags'}
                     onClick={onTags}
-                    className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
+                    className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:mx-1.5 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
                         hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
                     }`}
                 >

@@ -93,6 +93,9 @@ const SM_BREAKPOINT = 640;
  */
 const PHONE_CONTROLS_STRIP = 56;
 
+/** Larger screens: the strip (px) the pager and zoom row cover above the bottom safe area. */
+const FLOATING_CONTROLS_STRIP = 60;
+
 /**
  * A tap in the left/right margin strip of the viewport turns the page (the
  * sheet-music-reader convention). Kept narrow so a tap on the first or last
@@ -910,6 +913,13 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                             store={annotationStore}
                             viewportWidth={viewportSize.width}
                             viewportHeight={viewportSize.height}
+                            // Larger screens float the pager and zoom row at the
+                            // bottom (1rem above the safe area, one 44px control).
+                            bottomInset={Math.max(
+                                obscured.bottom,
+                                viewportSize.width >= SM_BREAKPOINT ? FLOATING_CONTROLS_STRIP : 0,
+                            )}
+                            bottomInsetSafe={viewportSize.width >= SM_BREAKPOINT}
                             onCommit={commitText}
                             onCancel={() => {
                                 textIntentHandled.current = true;

@@ -17,6 +17,10 @@ export interface TextEditorOverlayProps {
     /** The viewer's size (CSS px), which the editor never runs past (unbounded when omitted). */
     viewportWidth?: number;
     viewportHeight?: number;
+    /** Height (CSS px) covered at the viewer's bottom (toolbar, floating controls), which the editor stays above. */
+    bottomInset?: number;
+    /** Also keep clear of the safe-area inset (floating controls sit above it). */
+    bottomInsetSafe?: boolean;
     /** Commit the edit. Empty text on an existing note deletes it. */
     onCommit: (text: string) => void;
     onCancel: () => void;
@@ -26,6 +30,12 @@ export interface TextEditorOverlayProps {
 const VIEWPORT_MARGIN = 8;
 /** The textarea's p-1 padding plus its 1px border, both sides. */
 const BOX_EXTRA = 10;
+/** Smallest font (CSS px) the editor lays text out at; smaller notes are scaled down from it. */
+const MIN_EDITOR_FONT = 10;
+/** Narrowest the editor gets (CSS px) before it moves left instead of shrinking. */
+const MIN_EDITOR_WIDTH = 160;
+/** Shortest the editor gets (CSS px) before it moves up instead of shrinking. */
+const MIN_EDITOR_HEIGHT = 48;
 
 /** Inline textarea positioned at the tapped point of a page. */
 export const TextEditorOverlay = ({
@@ -35,6 +45,8 @@ export const TextEditorOverlay = ({
     store,
     viewportWidth = Infinity,
     viewportHeight = Infinity,
+    bottomInset = 0,
+    bottomInsetSafe = false,
     onCommit,
     onCancel,
 }: TextEditorOverlayProps) => {
@@ -55,23 +67,43 @@ export const TextEditorOverlay = ({
     const nx = existingPayload ? existingPayload.x : intent.nx;
     const ny = existingPayload ? existingPayload.y : intent.ny;
 
-    // The box sits back by its padding and border, so the typed glyphs start
-    // where the committed note will draw them.
-    const anchor = pagePointToViewport(view, layout, nx, ny);
-    const left = anchor.x - BOX_EXTRA / 2;
-    const top = anchor.y - BOX_EXTRA / 2;
     const size = existingPayload ? existingPayload.size : 0.018;
     const fontPx = size * layout.width * view.scale;
+    // Lay out at no less than MIN_EDITOR_FONT and scale the box down to the
+    // drawn size, so the editor breaks lines exactly where the note will.
+    const editorFont = Math.max(MIN_EDITOR_FONT, fontPx);
+    const k = fontPx / editorFont;
     const spec = styledPayload ? textDrawSpec(styledPayload.text, styledPayload.hw === 1, styledPayload) : null;
     const proseFace = spec && !spec.music ? spec : null;
+
+    // The box sits back by its padding and border, so the typed glyphs start
+    // where the committed note will draw them. Sizes below are on screen.
+    const anchor = pagePointToViewport(view, layout, nx, ny);
+    let left = anchor.x - (BOX_EXTRA / 2) * k;
+    let top = anchor.y - (BOX_EXTRA / 2) * k;
     // As wide as the committed note may run (up to the page's right edge, see
     // textNoteLines), so the text wraps where it will be drawn — but never
-    // past the viewer, where typing would scroll the score sideways.
-    const wrapPx = textWrapEm({ x: nx, size }) * fontPx;
-    const width = Math.max(48, Math.min(wrapPx + BOX_EXTRA, viewportWidth - VIEWPORT_MARGIN - left));
-    const maxHeight = Number.isFinite(viewportHeight)
-        ? Math.max(48, viewportHeight - VIEWPORT_MARGIN - top)
-        : undefined;
+    // past the viewer, where typing would scroll the score sideways. When
+    // that leaves too little room (zoomed in, tapped near the edge), the box
+    // moves left rather than becoming a sliver.
+    const wantWidth = textWrapEm({ x: nx, size }) * fontPx + BOX_EXTRA * k;
+    let width = wantWidth;
+    if (Number.isFinite(viewportWidth)) {
+        const room = viewportWidth - VIEWPORT_MARGIN - left;
+        if (room < width) {
+            const minWidth = Math.min(width, MIN_EDITOR_WIDTH, viewportWidth - 2 * VIEWPORT_MARGIN);
+            width = Math.max(room, minWidth);
+            left = Math.max(VIEWPORT_MARGIN, Math.min(left, viewportWidth - VIEWPORT_MARGIN - width));
+        }
+    }
+    // Grow down to the bottom toolbar / controls, not under them.
+    let maxHeight: string | undefined;
+    if (Number.isFinite(viewportHeight)) {
+        const bottom = viewportHeight - bottomInset - VIEWPORT_MARGIN;
+        top = Math.max(0, Math.min(top, bottom - MIN_EDITOR_HEIGHT));
+        const safe = bottomInsetSafe ? ' - var(--safe-bottom)' : '';
+        maxHeight = `max(${MIN_EDITOR_HEIGHT / k}px, calc((${bottom - top}px${safe}) / ${k}))`;
+    }
 
     // Grow with the text instead of scrolling it inside a fixed two rows.
     const fitHeight = (el: HTMLTextAreaElement) => {
@@ -105,9 +137,11 @@ export const TextEditorOverlay = ({
             style={{
                 left,
                 top,
-                width,
+                width: width / k,
                 maxHeight,
-                fontSize: Math.max(10, fontPx),
+                fontSize: editorFont,
+                transform: k < 1 ? `scale(${k})` : undefined,
+                transformOrigin: 'top left',
                 lineHeight: TEXT_LINE_HEIGHT,
                 // The face the note is drawn in, so the editor wraps like the page.
                 fontFamily: proseFace?.family ?? SYSTEM_FONT_FAMILY,

@@ -525,8 +525,11 @@ export const RosterPage = () => {
             {archiveTarget ? (
                 <div className="contents [overflow-wrap:anywhere]">
                     <ConfirmDialog
-                        title={`Archive ${archiveTarget.display_name}?`}
-                        body="Their seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was."
+                        // The name goes in the body, as in the reset prompts: the title sits in a
+                        // sticky header, and a long name wrapping there would leave the body and
+                        // actions a sliver of scroll room on a short screen.
+                        title="Archive this student?"
+                        body={`${archiveTarget.display_name}’s seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was.`}
                         confirmLabel="Archive"
                         busy={busy}
                         onConfirm={() => void confirmArchive()}
