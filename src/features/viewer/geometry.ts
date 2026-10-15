@@ -177,7 +177,10 @@ export const visiblePageRange = (
  * Used for "share this page" actions.
  */
 export const focusedPageIndex = (view: ViewState, viewportHeight: number, layouts: readonly PageLayout[]): number => {
-    if (layouts.length === 0) {
+    // Scrolled to the very top, page 1 is the page being read — even when the
+    // viewport is tall enough that a later row sits nearer its centre (a whole
+    // short score fits). Otherwise the pager read "p. 3 / 4" and Next was off.
+    if (layouts.length === 0 || view.scrollY <= 0) {
         return 0;
     }
     const centerY = (view.scrollY + viewportHeight / 2) / view.scale;

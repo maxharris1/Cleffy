@@ -56,5 +56,10 @@ export const chipClassName = (active: boolean, extra = ''): string =>
 
 export const fieldLabelClassName = 'block text-xs font-medium uppercase tracking-[0.08em] text-stone-600';
 
+/**
+ * Inline text link. On touch screens an invisible ::after widens the hit area
+ * to ~44px tall without moving the text, so callers' own margins and display
+ * still hold and desktop is unchanged.
+ */
 export const linkClassName =
-    'text-sm text-accent underline decoration-accent/30 underline-offset-2 transition hover:text-accent-hover hover:decoration-accent/60';
+    'relative text-sm text-accent underline decoration-accent/30 underline-offset-2 transition hover:text-accent-hover hover:decoration-accent/60 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';

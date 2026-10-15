@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
 import {
+    hardWrapText,
     annotationNeedsMusicFont,
     editedTextPayload,
     ensureMusicFontLoaded,
@@ -118,5 +119,23 @@ describe('ensureMusicFontLoaded', () => {
         vi.stubGlobal('document', Object.assign(document, { fonts: { load } }));
         expect(await ensureMusicFontLoaded()).toBe(false);
         expect(isMusicFontReady()).toBe(false);
+    });
+});
+
+describe('hardWrapText', () => {
+    // jsdom has no canvas, so every grapheme measures 0.55em.
+    const note = (text: string) => ({ x: 0.1, y: 0.1, size: 0.02, text });
+
+    it('breaks between emoji like the browser, not only at spaces', () => {
+        expect(hardWrapText(note('abc 🎵🎹'), 3)).toBe('abc 🎵\n🎹');
+    });
+
+    it('breaks after a hyphen inside a word', () => {
+        expect(hardWrapText(note('well-known'), 3)).toBe('well-\nknown');
+    });
+
+    it('keeps typed line breaks and leaves music tokens alone', () => {
+        expect(hardWrapText(note('ab\ncd'), 10)).toBe('ab\ncd');
+        expect(hardWrapText({ ...note('mf'), hw: 1 }, 0.1)).toBe('mf');
     });
 });

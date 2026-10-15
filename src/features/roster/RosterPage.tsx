@@ -507,24 +507,35 @@ export const RosterPage = () => {
                 </Dialog>
             ) : null}
 
+            {/* Both prompts carry the student's name in the title and body. The
+                wrapper adds no box (`contents`); it only hands the inherited
+                overflow-wrap down, so a name with no spaces wraps inside the
+                dialog instead of running past it. */}
             {resetTarget ? (
-                <ConfirmDialog
-                    {...resetPromptFor(resetTarget)}
-                    busy={busy}
-                    onConfirm={() => void confirmReset()}
-                    onCancel={() => setResetTarget(null)}
-                />
+                <div className="contents [overflow-wrap:anywhere]">
+                    <ConfirmDialog
+                        {...resetPromptFor(resetTarget)}
+                        busy={busy}
+                        onConfirm={() => void confirmReset()}
+                        onCancel={() => setResetTarget(null)}
+                    />
+                </div>
             ) : null}
 
             {archiveTarget ? (
-                <ConfirmDialog
-                    title={`Archive ${archiveTarget.display_name}?`}
-                    body="Their seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was."
-                    confirmLabel="Archive"
-                    busy={busy}
-                    onConfirm={() => void confirmArchive()}
-                    onCancel={() => setArchiveTarget(null)}
-                />
+                <div className="contents [overflow-wrap:anywhere]">
+                    <ConfirmDialog
+                        // The name goes in the body, as in the reset prompts: the title sits in a
+                        // sticky header, and a long name wrapping there would leave the body and
+                        // actions a sliver of scroll room on a short screen.
+                        title="Archive this student?"
+                        body={`${archiveTarget.display_name}’s seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was.`}
+                        confirmLabel="Archive"
+                        busy={busy}
+                        onConfirm={() => void confirmArchive()}
+                        onCancel={() => setArchiveTarget(null)}
+                    />
+                </div>
             ) : null}
         </div>
     );
@@ -726,32 +737,37 @@ const StudentRow = ({
 
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
-            <div
-                className={`group border-b border-stone-300/50 transition hover:border-accent/40 ${
-                    archived ? 'opacity-60' : ''
-                }`}
-            >
+            {/* Archived rows dim their content, not the wrapper: opacity on the
+                wrapper would also wash out the ⋮ menu popover inside it. */}
+            <div className="group border-b border-stone-300/50 transition hover:border-accent/40">
                 <div className="flex items-center gap-0.5">
                     <button
                         type="button"
                         aria-expanded={expanded}
                         aria-controls={detailId}
                         onClick={onToggle}
-                        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-3.5 text-left"
+                        className={`flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-3.5 text-left ${
+                            archived ? 'opacity-60' : ''
+                        }`}
                     >
                         <span aria-hidden="true" className="w-3 shrink-0 text-xs text-stone-400">
                             {expanded ? '▾' : '▸'}
                         </span>
-                        <span className="truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
-                            {student.display_name}
+                        {/* Name first: on a phone the identifier drops to its own
+                            line instead of splitting one line with the name, which
+                            left an emoji name as "🎹🎻 …" beside a full email. */}
+                        <span className="flex min-w-0 flex-col sm:flex-row sm:items-center sm:gap-2">
+                            <span className="truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
+                                {student.display_name}
+                            </span>
+                            {/* What they type to get in, beside the name the teacher
+                                typed — the two are different strings on both paths. */}
+                            {identifier ? <span className="truncate text-xs text-stone-500">{identifier}</span> : null}
                         </span>
-                        {/* What they type to get in, beside the name the teacher
-                            typed — the two are different strings on both paths. */}
-                        {identifier ? <span className="truncate text-xs text-stone-500">{identifier}</span> : null}
                         {student.claimed_at === null && !archived ? <Badge tone="warn">Invited</Badge> : null}
                         {archived ? <Badge>Archived</Badge> : null}
                     </button>
-                    <span className="shrink-0 px-2 text-xs text-stone-500">
+                    <span className={`shrink-0 px-2 text-xs text-stone-500 ${archived ? 'opacity-60' : ''}`}>
                         {count === 0 ? 'No scores' : `${count} ${count === 1 ? 'score' : 'scores'}`}
                     </span>
                     <RosterRowMenu
@@ -765,7 +781,7 @@ const StudentRow = ({
                 </div>
 
                 {expanded ? (
-                    <div id={detailId} className="pb-5 pl-5">
+                    <div id={detailId} className={`pb-5 pl-5 ${archived ? 'opacity-60' : ''}`}>
                         <h3 className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
                             Assigned scores
                         </h3>
@@ -818,7 +834,7 @@ const StudentRow = ({
                                             Unassign
                                         </Button>
                                         {assignment.note ? (
-                                            <p className="w-full text-xs leading-relaxed text-stone-600">
+                                            <p className="w-full text-xs leading-relaxed text-stone-600 [overflow-wrap:anywhere]">
                                                 {assignment.note}
                                             </p>
                                         ) : null}
@@ -911,11 +927,11 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
                             <p className="text-xs font-medium text-stone-500">{formatDay(day.day)}</p>
                             <ul className="mt-1.5 flex flex-col gap-1.5 border-l border-stone-300/70 pl-3">
                                 {day.entries.map(({ note, documentTitle }) => (
-                                    <li key={note.id}>
+                                    <li key={note.id} className="min-w-0">
                                         <div className="flex flex-wrap items-center gap-2">
                                             <Link
                                                 to={`/doc/${note.document_id}`}
-                                                className="text-xs text-stone-500 transition hover:text-stone-700 hover:underline"
+                                                className="min-w-0 text-xs text-stone-500 transition [overflow-wrap:anywhere] hover:text-stone-700 hover:underline"
                                             >
                                                 {documentTitle}
                                             </Link>
@@ -923,7 +939,7 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
                                                 {note.shared ? 'Shared' : 'Private'}
                                             </Badge>
                                         </div>
-                                        <p className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-stone-700">
+                                        <p className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-stone-700 [overflow-wrap:anywhere]">
                                             {note.body}
                                         </p>
                                     </li>
@@ -992,7 +1008,9 @@ const RosterRowMenu = ({
                 aria-label="Student actions"
                 disabled={busy}
                 onClick={() => setOpen((v) => !v)}
-                className="rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50"
+                className={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
+                    archived ? 'opacity-60' : ''
+                }`}
             >
                 <MoreVerticalIcon size={16} />
             </button>

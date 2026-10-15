@@ -54,9 +54,11 @@ export interface ToolbarProps {
  * above the safe area, icon buttons only, with the colours and sizes behind a
  * single style button — inline they wrapped the bar to three rows over the
  * page. From `sm` (tablets, a portrait iPad included): production's bar, at
- * the top with labels and the colours and sizes inline, one tap each; where
- * that wraps to two rows, the viewer lets the first page scroll clear of it
- * (onObscuredChange). Hidden entirely for view-only roles (M3).
+ * the top with labels; the colours and sizes stay behind the style button
+ * until `lg`, where they fit inline, one tap each (inline, a portrait iPad's
+ * bar wrapped to a mostly empty second row). Where the bar still wraps, the
+ * viewer lets the first page scroll clear of it (onObscuredChange). Hidden
+ * entirely for view-only roles (M3).
  */
 export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const tool = useViewerStore((s) => s.tool);
@@ -205,8 +207,8 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
 
                 {showColors || showSize ? (
                     <>
-                        {/* Phones: one button that opens the colours and sizes. */}
-                        <div className={`${DIVIDER} sm:hidden`} />
+                        {/* Below lg: one button that opens the colours and sizes. */}
+                        <div className={`${DIVIDER} lg:hidden`} />
                         <button
                             ref={styleButtonRef}
                             type="button"
@@ -216,7 +218,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                             aria-expanded={styleOpen}
                             aria-controls={styleOpen ? popoverId : undefined}
                             onClick={() => setStyleOpen((open) => !open)}
-                            className={`${BAR_BUTTON} sm:hidden ${styleOpen ? 'bg-accent-soft' : 'hover:bg-ink/5'}`}
+                            className={`${BAR_BUTTON} sm:w-10 lg:hidden ${styleOpen ? 'bg-accent-soft' : 'hover:bg-ink/5'}`}
                         >
                             {showColors ? (
                                 <span
@@ -242,7 +244,8 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                                 id={popoverId}
                                 role="group"
                                 aria-label={styleLabel}
-                                className="absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-lg backdrop-blur sm:hidden"
+                                // Above the phone's bottom bar; below the bar docked at the top from sm.
+                                className="absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-lg backdrop-blur sm:bottom-auto sm:top-full sm:mb-0 sm:mt-2 lg:hidden"
                             >
                                 {showColors ? (
                                     <>
@@ -269,9 +272,9 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                     </>
                 ) : null}
 
-                {/* From sm up: colours and sizes inline, as in production. */}
+                {/* From lg up: colours and sizes inline, as in production. */}
                 {showColors ? (
-                    <div className="hidden sm:contents">
+                    <div className="hidden lg:contents">
                         <div className={DIVIDER} />
                         {tool === 'highlighter' ? (
                             <span className="px-1 text-[10px] font-medium uppercase tracking-wide text-amber-700">
@@ -283,7 +286,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                 ) : null}
 
                 {showSize ? (
-                    <div className="hidden sm:contents">
+                    <div className="hidden lg:contents">
                         <div className={DIVIDER} />
                         <span className="px-1 text-[10px] font-medium uppercase tracking-wide text-stone-500">
                             {sizeCaption}

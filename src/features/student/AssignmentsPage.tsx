@@ -255,18 +255,26 @@ const AssignmentCard = ({ score: { assignment, document: doc } }: { score: Assig
                 <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
                     {/* Two lines before it ellipsizes — a long catalogue title
                         ("Sonata in C major, K 545: I. Allegro") is told apart
-                        by its end — and the whole title on hover. */}
+                        by its end — and the whole title on hover. The 14rem
+                        basis lets the badges wrap below it on a phone rather
+                        than squeeze it to a word or two; they wrap together. */}
                     <span
                         title={doc.title}
-                        className="line-clamp-2 min-w-0 flex-1 text-lg font-medium break-words text-stone-800"
+                        className="line-clamp-2 min-w-0 grow basis-56 text-lg font-medium break-words text-stone-800"
                     >
                         {doc.title}
                     </span>
-                    {due ? <Badge>Due {due}</Badge> : null}
-                    {assignment.access === 'view' ? <Badge>View only</Badge> : null}
+                    {due || assignment.access === 'view' ? (
+                        <span className="flex max-w-full flex-wrap items-center gap-x-2.5 gap-y-1.5">
+                            {due ? <Badge>Due {due}</Badge> : null}
+                            {assignment.access === 'view' ? <Badge>View only</Badge> : null}
+                        </span>
+                    ) : null}
                 </div>
                 {assignment.note ? (
-                    <p className="mt-1.5 text-sm leading-relaxed text-stone-600">{assignment.note}</p>
+                    <p className="mt-1.5 text-sm leading-relaxed [overflow-wrap:anywhere] text-stone-600">
+                        {assignment.note}
+                    </p>
                 ) : null}
             </Link>
         </li>

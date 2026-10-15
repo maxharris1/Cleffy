@@ -103,22 +103,40 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
                 aria-label={label}
                 tabIndex={-1}
                 onClick={(event) => event.stopPropagation()}
-                className={`w-full max-w-md rounded-2xl border border-stone-200 bg-white p-5 shadow-xl outline-none ${
+                className={`w-full max-w-md overscroll-contain rounded-2xl border border-stone-200 bg-white p-5 shadow-xl outline-none ${
                     sheet
-                        ? 'max-h-[80vh] overflow-auto pb-[max(1.25rem,var(--safe-bottom))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
-                        : ''
+                        ? 'max-h-[80vh] overflow-y-auto overflow-x-hidden pb-[max(1.25rem,var(--safe-bottom))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
+                        : // Fits any viewport (the scrim's p-4 is the 2rem) and scrolls inside, so a
+                          // tall dialog on a short phone or landscape screen never pushes its title,
+                          // Close or actions off-screen — the page behind cannot scroll to reveal them.
+                          'max-h-[calc(100dvh-2rem)] overflow-y-auto'
                 }`}
             >
                 {withHeader ? (
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                        <h2 className="text-lg font-semibold text-stone-800">{label}</h2>
+                    // Sticky, bleeding over the panel padding, so Close stays in reach while a
+                    // long dialog scrolls and the content passes under an opaque header. The gap
+                    // below stays a margin: some dialogs tuck a subtitle into it with -mt-2.
+                    // -top-5: the sticky edge is the panel's content box, not its border.
+                    <div
+                        className={`sticky -top-5 z-10 -mt-5 mb-3 flex items-center justify-between gap-3 bg-white pt-5 ${
+                            sheet
+                                ? '-ml-[max(1.25rem,var(--safe-left))] -mr-[max(1.25rem,var(--safe-right))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
+                                : '-mx-5 px-5'
+                        }`}
+                    >
+                        <h2 className="min-w-0 text-lg font-semibold text-stone-800 [overflow-wrap:anywhere]">
+                            {label}
+                        </h2>
+                        {/* 44px hit area on touch; the negative margin keeps the icon where it sits on desktop.
+                            Sized explicitly rather than by padding: a dialog rendered inside a toolbar
+                            (ViewerHeader's [&_button]:px-*) would otherwise inherit its button padding. */}
                         <button
                             type="button"
                             aria-label="Close"
                             onClick={onClose}
-                            className="rounded-lg p-1.5 text-stone-500 transition hover:bg-stone-100"
+                            className="inline-flex size-7.5 shrink-0 items-center justify-center rounded-lg text-stone-500 transition hover:bg-stone-100 pointer-coarse:-m-[7px] pointer-coarse:size-11"
                         >
-                            <CloseIcon size={18} />
+                            <CloseIcon size={18} className="shrink-0" />
                         </button>
                     </div>
                 ) : null}

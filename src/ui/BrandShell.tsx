@@ -17,7 +17,9 @@ const BrandFrame = ({ brand, title, subtitle, children }: BrandShellProps & { br
             {brand}
             <div className="landing-rule mx-auto" aria-hidden="true" />
             <h1 className="mt-6 font-display text-2xl font-semibold tracking-tight text-stone-800">{title}</h1>
-            {subtitle ? <p className="mt-2 text-sm leading-relaxed text-stone-600">{subtitle}</p> : null}
+            {subtitle ? (
+                <p className="mt-2 text-sm leading-relaxed text-stone-600 [overflow-wrap:anywhere]">{subtitle}</p>
+            ) : null}
             {children ? <div className="mt-8 text-left">{children}</div> : null}
         </div>
     </main>

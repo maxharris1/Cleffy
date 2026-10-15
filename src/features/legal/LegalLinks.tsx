@@ -13,13 +13,17 @@ interface LegalLinksProps {
     newTab?: boolean;
 }
 
-const LINK = 'transition hover:text-accent hover:underline underline-offset-2';
+// Same touch hit area as linkClassName: ~44px tall on coarse pointers, text unmoved.
+const LINK =
+    'relative transition hover:text-accent hover:underline underline-offset-2 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';
 
 /** The quiet "Privacy · Terms" line used in footers and menus. */
 export const LegalLinks = ({ className = '', withContact = false, newTab = false }: LegalLinksProps) => {
     const target = newTab ? { target: '_blank', rel: 'noopener noreferrer' } : {};
     return (
-        <p className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-500 ${className}`}>
+        <p
+            className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs pointer-coarse:gap-x-5 pointer-coarse:gap-y-3 text-stone-500 ${className}`}
+        >
             <Link to="/privacy" className={LINK} {...target}>
                 Privacy
             </Link>

@@ -359,12 +359,12 @@ body {
  * from here rather than hard-coded into each surface.
  */
 .library-shell {
-    --shell-bar-height: 6.125rem;
+    --shell-bar-height: calc(6.0625rem + var(--safe-top));
 }
 
 @media (min-width: 40rem) {
     .library-shell {
-        --shell-bar-height: 4rem;
+        --shell-bar-height: calc(4.0625rem + var(--safe-top));
     }
 }
 
@@ -391,9 +391,11 @@ body {
  * composited layers on every scrolled frame. `auto` keeps a card's real height
  * once it has been laid out, so the scrollbar does not jump.
  *
- * content-visibility clips to the card's box, so the clip margin leaves room
- * for the cover's hover lift and shadow, and a card with its action menu open
- * (the menu drops below the card) is always rendered whole.
+ * content-visibility clips to the card's box, painting and hit-testing alike,
+ * so the clip margin leaves room for the cover's hover lift and shadow and for
+ * the invisible touch rings around the row's buttons (the widest reaches 12px
+ * past the edge). A card with its action menu open (the menu can open past
+ * either edge) is always rendered whole.
  */
 .library-card,
 .library-list-item {

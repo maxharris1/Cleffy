@@ -168,7 +168,7 @@ const CredentialEntry = () => {
                     Have a setup code from your teacher?
                 </Link>
             </p>
-            <p className="mt-4 text-center text-sm text-stone-600">
+            <p className="mt-4 text-center text-sm text-stone-600 pointer-coarse:mt-6">
                 <Link to="/forgot-password" className={linkClassName}>
                     Forgot your password?
                 </Link>
