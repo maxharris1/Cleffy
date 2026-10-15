@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
 import { HomeScreenPromptBanner } from '@/features/install/HomeScreenPromptBanner';
@@ -19,6 +19,7 @@ import {
     writeCachedLibraryList,
 } from '@/features/library/libraryBootstrap';
 import { libraryMutationEpoch } from '@/features/library/libraryCache';
+import { coverDownloadsSettled } from '@/features/library/thumbnailRemote';
 import {
     appendPage,
     applyLibraryFilters,
@@ -35,11 +36,13 @@ import { FileDropZone } from '@/features/library/FileDropZone';
 import { formatUpdated } from '@/features/library/libraryFormat';
 import { readLibraryView, writeLibraryView, type LibraryView } from '@/features/library/libraryPrefs';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { prefetchWhenIdle } from '@/lib/idlePrefetch';
 import { perfLogIfDev, perfMark } from '@/lib/perf';
 import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
 import { ScoreCard } from '@/features/library/ScoreCard';
+import { sameDocRow, useEntranceDelay, type ScoreActions } from '@/features/library/scoreRow';
 import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import { ScoreThumb } from '@/features/library/ScoreThumb';
 import { TagAssignDialog } from '@/features/library/TagAssignDialog';
@@ -74,6 +77,20 @@ const TAG_CHIP_LIMIT = 8;
 const INLINE_TAG_LIMIT = 3;
 /** Quiet time after the last keystroke before the search goes to the server. */
 const SEARCH_DEBOUNCE_MS = 300;
+/**
+ * Rows rendered per task — a few screens' worth — whenever the list has more
+ * than are on the page: its first paint, and each "load more" page. A hundred
+ * cards in one commit took half a second with the CPU slowed 4x; nothing else
+ * could happen meanwhile, not the first covers starting, not a scroll. Plain
+ * updates, one slice per task, rather than a transition: rows entering the
+ * viewport update state as a reader scrolls, and each of those restarted a
+ * transition's render, so an appended page could wait seconds to land.
+ */
+const ROWS_PER_TASK = 24;
+/** How long the first cards get to queue their covers before the viewer prefetch looks. */
+const COVERS_FIRST_MS = 400;
+/** The viewer prefetch waits for the covers at most this long. */
+const VIEWER_PREFETCH_MAX_WAIT_MS = 5000;
 
 /**
  * One server-side answer for the current sort + filters, used while the
@@ -177,7 +194,7 @@ export const LibraryPage = () => {
      * is the write that puts the list the page knows is true.
      */
     const [persistTick, setPersistTick] = useState(0);
-    const persistSnapshot = () => setPersistTick((t) => t + 1);
+    const persistSnapshot = useCallback(() => setPersistTick((t) => t + 1), []);
 
     useEffect(() => {
         if (persistTick === 0 || documents === null) {
@@ -403,7 +420,6 @@ export const LibraryPage = () => {
         return () => window.removeEventListener('online', refresh);
     }, [error]);
 
-    const tagsById = new Map(tags.map((t) => [t.id, t]));
     const isCachedListNotice = error !== null && CACHED_LIST_NOTICES.has(error);
     // Either the browser says so, or the library itself could only be painted
     // from this device's snapshot. A server search would just fail.
@@ -483,6 +499,32 @@ export const LibraryPage = () => {
               ? groupByComposer(sorted)
               : [{ label: null, documents: sorted }]
         : null;
+
+    // How many rows may be on the page; grows by ROWS_PER_TASK per task while
+    // the list has more (see ROWS_PER_TASK). Never shrinks, so a list that
+    // was whole once (a search cleared) comes back whole at once.
+    const [rowBudget, setRowBudget] = useState(ROWS_PER_TASK);
+    // Within the row budget; a group past it waits for a later slice.
+    let budgetLeft = rowBudget;
+    const shownGroups =
+        groups?.flatMap((group) => {
+            if (budgetLeft <= 0) {
+                return [];
+            }
+            const shown = group.documents.length <= budgetLeft ? group.documents : group.documents.slice(0, budgetLeft);
+            budgetLeft -= shown.length;
+            return [{ ...group, documents: shown }];
+        }) ?? null;
+    const allRowsShown = (groups ?? []).reduce((n, group) => n + group.documents.length, 0) <= rowBudget;
+    useEffect(() => {
+        if (allRowsShown) {
+            return;
+        }
+        // One slice per task: between them the browser paints, scrolls,
+        // delivers the cards' visibility and starts their covers.
+        const next = setTimeout(() => setRowBudget((budget) => budget + ROWS_PER_TASK), 0);
+        return () => clearTimeout(next);
+    }, [rowBudget, allRowsShown]);
 
     const canLoadMore = remoteResults ? remoteResults.hasMore : !serverMode && hasMore;
 
@@ -572,8 +614,11 @@ export const LibraryPage = () => {
     const sentinelRef = useRef<HTMLDivElement | null>(null);
     useEffect(() => {
         const node = sentinelRef.current;
+        // The sentinel mounts with the last slice of rows (allRowsShown), so
+        // that is also when there is first something to observe.
         if (
             !node ||
+            !allRowsShown ||
             !canLoadMore ||
             loadingMore ||
             loadMoreError ||
@@ -588,13 +633,42 @@ export const LibraryPage = () => {
                     onSentinelVisible();
                 }
             },
-            { rootMargin: '600px 0px' },
+            // About three screens ahead: the next page is asked for while
+            // the reader is still a good way from the end, so a steady scroll
+            // reaches older scores already on the shelf instead of waiting at
+            // the bottom for them. Appending is cheap now that rows are memoized.
+            { rootMargin: '2400px 0px' },
         );
         observer.observe(node);
         return () => observer.disconnect();
-    }, [canLoadMore, loadingMore, loadMoreError, autoLoadPaused]);
+    }, [canLoadMore, loadingMore, loadMoreError, autoLoadPaused, allRowsShown]);
 
     const hasScores = documents !== null && documents.length > 0;
+    // A shelf with scores on it is a score about to be opened: bring in the
+    // viewer (and pdf.js) while the teacher looks, not after the tap. Covers
+    // first, though: on a first visit those few hundred KB would share the
+    // connection with the shelf's first covers and slow them down. Once their
+    // downloads go quiet (at once when they come from this device), or after
+    // a few seconds at most.
+    useEffect(() => {
+        if (!hasScores) {
+            return;
+        }
+        let cancelled = false;
+        const prefetch = () => {
+            if (!cancelled) {
+                prefetchWhenIdle('viewer', () => import('@/features/viewer/ViewerPage'));
+            }
+        };
+        // Lets the first cards ask for their covers before the queue is read.
+        const settle = setTimeout(() => void coverDownloadsSettled().then(prefetch), COVERS_FIRST_MS);
+        const latest = setTimeout(prefetch, VIEWER_PREFETCH_MAX_WAIT_MS);
+        return () => {
+            cancelled = true;
+            clearTimeout(settle);
+            clearTimeout(latest);
+        };
+    }, [hasScores]);
     const statusError = uploadError ?? actionError ?? error;
     const useTagSelect = tags.length > TAG_CHIP_LIMIT;
     /**
@@ -632,33 +706,55 @@ export const LibraryPage = () => {
         writeLibraryView(next);
     };
 
-    const toggleFavorite = (doc: DocumentRow) => {
-        const next = !favorites.has(doc.id);
-        setActionError(null);
-        setFavorites((prev) => {
-            const set = new Set(prev);
-            if (next) {
-                set.add(doc.id);
-            } else {
-                set.delete(doc.id);
-            }
-            return set;
-        });
-        setDocumentFavorite(doc.id, userId, next)
-            .then(persistSnapshot)
-            .catch((err: unknown) => {
-                setFavorites((prev) => {
-                    const set = new Set(prev);
-                    if (next) {
-                        set.delete(doc.id);
-                    } else {
-                        set.add(doc.id);
-                    }
-                    return set;
-                });
-                setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
+    // Stable for the life of the page (setters and userId only), so the row
+    // actions built from it never change and memoized rows stay put.
+    const toggleFavorite = useCallback(
+        (doc: DocumentRow, next: boolean) => {
+            setActionError(null);
+            setFavorites((prev) => {
+                if (prev.has(doc.id) === next) {
+                    return prev;
+                }
+                const set = new Set(prev);
+                if (next) {
+                    set.add(doc.id);
+                } else {
+                    set.delete(doc.id);
+                }
+                return set;
             });
-    };
+            setDocumentFavorite(doc.id, userId, next)
+                .then(persistSnapshot)
+                .catch((err: unknown) => {
+                    setFavorites((prev) => {
+                        const set = new Set(prev);
+                        if (next) {
+                            set.delete(doc.id);
+                        } else {
+                            set.add(doc.id);
+                        }
+                        return set;
+                    });
+                    setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
+                });
+        },
+        [userId, persistSnapshot],
+    );
+
+    /** Everything a row can ask for, as one object every row shares (see ScoreActions). */
+    const actions = useMemo<ScoreActions>(
+        () => ({
+            toggleFavorite,
+            rename: setRenameTarget,
+            share: setShareTarget,
+            assign: canManageStudents ? setAssignTarget : undefined,
+            remove: setDeleteTarget,
+            leave: setLeaveTarget,
+            editTags: setTagTarget,
+            filterTag: (tagId) => setActiveTagId((id) => (id === tagId ? null : tagId)),
+        }),
+        [toggleFavorite, canManageStudents],
+    );
 
     const patchAssignment = (documentId: string, tagId: string, assigned: boolean) => {
         setAssignments((prev) => {
@@ -846,10 +942,20 @@ export const LibraryPage = () => {
         }
     };
 
-    const docTags = (docId: string): LibraryTagRow[] => {
-        const ids = assignments.get(docId) ?? [];
-        return ids.map((id) => tagsById.get(id)).filter((t): t is LibraryTagRow => t !== undefined);
-    };
+    // One array per score, rebuilt only when tags or assignments change: a
+    // fresh array per render would defeat the memoized rows below.
+    const tagsByDoc = useMemo(() => {
+        const tagsById = new Map(tags.map((t) => [t.id, t]));
+        const byDoc = new Map<string, LibraryTagRow[]>();
+        for (const [docId, ids] of assignments) {
+            byDoc.set(
+                docId,
+                ids.map((id) => tagsById.get(id)).filter((t): t is LibraryTagRow => t !== undefined),
+            );
+        }
+        return byDoc;
+    }, [tags, assignments]);
+    const docTags = (docId: string): LibraryTagRow[] => tagsByDoc.get(docId) ?? NO_TAGS;
 
     let rowIndex = 0;
 
@@ -1051,7 +1157,7 @@ export const LibraryPage = () => {
                                         : `No scores match “${query.trim()}”.`}
                             </p>
                         ) : (
-                            groups?.map((group) => (
+                            shownGroups?.map((group) => (
                                 <section key={group.label ?? 'all'}>
                                     {group.label ? (
                                         <h3 className="mt-7 border-b border-stone-300/50 pb-1.5 text-xs font-medium uppercase tracking-[0.08em] text-stone-500 [overflow-wrap:anywhere]">
@@ -1066,20 +1172,12 @@ export const LibraryPage = () => {
                                                     doc={doc}
                                                     index={rowIndex++}
                                                     stripComposer={groupComposer && group.label !== null}
-                                                    assignedTags={docTags(doc.id)}
                                                     isFavorite={favorites.has(doc.id)}
                                                     isOwner={doc.owner_id === userId}
-                                                    onToggleFavorite={() => toggleFavorite(doc)}
-                                                    onRename={() => setRenameTarget(doc)}
-                                                    onShare={() => setShareTarget(doc)}
-                                                    onAssign={
-                                                        canManageStudents ? () => setAssignTarget(doc) : undefined
-                                                    }
-                                                    onDelete={() => setDeleteTarget(doc)}
-                                                    onLeave={() => setLeaveTarget(doc)}
+                                                    actions={actions}
                                                 />
                                             ))}
-                                            {showAddTile ? (
+                                            {showAddTile && allRowsShown ? (
                                                 <AddScoreTile
                                                     uploading={uploading}
                                                     quotaExhausted={quotaExhausted}
@@ -1098,18 +1196,7 @@ export const LibraryPage = () => {
                                                     assignedTags={docTags(doc.id)}
                                                     isFavorite={favorites.has(doc.id)}
                                                     isOwner={doc.owner_id === userId}
-                                                    onToggleFavorite={() => toggleFavorite(doc)}
-                                                    onTags={() => setTagTarget(doc)}
-                                                    onFilterTag={(tagId) =>
-                                                        setActiveTagId((id) => (id === tagId ? null : tagId))
-                                                    }
-                                                    onRename={() => setRenameTarget(doc)}
-                                                    onShare={() => setShareTarget(doc)}
-                                                    onAssign={
-                                                        canManageStudents ? () => setAssignTarget(doc) : undefined
-                                                    }
-                                                    onDelete={() => setDeleteTarget(doc)}
-                                                    onLeave={() => setLeaveTarget(doc)}
+                                                    actions={actions}
                                                 />
                                             ))}
                                         </ul>
@@ -1118,7 +1205,9 @@ export const LibraryPage = () => {
                             ))
                         )}
 
-                        {canLoadMore ? (
+                        {/* Not before every row is rendered: a sentinel under a
+                            partial list would ask for the next page at once. */}
+                        {canLoadMore && allRowsShown ? (
                             <div className="mt-8 flex flex-col items-center gap-2">
                                 <div ref={sentinelRef} aria-hidden="true" />
                                 {loadMoreError ? (
@@ -1286,150 +1375,159 @@ const AddScoreTile = ({
     </label>
 );
 
-const ScoreRow = ({
-    doc,
-    index,
-    stripComposer,
-    assignedTags,
-    isFavorite,
-    isOwner,
-    onToggleFavorite,
-    onTags,
-    onFilterTag,
-    onRename,
-    onShare,
-    onAssign,
-    onDelete,
-    onLeave,
-}: {
+/** Shared by every untagged row, so their props compare equal between renders. */
+const NO_TAGS: LibraryTagRow[] = [];
+
+interface ScoreRowProps {
     doc: DocumentRow;
+    /** Position in the list when the row mounted — only the entrance stagger reads it. */
     index: number;
     stripComposer: boolean;
     assignedTags: LibraryTagRow[];
     isFavorite: boolean;
     isOwner: boolean;
-    onToggleFavorite: () => void;
-    onTags: () => void;
-    onFilterTag: (tagId: string) => void;
-    onRename: () => void;
-    onShare: () => void;
-    onAssign?: () => void;
-    onDelete: () => void;
-    /** A score shared with you: its menu offers to take it out of your library. */
-    onLeave: () => void;
-}) => {
-    const hasTags = assignedTags.length > 0;
-    const visibleTags = assignedTags.slice(0, INLINE_TAG_LIMIT);
-    const overflow = assignedTags.length - visibleTags.length;
+    actions: ScoreActions;
+}
 
-    return (
-        <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
-            <div className="group relative flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40 hover:bg-ink/[0.03]">
-                {/*
-                  Sibling of the text block, not a child of it: that block turns
-                  into a column on phones, which would stack the thumbnail above
-                  the title instead of beside it.
-                */}
-                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} thumbRev={doc.thumb_rev ?? null} />
-                <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-4 sm:py-3">
-                    <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 items-center gap-2">
-                            <Link
-                                to={`/doc/${doc.id}`}
-                                className="min-w-0 font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover sm:line-clamp-none sm:block sm:truncate after:absolute after:inset-0 after:content-['']"
-                            >
-                                {stripComposer ? displayTitleOf(doc.title) : doc.title}
-                            </Link>
-                            {/* Past the free cap: still readable and exportable, just not writable. */}
-                            {doc.archived_at ? (
-                                <span className="relative shrink-0" title="Read-only — over your plan’s score limit">
-                                    <Badge tone="warn">Archived</Badge>
-                                </span>
-                            ) : null}
-                        </div>
-                        {hasTags ? (
-                            <div className="relative mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pointer-coarse:mt-2 pointer-coarse:gap-y-4 pointer-coarse:pb-1">
-                                {/* The separator trails its chip rather than leading the
-                                    next one, so a wrapped line never starts with a
-                                    stray '·'. On touch each chip's hit area is
-                                    stretched invisibly to 32px tall, and the margin,
-                                    padding and wrap gap grow to match so that ring
-                                    never reaches the title, the date or the next line. */}
-                                {visibleTags.map((tag, i) => (
-                                    <span key={tag.id} className="inline-flex min-w-0 items-center gap-1.5">
-                                        <button
-                                            type="button"
-                                            onClick={() => onFilterTag(tag.id)}
-                                            className="relative max-w-[8rem] text-xs text-stone-500 transition hover:text-stone-700 hover:underline pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2"
-                                            title={`Filter by ${tag.name}`}
-                                        >
-                                            {/* Truncated inside, not on the button: its overflow
-                                                would clip the hit area as well as the text. */}
-                                            <span className="block truncate">{tag.name}</span>
-                                        </button>
-                                        {i < visibleTags.length - 1 ? (
-                                            <span className="text-stone-300" aria-hidden="true">
-                                                ·
-                                            </span>
-                                        ) : null}
-                                    </span>
-                                ))}
-                                {overflow > 0 ? (
-                                    <button
-                                        type="button"
-                                        onClick={onTags}
-                                        className="text-xs text-stone-400 transition hover:text-stone-600"
-                                        aria-label={`Edit tags, ${overflow} more`}
+/** The list view's row. Memoized like ScoreCard, for the same reason. */
+const ScoreRow = memo(
+    ({ doc, index, stripComposer, assignedTags, isFavorite, isOwner, actions }: ScoreRowProps) => {
+        const hasTags = assignedTags.length > 0;
+        const visibleTags = assignedTags.slice(0, INLINE_TAG_LIMIT);
+        const overflow = assignedTags.length - visibleTags.length;
+        const entranceDelay = useEntranceDelay(index);
+        const onTags = () => actions.editTags(doc);
+
+        return (
+            <li
+                className={`library-list-item${entranceDelay === null ? ' library-card-settled' : ''}`}
+                style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
+            >
+                <div className="group relative flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40 hover:bg-ink/[0.03]">
+                    {/*
+                      Sibling of the text block, not a child of it: that block turns
+                      into a column on phones, which would stack the thumbnail above
+                      the title instead of beside it.
+                    */}
+                    <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} thumbRev={doc.thumb_rev ?? null} />
+                    <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-4 sm:py-3">
+                        <div className="min-w-0 flex-1">
+                            <div className="flex min-w-0 items-center gap-2">
+                                <Link
+                                    to={`/doc/${doc.id}`}
+                                    className="min-w-0 font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover sm:line-clamp-none sm:block sm:truncate after:absolute after:inset-0 after:content-['']"
+                                >
+                                    {stripComposer ? displayTitleOf(doc.title) : doc.title}
+                                </Link>
+                                {/* Past the free cap: still readable and exportable, just not writable. */}
+                                {doc.archived_at ? (
+                                    <span
+                                        className="relative shrink-0"
+                                        title="Read-only — over your plan’s score limit"
                                     >
-                                        +{overflow}
-                                    </button>
+                                        <Badge tone="warn">Archived</Badge>
+                                    </span>
                                 ) : null}
                             </div>
-                        ) : null}
+                            {hasTags ? (
+                                <div className="relative mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pointer-coarse:mt-2 pointer-coarse:gap-y-4 pointer-coarse:pb-1">
+                                    {/* The separator trails its chip rather than leading the
+                                        next one, so a wrapped line never starts with a
+                                        stray '·'. On touch each chip's hit area is
+                                        stretched invisibly to 32px tall, and the margin,
+                                        padding and wrap gap grow to match so that ring
+                                        never reaches the title, the date or the next line. */}
+                                    {visibleTags.map((tag, i) => (
+                                        <span key={tag.id} className="inline-flex min-w-0 items-center gap-1.5">
+                                            <button
+                                                type="button"
+                                                onClick={() => actions.filterTag(tag.id)}
+                                                className="relative max-w-[8rem] text-xs text-stone-500 transition hover:text-stone-700 hover:underline pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2"
+                                                title={`Filter by ${tag.name}`}
+                                            >
+                                                {/* Truncated inside, not on the button: its overflow
+                                                    would clip the hit area as well as the text. */}
+                                                <span className="block truncate">{tag.name}</span>
+                                            </button>
+                                            {i < visibleTags.length - 1 ? (
+                                                <span className="text-stone-300" aria-hidden="true">
+                                                    ·
+                                                </span>
+                                            ) : null}
+                                        </span>
+                                    ))}
+                                    {overflow > 0 ? (
+                                        <button
+                                            type="button"
+                                            onClick={onTags}
+                                            className="text-xs text-stone-400 transition hover:text-stone-600"
+                                            aria-label={`Edit tags, ${overflow} more`}
+                                        >
+                                            +{overflow}
+                                        </button>
+                                    ) : null}
+                                </div>
+                            ) : null}
+                        </div>
+                        <span className="text-xs text-stone-500 sm:shrink-0">
+                            {doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : ''}
+                            {formatUpdated(doc.updated_at)}
+                        </span>
                     </div>
-                    <span className="text-xs text-stone-500 sm:shrink-0">
-                        {doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : ''}
-                        {formatUpdated(doc.updated_at)}
-                    </span>
+                    {/*
+                      On touch the icons stay 32px (no sm: shrink) and each gets an
+                      invisible 40x44 hit area over itself and the gap to its right;
+                      the gaps widen just enough for that. Growing the buttons
+                      instead cost the title ~40px on phones.
+                    */}
+                    <button
+                        type="button"
+                        aria-pressed={isFavorite}
+                        aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                        title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                        onClick={() => actions.toggleFavorite(doc, !isFavorite)}
+                        className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
+                            isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
+                        }`}
+                    >
+                        <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
+                    </button>
+                    <button
+                        type="button"
+                        aria-label={hasTags ? 'Edit tags' : 'Add tags'}
+                        title={hasTags ? 'Edit tags' : 'Add tags'}
+                        onClick={onTags}
+                        className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:mx-1.5 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
+                            hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
+                        }`}
+                    >
+                        <TagIcon size={16} />
+                    </button>
+                    {isOwner ? (
+                        <RowMenu
+                            inline
+                            onRename={() => actions.rename(doc)}
+                            onShare={() => actions.share(doc)}
+                            onAssign={actions.assign ? () => actions.assign?.(doc) : undefined}
+                            onDelete={() => actions.remove(doc)}
+                        />
+                    ) : (
+                        <SharedScoreMenu inline onLeave={() => actions.leave(doc)} />
+                    )}
                 </div>
-                {/*
-                  On touch the icons stay 32px (no sm: shrink) and each gets an
-                  invisible 40x44 hit area over itself and the gap to its right;
-                  the gaps widen just enough for that. Growing the buttons
-                  instead cost the title ~40px on phones.
-                */}
-                <button
-                    type="button"
-                    aria-pressed={isFavorite}
-                    aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                    title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                    onClick={onToggleFavorite}
-                    className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
-                        isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
-                    }`}
-                >
-                    <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
-                </button>
-                <button
-                    type="button"
-                    aria-label={hasTags ? 'Edit tags' : 'Add tags'}
-                    title={hasTags ? 'Edit tags' : 'Add tags'}
-                    onClick={onTags}
-                    className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:mx-1.5 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
-                        hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
-                    }`}
-                >
-                    <TagIcon size={16} />
-                </button>
-                {isOwner ? (
-                    <RowMenu inline onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
-                ) : (
-                    <SharedScoreMenu inline onLeave={onLeave} />
-                )}
-            </div>
-        </li>
-    );
-};
+            </li>
+        );
+    },
+    (prev, next) =>
+        prev.stripComposer === next.stripComposer &&
+        prev.assignedTags === next.assignedTags &&
+        prev.isFavorite === next.isFavorite &&
+        prev.isOwner === next.isOwner &&
+        prev.actions === next.actions &&
+        sameDocRow(prev.doc, next.doc),
+);
+
+ScoreRow.displayName = 'ScoreRow';
 
 const RenameDialog = ({
     doc,

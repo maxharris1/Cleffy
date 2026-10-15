@@ -89,6 +89,23 @@ export interface CachedPdf {
     userId?: string;
 }
 
+/**
+ * Everything about a cached PDF except its bytes, in a table of its own
+ * (pdfMeta), written in the same transaction as each pdfCache row.
+ *
+ * IndexedDB cannot read part of a value: any get on pdfCache structured-clones
+ * the whole file onto the main thread, 200 ms for a 23 MB scan with the CPU
+ * slowed 4x, as for a mid-range tablet. Most readers want only the role, the
+ * revision or whose copy it is, and metadata-only changes (a rename, a role or
+ * archive change) used to rewrite the whole file as well. Where the two tables
+ * disagree, pdfMeta wins: metadata changes are written there alone. See
+ * sync/pdfCache.ts.
+ */
+export interface CachedPdfMeta extends Omit<CachedPdf, 'bytes'> {
+    /** Byte length of the cached file, for the storage summary. */
+    size: number;
+}
+
 /** Cached play-along analysis: offline replays and fast viewer opens (M-playback). */
 export interface CachedScoreAnalysis {
     docId: string;
@@ -187,6 +204,7 @@ export class ScribblerDb extends Dexie {
     ops!: Table<PendingOp, number>;
     syncState!: Table<SyncState, string>;
     pdfCache!: Table<CachedPdf, string>;
+    pdfMeta!: Table<CachedPdfMeta, string>;
     annotationSnapshots!: Table<LocalAnnotationSnapshot, string>;
     scoreCache!: Table<CachedScoreAnalysis, string>;
     fingeringRegions!: Table<FingeringRegionCache, string>;
@@ -311,6 +329,25 @@ export class ScribblerDb extends Dexie {
             ops: '++opId, docId',
             syncState: 'docId',
             pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, &[docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
+            entitlements: 'userId',
+            thumbnails: 'docId',
+            libraryList: 'userId',
+            rosterCache: 'userId',
+            assignmentsCache: 'userId',
+        });
+        // v10 adds pdfMeta (see CachedPdfMeta). No upgrade step: copying it
+        // out of every cached PDF would read every file inside the version
+        // change; a row cached before v10 is read whole once, on first use,
+        // and its metadata written then (pdfCache.ts).
+        this.version(10).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            pdfMeta: 'docId',
             annotationSnapshots: 'id, docId, &[docId+capturedOn], capturedOn',
             scoreCache: 'docId',
             fingeringRegions: 'id, docId, createdAt',

@@ -6,6 +6,7 @@ import ReactDOM from 'react-dom/client';
 import { App } from '@/app/App';
 import { captureAuthUrlError } from '@/features/auth/authUrlError';
 import { monitoringEnabled, setMonitoringUser, startMonitoring } from '@/lib/monitoring';
+import { registerServiceWorker } from '@/lib/serviceWorker';
 import { installStaleChunkRecovery } from '@/lib/staleChunk';
 import { getSupabase, isSupabaseConfigured } from '@/lib/supabase';
 
@@ -26,6 +27,9 @@ if (monitoringEnabled() && isSupabaseConfigured()) {
     // Reports carry the account's opaque id and nothing else about who it is.
     getSupabase().auth.onAuthStateChange((_event, session) => setMonitoringUser(session?.user.id ?? null));
 }
+
+// Offline support. Not at load on a first visit: see registerServiceWorker.
+registerServiceWorker();
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

@@ -16,10 +16,12 @@ import {
     cancelBackgroundPdfCache,
     finishPdfCacheInBackground,
     getCachedPdf,
+    getCachedPdfMeta,
     putCachedPdf,
     readCachedPdfBytes,
+    updateCachedPdfMeta,
 } from '@/sync/pdfCache';
-import type { CachedPdf } from '@/sync/db';
+import type { CachedPdfMeta } from '@/sync/db';
 import type { LibrarySort } from '@/features/library/libraryView';
 import type { DocumentRow, DocumentStorageCleanupRow, MemberRole } from '@/types/database';
 
@@ -136,9 +138,9 @@ export const fetchMyRole = async (docId: string, userId: string): Promise<Member
     const role = data?.role ?? null;
     if (role) {
         // Remember the role so an offline open gets the right editing mode.
-        const cached = await getCachedPdf(docId);
+        const cached = await getCachedPdfMeta(docId);
         if (cached && (cached.myRole !== role || cached.userId !== userId)) {
-            await putCachedPdf({ ...cached, myRole: role, userId });
+            await updateCachedPdfMeta(docId, { myRole: role, userId });
         }
     }
     return role;
@@ -437,10 +439,7 @@ export const renameDocument = async (docId: string, title: string): Promise<void
         throw new Error(`Could not rename: ${error.message}`);
     }
     noteLibraryMutationCommitted();
-    const cached = await getCachedPdf(docId);
-    if (cached) {
-        await putCachedPdf({ ...cached, title });
-    }
+    await updateCachedPdfMeta(docId, { title });
 };
 
 /** Objects under `{docId}/` in one bucket, or null when Storage would not say. */
@@ -658,6 +657,7 @@ export const purgeLocalDocument = async (docId: string): Promise<void> => {
     const db = getDb();
     await Promise.all([
         db.pdfCache.delete(docId),
+        db.pdfMeta.delete(docId),
         db.syncState.delete(docId),
         db.annotations.where('docId').equals(docId).delete(),
         db.ops.where('docId').equals(docId).delete(),
@@ -771,35 +771,47 @@ export interface CacheStamp {
 /**
  * Bytes of `doc`'s current revision already on this device — the warm
  * open's, or the cache row's — with the row's archive flag and role brought
- * up to date. `cached` is the row read, for the caller's fallbacks.
+ * up to date. `cached` is the row's metadata, for the caller's fallbacks.
+ * Only a current copy's bytes are read: the metadata says whether it is one.
  */
 const currentLocalBytes = async (
     doc: DocumentRow,
     preloaded: PreloadedBytes | undefined,
     role: MemberRole | undefined,
-): Promise<{ bytes: ArrayBuffer | null; cached: CachedPdf | null }> => {
+): Promise<{ bytes: ArrayBuffer | null; cached: CachedPdfMeta | null }> => {
     const wantRev = doc.content_rev ?? 0;
+    // Refresh the archive flag from the row we were handed, same as fetchMyRole
+    // does for the role — an offline open must know the score is read-only.
+    const refresh = async (cached: CachedPdfMeta | null): Promise<void> => {
+        if (cached && (cached.archivedAt !== doc.archived_at || (role && cached.myRole !== role))) {
+            await updateCachedPdfMeta(doc.id, { archivedAt: doc.archived_at, myRole: role ?? cached.myRole });
+        }
+    };
     if (preloaded && preloaded.contentRev >= wantRev) {
         // The warm open already read and materialised these bytes; a second
-        // Dexie read would hold a second multi-megabyte copy for nothing.
+        // read of the file would hold a second multi-megabyte copy for nothing.
         if (preloaded.archivedAt !== doc.archived_at || role) {
-            const cached = await getCachedPdf(doc.id);
-            if (cached && (cached.archivedAt !== doc.archived_at || (role && cached.myRole !== role))) {
-                await putCachedPdf({ ...cached, archivedAt: doc.archived_at, myRole: role ?? cached.myRole });
-            }
+            await refresh(await getCachedPdfMeta(doc.id));
         }
         return { bytes: preloaded.bytes, cached: null };
     }
-    const cached = await getCachedPdf(doc.id);
+    const cached = await getCachedPdfMeta(doc.id);
     if (cached && (cached.contentRev ?? 0) >= wantRev) {
-        // Refresh the archive flag from the row we were handed, same as fetchMyRole
-        // does for the role — an offline open must know the score is read-only.
-        if (cached.archivedAt !== doc.archived_at || (role && cached.myRole !== role)) {
-            await putCachedPdf({ ...cached, archivedAt: doc.archived_at, myRole: role ?? cached.myRole });
+        const row = await getCachedPdf(doc.id);
+        if (row) {
+            await refresh(cached);
+            return { bytes: await readCachedPdfBytes(row.bytes), cached };
         }
-        return { bytes: await readCachedPdfBytes(cached.bytes), cached };
+        // The metadata outlived its bytes (a delete that half failed).
+        return { bytes: null, cached: null };
     }
     return { bytes: null, cached };
+};
+
+/** A cached copy's bytes, whatever its revision: when a download fails, a stale score beats none. */
+const staleCopy = async (cached: CachedPdfMeta | null): Promise<ArrayBuffer | null> => {
+    const row = cached ? await getCachedPdf(cached.docId) : null;
+    return row ? readCachedPdfBytes(row.bytes) : null;
 };
 
 /**
@@ -809,9 +821,9 @@ const currentLocalBytes = async (
 export const cacheDocumentBytes = async (
     doc: DocumentRow,
     bytes: ArrayBuffer,
-    stamp: CacheStamp & { cached?: CachedPdf | null } = {},
+    stamp: CacheStamp & { cached?: CachedPdfMeta | null } = {},
 ): Promise<void> => {
-    const cached = stamp.cached === undefined ? await getCachedPdf(doc.id) : stamp.cached;
+    const cached = stamp.cached === undefined ? await getCachedPdfMeta(doc.id) : stamp.cached;
     await putCachedPdf({
         docId: doc.id,
         bytes,
@@ -844,13 +856,13 @@ export const cacheStreamedDocument = (
         download.complete,
         () => download.abort(),
         async (bytes, isCancelled) => {
-            const cached = await getCachedPdf(doc.id);
+            const cached = await getCachedPdfMeta(doc.id);
             if (isCancelled()) {
                 return;
             }
             if (cached && (cached.contentRev ?? 0) >= (doc.content_rev ?? 0)) {
                 if (!cached.myRole && stamp.role && stamp.userId && cached.userId === stamp.userId) {
-                    await putCachedPdf({ ...cached, myRole: stamp.role });
+                    await updateCachedPdfMeta(doc.id, { myRole: stamp.role });
                 }
                 return;
             }
@@ -879,18 +891,20 @@ export const loadDocumentBytes = async (
         try {
             bytes = await downloadScoreWithProgress(doc.storage_path, onProgress);
         } catch (err) {
-            if (cached) {
-                // Same rule as below: a stale copy beats no score at all.
-                return readCachedPdfBytes(cached.bytes);
+            // Same rule as below: a stale copy beats no score at all.
+            const stale = await staleCopy(cached);
+            if (stale) {
+                return stale;
             }
             throw err;
         }
     } else {
         const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
         if (error || !data) {
-            if (cached) {
-                // Offline with a stale cache beats no score at all.
-                return readCachedPdfBytes(cached.bytes);
+            // Offline with a stale cache beats no score at all.
+            const stale = await staleCopy(cached);
+            if (stale) {
+                return stale;
             }
             throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
         }
@@ -1009,7 +1023,7 @@ export const replaceDocumentPdf = async (
     }
     noteLibraryMutationCommitted();
 
-    const cached = await getCachedPdf(doc.id);
+    const cached = await getCachedPdfMeta(doc.id);
     await putCachedPdf({
         docId: doc.id,
         bytes: newBytes.slice().buffer,

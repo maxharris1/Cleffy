@@ -1,11 +1,12 @@
-import { useRef } from 'react';
+import { memo, useRef } from 'react';
 import { Link } from 'react-router';
 
 import { composerOf, displayTitleOf } from '@/features/library/libraryView';
 import { formatUpdated } from '@/features/library/libraryFormat';
 import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
+import { sameDocRow, useEntranceDelay, type ScoreActions } from '@/features/library/scoreRow';
 import { useNearViewport, useScoreThumbnail } from '@/features/library/useScoreThumbnail';
-import type { DocumentRow, LibraryTagRow } from '@/types/database';
+import type { DocumentRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { StarIcon } from '@/ui/icons';
 import { TypesetCover } from '@/ui/TypesetCover';
@@ -22,6 +23,16 @@ import { TypesetCover } from '@/ui/TypesetCover';
 const REVEAL =
     'opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100';
 
+interface ScoreCardProps {
+    doc: DocumentRow;
+    /** Position in the list when the card mounted — only the entrance stagger reads it. */
+    index: number;
+    stripComposer: boolean;
+    isFavorite: boolean;
+    isOwner: boolean;
+    actions: ScoreActions;
+}
+
 /**
  * One score on the shelf: its engraved first page as the cover, with title,
  * composer and meta beneath.
@@ -36,138 +47,130 @@ const REVEAL =
  * rows without turning into noise. The list view remains the place to see and
  * filter them; the visible title (line-clamp-2) is the card's name.
  */
-export const ScoreCard = ({
-    doc,
-    index,
-    stripComposer,
-    assignedTags: _assignedTags,
-    isFavorite,
-    isOwner,
-    onToggleFavorite,
-    onRename,
-    onShare,
-    onAssign,
-    onDelete,
-    onLeave,
-}: {
-    doc: DocumentRow;
-    index: number;
-    stripComposer: boolean;
-    assignedTags: LibraryTagRow[];
-    isFavorite: boolean;
-    isOwner: boolean;
-    onToggleFavorite: () => void;
-    onRename: () => void;
-    onShare: () => void;
-    onAssign?: () => void;
-    onDelete: () => void;
-    /** A score shared with you: its menu offers to take it out of your library. */
-    onLeave?: () => void;
-}) => {
-    const rootRef = useRef<HTMLDivElement | null>(null);
-    const near = useNearViewport(rootRef);
-    const url = useScoreThumbnail(doc.id, doc.content_rev ?? 0, { thumbRev: doc.thumb_rev ?? null, enabled: near });
-    // Suppressed under a composer group header, which already says it — five
-    // cards in a row repeating "Bach, Johann Sebastian" is noise, not context.
-    const composer = stripComposer ? null : composerOf(doc.title);
-    // Whenever the composer gets its own line the title drops its trailing
-    // "(Chopin)" — printing both turns every card into an echo.
-    const title = stripComposer || composer ? displayTitleOf(doc.title) : doc.title;
-    const pages = doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : '';
+export const ScoreCard = memo(
+    ({ doc, index, stripComposer, isFavorite, isOwner, actions }: ScoreCardProps) => {
+        const rootRef = useRef<HTMLDivElement | null>(null);
+        const near = useNearViewport(rootRef);
+        const url = useScoreThumbnail(doc.id, doc.content_rev ?? 0, { thumbRev: doc.thumb_rev ?? null, enabled: near });
+        // Suppressed under a composer group header, which already says it — five
+        // cards in a row repeating "Bach, Johann Sebastian" is noise, not context.
+        const composer = stripComposer ? null : composerOf(doc.title);
+        // Whenever the composer gets its own line the title drops its trailing
+        // "(Chopin)" — printing both turns every card into an echo.
+        const title = stripComposer || composer ? displayTitleOf(doc.title) : doc.title;
+        const pages = doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : '';
+        const entranceDelay = useEntranceDelay(index);
 
-    return (
-        <div
-            ref={rootRef}
-            className="library-card group relative has-[[aria-expanded=true]]:z-20"
-            style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}
-        >
-            {/*
-              The clipped cover and the controls are siblings on purpose: the
-              action menu opens downward past the cover's bottom edge, and
-              `overflow-hidden` would slice it in half.
-            */}
-            <div className="relative">
-                <div
-                    aria-hidden="true"
-                    className="library-card-cover aspect-[1/1.414] overflow-hidden rounded-md border border-stone-200/80 bg-white shadow-sm"
-                >
-                    {url ? (
-                        <img src={url} alt="" className="h-full w-full object-cover object-top" />
-                    ) : (
-                        /* Default pt-10 clears the favourite star pinned to the
-                           cover's top-right corner — on a favourited score it is
-                           always lit, and a centred title ran under it. */
-                        <TypesetCover title={title} composer={composer} />
-                    )}
-                </div>
-
-                <div className={`absolute right-1.5 top-1.5 z-10 ${isFavorite ? '' : REVEAL}`}>
-                    <button
-                        type="button"
-                        aria-pressed={isFavorite}
-                        aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                        title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                        onClick={onToggleFavorite}
-                        // The pill stays small on touch; an invisible ring takes the hit area to 44px.
-                        className={`relative grid place-items-center rounded-full bg-white/85 p-1.5 backdrop-blur transition hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2 ${
-                            isFavorite ? 'text-amber-500' : 'text-stone-500 hover:text-stone-700'
-                        }`}
+        return (
+            <div
+                ref={rootRef}
+                className={`library-card group relative has-[[aria-expanded=true]]:z-20${
+                    entranceDelay === null ? ' library-card-settled' : ''
+                }`}
+                style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
+            >
+                {/*
+                  The clipped cover and the controls are siblings on purpose: the
+                  action menu opens downward past the cover's bottom edge, and
+                  `overflow-hidden` would slice it in half.
+                */}
+                <div className="relative">
+                    <div
+                        aria-hidden="true"
+                        className="library-card-cover aspect-[1/1.414] overflow-hidden rounded-md border border-stone-200/80 bg-white shadow-sm"
                     >
-                        <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
-                    </button>
-                </div>
+                        {url ? (
+                            <img src={url} alt="" className="h-full w-full object-cover object-top" />
+                        ) : near ? (
+                            /* Default pt-10 clears the favourite star pinned to the
+                               cover's top-right corner — on a favourited score it is
+                               always lit, and a centred title ran under it. Drawn
+                               only once the card comes near the screen: a page of a
+                               hundred cards would otherwise build a hundred engraved
+                               plates nobody has scrolled to. */
+                            <TypesetCover title={title} composer={composer} />
+                        ) : null}
+                    </div>
 
-                {isOwner || onLeave ? (
-                    // `has-[[aria-expanded=true]]` keeps the pill lit while its
-                    // own menu is open — otherwise moving the pointer onto the
-                    // menu fades out the menu with it.
+                    <div className={`absolute right-1.5 top-1.5 z-10 ${isFavorite ? '' : REVEAL}`}>
+                        <button
+                            type="button"
+                            aria-pressed={isFavorite}
+                            aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                            title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                            onClick={() => actions.toggleFavorite(doc, !isFavorite)}
+                            // The pill stays small on touch; an invisible ring takes the hit area to 44px.
+                            className={`relative grid place-items-center rounded-full bg-white/85 p-1.5 backdrop-blur transition hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2 ${
+                                isFavorite ? 'text-amber-500' : 'text-stone-500 hover:text-stone-700'
+                            }`}
+                        >
+                            <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
+                        </button>
+                    </div>
+
+                    {/* `has-[[aria-expanded=true]]` keeps the pill lit while its
+                        own menu is open — otherwise moving the pointer onto the
+                        menu fades out the menu with it. */}
                     <div
                         className={`absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/85 backdrop-blur has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
                     >
                         {isOwner ? (
-                            <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
-                        ) : onLeave ? (
-                            <SharedScoreMenu onLeave={onLeave} />
-                        ) : null}
+                            <RowMenu
+                                onRename={() => actions.rename(doc)}
+                                onShare={() => actions.share(doc)}
+                                onAssign={actions.assign ? () => actions.assign?.(doc) : undefined}
+                                onDelete={() => actions.remove(doc)}
+                            />
+                        ) : (
+                            <SharedScoreMenu onLeave={() => actions.leave(doc)} />
+                        )}
                     </div>
-                ) : null}
 
-                {/* Past the free cap: still readable and exportable, just not writable. */}
-                {doc.archived_at ? (
-                    <span
-                        className="absolute bottom-1.5 left-1.5 z-10"
-                        title="Read-only — over your plan’s score limit"
+                    {/* Past the free cap: still readable and exportable, just not writable. */}
+                    {doc.archived_at ? (
+                        <span
+                            className="absolute bottom-1.5 left-1.5 z-10"
+                            title="Read-only — over your plan’s score limit"
+                        >
+                            <Badge tone="warn">Archived</Badge>
+                        </span>
+                    ) : null}
+                </div>
+
+                <div className="mt-2.5">
+                    {/*
+                      No `block` here: line-clamp-2 needs `display: -webkit-box`,
+                      and the two utilities set the same property — whichever
+                      Tailwind emits last wins, which is how a three-line title got
+                      through.
+                    */}
+                    <Link
+                        to={`/doc/${doc.id}`}
+                        // Ungrouped, the visible title drops its "(Chopin)" because
+                        // the composer has its own line — but the link still has to
+                        // name the score in full for anyone reading it out of
+                        // context. Under a composer heading there is nothing to
+                        // restore, so the visible text stands on its own.
+                        aria-label={!stripComposer && composer ? doc.title : undefined}
+                        className="text-sm font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
                     >
-                        <Badge tone="warn">Archived</Badge>
-                    </span>
-                ) : null}
+                        {title}
+                    </Link>
+                    {composer ? <p className="mt-0.5 truncate text-xs text-stone-500">{composer}</p> : null}
+                    <p className="mt-0.5 text-xs text-stone-400">
+                        {pages}
+                        {formatUpdated(doc.updated_at)}
+                    </p>
+                </div>
             </div>
+        );
+    },
+    (prev, next) =>
+        prev.stripComposer === next.stripComposer &&
+        prev.isFavorite === next.isFavorite &&
+        prev.isOwner === next.isOwner &&
+        prev.actions === next.actions &&
+        sameDocRow(prev.doc, next.doc),
+);
 
-            <div className="mt-2.5">
-                {/*
-                  No `block` here: line-clamp-2 needs `display: -webkit-box`,
-                  and the two utilities set the same property — whichever
-                  Tailwind emits last wins, which is how a three-line title got
-                  through.
-                */}
-                <Link
-                    to={`/doc/${doc.id}`}
-                    // Ungrouped, the visible title drops its "(Chopin)" because
-                    // the composer has its own line — but the link still has to
-                    // name the score in full for anyone reading it out of
-                    // context. Under a composer heading there is nothing to
-                    // restore, so the visible text stands on its own.
-                    aria-label={!stripComposer && composer ? doc.title : undefined}
-                    className="text-sm font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
-                >
-                    {title}
-                </Link>
-                {composer ? <p className="mt-0.5 truncate text-xs text-stone-500">{composer}</p> : null}
-                <p className="mt-0.5 text-xs text-stone-400">
-                    {pages}
-                    {formatUpdated(doc.updated_at)}
-                </p>
-            </div>
-        </div>
-    );
-};
+ScoreCard.displayName = 'ScoreCard';

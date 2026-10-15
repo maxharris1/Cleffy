@@ -450,6 +450,7 @@ export const clearAccountCachesFromDevice = async ({ keepCloudAnnotations = fals
         db.rosterCache.clear().catch(() => undefined),
         db.assignmentsCache.clear().catch(() => undefined),
         db.pdfCache.clear().catch(() => undefined),
+        db.pdfMeta.clear().catch(() => undefined),
         db.thumbnails.clear().catch(() => undefined),
         db.entitlements.clear().catch(() => undefined),
         // Cloud-score marks, their outbox, watermarks and day snapshots: the
