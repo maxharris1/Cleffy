@@ -153,6 +153,16 @@ export const fetchPublishedThumbnail = async (docId: string, rev: number): Promi
     }
 };
 
+/** HTTP status of a refused exists() probe: on the error, or on the response it wraps. */
+const probeStatusOf = (error: unknown): number | undefined => {
+    if (!error || typeof error !== 'object') {
+        return undefined;
+    }
+    const { status, originalError } = error as { status?: unknown; originalError?: { status?: unknown } };
+    const code = typeof status === 'number' ? status : originalError?.status;
+    return typeof code === 'number' ? code : undefined;
+};
+
 /**
  * Probes run one at a time, on a lane of their own: they only guard against a
  * rare missing object, and must never hold up a download a card is waiting on.
@@ -167,10 +177,15 @@ let probeLane: Promise<unknown> = Promise.resolve();
 export const probePublishedThumbnail = (docId: string, rev: number): Promise<PublishedThumbnail['status']> => {
     const probe = probeLane.then(async (): Promise<PublishedThumbnail['status']> => {
         try {
-            const { data } = await getSupabase().storage.from(BUCKET).exists(thumbnailObjectPath(docId, rev));
-            // exists() answers false only for a 400/404 and throws on anything
-            // else (a 503, a dropped connection), which is not "missing".
-            return data ? 'found' : 'missing';
+            const { data, error } = await getSupabase().storage.from(BUCKET).exists(thumbnailObjectPath(docId, rev));
+            if (data) {
+                return 'found';
+            }
+            // exists() answers false for a 400 as well as a 404, and Storage
+            // answers some auth and JWT failures with a 400 that a HEAD has no
+            // body to explain: only a 404 is "missing" (a republish). Anything
+            // it throws on (a 503, a dropped connection) is not either.
+            return probeStatusOf(error) === 404 ? 'missing' : 'unavailable';
         } catch {
             return 'unavailable';
         }
