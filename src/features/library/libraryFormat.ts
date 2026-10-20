@@ -23,9 +23,19 @@ export const formatUpdated = (iso: string): string => {
         }
     }
     const sameYear = date.getFullYear() === new Date(now).getFullYear();
-    return date.toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-        ...(sameYear ? {} : { year: 'numeric' as const }),
-    });
+    return dateFormat(sameYear).format(date);
 };
+
+/**
+ * The two formatters, built once. toLocaleDateString with options builds a
+ * new Intl.DateTimeFormat on every call — on a library's first paint that was
+ * the costliest function in the app, a hundred formatters for a hundred cards.
+ * Same output: toLocaleDateString(undefined, options) is this format.
+ */
+let thisYear: Intl.DateTimeFormat | null = null;
+let otherYear: Intl.DateTimeFormat | null = null;
+
+const dateFormat = (sameYear: boolean): Intl.DateTimeFormat =>
+    sameYear
+        ? (thisYear ??= new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }))
+        : (otherYear ??= new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }));

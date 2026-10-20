@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     fetchLibraryBootstrap,
     prependCachedLibraryDocument,
+    recentLibraryBootstrap,
     readCachedLibraryList,
     removeCachedLibraryDocument,
     writeCachedLibraryList,
@@ -251,6 +252,35 @@ describe('fetchLibraryBootstrap', () => {
         await removeCachedLibraryDocument('user-without-snapshot', 'd-other');
         expect(spy).not.toHaveBeenCalled();
         spy.mockRestore();
+    });
+
+    it('hands the answer that just landed to recentLibraryBootstrap, for that account only', async () => {
+        rpc.mockResolvedValueOnce({ data: payload('Aria'), error: null });
+        const boot = await fetchLibraryBootstrap('user-recent');
+        expect(recentLibraryBootstrap('user-recent')).toBe(boot);
+        expect(recentLibraryBootstrap('user-other')).toBeNull();
+    });
+
+    it('stops offering the recent answer once the library has changed', async () => {
+        rpc.mockResolvedValueOnce({ data: payload('Aria'), error: null });
+        await fetchLibraryBootstrap('user-mutated');
+        noteLibraryMutation();
+        expect(recentLibraryBootstrap('user-mutated')).toBeNull();
+    });
+
+    it('stops offering the recent answer after a few seconds', async () => {
+        const now = vi.spyOn(Date, 'now');
+        try {
+            now.mockReturnValue(1_000_000);
+            rpc.mockResolvedValueOnce({ data: payload('Aria'), error: null });
+            await fetchLibraryBootstrap('user-aging');
+            now.mockReturnValue(1_004_000);
+            expect(recentLibraryBootstrap('user-aging')).not.toBeNull();
+            now.mockReturnValue(1_006_000);
+            expect(recentLibraryBootstrap('user-aging')).toBeNull();
+        } finally {
+            now.mockRestore();
+        }
     });
 
     it('does not memoize a failed request', async () => {

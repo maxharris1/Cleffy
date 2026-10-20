@@ -4,6 +4,7 @@ import {
     canReloadForStaleChunk,
     installStaleChunkRecovery,
     isChunkLoadError,
+    loadAsPrefetch,
     isStaleChunkReloadPending,
     reloadForStaleChunk,
     resetStaleChunkStateForTests,
@@ -123,5 +124,51 @@ describe('installStaleChunkRecovery', () => {
         window.dispatchEvent(preloadError(new Error('something else')));
         uninstall();
         expect(reload).not.toHaveBeenCalled();
+    });
+
+    /**
+     * What Vite's preload helper does when a chunk is gone: dispatch the event
+     * on window with the error, then reject the import with that same error.
+     */
+    const viteImport = (error: Error) => () =>
+        Promise.resolve().then(() => {
+            window.dispatchEvent(preloadError(error));
+            throw error;
+        });
+
+    it('leaves the page alone when only a prefetch met a stale chunk, and reloads on the navigation', async () => {
+        vi.useFakeTimers();
+        const reload = vi.fn();
+        const uninstall = installStaleChunkRecovery(window, reload);
+        try {
+            await expect(loadAsPrefetch(viteImport(chromeChunkError()))).rejects.toThrow(/dynamically imported/);
+            await vi.runAllTimersAsync();
+            expect(reload).not.toHaveBeenCalled();
+
+            // The tap on a score imports the chunk again, outside any prefetch.
+            await expect(viteImport(chromeChunkError())()).rejects.toThrow(/dynamically imported/);
+            expect(reload).toHaveBeenCalledTimes(1);
+        } finally {
+            uninstall();
+            vi.useRealTimers();
+        }
+    });
+
+    it('still reloads for another import that fails while a prefetch is in flight', async () => {
+        vi.useFakeTimers();
+        const reload = vi.fn();
+        const uninstall = installStaleChunkRecovery(window, reload);
+        let finishPrefetch!: () => void;
+        const prefetch = loadAsPrefetch(() => new Promise<void>((resolve) => (finishPrefetch = resolve)));
+        try {
+            await expect(viteImport(chromeChunkError())()).rejects.toThrow(/dynamically imported/);
+            await vi.runAllTimersAsync();
+            expect(reload).toHaveBeenCalledTimes(1);
+        } finally {
+            finishPrefetch();
+            await prefetch;
+            uninstall();
+            vi.useRealTimers();
+        }
     });
 });

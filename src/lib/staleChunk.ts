@@ -120,6 +120,32 @@ export const reloadForStaleChunk = (now = Date.now(), reload: () => void = () =>
 };
 
 /**
+ * Prefetches still in flight (lib/idlePrefetch.ts), and the errors they ended
+ * in. A prefetch is a guess made in the background: one that meets a chunk
+ * from an older build must not reload the page under a teacher who is
+ * mid-upload or has a dialog open on a page that works. Its failure is
+ * dropped, and the navigation that needs the chunk imports it again and
+ * recovers then, as it did before there was a prefetch.
+ */
+let prefetchesInFlight = 0;
+const prefetchErrors = new WeakSet<object>();
+
+/** Run `load` as a prefetch: a stale chunk it meets does not reload the page. */
+export const loadAsPrefetch = async <T>(load: () => Promise<T>): Promise<T> => {
+    prefetchesInFlight += 1;
+    try {
+        return await load();
+    } catch (err) {
+        if (err !== null && typeof err === 'object') {
+            prefetchErrors.add(err);
+        }
+        throw err;
+    } finally {
+        prefetchesInFlight -= 1;
+    }
+};
+
+/**
  * Vite's own signal for a failed lazy import in a built bundle: its preload
  * helper dispatches `vite:preloadError` on window for the chunk itself and for
  * every file the chunk preloads, before the import rejects. Reloading here
@@ -127,6 +153,10 @@ export const reloadForStaleChunk = (now = Date.now(), reload: () => void = () =>
  * boundary as well. The error is left to propagate (no preventDefault): the
  * importer's own handling still runs, and the error boundary renders an
  * "updating" frame rather than a crash while the reload is under way.
+ *
+ * While a prefetch is in flight, the reload waits one task: the helper rejects
+ * the import with the event's own payload, in microtasks straight after the
+ * event, so by then loadAsPrefetch has marked it if the failure was its own.
  */
 export const installStaleChunkRecovery = (
     target: Window = window,
@@ -136,9 +166,19 @@ export const installStaleChunkRecovery = (
         const payload = (event as Event & { payload?: unknown }).payload;
         // The helper only ever dispatches for a failed fetch; checking the
         // payload anyway keeps an unrelated error from reloading the page.
-        if (payload === undefined || isChunkLoadError(payload)) {
-            reloadForStaleChunk(Date.now(), reload);
+        if (payload !== undefined && !isChunkLoadError(payload)) {
+            return;
         }
+        if (prefetchesInFlight === 0) {
+            reloadForStaleChunk(Date.now(), reload);
+            return;
+        }
+        setTimeout(() => {
+            if (payload !== null && typeof payload === 'object' && prefetchErrors.has(payload)) {
+                return;
+            }
+            reloadForStaleChunk(Date.now(), reload);
+        }, 0);
     };
     target.addEventListener('vite:preloadError', onPreloadError);
     return () => target.removeEventListener('vite:preloadError', onPreloadError);
@@ -147,4 +187,5 @@ export const installStaleChunkRecovery = (
 /** Tests only: forget that a reload was started. */
 export const resetStaleChunkStateForTests = (): void => {
     reloadPending = false;
+    prefetchesInFlight = 0;
 };

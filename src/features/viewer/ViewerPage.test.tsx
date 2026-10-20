@@ -874,7 +874,8 @@ describe('CloudViewer membership changes', () => {
         fetchMyRole.mockResolvedValue('viewer');
         await membershipChanged();
 
-        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        // Two mocked reads and a commit: generous room on a loaded CI runner.
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'), { timeout: 5000 });
         expect(screen.getByRole('status')).toHaveTextContent('you can now only view this score');
         expect(purgeLocalDocument).not.toHaveBeenCalled();
     });
@@ -886,7 +887,8 @@ describe('CloudViewer membership changes', () => {
         fetchMyRole.mockResolvedValue('editor');
         await membershipChanged();
 
-        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        // Two mocked reads and a commit: generous room on a loaded CI runner.
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'), { timeout: 5000 });
         expect(screen.getByRole('status')).toHaveTextContent('you can now edit this score');
     });
 

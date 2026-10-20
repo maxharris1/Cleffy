@@ -83,6 +83,8 @@ vi.mock('@/features/library/libraryBootstrap', () => ({
     readCachedLibraryList: (...args: unknown[]) => readCachedLibraryList(...args),
     prependCachedLibraryDocument: (...args: unknown[]) => prependCachedLibraryDocument(...args),
     fetchLibraryBootstrap: (...args: unknown[]) => fetchLibraryBootstrap(...args),
+    // No answer has just landed in these tests: the cap check asks for one.
+    recentLibraryBootstrap: () => null,
 }));
 
 vi.mock('@/features/import/importPromptService', () => ({

@@ -16,10 +16,7 @@ import { getSupabase } from '@/lib/supabase';
 
 const BUCKET = 'thumbnails';
 
-export type PublishedThumbnail =
-    | { status: 'found'; blob: Blob }
-    | { status: 'missing' }
-    | { status: 'unavailable' };
+export type PublishedThumbnail = { status: 'found'; blob: Blob } | { status: 'missing' } | { status: 'unavailable' };
 
 type StorageErrorLike = {
     message?: string;
@@ -112,10 +109,30 @@ const acquire = (): Promise<void> =>
         });
     });
 
+/** Callers waiting for the download queue to go quiet (coverDownloadsSettled). */
+let settledWaiters: Array<() => void> = [];
+
 const release = (): void => {
     active -= 1;
     waiting.shift()?.();
+    if (active === 0 && waiting.length === 0 && settledWaiters.length > 0) {
+        const done = settledWaiters;
+        settledWaiters = [];
+        done.forEach((resolve) => resolve());
+    }
 };
+
+/**
+ * Resolves once no cover is downloading or queued — at once if none is. For
+ * work that should not share the connection with the first screen of covers
+ * (see LibraryPage's viewer prefetch).
+ */
+export const coverDownloadsSettled = (): Promise<void> =>
+    active === 0 && waiting.length === 0
+        ? Promise.resolve()
+        : new Promise((resolve) => {
+              settledWaiters.push(resolve);
+          });
 
 /** The published cover at this revision: found, 404-missing, or otherwise unavailable. */
 export const fetchPublishedThumbnail = async (docId: string, rev: number): Promise<PublishedThumbnail> => {
@@ -134,4 +151,45 @@ export const fetchPublishedThumbnail = async (docId: string, rev: number): Promi
     } finally {
         release();
     }
+};
+
+/** HTTP status of a refused exists() probe: on the error, or on the response it wraps. */
+const probeStatusOf = (error: unknown): number | undefined => {
+    if (!error || typeof error !== 'object') {
+        return undefined;
+    }
+    const { status, originalError } = error as { status?: unknown; originalError?: { status?: unknown } };
+    const code = typeof status === 'number' ? status : originalError?.status;
+    return typeof code === 'number' ? code : undefined;
+};
+
+/**
+ * Probes run one at a time, on a lane of their own: they only guard against a
+ * rare missing object, and must never hold up a download a card is waiting on.
+ */
+let probeLane: Promise<unknown> = Promise.resolve();
+
+/**
+ * Whether the published cover at this revision is still in the bucket. A HEAD
+ * request: confirming a cover this device already holds used to download the
+ * whole image again, for every cover on screen, on every launch.
+ */
+export const probePublishedThumbnail = (docId: string, rev: number): Promise<PublishedThumbnail['status']> => {
+    const probe = probeLane.then(async (): Promise<PublishedThumbnail['status']> => {
+        try {
+            const { data, error } = await getSupabase().storage.from(BUCKET).exists(thumbnailObjectPath(docId, rev));
+            if (data) {
+                return 'found';
+            }
+            // exists() answers false for a 400 as well as a 404, and Storage
+            // answers some auth and JWT failures with a 400 that a HEAD has no
+            // body to explain: only a 404 is "missing" (a republish). Anything
+            // it throws on (a 503, a dropped connection) is not either.
+            return probeStatusOf(error) === 404 ? 'missing' : 'unavailable';
+        } catch {
+            return 'unavailable';
+        }
+    });
+    probeLane = probe.catch(() => undefined);
+    return probe;
 };

@@ -5,13 +5,13 @@ import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
-import { prescanDocument } from '@/features/import/prescan';
 import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
 import { isImslpImportCancelled, type ImslpDownloadStage } from '@/features/imslp/imslpApi';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import {
     fetchLibraryBootstrap,
+    recentLibraryBootstrap,
     prependCachedLibraryDocument,
     readCachedLibraryList,
     type LibraryListSnapshot,
@@ -270,6 +270,15 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 refreshCap(docs);
             }
         };
+        // The answer that brought these entitlements usually just landed:
+        // count from it rather than ask for the whole library again.
+        const known = recentLibraryBootstrap(userId);
+        if (known) {
+            apply(known.documents);
+            return () => {
+                cancelled = true;
+            };
+        }
         void readCachedLibraryList(userId)
             .then((snap) => {
                 if (snap) {
@@ -313,7 +322,12 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             // Free, local prescan: does this score already carry colored-ink
             // markings? If so (and the user never declined), offer the import.
             try {
-                const bytes = await loadDocumentBytes(document, { userId });
+                // Loaded after an upload only: the page rasterizer and segmenter
+                // have no business in the bundle every library visit pays for.
+                const [bytes, { prescanDocument }] = await Promise.all([
+                    loadDocumentBytes(document, { userId }),
+                    import('@/features/import/prescan'),
+                ]);
                 if ((await prescanDocument(bytes)) && (await shouldOfferImport(document.id))) {
                     setImportOffer(document);
                     return; // the dialog decides where to navigate

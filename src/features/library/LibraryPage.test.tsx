@@ -54,6 +54,12 @@ vi.mock('@/features/library/tagsService', () => ({
     setDocumentTag: (...args: unknown[]) => setDocumentTag(...args),
 }));
 
+// Covers are not what these tests are about; the real service would run
+// every row's IndexedDB lookups through fake-indexeddb, one slice of rows at
+// a time (ROWS_PER_TASK), and make the hundred-row tests crawl.
+vi.mock('@/features/library/thumbnailService', () => ({
+    getThumbnail: vi.fn(() => Promise.resolve(null)),
+}));
 vi.mock('@/features/share/ShareDialog', () => ({
     ShareDialog: ({ docId }: { docId: string }) => <div data-testid="share-dialog">{docId}</div>,
 }));
@@ -934,8 +940,13 @@ describe('LibraryPage', () => {
             renderLibrary();
             await screen.findByText('Couldn’t reach Cleffy');
 
-            const retry = setTimeoutSpy.mock.calls.find(([, ms]) => ms === 5000);
-            expect(retry).toBeDefined();
+            // The retry is armed by an effect that can run just after the
+            // notice paints.
+            const retry = await waitFor(() => {
+                const call = setTimeoutSpy.mock.calls.find(([, ms]) => ms === 5000);
+                expect(call).toBeDefined();
+                return call;
+            });
             mockBootstrap({ documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')] });
             await act(async () => {
                 (retry![0] as () => void)();
@@ -1286,6 +1297,10 @@ describe('pagination and server search', () => {
         fetchLibraryPage.mockResolvedValueOnce({ documents: [olderScore], hasMore: false });
         renderLibrary();
         await screen.findByText('Score 0');
+        // A hundred rows render a slice per task (ROWS_PER_TASK), each slow
+        // in jsdom (seconds, on a loaded CI runner); the button follows the
+        // last of them.
+        await screen.findByText('Score 99', undefined, { timeout: 15_000 });
         await user.click(screen.getByRole('button', { name: 'Load more scores' }));
         await screen.findByText('Gymnopédie (Satie, Erik)');
         await user.click(screen.getAllByRole('button', { name: 'Add to favorites' })[0] as HTMLElement);
@@ -1296,7 +1311,7 @@ describe('pagination and server search', () => {
         };
         expect(snapshot.documents).toHaveLength(100);
         expect(snapshot.hasMore).toBe(true);
-    });
+    }, 30_000);
 
     it('continues A–Z from the row the server sent, even after that row was renamed', async () => {
         const user = userEvent.setup();
@@ -1371,6 +1386,35 @@ describe('pagination and server search', () => {
         expect(fetchLibraryPage).toHaveBeenCalledWith({ sort: 'recent', after: firstPage[1] });
     });
 
+    it('scrolls into the next page once the last slice of a long first page is on screen', async () => {
+        // The sentinel only mounts with the last slice of rows (ROWS_PER_TASK);
+        // the observer must attach to it then, not just when "more" first showed.
+        const observed: Element[] = [];
+        class FakeObserver {
+            constructor(private callback: (entries: Array<{ isIntersecting: boolean; target: Element }>) => void) {}
+            observe(target: Element) {
+                observed.push(target);
+                queueMicrotask(() => this.callback([{ isIntersecting: true, target }]));
+            }
+            unobserve() {}
+            disconnect() {}
+        }
+        vi.stubGlobal('IntersectionObserver', FakeObserver);
+        try {
+            const many = Array.from({ length: 60 }, (_, i) => doc(`s${i}`, `Study ${i}`));
+            mockBootstrap({ documents: many, hasMore: true });
+            fetchLibraryPage.mockResolvedValue({ documents: [olderScore], hasMore: false });
+            renderLibrary();
+            await screen.findByText('Study 0');
+            await screen.findByText('Gymnopédie (Satie, Erik)', undefined, { timeout: 15_000 });
+            expect(fetchLibraryPage).toHaveBeenCalledWith({ sort: 'recent', after: many[59] });
+        } finally {
+            vi.unstubAllGlobals();
+            vi.stubGlobal('localStorage', memoryStorage());
+            window.localStorage.setItem('cleffy:library-view', 'list');
+        }
+    }, 30_000);
+
     it('stops scrolling into pages that add nothing new and leaves the button to the teacher', async () => {
         const observers: Array<(entries: Array<{ isIntersecting: boolean }>) => void> = [];
         class FakeObserver {
@@ -1381,6 +1425,7 @@ describe('pagination and server search', () => {
                 // A sentinel already in view reports at once, as browsers do.
                 queueMicrotask(() => observers.at(-1)?.([{ isIntersecting: true }]));
             }
+            unobserve() {}
             disconnect() {}
         }
         vi.stubGlobal('IntersectionObserver', FakeObserver);

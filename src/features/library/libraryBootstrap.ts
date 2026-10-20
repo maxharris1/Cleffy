@@ -202,6 +202,26 @@ const fetchBootstrap = async (userId: string): Promise<LibraryBootstrap> => {
     return boot;
 };
 
+/** The last answer, for recentLibraryBootstrap. */
+let recent: { userId: string; boot: LibraryBootstrap; at: number } | null = null;
+const RECENT_REUSE_MS = 5000;
+
+/**
+ * The answer that just landed, while no library change has happened since it
+ * was requested and for a few seconds — else null. For the shell's score-cap
+ * check: it runs once the plan is known, and the plan arrives in this same
+ * answer, so its own request always came a moment too late to share the
+ * in-flight one and asked the server for the whole library a second time, on
+ * every visit. fetchLibraryBootstrap itself still always asks anew.
+ */
+export const recentLibraryBootstrap = (userId: string): LibraryBootstrap | null =>
+    recent &&
+    recent.userId === userId &&
+    recent.boot.fetchedAtEpoch === libraryMutationEpoch() &&
+    Date.now() - recent.at < RECENT_REUSE_MS
+        ? recent.boot
+        : null;
+
 /**
  * One round-trip for documents + favorites + tags + entitlements.
  * Concurrent callers for the same user share the in-flight promise.
@@ -210,11 +230,16 @@ export const fetchLibraryBootstrap = (userId: string): Promise<LibraryBootstrap>
     if (inflight && inflight.userId === userId) {
         return inflight.promise;
     }
-    const promise = fetchBootstrap(userId).finally(() => {
-        if (inflight?.promise === promise) {
-            inflight = null;
-        }
-    });
+    const promise = fetchBootstrap(userId)
+        .then((boot) => {
+            recent = { userId, boot, at: Date.now() };
+            return boot;
+        })
+        .finally(() => {
+            if (inflight?.promise === promise) {
+                inflight = null;
+            }
+        });
     inflight = { userId, promise };
     return promise;
 };
