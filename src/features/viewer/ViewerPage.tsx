@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 
 import { displayNameOf, isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
@@ -217,9 +217,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const accessCheckInFlight = useRef(false);
     /** A change arrived while a check was running; that check may have read the role before it. */
     const accessRecheckPending = useRef(false);
-    /** Latest state for the access re-check, which runs outside render. */
+    /**
+     * Latest state for the access re-check, which runs outside render. Kept in
+     * step with the commit (a layout effect, not a passive one): a membership
+     * event that lands after the viewport is on screen but before passive
+     * effects have run must not find the state from before it, or none at all,
+     * and drop the re-check.
+     */
     const stateRef = useRef(state);
-    useEffect(() => {
+    useLayoutEffect(() => {
         stateRef.current = state;
     }, [state]);
 
