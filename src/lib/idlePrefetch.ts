@@ -1,3 +1,5 @@
+import { loadAsPrefetch } from '@/lib/staleChunk';
+
 /**
  * Load a lazy chunk while the page is idle, so the navigation that needs it
  * finds it already downloaded and evaluated.
@@ -9,8 +11,9 @@
  * route renders without suspending.
  *
  * Once per key per page load. Skipped when the browser asks to save data;
- * failures are ignored — the navigation imports the chunk again itself and
- * meets the error there, as it did before.
+ * failures are ignored, a stale chunk's included (no automatic reload, see
+ * loadAsPrefetch) — the navigation imports the chunk again itself and meets
+ * the error there, as it did before.
  */
 const started = new Set<string>();
 
@@ -33,7 +36,7 @@ export const prefetchWhenIdle = (key: string, load: () => Promise<unknown>): voi
     }
     started.add(key);
     const run = () => {
-        void load().catch(() => undefined);
+        void loadAsPrefetch(load).catch(() => undefined);
     };
     const idle = window as IdleWindow;
     if (typeof idle.requestIdleCallback === 'function') {
