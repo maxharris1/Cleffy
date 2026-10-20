@@ -396,24 +396,30 @@ body {
  * the invisible touch rings around the row's buttons (the widest reaches 12px
  * past the edge). A card with its action menu open (the menu can open past
  * either edge) is always rendered whole.
+ *
+ * Only where the clip margin works: Safari (and so every iPad browser) has
+ * content-visibility but not overflow-clip-margin, and there the clip would
+ * cut off those touch rings and the hover lift. It keeps rendering every card.
  */
-.library-card,
-.library-list-item {
-    content-visibility: auto;
-    overflow-clip-margin: 12px;
-}
+@supports (overflow-clip-margin: 12px) {
+    .library-card,
+    .library-list-item {
+        content-visibility: auto;
+        overflow-clip-margin: 12px;
+    }
 
-.library-card {
-    contain-intrinsic-block-size: auto 320px;
-}
+    .library-card {
+        contain-intrinsic-block-size: auto 320px;
+    }
 
-.library-list-item {
-    contain-intrinsic-block-size: auto 64px;
-}
+    .library-list-item {
+        contain-intrinsic-block-size: auto 64px;
+    }
 
-.library-card:has([aria-expanded='true']),
-.library-list-item:has([aria-expanded='true']) {
-    content-visibility: visible;
+    .library-card:has([aria-expanded='true']),
+    .library-list-item:has([aria-expanded='true']) {
+        content-visibility: visible;
+    }
 }
 
 /* The cover lifts off the paper on hover. This lives here rather than in a
