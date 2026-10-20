@@ -114,6 +114,24 @@ updates when the role exists.
 an archived, claimed roster row whose account is a provisioned student (false
 for a wrong one, a live or unclaimed row, a non-student account, a non-bcrypt
 hash and an unknown username), and refuses every caller but the service role.
+`district_seats.sql` proves
+`supabase/migrations/20261020180400_district_seat_overrides.sql`: a studio is
+capped at Academy's 5 until an admin sets an override, which then raises the
+seat trigger's limit only while the subscription it is tied to is the studio
+owner's live `send_invoice` Academy subscription (a lapsed period, `past_due`,
+`canceled` or a switch to `charge_automatically` puts the studio back on 5, and
+a renewal or payment restores the override without anyone re-setting it); the
+webhook's own subscription writes (`write_subscription_under_lock`, a write
+that omits `collection_method` included) never touch the override or its log;
+`admin_set_studio_seat_override` refuses an override at or below 5, no actor, an
+unrecorded or another user's subscription and a card-paid one, leaving nothing
+behind; owners and members read the effective limit through `studio_seat_limit`
+and nobody else does; no client role reads or writes either table, calls the
+admin functions (a user identity is refused even where EXECUTE is held) or
+raises `studios.seat_limit`; and every set, change and clear -- a hand-run
+insert and the cascade from a deleted studio included -- lands in
+`studio_seat_override_log`, which outlives the studio. It reports
+`failures | total` on its last line.
 `edge_rate_limit_refund.sql` proves
 `supabase/migrations/20261011120101_refund_edge_rate_limit.sql`: a refund hands
 back one use of a bucket inside its window (never below zero, never into the

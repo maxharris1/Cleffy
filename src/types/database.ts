@@ -381,6 +381,12 @@ export type SubscriptionRow = {
      * whichever of them happened to write second.
      */
     last_event_created_at: string | null;
+    /**
+     * How Stripe collects it. `send_invoice` is Stripe Invoicing -- a district
+     * contract -- and is what a studio's seat override is tied to. Null on rows
+     * written before the webhook recorded it.
+     */
+    collection_method: 'charge_automatically' | 'send_invoice' | null;
     created_at: string;
     updated_at: string;
 };
@@ -406,6 +412,10 @@ export type StudioRow = {
     id: string;
     owner_id: string;
     name: string;
+    /**
+     * The Academy cap (5). A district's larger count is an admin override that
+     * clients never read directly: studio_seat_limit() answers the effective one.
+     */
     seat_limit: number;
     created_at: string;
 };
@@ -910,6 +920,10 @@ export type Database = {
             studio_roster: {
                 Args: { p_studio: string };
                 Returns: Array<{ user_id: string; email: string }>;
+            };
+            studio_seat_limit: {
+                Args: { p_studio: string };
+                Returns: number;
             };
             set_document_page_count: {
                 Args: { doc: string; pages: number };

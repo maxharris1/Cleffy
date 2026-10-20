@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
     createStudio,
     fetchOwnedStudio,
+    fetchStudioSeatLimit,
     fetchStudioSeats,
     inviteStudioMember,
     removeStudioMember,
@@ -20,9 +21,17 @@ export interface StudioSeatsProps {
 }
 
 /**
+ * The effective seat count, or null to fall back on the studio row's own: a
+ * backend without the district-seats migration has no studio_seat_limit, and the
+ * roster is still worth showing.
+ */
+const seatLimitOf = (studioId: string): Promise<number | null> => fetchStudioSeatLimit(studioId).catch(() => null);
+
+/**
  * Minimal seat management for an Academy: the owner types a teacher's email and
  * they get Teacher-equivalent entitlements. The seat cap itself is a database
- * trigger, so this UI only has to report what the server said.
+ * trigger, so this UI only has to report what the server said -- including a
+ * district's contracted count, which is an admin override the server resolves.
  *
  * The tables and services are still named `studio` — only the tier and the copy
  * were renamed.
@@ -30,6 +39,7 @@ export interface StudioSeatsProps {
 export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
     const [studio, setStudio] = useState<StudioRow | null>(null);
     const [seats, setSeats] = useState<StudioSeat[]>([]);
+    const [effectiveLimit, setEffectiveLimit] = useState<number | null>(null);
     const [email, setEmail] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -39,7 +49,11 @@ export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
     const reload = useCallback(async () => {
         const owned = await fetchOwnedStudio(userId);
         setStudio(owned);
-        setSeats(owned ? await fetchStudioSeats(owned.id) : []);
+        const [roster, limit] = owned
+            ? await Promise.all([fetchStudioSeats(owned.id), seatLimitOf(owned.id)])
+            : [[], null];
+        setSeats(roster);
+        setEffectiveLimit(limit);
     }, [userId]);
 
     useEffect(() => {
@@ -54,9 +68,12 @@ export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
                     return;
                 }
                 setStudio(owned);
-                const roster = owned ? await fetchStudioSeats(owned.id) : [];
+                const [roster, limit] = owned
+                    ? await Promise.all([fetchStudioSeats(owned.id), seatLimitOf(owned.id)])
+                    : [[], null];
                 if (mounted) {
                     setSeats(roster);
+                    setEffectiveLimit(limit);
                 }
             } catch {
                 // Best-effort, like the library's favourites and tags loads.
@@ -96,7 +113,7 @@ export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
     };
 
     const seatsUsed = seats.length + 1; // the owner holds one
-    const seatLimit = studio?.seat_limit ?? 5;
+    const seatLimit = effectiveLimit ?? studio?.seat_limit ?? 5;
 
     return (
         <section className="mt-8 border-t border-stone-300/50 pt-6">

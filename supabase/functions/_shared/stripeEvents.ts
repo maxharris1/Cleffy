@@ -65,6 +65,15 @@ export const holdsRunningSubscription = (
         return Number.isFinite(endMs) ? endMs > nowMs : true;
     });
 
+/**
+ * How Stripe collects a subscription's invoices. Checkout only ever creates
+ * `charge_automatically`; `send_invoice` is Stripe Invoicing, which only an
+ * admin holding the secret key can set up -- that is what a district contract
+ * is, and what a studio's seat override is tied to (migration
+ * 20261020180400_district_seat_overrides.sql).
+ */
+export type CollectionMethod = 'charge_automatically' | 'send_invoice';
+
 export interface SubscriptionUpsert {
     stripe_subscription_id: string;
     user_id: string;
@@ -81,6 +90,11 @@ export interface SubscriptionUpsert {
      * read the older state writing second (QA round 4, D3).
      */
     last_event_created_at: string | null;
+    /**
+     * Null only for an object that did not say. The write keeps whatever the
+     * row already had in that case, so an incomplete object cannot unset it.
+     */
+    collection_method: CollectionMethod | null;
 }
 
 /** Only the fields this handler reads — not a full mirror of Stripe's type. */
@@ -92,6 +106,7 @@ export interface StripeSubscriptionLike {
     cancel_at?: number | null;
     current_period_end?: number | null;
     customer?: string | { id?: string } | null;
+    collection_method?: string | null;
     metadata?: Record<string, string> | null;
     items?: {
         data?: Array<{ price?: { id?: string | null } | null; current_period_end?: number | null } | undefined>;
@@ -391,6 +406,44 @@ export const tierForPrice = (priceId: string | null, priceTiers: Record<string, 
     return priceTiers[priceId] ?? 'free';
 };
 
+/**
+ * The subscription metadata that marks a district contract. A district is
+ * priced on a custom quote, so its price is in no catalogue and tierForPrice
+ * alone would record it as free.
+ */
+export const DISTRICT_PLAN_METADATA = { key: 'cleffy_plan', value: 'district' } as const;
+
+const collectionMethodOf = (sub: StripeSubscriptionLike): CollectionMethod | null =>
+    sub.collection_method === 'send_invoice' || sub.collection_method === 'charge_automatically'
+        ? sub.collection_method
+        : null;
+
+/**
+ * A district contract: Stripe Invoicing AND marked as one in metadata. Both,
+ * because neither is something a customer can set -- Checkout only creates
+ * `charge_automatically` subscriptions and writes only server-chosen metadata --
+ * but the metadata alone would be one dashboard slip from turning any
+ * card-paid subscription into Academy, and send_invoice alone would do the
+ * same for any invoice-billed one-off.
+ */
+export const isDistrictSubscription = (sub: StripeSubscriptionLike): boolean =>
+    collectionMethodOf(sub) === 'send_invoice' &&
+    sub.metadata?.[DISTRICT_PLAN_METADATA.key] === DISTRICT_PLAN_METADATA.value;
+
+/**
+ * A catalogue price names its plan. A district's custom-quote price is in no
+ * catalogue, so a district contract is Academy by its marking instead; the
+ * seat count above Academy's 5 is set separately, by an admin, against this
+ * subscription -- in its own table, which nothing here writes.
+ */
+const tierOf = (sub: StripeSubscriptionLike, priceTiers: Record<string, BillingTier>): BillingTier => {
+    const byPrice = tierForPrice(priceIdOf(sub), priceTiers);
+    if (byPrice !== 'free') {
+        return byPrice;
+    }
+    return isDistrictSubscription(sub) ? 'academy' : 'free';
+};
+
 const priceIdOf = (sub: StripeSubscriptionLike): string | null => {
     const first = sub.items?.data?.[0];
     return first?.price?.id ?? null;
@@ -446,12 +499,13 @@ export const subscriptionRowFrom = (
     return {
         stripe_subscription_id: sub.id,
         user_id: userId,
-        tier: isEntitlingStatus(sub.status) ? tierForPrice(priceId, priceTiers) : 'free',
+        tier: isEntitlingStatus(sub.status) ? tierOf(sub, priceTiers) : 'free',
         status: sub.status,
         price_id: priceId,
         current_period_end: ending.periodEnd,
         cancel_at_period_end: ending.cancelling,
         last_event_created_at: lastEventCreatedAt,
+        collection_method: collectionMethodOf(sub),
     };
 };
 

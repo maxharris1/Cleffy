@@ -50,6 +50,19 @@ export const fetchStudioSeats = async (studioId: string): Promise<StudioSeat[]> 
     return (data ?? []).map((row) => ({ userId: row.user_id, email: row.email }));
 };
 
+/**
+ * The seats the studio may fill, owner included: 5 on Academy, or a district's
+ * contracted count while its invoice-billed subscription is live. The count
+ * lives behind a definer RPC because the override that raises it is admin-only.
+ */
+export const fetchStudioSeatLimit = async (studioId: string): Promise<number> => {
+    const { data, error } = await getSupabase().rpc('studio_seat_limit', { p_studio: studioId });
+    if (error) {
+        throw new Error(`Could not load the seat limit: ${error.message}`);
+    }
+    return data;
+};
+
 export const inviteStudioMember = async (studioId: string, email: string): Promise<void> => {
     const { error } = await getSupabase().rpc('studio_invite_member', { p_studio: studioId, p_email: email });
     if (!error) {
