@@ -129,3 +129,58 @@ describe('the district purge (20261021120700)', () => {
         expect(migration).toMatch(/add column if not exists contract_ends_at timestamptz;/);
     });
 });
+
+describe('the district purge’s scope (20261021120800)', () => {
+    const scope = read('supabase/migrations/20261021120800_district_student_attribution.sql');
+    const sqlProof = read('tests/sql/district_student_scope.sql');
+    const fn = (name: string): string =>
+        scope.match(new RegExp(`function public\\.${name}[\\s\\S]*?\\$\\$;`))?.[0] ?? '';
+
+    it('selects on the district each student was provisioned under, never on current membership', () => {
+        const students = fn('retention_district_students');
+        expect(students).toMatch(/where ms\.district_studio_id = p_studio/);
+        expect(students).not.toMatch(/studio_members|owner_id/);
+    });
+
+    it('records the district at provisioning, by trigger, whatever the caller supplies', () => {
+        const trigger = fn('managed_students_district_attribution');
+        expect(trigger).toMatch(
+            /if tg_op = 'INSERT' then\s+new\.district_studio_id := public\.district_studio_for_teacher \(new\.teacher_id, now\(\)\);/,
+        );
+        expect(scope).toMatch(
+            /create trigger managed_students_district_attribution before insert or update on public\.managed_students/,
+        );
+    });
+
+    it('counts only district studios, the owner’s first, then the seat held longest', () => {
+        const rule = fn('district_studio_for_teacher');
+        expect(rule.match(/join public\.district_billing b/g)).toHaveLength(2);
+        expect(rule).toMatch(/sm\.created_at <= p_at/);
+        expect(rule).toMatch(/order by d\.rank, d\.since, d\.studio_id\s+limit 1/);
+    });
+
+    it('refuses to change the record by UPDATE except through the logged admin correction', () => {
+        expect(fn('managed_students_district_attribution')).toMatch(/errcode = '42501'/);
+        const admin = fn('admin_set_student_district');
+        expect(admin).toContain("set_config('cleffy.district_attribution', 'admin', true)");
+        expect(admin).toMatch(/'attribution_changed'/);
+        expect(scope).toContain("'public.admin_set_student_district (uuid, uuid, text)'");
+    });
+
+    it('backfills only from a seat held since before the student was created, and only unattributed rows', () => {
+        const backfill = fn('backfill_district_student_attribution');
+        expect(backfill).toMatch(/district_studio_for_teacher \(ms\.teacher_id, ms\.created_at\)/);
+        expect(backfill).toMatch(/where ms\.district_studio_id is null/);
+    });
+
+    it('is proven against a database for a private roster, a departed teacher and two districts', () => {
+        for (const check of [
+            'a private student provisioned before the teacher joined a district belongs to no district',
+            'a teacher seated in two districts provisions into the seat held longest (B), not both',
+            "the hard delete removes the districts'' students, the departed teacher''s l1 included",
+            "and never the teacher''s private students (p1 from before joining, l2 from after leaving), nor Q''s",
+        ]) {
+            expect(sqlProof).toContain(check);
+        }
+    });
+});

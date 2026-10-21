@@ -339,3 +339,21 @@ and its billing record, while teachers' own accounts, scores and other
 students stay; the log keeps the counts after the studio is gone. Proven
 against the local stack (PostgreSQL 17.11) on 2026-10-21: all 26 checks
 passed.
+
+`district_student_scope.sql` proves `20261021120800_district_student_attribution.sql`
+(Codex round-2 review of #64, new major 1): each roster row records the district
+it was provisioned under, and the district purge takes those students and
+nobody else's. A teacher's private student from before they joined a district
+belongs to none; a student provisioned while seated (or by the district's
+owner) belongs to that district; a teacher seated in two districts provisions
+into the seat held longest, never both; a departed teacher's district students
+stay the district's, and the students they provision after leaving are their
+own. The service role cannot change the record by UPDATE and a value supplied
+on INSERT is ignored; clients cannot read it or call the logged admin
+correction. The backfill attributes only from a seat held since before the
+student was created and is a no-op on a second run. Two districts' contracts
+then end: the soft and hard deletes take exactly the four district students
+(the departed teacher's included) and leave both private students, an
+unrelated teacher's, every teacher account and the score untouched, with
+per-district counts in the log. Proven against the local stack on 2026-10-21:
+all 22 checks passed; against the 20261021120700 membership scope, 4 fail.

@@ -441,6 +441,8 @@ export type StudioMemberRow = {
  * service role. That is also why the queries below name their columns instead
  * of `*`. `access_revoked_at` (20261010120300) is absent for the same reason:
  * no client is granted it; only student_access_revoked() reads it.
+ * `district_studio_id` (20261021120800) likewise: the district a student was
+ * provisioned under, read only by the district retention purge.
  */
 export type ManagedStudentRow = {
     id: string;

@@ -24,10 +24,12 @@
 -- with its counts in district_retention_log, which outlives the studio.
 --
 -- What "district data" is here: the district studio and everything keyed to
--- it, and the roster students (with their markings) provisioned by the
--- district's owner and seated teachers -- the school-provided student data the
--- contract covered. Teachers' own accounts and scores are theirs, not the
--- district's, and are not touched. See retention_district_students().
+-- it, and the roster students (with their markings) provisioned under the
+-- district -- the school-provided student data the contract covered.
+-- Teachers' own accounts and scores are theirs, not the district's, and are
+-- not touched. See retention_district_students(), which
+-- 20261021120800_district_student_attribution.sql scopes to the district each
+-- student was provisioned under (not to whoever is seated on the day).
 --
 -- PAUSED. Nothing schedules retention_district_run(): Max first reads the
 -- counts from retention_district_dry_run() against production, then schedules

@@ -1,4 +1,4 @@
--- District retention (20261021120700), against a real database. LOCAL STACK
+-- District retention (20261021120700, scoped by 20261021120800), against a real database. LOCAL STACK
 -- or the dev branch project only. Same harness and same reading as
 -- launch_consent.sql: one transaction ending in ROLLBACK, every check a row in
 -- integrity_results, a clean run is exactly one row 'ALL n CHECKS PASSED'.
@@ -103,16 +103,8 @@ values
     ('d1000000-0000-4000-8000-0000000000b3', 'authenticated', 'authenticated', 'dr-s3@students.cleffy.app',
      '{"user_type":"student"}');
 
-insert into public.managed_students
-    (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at, archived_at)
-values
-    ('d1000000-0000-4000-8000-0000000005b1', 'd1000000-0000-4000-8000-0000000000a1',
-     'd1000000-0000-4000-8000-0000000000b1', 'One', null, 'code', 'dr_one', now(), null),
-    ('d1000000-0000-4000-8000-0000000005b2', 'd1000000-0000-4000-8000-0000000000a2',
-     'd1000000-0000-4000-8000-0000000000b2', 'Two', null, 'code', 'dr_two', now(), now() - interval '60 days'),
-    ('d1000000-0000-4000-8000-0000000005b3', 'd1000000-0000-4000-8000-0000000000a3',
-     'd1000000-0000-4000-8000-0000000000b3', 'Three', null, 'code', 'dr_three', now(), null);
-
+-- The district exists before its students are provisioned: each roster row
+-- records the district it was provisioned under (20261021120800).
 insert into public.studios (id, owner_id, name)
 values ('d1000000-0000-4000-8000-0000000005d1', 'd1000000-0000-4000-8000-0000000000a1', 'District S'),
        ('d1000000-0000-4000-8000-0000000005d2', 'd1000000-0000-4000-8000-0000000000a4', 'District N');
@@ -123,6 +115,16 @@ values ('d1000000-0000-4000-8000-0000000005d1', 'd1000000-0000-4000-8000-0000000
 insert into public.district_billing (studio_id, contract_ends_at, contract_ends_source, updated_by)
 values ('d1000000-0000-4000-8000-0000000005d1', now() - interval '17 days', 'admin', 'test'),
        ('d1000000-0000-4000-8000-0000000005d2', null, null, 'test');
+
+insert into public.managed_students
+    (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at, archived_at)
+values
+    ('d1000000-0000-4000-8000-0000000005b1', 'd1000000-0000-4000-8000-0000000000a1',
+     'd1000000-0000-4000-8000-0000000000b1', 'One', null, 'code', 'dr_one', now(), null),
+    ('d1000000-0000-4000-8000-0000000005b2', 'd1000000-0000-4000-8000-0000000000a2',
+     'd1000000-0000-4000-8000-0000000000b2', 'Two', null, 'code', 'dr_two', now(), now() - interval '60 days'),
+    ('d1000000-0000-4000-8000-0000000005b3', 'd1000000-0000-4000-8000-0000000000a3',
+     'd1000000-0000-4000-8000-0000000000b3', 'Three', null, 'code', 'dr_three', now(), null);
 
 insert into public.documents (id, owner_id, title, storage_path)
 values ('d1000000-0000-4000-8000-00000000d001', 'd1000000-0000-4000-8000-0000000000a1', 'Score',
