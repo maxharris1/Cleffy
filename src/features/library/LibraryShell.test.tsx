@@ -87,9 +87,11 @@ vi.mock('@/features/library/libraryBootstrap', () => ({
     recentLibraryBootstrap: () => null,
 }));
 
+const shouldOfferImport = vi.hoisted(() => vi.fn());
+
 vi.mock('@/features/import/importPromptService', () => ({
     recordImportStatus: vi.fn(),
-    shouldOfferImport: vi.fn(),
+    shouldOfferImport: (...args: unknown[]) => shouldOfferImport(...args),
 }));
 
 vi.mock('@/features/import/prescan', () => ({
@@ -205,6 +207,21 @@ describe('LibraryShell', () => {
         expect(await screen.findByText('viewer page')).toBeInTheDocument();
         expect(readCachedLibraryList).toHaveBeenCalledWith('teacher-1');
         expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', before, document);
+    });
+
+    it('never offers smart import after an upload while the feature is off', async () => {
+        const user = userEvent.setup();
+        readCachedLibraryList.mockResolvedValue(null);
+        uploadDocument.mockResolvedValue({ document: { id: 'd3', title: 'Marked-up score' } });
+        shouldOfferImport.mockResolvedValue(true);
+        renderShell();
+
+        const input = screen.getByLabelText('Upload score', { selector: 'input' });
+        await user.upload(input, new File(['%PDF-1.4'], 'marked.pdf', { type: 'application/pdf' }));
+
+        expect(await screen.findByText('viewer page')).toBeInTheDocument();
+        // VITE_FEATURE_SMART_IMPORT is unset in tests, as in the launch build.
+        expect(shouldOfferImport).not.toHaveBeenCalled();
     });
 
     it('opens an imported IMSLP score', async () => {

@@ -525,9 +525,10 @@ to refund (comment at the end of `20261007120300`).
     - Optional tuning: `IMSLP_DOWNLOAD_GLOBAL_MAX` / `IMSLP_DOWNLOAD_GLOBAL_SPACING_MS`
       (deployment-wide IMSLP pacing, defaults 2 per 1000 ms — SETUP_SUPABASE.md).
 5. **Vercel env (build time).** Leave `VITE_FEATURE_PLAYALONG`,
-   `VITE_FEATURE_FINGERING` and `VITE_FEATURE_PRINT_HANDWRITING` unset (or `0`):
-   play-along and fingering are not part of this release and the pricing copy
-   no longer sells them. Optional `VITE_SENTRY_DSN` / `VITE_SENTRY_RELEASE` (§4).
+   `VITE_FEATURE_FINGERING`, `VITE_FEATURE_PRINT_HANDWRITING` and
+   `VITE_FEATURE_SMART_IMPORT` unset (or `0`): play-along, fingering and smart
+   import are not part of this release and the pricing copy no longer sells
+   them. Optional `VITE_SENTRY_DSN` / `VITE_SENTRY_RELEASE` (§4).
    The `vercel.json` security headers (CSP, HSTS, frame, referrer, permissions)
    ship with the bundle; the CSP already allows both Supabase projects and
    `*.ingest.sentry.io`, `*.ingest.us.sentry.io`, `*.ingest.de.sentry.io`.

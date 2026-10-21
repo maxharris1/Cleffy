@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 
 import type { AgeGate } from '@/features/auth/ageCheck';
 import { perfMark } from '@/lib/perf';
+import { safePresenceName } from '@/lib/presenceName';
 import { getSupabase } from '@/lib/supabase';
 
 export interface SessionState {
@@ -475,7 +476,18 @@ export const clearAccountCachesFromDevice = async ({ keepCloudAnnotations = fals
     ]);
 };
 
-/** Display name for presence/attribution: metadata name, else email, else Guest. */
+/**
+ * The name this account announces in a score's presence bar: its display name,
+ * else "Guest" / "Collaborator" — never its email (src/lib/presenceName.ts).
+ */
+export const presenceNameOf = (session: Session | null): string =>
+    safePresenceName(storedDisplayNameOf(session), Boolean(session?.user.is_anonymous));
+
+/**
+ * This account's own label (top bar, account page): metadata name, else email,
+ * else Guest. Only ever shown to the account itself — presence uses
+ * presenceNameOf instead.
+ */
 export const displayNameOf = (session: Session | null): string => {
     const meta = session?.user.user_metadata as Record<string, unknown> | undefined;
     const name = typeof meta?.['display_name'] === 'string' ? (meta['display_name'] as string) : null;
@@ -485,8 +497,8 @@ export const displayNameOf = (session: Session | null): string => {
 /**
  * The stored display name with no fallback — '' when the account never set one.
  *
- * displayNameOf() substitutes the email, which is right for presence and wrong
- * for a form field: seeding the input with an address the user never typed
+ * displayNameOf() substitutes the email, which is right for the account's own
+ * label and wrong for a form field: seeding the input with an address the user never typed
  * would turn "leave it blank" into "save my email as my name".
  */
 export const storedDisplayNameOf = (session: Session | null): string => {

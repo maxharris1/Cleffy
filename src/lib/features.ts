@@ -13,4 +13,10 @@ export const features = {
     fingering: flag(import.meta.env.VITE_FEATURE_FINGERING),
     /** Print handwriting: on-device conversion of handwritten digits and symbols to type. */
     printHandwriting: flag(import.meta.env.VITE_FEATURE_PRINT_HANDWRITING),
+    /**
+     * Smart import: reading the markings already on a scanned score — the
+     * post-upload offer, the viewer's import button and its AI pass
+     * (analyze-annotations → Anthropic). Off at launch.
+     */
+    smartImport: flag(import.meta.env.VITE_FEATURE_SMART_IMPORT),
 } as const;

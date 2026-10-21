@@ -1,5 +1,6 @@
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
+import { safePresenceName } from '@/lib/presenceName';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import {
     INK_PROGRESS_EVENT,
@@ -264,7 +265,9 @@ export class DocRealtimeChannel {
                 const first = metas[0];
                 const parsed = presenceSchema.safeParse(first);
                 if (parsed.success) {
-                    peers.push(parsed.data);
+                    // An older build announces its email when it has no
+                    // display name; it is not shown as one here.
+                    peers.push({ ...parsed.data, name: safePresenceName(parsed.data.name, parsed.data.isAnonymous) });
                 }
             }
             this.members = peers.length;
