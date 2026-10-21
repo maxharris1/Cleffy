@@ -5,11 +5,13 @@ import {
     INK_PROGRESS_EVENT,
     MEMBERSHIP_EVENT,
     SCORE_ANALYSIS_EVENT,
+    TOPIC_ROTATED_EVENT,
     parseDbChange,
     parseDocumentChange,
     parseInkProgress,
     parseMembershipChange,
     parseScoreAnalysisBroadcast,
+    parseTopicRotated,
     presenceSchema,
     type InkProgressMsg,
     type PresencePeer,
@@ -151,10 +153,27 @@ export interface DocRealtimeChannelOptions {
      * re-reads its role rather than trusting either signal.
      */
     onMembershipChanged?: () => void;
+    /**
+     * The score's realtime topic generation (realtime_topic_epoch, migration
+     * 20261020150100): 0 until a takedown moves the score to fresh topics,
+     * null when this user may not open it, undefined when it could not be
+     * asked (offline, or a server from before that migration, where every
+     * score is generation 0). Absent: always generation 0.
+     */
+    fetchTopicEpoch?: () => Promise<number | null | undefined>;
 }
 
+/**
+ * The suffix of a score's topics at generation `epoch`. Generation 0 is the
+ * plain topic, so nothing changes for a score no takedown has rotated; after
+ * one, the server sends only to `{topic}:{n}` and admits a join there only
+ * (20261020150100_takedown_realtime_topics): whoever it shut out is left on a
+ * topic nobody talks on.
+ */
+const generation = (epoch: number): string => (epoch > 0 ? `:${epoch}` : '');
+
 /** Private topic for presence and live ink — members may send on it. */
-export const docTopic = (docId: string): string => `doc:${docId}`;
+export const docTopic = (docId: string, epoch = 0): string => `doc:${docId}${generation(epoch)}`;
 
 /**
  * Private topic for server-authored events: committed annotation rows, PDF
@@ -165,7 +184,27 @@ export const docTopic = (docId: string): string => `doc:${docId}`;
  * shared topic any editor could broadcast a hand-made 'INSERT' that peers
  * would apply as a committed row (forged author, forged seq).
  */
-export const docDbTopic = (docId: string): string => `doc-db:${docId}`;
+export const docDbTopic = (docId: string, epoch = 0): string => `doc-db:${docId}${generation(epoch)}`;
+
+/**
+ * The score's topic generation for fetchTopicEpoch. A server without
+ * realtime_topic_epoch (before 20261020150100), or any failure, answers
+ * undefined: the channel keeps the generation it has, which on such a server
+ * is the only one there is.
+ */
+export const fetchRealtimeTopicEpoch = async (
+    supabase: TypedSupabaseClient,
+    docId: string,
+): Promise<number | null | undefined> => {
+    const { data, error } = await supabase.rpc('realtime_topic_epoch', { p_document: docId });
+    if (error) {
+        return undefined;
+    }
+    if (data === null) {
+        return null;
+    }
+    return Number.isInteger(data) && data >= 0 ? data : undefined;
+};
 
 type ChannelKey = 'live' | 'db';
 
@@ -181,6 +220,17 @@ export class DocRealtimeChannel {
     /** doc:{id} re-joined after a drop and onReconnect has not run for it yet. */
     private liveRejoined = false;
     private stopped = false;
+
+    // Topic generation (see fetchTopicEpoch and moveToEpoch).
+    private epoch = 0;
+    private epochCheck: Promise<void> | null = null;
+    private epochCheckAgain = false;
+    /**
+     * The server said the topics moved and the new generation is not read
+     * yet: no live ink goes out, since whoever is still on the old doc:{id}
+     * may be exactly who the takedown shut out.
+     */
+    private inkHeld = false;
 
     // Re-join after a drop (see scheduleRejoin).
     private readonly rejoinTimers: Record<ChannelKey, ReturnType<typeof setTimeout> | null> = { live: null, db: null };
@@ -218,13 +268,113 @@ export class DocRealtimeChannel {
     constructor(private opts: DocRealtimeChannelOptions) {}
 
     start(): void {
+        if (!this.opts.fetchTopicEpoch) {
+            this.openLive();
+            this.openDb();
+            return;
+        }
+        // Channels open once the generation is known (or could not be asked).
+        this.refreshEpoch();
+    }
+
+    /**
+     * Re-read the topic generation, and move both channels if it changed.
+     * Runs on start, on the server's `topic_rotated` hint and on a refused
+     * join (a stale generation is refused). Calls that land while one is in
+     * flight run once more after it, never in parallel.
+     */
+    private refreshEpoch(): void {
+        const fetchEpoch = this.opts.fetchTopicEpoch;
+        if (!fetchEpoch || this.stopped) {
+            return;
+        }
+        if (this.epochCheck) {
+            this.epochCheckAgain = true;
+            return;
+        }
+        const run = async (): Promise<void> => {
+            do {
+                this.epochCheckAgain = false;
+                let next: number | null | undefined;
+                try {
+                    next = await fetchEpoch();
+                } catch {
+                    next = undefined;
+                }
+                if (this.stopped) {
+                    return;
+                }
+                if (next === null) {
+                    // Not this user's to open (any more): the re-check closes it.
+                    this.opts.onMembershipChanged?.();
+                } else if (next !== undefined && next !== this.epoch && (this.channel || this.dbChannel)) {
+                    this.moveToEpoch(next);
+                } else if (next !== undefined) {
+                    this.epoch = next;
+                }
+            } while (this.epochCheckAgain && !this.stopped);
+            this.inkHeld = false;
+            if (!this.stopped && !this.channel && !this.dbChannel) {
+                this.openLive();
+                this.openDb();
+            }
+        };
+        this.epochCheck = run().finally(() => {
+            this.epochCheck = null;
+        });
+    }
+
+    /**
+     * Leave both topics for generation `epoch`'s. Treated as a re-join: once
+     * both are back, onReconnect clears live ink and pulls what was committed
+     * while neither topic was joined.
+     */
+    private moveToEpoch(epoch: number): void {
+        const { supabase } = this.opts;
+        this.epoch = epoch;
+        const old = [this.channel, this.dbChannel];
+        this.channel = null;
+        this.dbChannel = null;
+        for (const key of ['live', 'db'] as const) {
+            this.clearRejoinTimer(key);
+            this.joined[key] = false;
+            this.joinedAt[key] = null;
+            this.rejoinAttempts[key] = 0;
+            this.everJoined[key] = true;
+        }
+        this.dropLiveAudience();
+        for (const channel of old) {
+            if (channel) {
+                void supabase.removeChannel(channel).catch(() => undefined);
+            }
+        }
         this.openLive();
         this.openDb();
     }
 
+    /** The server moved this score's topics: stop live ink now, then follow. */
+    private onTopicRotated(payload: unknown): void {
+        if (parseTopicRotated(payload)?.document_id !== this.opts.docId || !this.opts.fetchTopicEpoch) {
+            return;
+        }
+        this.inkHeld = true;
+        this.dropLiveAudience();
+        this.refreshEpoch();
+    }
+
+    /** Nobody is reachable on doc:{id} until a presence sync says so again. */
+    private dropLiveAudience(): void {
+        this.hasRemoteAudience = false;
+        this.pending = [];
+        if (this.flushTimer) {
+            clearTimeout(this.flushTimer);
+            this.flushTimer = null;
+        }
+    }
+
     private openLive(): void {
         const { supabase, docId, self } = this.opts;
-        const channel = supabase.channel(docTopic(docId), {
+        const channel = supabase.channel(docTopic(docId, this.epoch), {
             config: {
                 private: true,
                 broadcast: { self: false, ack: false },
@@ -256,6 +406,9 @@ export class DocRealtimeChannel {
                 this.opts.onMembershipChanged?.();
             }
         });
+
+        // Any member could forge this one here too; it only makes us re-read.
+        channel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload));
 
         channel.on('presence', { event: 'sync' }, () => {
             const state = channel.presenceState<Record<string, unknown>>();
@@ -294,6 +447,9 @@ export class DocRealtimeChannel {
                 // join there is refused, which says nothing about access —
                 // nor does a join refused by the rate limiter.)
                 this.opts.onMembershipChanged?.();
+                // Or the score moved to a new generation while we were away,
+                // and the old one is refused.
+                this.refreshEpoch();
             }
             // Join state first: presence and live ink only go out while joined.
             this.onChannelStatus('live', status);
@@ -307,7 +463,7 @@ export class DocRealtimeChannel {
     private openDb(): void {
         const { supabase, docId } = this.opts;
         // Receive-only: no presence, and nothing is ever sent on it.
-        const dbChannel = supabase.channel(docDbTopic(docId), {
+        const dbChannel = supabase.channel(docDbTopic(docId, this.epoch), {
             config: { private: true, broadcast: { self: false, ack: false } },
         });
         const onDb = ({ payload }: { payload: unknown }) => {
@@ -330,6 +486,8 @@ export class DocRealtimeChannel {
                 this.opts.onScoreAnalysis?.(msg);
             }
         });
+        // Server-authored, so unforgeable here: the takedown moved the score.
+        dbChannel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload));
         dbChannel.on('system', {}, (payload: unknown) => this.onSystem(payload));
         this.dbChannel = dbChannel;
         dbChannel.subscribe((status, err) => {
@@ -374,12 +532,7 @@ export class DocRealtimeChannel {
                 // Whoever was watching is not reachable until the rejoin's
                 // presence sync says so again; a stroke drawn meanwhile is
                 // not streamed (it still lands as a committed row).
-                this.hasRemoteAudience = false;
-                this.pending = [];
-                if (this.flushTimer) {
-                    clearTimeout(this.flushTimer);
-                    this.flushTimer = null;
-                }
+                this.dropLiveAudience();
             }
             this.updateDbFallback();
             this.scheduleRejoin(key);
@@ -761,7 +914,7 @@ export class DocRealtimeChannel {
      * Returns whether the batch went out.
      */
     private send(payload: InkProgressMsg): boolean {
-        if (!this.channel || this.stopped || !this.hasRemoteAudience || !this.isLive()) {
+        if (!this.channel || this.stopped || this.inkHeld || !this.hasRemoteAudience || !this.isLive()) {
             return false;
         }
         void this.channel

@@ -1035,6 +1035,11 @@ for each row execute function public.refuse_share_links_on_taken_down ();
 -- ---------------------------------------------------------------------------
 -- Realtime: cutting off viewers who are already connected
 -- ---------------------------------------------------------------------------
+-- Superseded in part by 20261020150100_takedown_realtime_topics: a takedown
+-- now moves the score to fresh topics, so a client that ignores the hint is
+-- left on a dead doc:{id}, and the owner's devices keep their committed-row
+-- fan-out. What follows is how this migration left it.
+--
 -- document_role() refuses a taken-down score when a channel JOINS, but a
 -- collaborator who joined before the takedown keeps the channel: Realtime does
 -- not re-run the realtime.messages policies per message. Two things close it:

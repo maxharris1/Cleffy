@@ -52,7 +52,7 @@ import { peerColor } from '@/lib/colors';
 import { useLockedPageZoom } from '@/lib/viewportZoom';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
-import { DocRealtimeChannel } from '@/sync/realtimeChannel';
+import { DocRealtimeChannel, fetchRealtimeTopicEpoch } from '@/sync/realtimeChannel';
 import {
     createSupabaseAnnotationsApi,
     SyncEngine,
@@ -661,6 +661,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
                 onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
                 onMembershipChanged: () => syncOnMembershipChanged?.(),
+                fetchTopicEpoch: () => fetchRealtimeTopicEpoch(getSupabase(), docId),
             });
             if (syncCanWrite) {
                 ink.setLivePublisher(channel.publisher);

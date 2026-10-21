@@ -3,8 +3,7 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { docTopic } from '@/sync/realtimeChannel';
-import { MEMBERSHIP_EVENT, parseMembershipChange } from '@/sync/wire';
+import { MEMBERSHIP_EVENT, TOPIC_ROTATED_EVENT, parseMembershipChange, parseTopicRotated } from '@/sync/wire';
 
 /**
  * A takedown must reach viewers who already have the score open
@@ -52,19 +51,24 @@ const latestDocumentsSelect = (): string => {
 
 describe('a takedown cuts off viewers already connected', () => {
     it.each(['broadcast_annotation_changes', 'broadcast_document_changes', 'broadcast_score_analysis_changes'])(
-        '%s sends nothing for a taken-down score',
+        '%s sends to the current generation only, and nothing for a removed score',
         (fn) => {
             const body = latestDefinition(fn);
-            const check = body.indexOf('public.content_taken_down (new.');
+            const check = body.indexOf('public.content_removed (new.');
             const send = Math.max(body.indexOf('realtime.broadcast_changes'), body.indexOf('realtime.send'));
-            expect(check, `${fn} has no takedown check`).toBeGreaterThan(-1);
+            expect(check, `${fn} has no removal check`).toBeGreaterThan(-1);
             // Checked before anything goes out, and the check returns.
             expect(check).toBeLessThan(send);
             expect(body.slice(check, send)).toMatch(/return null;/);
+            // A restricted score's changes go to its rotated topic, which only
+            // its owner may join, never to the plain one a shut-out member
+            // may still sit on.
+            expect(body).toMatch(/public\.document_db_topic \(new\.(document_id|id)\)/);
+            expect(body).not.toMatch(/'doc-db:'\s*\|\|/);
         },
     );
 
-    it('tells every member who lost access to re-check, on the topic and event the app listens to', () => {
+    it('tells every member who lost access to re-check, on the topic and event the app listens to, then moves the score', () => {
         expect(latestDefinition('apply_content_takedown')).toMatch(
             /perform public\.content_takedown_notify_viewers \(p_document, p_action\)/,
         );
@@ -72,13 +76,44 @@ describe('a takedown cuts off viewers already connected', () => {
         // Everyone but the owner for restrict; everyone for remove.
         expect(notify).toMatch(/p_action = 'remove' or dm\.role <> 'owner'/);
         expect(notify).toContain(`'${MEMBERSHIP_EVENT}', -- event`);
-        expect(notify).toContain(`'${docTopic('')}' || p_document::text`);
+        // On the topic those members are on now, read before the rotation.
+        expect(notify).toMatch(/v_topic text := public\.document_live_topic \(p_document\)/);
+        expect(notify.indexOf('v_topic, -- topic')).toBeLessThan(
+            notify.indexOf('perform public.rotate_document_realtime (p_document)'),
+        );
         // The payload is one the client accepts (role null: re-check, you were removed).
         expect(notify).toMatch(/'role', null/);
         expect(
             parseMembershipChange({ table: 'document_members', document_id: 'd', user_id: 'u', role: null }),
         ).not.toBeNull();
     });
+
+    it('rotates the topics and tells both old ones, with the event the app follows', () => {
+        const rotate = latestDefinition('rotate_document_realtime');
+        expect(rotate).toMatch(/v_old_live text := public\.document_live_topic \(p_document\)/);
+        expect(rotate).toMatch(/v_old_db text := public\.document_db_topic \(p_document\)/);
+        expect(rotate.match(new RegExp(`'${TOPIC_ROTATED_EVENT}', -- event`, 'g'))).toHaveLength(2);
+        // The payload the client checks.
+        expect(rotate).toMatch(/jsonb_build_object\('document_id', p_document\)/);
+        expect(parseTopicRotated({ id: 'x', document_id: 'd' })).toEqual({ document_id: 'd' });
+    });
+
+    it('admits a join on the current generation only, for a member document_role() answers for', () => {
+        const parse = latestDefinition('realtime_topic_document');
+        expect(parse).toMatch(/v_epoch <> public\.document_realtime_epoch \(v_doc\)/);
+        expect(latestDefinition('topic_document_role')).toMatch(/realtime_topic_document \(topic, 'doc'\)/);
+        expect(latestDefinition('db_topic_document_role')).toMatch(/realtime_topic_document \(topic, 'doc-db'\)/);
+        expect(latestDefinition('realtime_topic_epoch')).toMatch(/public\.document_role \(p_document\) is not null/);
+    });
+
+    it.each(['broadcast_membership_changes', 'end_student_sessions'])(
+        '%s sends its hint on the current generation',
+        (fn) => {
+            const body = latestDefinition(fn);
+            expect(body).toMatch(/public\.document_live_topic \(/);
+            expect(body).not.toMatch(/'doc:'\s*\|\|/);
+        },
+    );
 
     it("stops a removed score's owner reading its row, so the re-check finds nothing", () => {
         expect(latestDocumentsSelect()).toMatch(

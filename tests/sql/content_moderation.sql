@@ -1,8 +1,10 @@
 -- Behaviour proof for 20261020150000_content_moderation.sql: a restricted
 -- score answers its owner only, a removed one nobody (its owner's direct read
 -- of the row included); neither can gain members or share links; viewers
--- already connected are told to re-check and the score's committed changes
--- stop going out on realtime until the takedown is lifted (needs the local
+-- already connected are told to re-check, and the score moves to fresh
+-- realtime topics (20261020150100) that only who may still see it can join,
+-- its committed changes going to its owner there and to nobody on the old
+-- ones (needs the local
 -- stack running, so today's realtime.messages partition exists: `npm run
 -- cloud:up`); lifting restores exactly the access that was suspended; a
 -- copyright takedown is a strike and lifting it withdraws the strike; the
@@ -65,6 +67,27 @@ create function pg_temp.broadcast_of(p_mark uuid) returns boolean language sql a
         where topic like 'doc-db:%' and payload -> 'record' ->> 'id' = p_mark::text
     )
 $f$;
+-- Was the mark broadcast on exactly this topic?
+create function pg_temp.broadcast_on(p_mark uuid, p_topic text) returns boolean language sql as $f$
+    select exists (
+        select 1 from realtime.messages
+        where topic = p_topic and payload -> 'record' ->> 'id' = p_mark::text
+    )
+$f$;
+-- A join is a read of realtime.messages under the joining user with
+-- realtime.topic set (tests/sql/column_integrity.sql): may this user join it?
+create function pg_temp.can_join(p_topic text) returns boolean language plpgsql as $f$
+declare v boolean; v_role text := current_setting('role');
+begin
+    -- The probe is written by the test, not by the joining user.
+    perform set_config('role', 'postgres', true);
+    insert into realtime.messages (topic, extension, event, payload, private) values (p_topic, 'broadcast', 'probe', '{}', true);
+    perform set_config('role', v_role, true);
+    perform set_config('realtime.topic', p_topic, true);
+    execute 'select count(*) > 0 from realtime.messages where topic = $1' into v using p_topic;
+    perform set_config('realtime.topic', '', true);
+    return v;
+end $f$;
 create function pg_temp.told_to_recheck(p_doc uuid, p_user uuid) returns boolean language sql as $f$
     select exists (
         select 1 from realtime.messages
@@ -112,7 +135,8 @@ insert into auth.users (id, email, raw_user_meta_data, is_anonymous) values
 (pg_temp.u(5), 'nobody@modtest.test', '{}', false);
 insert into public.documents (id, owner_id, title, storage_path) values
 (pg_temp.d(1), pg_temp.u(1), 'Restricted', pg_temp.d(1)::text || '/original.pdf'),
-(pg_temp.d(2), pg_temp.u(1), 'Removed', pg_temp.d(2)::text || '/original.pdf');
+(pg_temp.d(2), pg_temp.u(1), 'Removed', pg_temp.d(2)::text || '/original.pdf'),
+(pg_temp.d(9), pg_temp.u(1), 'Never taken down', pg_temp.d(9)::text || '/original.pdf');
 insert into public.document_members (document_id, user_id, role) values
 (pg_temp.d(1), pg_temp.u(2), 'editor'),
 (pg_temp.d(2), pg_temp.u(2), 'editor');
@@ -181,9 +205,22 @@ select pg_temp.chk('71 restrict: the owner, who keeps it, is not', $q$select not
 select pg_temp.chk('72 remove: the editor and the owner are both told', $q$select pg_temp.told_to_recheck(pg_temp.d(2), pg_temp.u(2)) and pg_temp.told_to_recheck(pg_temp.d(2), pg_temp.u(1))$q$);
 select pg_temp.mark(pg_temp.a(2), pg_temp.d(1));
 select pg_temp.mark(pg_temp.a(3), pg_temp.d(2));
-select pg_temp.chk('73 taken down: a new mark is not broadcast, restricted or removed', $q$select not pg_temp.broadcast_of(pg_temp.a(2)) and not pg_temp.broadcast_of(pg_temp.a(3))$q$);
+-- A takedown moves the score to generation 1 (20261020150100): a restricted
+-- score's changes reach its owner's devices on doc-db:{id}:1 and nobody on the
+-- old doc-db:{id}; a removed score's go nowhere.
+select pg_temp.chk('73 restricted: a new mark goes to doc-db:{id}:1 only, never the old topic', $q$select pg_temp.broadcast_on(pg_temp.a(2), 'doc-db:' || pg_temp.d(1)::text || ':1') and not pg_temp.broadcast_on(pg_temp.a(2), 'doc-db:' || pg_temp.d(1)::text)$q$);
+select pg_temp.chk('73b removed: a new mark is not broadcast at all', $q$select not pg_temp.broadcast_of(pg_temp.a(3))$q$);
 update public.documents set content_rev = content_rev + 1 where id = pg_temp.d(1);
-select pg_temp.chk('74 taken down: a replaced PDF is not broadcast', $q$select not exists (select 1 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text and payload ->> 'table' = 'documents')$q$);
+select pg_temp.chk('74 restricted: a replaced PDF is not broadcast on the old topic', $q$select not exists (select 1 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text and payload ->> 'table' = 'documents')$q$);
+select pg_temp.chk('74b restricted: it goes to the owner on doc-db:{id}:1', $q$select exists (select 1 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text || ':1' and payload ->> 'table' = 'documents')$q$);
+select pg_temp.chk('81 both takedowns rotated their score to generation 1', $q$select public.document_realtime_epoch(pg_temp.d(1)) = 1 and public.document_realtime_epoch(pg_temp.d(2)) = 1$q$);
+select pg_temp.chk('82 everyone on the old topics is told topic_rotated, on both', $q$select count(distinct topic) = 2 from realtime.messages where event = 'topic_rotated' and topic in ('doc:' || pg_temp.d(1)::text, 'doc-db:' || pg_temp.d(1)::text) and payload ->> 'document_id' = pg_temp.d(1)::text$q$);
+select pg_temp.chk('83 the membership hint went out on the old topic, before the move', $q$select pg_temp.told_to_recheck(pg_temp.d(1), pg_temp.u(2)) and not exists (select 1 from realtime.messages where topic = 'doc:' || pg_temp.d(1)::text || ':1' and event = 'membership')$q$);
+-- More than the pull's 50-seq overlap while restricted: every one still
+-- reaches the owner's other devices live, so none can skip a mark.
+select pg_temp.mark(gen_random_uuid(), pg_temp.d(1)) from generate_series(1, 60);
+select pg_temp.chk('84 restricted: 60 more marks all reach doc-db:{id}:1', $q$select count(*) = 61 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text || ':1' and payload ->> 'table' = 'annotations'$q$);
+select pg_temp.chk('85 restricted: and not one of them the old doc-db:{id}', $q$select count(*) = 0 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text and payload ->> 'table' = 'annotations' and payload -> 'record' ->> 'id' <> pg_temp.a(1)::text$q$);
 select pg_temp.chk('75 the hints carry ids only', $q$select bool_and(payload - 'table' - 'document_id' - 'user_id' - 'role' - 'id' = '{}'::jsonb) from realtime.messages where topic in ('doc:' || pg_temp.d(1)::text, 'doc:' || pg_temp.d(2)::text) and event = 'membership'$q$);
 -- Something on each topic to be refused: a join is a read of realtime.messages
 -- under the joining user with realtime.topic set (tests/sql/column_integrity.sql).
@@ -195,10 +232,15 @@ select set_config('realtime.topic', 'doc:' || pg_temp.d(1)::text, true);
 select pg_temp.chk('76 restricted: the editor cannot re-join doc:{id}', $q$select count(*) = 0 from realtime.messages where topic = 'doc:' || pg_temp.d(1)::text$q$);
 select set_config('realtime.topic', 'doc-db:' || pg_temp.d(1)::text, true);
 select pg_temp.chk('77 restricted: nor doc-db:{id}', $q$select count(*) = 0 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text$q$);
+select pg_temp.chk('77b restricted: nor the new doc:{id}:1 or doc-db:{id}:1', $q$select not pg_temp.can_join('doc:' || pg_temp.d(1)::text || ':1') and not pg_temp.can_join('doc-db:' || pg_temp.d(1)::text || ':1')$q$);
+select pg_temp.chk('77c restricted: the editor is not told the generation', $q$select public.realtime_topic_epoch(pg_temp.d(1)) is null$q$);
 select pg_temp.as_user(1);
-select set_config('realtime.topic', 'doc-db:' || pg_temp.d(1)::text, true);
-select pg_temp.chk('78 restricted: its owner still can', $q$select count(*) > 0 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text$q$);
-select set_config('realtime.topic', '', true);
+select pg_temp.chk('78 restricted: its owner joins the new doc:{id}:1 and doc-db:{id}:1', $q$select pg_temp.can_join('doc:' || pg_temp.d(1)::text || ':1') and pg_temp.can_join('doc-db:' || pg_temp.d(1)::text || ':1')$q$);
+select pg_temp.chk('78b restricted: but not the old generation, so a stale device moves', $q$select not pg_temp.can_join('doc:' || pg_temp.d(1)::text) and not pg_temp.can_join('doc-db:' || pg_temp.d(1)::text)$q$);
+select pg_temp.chk('78c restricted: the owner is told generation 1', $q$select public.realtime_topic_epoch(pg_temp.d(1)) = 1$q$);
+select pg_temp.chk('78d removed: the owner joins neither generation', $q$select not pg_temp.can_join('doc:' || pg_temp.d(2)::text || ':1') and not pg_temp.can_join('doc:' || pg_temp.d(2)::text) and public.realtime_topic_epoch(pg_temp.d(2)) is null$q$);
+select pg_temp.chk('78e malformed generations name no topic', $q$select bool_and(public.topic_document_role(t) is null) from unnest(array['doc:' || pg_temp.d(1)::text || ':01', 'doc:' || pg_temp.d(1)::text || ':2', 'doc:' || pg_temp.d(1)::text || ':1:1', 'doc:' || pg_temp.d(1)::text || ':x', 'doc:' || pg_temp.d(1)::text || ':0', 'doc:' || pg_temp.d(1)::text || ':-1']) as t$q$);
+select pg_temp.chk('78f a score never taken down keeps generation 0 and its plain topics', $q$select public.topic_document_role('doc:' || pg_temp.d(9)::text) = 'owner' and public.db_topic_document_role('doc-db:' || pg_temp.d(9)::text) = 'owner' and public.topic_document_role('doc:' || pg_temp.d(9)::text || ':1') is null and public.realtime_topic_epoch(pg_temp.d(9)) = 0$q$);
 select pg_temp.chk('79 removed: its owner cannot read the row directly either', $q$select count(*) = 0 from public.documents where id = pg_temp.d(2)$q$);
 select pg_temp.chk('80 restricted: its owner still reads the row', $q$select count(*) = 1 from public.documents where id = pg_temp.d(1)$q$);
 reset role;
@@ -211,11 +253,14 @@ select pg_temp.refused_with('42 lifting twice is refused', $q$select public.lift
 reset role;
 select pg_temp.as_user(2);
 select pg_temp.chk('43 lifted: the editor has it back, membership intact', $q$select public.document_role(pg_temp.d(1)) = 'editor' and pg_temp.d(1) = any (pg_temp.library_ids())$q$);
+select pg_temp.chk('43b lifted: the editor joins the owner on generation 1 (lifting does not rotate)', $q$select public.realtime_topic_epoch(pg_temp.d(1)) = 1 and pg_temp.can_join('doc:' || pg_temp.d(1)::text || ':1') and not pg_temp.can_join('doc:' || pg_temp.d(1)::text)$q$);
 select pg_temp.chk('44 still removed: score 2 stays out of reach', $q$select public.document_role(pg_temp.d(2)) is null$q$);
 reset role;
 select pg_temp.mark(pg_temp.a(4), pg_temp.d(1));
 select pg_temp.mark(pg_temp.a(5), pg_temp.d(2));
-select pg_temp.chk('46 lifted: marks are broadcast again; still removed: not', $q$select pg_temp.broadcast_of(pg_temp.a(4)) and not pg_temp.broadcast_of(pg_temp.a(5))$q$);
+select pg_temp.chk('46 lifted: marks are broadcast again (doc-db:{id}:1); still removed: not', $q$select pg_temp.broadcast_on(pg_temp.a(4), 'doc-db:' || pg_temp.d(1)::text || ':1') and not pg_temp.broadcast_of(pg_temp.a(5))$q$);
+update public.document_members set role = 'viewer' where document_id = pg_temp.d(1) and user_id = pg_temp.u(2);
+select pg_temp.chk('47 a later membership change is hinted on the current topic', $q$select exists (select 1 from realtime.messages where topic = 'doc:' || pg_temp.d(1)::text || ':1' and event = 'membership' and payload ->> 'user_id' = pg_temp.u(2)::text and payload ->> 'role' = 'viewer')$q$);
 select pg_temp.as_user(3);
 select pg_temp.chk('45 lifted: the old link works again', $q$select granted_role = 'viewer' from public.redeem_share_link('c0deLINK1')$q$);
 reset role;

@@ -671,6 +671,12 @@ export type Database = {
                 Args: { doc: string };
                 Returns: MemberRole | null;
             };
+            // Takedown topic generation (20261020150100): null when the caller
+            // may not open the score.
+            realtime_topic_epoch: {
+                Args: { p_document: string };
+                Returns: number | null;
+            };
             // Notice and action (20261020150000). The browser only asks and reads;
             // every write is the content-report / content-moderation functions'.
             is_content_moderator: {

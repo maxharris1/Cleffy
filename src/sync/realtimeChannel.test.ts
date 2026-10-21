@@ -15,6 +15,7 @@ import {
     REJOIN_STABLE_MS,
     docDbTopic,
     docTopic,
+    fetchRealtimeTopicEpoch,
     rejoinDelayMs,
     type DocRealtimeChannelOptions,
 } from '@/sync/realtimeChannel';
@@ -22,6 +23,7 @@ import {
     INK_PROGRESS_EVENT,
     MEMBERSHIP_EVENT,
     SCORE_ANALYSIS_EVENT,
+    TOPIC_ROTATED_EVENT,
     parseMembershipChange,
     type InkProgressMsg,
 } from '@/sync/wire';
@@ -193,7 +195,8 @@ describe('DocRealtimeChannel topics', () => {
         expect(opts.onDocReplaced).not.toHaveBeenCalled();
         // Live ink, plus the membership hint (which only triggers a role
         // re-read over PostgREST, so a forged one changes nothing).
-        expect(live.events('broadcast')).toEqual([INK_PROGRESS_EVENT, MEMBERSHIP_EVENT]);
+        // The topic hint, likewise, only makes the app re-read the generation.
+        expect(live.events('broadcast')).toEqual([INK_PROGRESS_EVENT, MEMBERSHIP_EVENT, TOPIC_ROTATED_EVENT]);
     });
 
     it('still takes live ink from doc:{id}, never from doc-db:{id}', () => {
@@ -855,5 +858,162 @@ describe('parseMembershipChange', () => {
         expect(parseMembershipChange({ ...membership(SELF, 'admin') })).toBeNull();
         expect(parseMembershipChange({ ...membership(SELF, null), table: 'annotations' })).toBeNull();
         warn.mockRestore();
+    });
+});
+
+describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+    });
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+    });
+
+    /** A channel that asks the generation first; `epochs` answers each ask in turn. */
+    const setupWithEpochs = async (
+        epochs: Array<number | null | undefined>,
+        overrides: Partial<DocRealtimeChannelOptions> = {},
+    ) => {
+        const answers = [...epochs];
+        const fetchTopicEpoch = vi.fn(async () => (answers.length > 1 ? answers.shift() : answers[0]));
+        const channels: FakeChannel[] = [];
+        const removed: FakeChannel[] = [];
+        const supabase = {
+            realtime: { isConnected: () => true },
+            channel: (topic: string, options: unknown) => {
+                const ch = new FakeChannel(topic, options);
+                channels.push(ch);
+                return ch;
+            },
+            removeChannel: async (ch: FakeChannel) => {
+                removed.push(ch);
+                return 'ok';
+            },
+        } as unknown as TypedSupabaseClient;
+        const opts: DocRealtimeChannelOptions = {
+            supabase,
+            docId: DOC,
+            self: { userId: SELF, name: 'Me', color: '#123456', page: 0, isAnonymous: false },
+            onRemoteInk: vi.fn(),
+            onDbChange: vi.fn(),
+            onPeers: vi.fn(),
+            onReconnect: vi.fn(),
+            onResync: vi.fn(),
+            onMembershipChanged: vi.fn(),
+            fetchTopicEpoch,
+            ...overrides,
+        };
+        const rt = new DocRealtimeChannel(opts);
+        rt.start();
+        await vi.advanceTimersByTimeAsync(0);
+        const latest = (topic: string): FakeChannel | undefined => channels.filter((c) => c.topic === topic).at(-1);
+        return { rt, opts, channels, removed, latest, fetchTopicEpoch };
+    };
+
+    it('names generation 0 with the plain topics, and a rotated score with a suffix', () => {
+        expect(docTopic(DOC)).toBe(`doc:${DOC}`);
+        expect(docTopic(DOC, 0)).toBe(`doc:${DOC}`);
+        expect(docTopic(DOC, 3)).toBe(`doc:${DOC}:3`);
+        expect(docDbTopic(DOC, 3)).toBe(`doc-db:${DOC}:3`);
+    });
+
+    it('asks the generation before joining, and joins that generation', async () => {
+        const { channels, fetchTopicEpoch } = await setupWithEpochs([2]);
+        expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+        expect(channels.map((c) => c.topic)).toEqual([`doc:${DOC}:2`, `doc-db:${DOC}:2`]);
+    });
+
+    it('joins generation 0 when the server cannot say (offline, or before the migration)', async () => {
+        const { channels } = await setupWithEpochs([undefined]);
+        expect(channels.map((c) => c.topic)).toEqual([`doc:${DOC}`, `doc-db:${DOC}`]);
+    });
+
+    it('a takedown moves the owner to the new topics, and leaves the old doc:{id} silent', async () => {
+        const { rt, opts, removed, latest } = await setupWithEpochs([0, 1]);
+        const live = latest(docTopic(DOC))!;
+        const db = latest(docDbTopic(DOC))!;
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        // A collaborator is on doc:{id} with the owner.
+        syncPresence(live, 2);
+        drawFor(rt, 200);
+        expect(inkSent(live).length).toBeGreaterThan(0);
+        live.send.mockClear();
+
+        // The takedown: the server says the topics moved, on doc-db:{id}.
+        db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+        // Ink stops at once, before the new generation is even read: the
+        // collaborator may still be on doc:{id}, whatever its app does.
+        drawFor(rt, 200);
+        expect(live.send).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(removed).toEqual(expect.arrayContaining([live, db]));
+        const live1 = latest(docTopic(DOC, 1))!;
+        const db1 = latest(docDbTopic(DOC, 1))!;
+        expect(live1).toBeDefined();
+        expect(db1).toBeDefined();
+        live1.status('SUBSCRIBED');
+        db1.status('SUBSCRIBED');
+        // A move is a re-join: pull whatever was committed between the topics.
+        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+
+        // The owner's other device is on generation 1 too; the shut-out
+        // collaborator cannot join it, so it is the only audience.
+        syncPresence(live1, 2);
+        drawFor(rt, 500);
+        expect(inkSent(live1).length).toBeGreaterThan(0);
+        // Not one batch more on the old topic, where the collaborator sits.
+        expect(live.send).not.toHaveBeenCalled();
+        // Committed rows now arrive on doc-db:{id}:1.
+        db1.broadcast('INSERT', dbChange(row({ seq: 99 })));
+        expect(opts.onDbChange).toHaveBeenCalledWith(expect.objectContaining({ seq: 99 }));
+    });
+
+    it('a member the takedown shut out is told to re-check, and never joins the new topics', async () => {
+        const { opts, latest, channels } = await setupWithEpochs([0, null]);
+        const db = latest(docDbTopic(DOC))!;
+        db.status('SUBSCRIBED');
+        db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(opts.onMembershipChanged).toHaveBeenCalled();
+        expect(channels.some((c) => c.topic.endsWith(':1'))).toBe(false);
+    });
+
+    it('re-reads the generation when a join is refused (a stale device), and moves', async () => {
+        const { latest, fetchTopicEpoch } = await setupWithEpochs([0, 4]);
+        const live = latest(docTopic(DOC))!;
+        live.status('CHANNEL_ERROR', new Error('Unauthorized'));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        expect(latest(docTopic(DOC, 4))).toBeDefined();
+        expect(latest(docDbTopic(DOC, 4))).toBeDefined();
+    });
+
+    it('ignores a hint for another score, and an unchanged generation moves nothing', async () => {
+        const { latest, channels, fetchTopicEpoch } = await setupWithEpochs([0]);
+        const db = latest(docDbTopic(DOC))!;
+        db.broadcast(TOPIC_ROTATED_EVENT, { document_id: 'another-score' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+        db.broadcast(TOPIC_ROTATED_EVENT, { document_id: DOC });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        expect(channels).toHaveLength(2);
+    });
+
+    it('reads the generation over PostgREST, keeping the current one on any failure', async () => {
+        const rpc = vi.fn();
+        const supabase = { rpc } as unknown as TypedSupabaseClient;
+        rpc.mockResolvedValueOnce({ data: 2, error: null });
+        await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toBe(2);
+        expect(rpc).toHaveBeenCalledWith('realtime_topic_epoch', { p_document: DOC });
+        rpc.mockResolvedValueOnce({ data: null, error: null });
+        await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toBeNull();
+        rpc.mockResolvedValueOnce({ data: null, error: { message: 'Could not find the function' } });
+        await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toBeUndefined();
+        rpc.mockResolvedValueOnce({ data: 1.5, error: null });
+        await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toBeUndefined();
     });
 });
