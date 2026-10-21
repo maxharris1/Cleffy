@@ -19,9 +19,15 @@
  * out. A notice the budget holds back is deferred: its claim is released
  * without spending an attempt, and the next wake sends it. The
  * district_retention_notices table is the outbox, so nothing is dropped, and
- * the purge simply waits for it. Each delivery carries a provider idempotency
- * key stable for that notice, so a send retried after a lost answer is one
- * mail.
+ * the purge simply waits for it.
+ *
+ * Every send ends in one of the outcomes of `_shared/resendDelivery.ts` (#62's
+ * shared helper, which the Deno sender calls): `sent`; `rejected` or
+ * `unconfigured`, when nothing can have gone out, and only then is the
+ * reservation handed back; or `unknown` (a timeout, a dropped connection, a
+ * 5xx), when the mail may be out, so the reservation STAYS spent and the next
+ * run retries with the same Resend Idempotency-Key, which Resend answers
+ * without sending a second copy.
  */
 
 export interface DistrictNoticeRow {
@@ -48,15 +54,28 @@ export interface DeliverDeps {
     reserve: () => Promise<MailReservation>;
     /** What one window of the budget allows: no point claiming more than that. */
     hourlyLimit: number;
-    send: (
-        to: string,
-        message: DistrictNoticeMessage,
-        idempotencyKey: string,
-    ) => Promise<'sent' | 'failed' | 'unconfigured'>;
+    send: (to: string, message: DistrictNoticeMessage, idempotencyKey: string) => Promise<NoticeSendOutcome>;
     finish: (id: number, error: string | null) => Promise<boolean>;
     /** Release the claim without spending an attempt: the budget said not yet. */
     defer: (id: number) => Promise<boolean>;
 }
+
+/** `sendViaResend`'s outcomes, with `unconfigured` (its `rejected` for a missing key) kept apart. */
+export type NoticeSendOutcome = 'sent' | 'rejected' | 'unconfigured' | 'unknown';
+
+/**
+ * Reads `sendViaResend`'s answer (structurally: this file imports nothing).
+ * Anything it cannot place for certain is `unknown`, so it never refunds on doubt.
+ */
+export const noticeOutcomeOf = (result: { outcome: string; reason: string }): NoticeSendOutcome => {
+    if (result.outcome === 'sent') {
+        return 'sent';
+    }
+    if (result.outcome === 'rejected') {
+        return result.reason === 'unconfigured' ? 'unconfigured' : 'rejected';
+    }
+    return 'unknown';
+};
 
 export interface DeliverResult {
     claimed: number;
@@ -68,14 +87,18 @@ export interface DeliverResult {
 /** At most this many notices per call; one district gets one notice per contract end. */
 export const NOTICE_BATCH = 20;
 
+/** The outbox's name in every Idempotency-Key it sends. */
+export const NOTICE_OUTBOX = 'district-retention-notice';
+
 /**
- * Stable for one notice of one cycle: the same row retried (a lost answer, a
- * lease that ran out) is the same key, so the provider sends it once; a cycle
- * cancelled and begun again re-queues the row with a new created_at, and the
- * owner is mailed again, as the purge's comments promise.
+ * Stable for one notice of one cycle, and the same on every attempt: the same
+ * row retried (a lost answer, a lease that ran out) is the same key, so Resend
+ * sends it once; a cycle cancelled and begun again re-queues the row with a
+ * new created_at, and the owner is mailed again, as the purge's comments
+ * promise. Exactly `resendIdempotencyKey(NOTICE_OUTBOX, '<id>_<created_at ms>')`.
  */
 export const noticeIdempotencyKey = (row: DistrictNoticeRow): string =>
-    `district-retention-notice/${row.id}/${Date.parse(row.created_at)}`;
+    `${NOTICE_OUTBOX}-${row.id}_${Date.parse(row.created_at)}`;
 
 export const SUPPORT_ADDRESS = 'support@cleffy.io';
 
@@ -108,8 +131,9 @@ export const buildDistrictNotice = (row: DistrictNoticeRow): DistrictNoticeMessa
  * sends each that the shared mail budget has room for. Every claimed notice is
  * finished or deferred: sent; failed with the reason (the next run retries
  * it); or, once the budget is spent, deferred with every notice after it,
- * attempts untouched. A reservation is handed back whenever no mail went out
- * (never when the send threw, which may have delivered it).
+ * attempts untouched. A reservation is handed back only when no mail can have
+ * gone out (`rejected`, `unconfigured`); never on `unknown` or a send that
+ * threw, either of which may have delivered it.
  */
 export const deliverDistrictNotices = async (deps: DeliverDeps): Promise<DeliverResult | null> => {
     const batch = Math.max(0, Math.min(NOTICE_BATCH, deps.hourlyLimit));
@@ -132,7 +156,7 @@ export const deliverDistrictNotices = async (deps: DeliverDeps): Promise<Deliver
             result.deferred += 1;
             continue;
         }
-        let outcome: 'sent' | 'failed' | 'unconfigured' | 'unknown';
+        let outcome: NoticeSendOutcome;
         try {
             outcome = await deps.send(row.to_email, buildDistrictNotice(row), noticeIdempotencyKey(row));
         } catch {
@@ -146,11 +170,19 @@ export const deliverDistrictNotices = async (deps: DeliverDeps): Promise<Deliver
             result.sent += 1;
             continue;
         }
-        if (outcome !== 'unknown') {
-            // The provider answered no, or there is no provider: nothing went out.
+        if (outcome === 'rejected' || outcome === 'unconfigured') {
+            // The provider certainly refused it, or there is no provider:
+            // nothing went out.
             await reservation.release().catch(() => undefined);
         }
-        await deps.finish(row.id, outcome === 'unconfigured' ? 'mail is not configured' : 'send failed');
+        await deps.finish(
+            row.id,
+            outcome === 'unconfigured'
+                ? 'mail is not configured'
+                : outcome === 'rejected'
+                  ? 'send rejected'
+                  : 'send outcome unknown',
+        );
         result.failed += 1;
     }
     return result;

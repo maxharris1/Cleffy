@@ -8,12 +8,17 @@ import {
     buildDistrictNotice,
     type DeliverDeps,
     deliverDistrictNotices,
+    type DistrictNoticeMessage,
     type MailReservation,
     NOTICE_BATCH,
+    NOTICE_OUTBOX,
     noticeIdempotencyKey,
+    noticeOutcomeOf,
+    type NoticeSendOutcome,
     type DistrictNoticeRow,
 } from '../../supabase/functions/_shared/districtNotice';
 import { MAIL_CATEGORY_CAPS, MAIL_WINDOW_MS, mailLimit } from '../../supabase/functions/_shared/mailBudget';
+import { resendIdempotencyKey, sendViaResend } from '../../supabase/functions/_shared/resendDelivery';
 
 /**
  * District retention (decision 1): the export notice and the purge's shape.
@@ -77,18 +82,18 @@ const deps = (overrides: Partial<DeliverDeps> = {}): DeliverDeps => ({
 });
 
 describe('delivering notices', () => {
-    it('marks a sent notice sent, and a failed one failed (retried next run, never counted as sent)', async () => {
+    it('marks a sent notice sent, and a rejected one failed (retried next run, never counted as sent)', async () => {
         const finish = vi.fn(async () => true);
-        const send = vi.fn(async (to: string): Promise<'sent' | 'failed'> =>
-            to === 'owner2@example.invalid' ? 'failed' : 'sent',
+        const send = vi.fn(async (to: string): Promise<NoticeSendOutcome> =>
+            to === 'owner2@example.invalid' ? 'rejected' : 'sent',
         );
         const result = await deliverDistrictNotices(deps({ send, finish }));
         expect(result).toEqual({ claimed: 2, sent: 1, failed: 1, deferred: 0 });
         expect(finish).toHaveBeenCalledWith(1, null);
-        expect(finish).toHaveBeenCalledWith(2, 'send failed');
+        expect(finish).toHaveBeenCalledWith(2, 'send rejected');
     });
 
-    it('a send that throws is a failure, and the rest still go', async () => {
+    it('a send that throws is an unknown outcome, and the rest still go', async () => {
         const finish = vi.fn(async () => true);
         let calls = 0;
         const send = vi.fn(async () => {
@@ -100,7 +105,7 @@ describe('delivering notices', () => {
         });
         const result = await deliverDistrictNotices(deps({ send, finish }));
         expect(result).toEqual({ claimed: 2, sent: 1, failed: 1, deferred: 0 });
-        expect(finish).toHaveBeenNthCalledWith(1, 1, 'send failed');
+        expect(finish).toHaveBeenNthCalledWith(1, 1, 'send outcome unknown');
         expect(finish).toHaveBeenNthCalledWith(2, 2, null);
     });
 
@@ -176,17 +181,19 @@ describe('the shared mail budget (Codex round 2, new major 2)', () => {
 
     it('hands the reservation back when no mail went out, and keeps it when the send may have', async () => {
         const { budget, reserve } = openBudget();
-        const outcomes = ['failed', 'unconfigured', 'throw', 'sent'] as const;
+        const outcomes = ['rejected', 'unconfigured', 'throw', 'unknown', 'sent'] as const;
         let i = 0;
-        const send = vi.fn(async (): Promise<'sent' | 'failed' | 'unconfigured'> => {
+        const send = vi.fn(async (): Promise<NoticeSendOutcome> => {
             const outcome = outcomes[i++];
             if (outcome === 'throw') {
                 throw new Error('connection reset after the request was written');
             }
             return outcome!;
         });
-        await deliverDistrictNotices(deps({ claim: async () => [row(1), row(2), row(3), row(4)], reserve, send }));
-        expect(budget).toEqual({ reserved: 4, released: 2 });
+        await deliverDistrictNotices(
+            deps({ claim: async () => [row(1), row(2), row(3), row(4), row(5)], reserve, send }),
+        );
+        expect(budget).toEqual({ reserved: 5, released: 2 });
     });
 
     it('gives every delivery a provider idempotency key, stable for the notice, new for a new cycle', async () => {
@@ -197,6 +204,12 @@ describe('the shared mail budget (Codex round 2, new major 2)', () => {
         expect(noticeIdempotencyKey(row(7))).toBe(key);
         expect(noticeIdempotencyKey(row(7, { created_at: '2026-11-01T00:00:00Z' }))).not.toBe(key);
         expect(noticeIdempotencyKey(row(8))).not.toBe(key);
+    });
+
+    it('the key is the shared helper’s key for this outbox row, and the same on every attempt', () => {
+        const ms = Date.parse(row(7).created_at);
+        expect(noticeIdempotencyKey(row(7))).toBe(resendIdempotencyKey(NOTICE_OUTBOX, `7_${ms}`));
+        expect(noticeIdempotencyKey(row(7))).toBe('district-retention-notice-7_' + ms);
     });
 
     it('integration: against the real retentionNotice windows, never more than its hour and day caps go out', async () => {
@@ -255,12 +268,11 @@ describe('the shared mail budget (Codex round 2, new major 2)', () => {
         expect(noticeSender).toContain("mailLimit('retentionNotice', 'hour', env)");
         expect(noticeSender).toContain("mailLimit('retentionNotice', 'day', env)");
         expect(noticeSender).toMatch(/const gate = await checkRateLimit\(key, limit, windowMs\);/);
-        expect(noticeSender).toContain("'Idempotency-Key': idempotencyKey");
+        expect(noticeSender).toMatch(/sendViaResend\(\{[^}]*idempotencyKey,/);
         expect(noticeSender).toMatch(/reserve,\s+hourlyLimit: BUDGET\[0\]\[1\]\.limit,\s+send,/);
         expect(noticeSender).toContain("admin.rpc('defer_district_retention_notice'");
         // One call site to Resend, inside the send deliverDistrictNotices only reaches with a reservation.
-        expect(noticeSender.match(/api\.resend\.com/g)).toHaveLength(1);
-        expect(noticeSender.match(/fetch\(/g)).toHaveLength(1);
+        expect(noticeSender.match(/sendViaResend\(/g)).toHaveLength(1);
     });
 
     it('a deferral hands the claim back without spending an attempt (20261021120900)', () => {
@@ -454,5 +466,114 @@ describe('the district purge’s scope (20261021120800)', () => {
         ]) {
             expect(sqlProof).toContain(check);
         }
+    });
+});
+
+describe('an unknown send outcome (Cleffy round-3 addendum, same contract as #62)', () => {
+    /** sendViaResend, as the Deno sender calls it, against a scripted Resend. */
+    const resendWith = (answers: Array<Response | Error>) => {
+        const keys: string[] = [];
+        const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+            keys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '');
+            const answer = answers.shift();
+            if (!answer || answer instanceof Error) {
+                throw answer ?? new Error('no scripted answer');
+            }
+            return answer;
+        });
+        const send = async (to: string, message: DistrictNoticeMessage, idempotencyKey: string) =>
+            noticeOutcomeOf(
+                await sendViaResend({
+                    apiKey: 're_test_placeholder',
+                    idempotencyKey,
+                    email: { from: 'Cleffy <noreply@cleffy.io>', to: [to], ...message },
+                    fetch: fetchFn as unknown as typeof fetch,
+                }),
+            );
+        return { send, keys, fetchFn };
+    };
+    const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+    it('keeps the reservation on a 5xx, a timeout or a dropped connection, and retries the row', async () => {
+        for (const answer of [
+            json(503, { name: 'internal_server_error' }),
+            json(500, {}),
+            Object.assign(new Error('aborted'), { name: 'AbortError' }),
+            new TypeError('connection reset'),
+        ]) {
+            const { budget, reserve } = openBudget();
+            const finish = vi.fn(async () => true);
+            const { send } = resendWith([answer]);
+            const result = await deliverDistrictNotices(deps({ claim: async () => [row(1)], reserve, send, finish }));
+            expect(result).toEqual({ claimed: 1, sent: 0, failed: 1, deferred: 0 });
+            expect(budget).toEqual({ reserved: 1, released: 0 });
+            // Finished with an error, so the next run claims it again.
+            expect(finish).toHaveBeenCalledWith(1, 'send outcome unknown');
+        }
+    });
+
+    it('refunds the reservation only on a definite rejection', async () => {
+        for (const answer of [json(422, { name: 'validation_error' }), json(400, {}), json(403, {})]) {
+            const { budget, reserve } = openBudget();
+            const finish = vi.fn(async () => true);
+            const { send } = resendWith([answer]);
+            await deliverDistrictNotices(deps({ claim: async () => [row(1)], reserve, send, finish }));
+            expect(budget).toEqual({ reserved: 1, released: 1 });
+            expect(finish).toHaveBeenCalledWith(1, 'send rejected');
+        }
+        // And on a 409 (a request with this key is in flight, or already went): never.
+        const { budget, reserve } = openBudget();
+        const { send } = resendWith([json(409, { name: 'concurrent_idempotent_requests' })]);
+        await deliverDistrictNotices(deps({ claim: async () => [row(1)], reserve, send }));
+        expect(budget).toEqual({ reserved: 1, released: 0 });
+    });
+
+    it('retries an unknown send with the same Idempotency-Key, which Resend answers once', async () => {
+        const { budget, reserve } = openBudget();
+        const finish = vi.fn(async () => true);
+        const { send, keys } = resendWith([new TypeError('connection reset'), json(200, { id: 'email_1' })]);
+        // Two runs claim the same outbox row: the first loses Resend's answer.
+        const first = await deliverDistrictNotices(deps({ claim: async () => [row(7)], reserve, send, finish }));
+        const second = await deliverDistrictNotices(deps({ claim: async () => [row(7)], reserve, send, finish }));
+        expect(first?.failed).toBe(1);
+        expect(second?.sent).toBe(1);
+        expect(keys).toEqual([noticeIdempotencyKey(row(7)), noticeIdempotencyKey(row(7))]);
+        expect(keys[0]).toBe(resendIdempotencyKey(NOTICE_OUTBOX, `7_${Date.parse(row(7).created_at)}`));
+        // Neither attempt's reservation was handed back.
+        expect(budget).toEqual({ reserved: 2, released: 0 });
+        expect(finish.mock.calls).toEqual([
+            [7, 'send outcome unknown'],
+            [7, null],
+        ]);
+    });
+
+    it('without a key nothing is requested, and the reservation goes back', async () => {
+        const { budget, reserve } = openBudget();
+        const finish = vi.fn(async () => true);
+        const fetchFn = vi.fn();
+        const send = async (to: string, message: DistrictNoticeMessage, idempotencyKey: string) =>
+            noticeOutcomeOf(
+                await sendViaResend({
+                    apiKey: undefined,
+                    idempotencyKey,
+                    email: { from: 'Cleffy <noreply@cleffy.io>', to: [to], ...message },
+                    fetch: fetchFn as unknown as typeof fetch,
+                }),
+            );
+        await deliverDistrictNotices(deps({ claim: async () => [row(1)], reserve, send, finish }));
+        expect(fetchFn).not.toHaveBeenCalled();
+        expect(budget).toEqual({ reserved: 1, released: 1 });
+        expect(finish).toHaveBeenCalledWith(1, 'mail is not configured');
+    });
+
+    it('the Deno sender calls Resend only through the shared helper, mapping its outcome without refunding on doubt', () => {
+        expect(noticeSender).toContain("import { sendViaResend } from '../_shared/resendDelivery.ts';");
+        expect(noticeSender).not.toMatch(/api\.resend\.com|await fetch\(/);
+        expect(noticeSender).toMatch(/const outcome = noticeOutcomeOf\(result\);/);
+        expect(noticeOutcomeOf({ outcome: 'unknown', reason: 'http_503' })).toBe('unknown');
+        expect(noticeOutcomeOf({ outcome: 'something new', reason: 'x' })).toBe('unknown');
+        expect(noticeOutcomeOf({ outcome: 'rejected', reason: 'unconfigured' })).toBe('unconfigured');
+        expect(noticeOutcomeOf({ outcome: 'rejected', reason: 'http_422' })).toBe('rejected');
     });
 });

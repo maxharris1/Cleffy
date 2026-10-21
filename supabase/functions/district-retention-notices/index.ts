@@ -4,10 +4,13 @@ import {
     type DistrictNoticeMessage,
     type DistrictNoticeRow,
     type MailReservation,
+    noticeOutcomeOf,
+    type NoticeSendOutcome,
 } from '../_shared/districtNotice.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { mailLimit } from '../_shared/mailBudget.ts';
 import { checkRateLimit, refundRateLimit, serviceClient } from '../_shared/rateLimit.ts';
+import { sendViaResend } from '../_shared/resendDelivery.ts';
 import { secretsEqual } from '../_shared/secretCompare.ts';
 
 /**
@@ -22,9 +25,12 @@ import { secretsEqual } from '../_shared/secretCompare.ts';
  * No notice leaves without a reservation from the shared mail budget: the
  * `retentionNotice` share of LAUNCH_MAIL_SPLIT, hour and day, counted in the
  * same edge rate-limit buckets every other budgeted sender uses.
+ *
+ * Resend is called through _shared/resendDelivery.ts (byte-identical to #62's),
+ * which says `sent`, `rejected` or `unknown`. Only a certain non-send hands the
+ * reservation back; an unknown outcome keeps it and is retried by the next
+ * run with the same Idempotency-Key.
  */
-
-const RESEND_API = 'https://api.resend.com';
 
 const mailFrom = (): string => Deno.env.get('DISTRICT_NOTICE_FROM') ?? 'Cleffy <noreply@cleffy.io>';
 
@@ -62,33 +68,21 @@ const reserve = async (): Promise<MailReservation> => {
     return { ok: true, release };
 };
 
-const send = async (
-    to: string,
-    message: DistrictNoticeMessage,
-    idempotencyKey: string,
-): Promise<'sent' | 'failed' | 'unconfigured'> => {
-    const apiKey = Deno.env.get('RESEND_API_KEY');
-    if (!apiKey) {
-        return 'unconfigured';
-    }
-    const res = await fetch(`${RESEND_API}/emails`, {
-        method: 'POST',
-        headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'Idempotency-Key': idempotencyKey,
-        },
-        body: JSON.stringify({ from: mailFrom(), to: [to], reply_to: 'support@cleffy.io', ...message }),
+const send = async (to: string, message: DistrictNoticeMessage, idempotencyKey: string): Promise<NoticeSendOutcome> => {
+    const result = await sendViaResend({
+        apiKey: Deno.env.get('RESEND_API_KEY'),
+        idempotencyKey,
+        email: { from: mailFrom(), to: [to], reply_to: 'support@cleffy.io', ...message },
     });
-    if (!res.ok) {
-        // The status and Resend's reason, never the address.
-        logError('district-retention-notices', new Error(`resend returned ${res.status}`), {
-            code: 'send_failed',
-            detail: (await res.text()).slice(0, 300),
+    const outcome = noticeOutcomeOf(result);
+    if (outcome === 'rejected' || outcome === 'unknown') {
+        // The reason, the status and Resend's error, never the address.
+        logError('district-retention-notices', new Error(`resend ${outcome}: ${result.reason}`), {
+            code: outcome === 'unknown' ? 'send_unknown' : 'send_rejected',
+            detail: [result.errorName, result.detail].filter(Boolean).join(' ').slice(0, 300),
         });
-        return 'failed';
     }
-    return 'sent';
+    return outcome;
 };
 
 Deno.serve(async (req) => {
