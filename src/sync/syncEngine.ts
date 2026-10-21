@@ -1495,7 +1495,15 @@ export class SyncEngine {
         if (this.stopped) {
             return;
         }
-        if (!state || row.seq > state.watermarkSeq) {
+        // The cursor is gated until a pull has run the compaction check once
+        // (it is what writes checkedSeq). Until then — a device that has never
+        // pulled this score, or one whose state was cached before checkedSeq
+        // existed — the watermark is the only record of where the last full
+        // check stood, and advancing it here would let pullOnce take the
+        // broadcast's seq as the checked position and skip a compacted
+        // deletion for good. The row is applied either way; the pull fetches
+        // it again, harmlessly.
+        if (state?.checkedSeq !== undefined && row.seq > state.watermarkSeq) {
             // checkedSeq stays: a live row says nothing about deletions this
             // device missed while it was away (see pullOnce).
             await db.syncState.put({ ...state, docId, watermarkSeq: row.seq });

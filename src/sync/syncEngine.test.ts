@@ -1043,6 +1043,9 @@ describe('SyncEngine.stop during an in-flight pull', () => {
 
 describe('SyncEngine.applyServerRow (broadcast path)', () => {
     it('applies rows and advances the watermark monotonically', async () => {
+        // The cursor only moves once a pull has run the compaction check.
+        await engine.pullSince();
+        expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 0, checkedSeq: 0 });
         await engine.applyServerRow(serverRow('b1', { page: 4, color: '#123', seq: 9 }));
         expect(store.getPage(4).has('b1')).toBe(true);
         expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(9);
@@ -2537,6 +2540,69 @@ describe('SyncEngine after tombstone compaction', () => {
 
         expect(store.getPage(0).has('m1')).toBe(false);
         expect(store.getPage(0).has('m4')).toBe(true);
+    });
+
+    it('upgrade: state cached before checkedSeq existed is not advanced by a broadcast ahead of the first pull', async () => {
+        // The device synced m1 and m2 on the old client, which wrote no
+        // checkedSeq. Then it upgrades, and while it was away m1 was deleted
+        // and the tombstone compacted (floor 3).
+        await db.syncState.put({ docId: DOC, watermarkSeq: 2 });
+        server.tombstone('m1');
+        server.add('m3');
+        server.compact();
+        expect(server.floor).toBe(3);
+        server.add('m4');
+
+        // The first thing the upgraded client hears is a live broadcast (seq 5).
+        await device.applyServerRow(server.rows.get('m4')!);
+        expect(store.getPage(0).has('m4')).toBe(true);
+        // The cursor is gated: the old watermark still marks the last full check.
+        expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 2 });
+
+        await device.pullSince();
+
+        expect(store.get('m1')).toBeUndefined();
+        expect(store.getPage(0).has('m1')).toBe(false);
+        expect(store.getPage(0).has('m4')).toBe(true);
+        expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 5, checkedSeq: 5 });
+
+        // Once the first full sync has run, broadcasts move the cursor again.
+        server.add('m5');
+        await device.applyServerRow(server.rows.get('m5')!);
+        expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 6, checkedSeq: 5 });
+    });
+
+    it('upgrade: a legacy device whose first floor check fails keeps its old watermark as the checked position', async () => {
+        await db.syncState.put({ docId: DOC, watermarkSeq: 2 });
+        server.tombstone('m1');
+        server.compact();
+        server.add('m3');
+        server.floorError = { kind: 'retry', message: 'down' };
+        await device.pullSince();
+        // The pull ran but could not check: checkedSeq records where the last
+        // real check stood (the legacy watermark), not where the pull reached.
+        expect((await db.syncState.get(DOC))?.checkedSeq).toBe(2);
+
+        server.add('m4');
+        await device.applyServerRow(server.rows.get('m4')!);
+        server.floorError = null;
+        await device.pullSince();
+        expect(store.getPage(0).has('m1')).toBe(false);
+    });
+
+    it('a device that has never pulled the score does not take a broadcast as its starting point', async () => {
+        const other = 'doc-never-pulled';
+        server.rows.set('n1', serverRow('n1', { document_id: other, seq: server.nextSeq++ }));
+        const freshStore = new AnnotationStore(db, other);
+        await freshStore.load();
+        const fresh = new SyncEngine({ db, store: freshStore, api: server, docId: other, getUserId: () => USER });
+        try {
+            server.rows.set('n2', serverRow('n2', { document_id: other, seq: server.nextSeq++ }));
+            await fresh.applyServerRow(server.rows.get('n2')!);
+            expect(await db.syncState.get(other)).toBeUndefined();
+        } finally {
+            fresh.stop();
+        }
     });
 
     it('a device back after its missed deletion was compacted resyncs, and the mark disappears', async () => {
