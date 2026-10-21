@@ -1,6 +1,9 @@
 import { useState } from 'react';
 
 import { createCheckoutSession, createPortalSession, redirectTo } from '@/features/billing/billingApi';
+import { useBillingCountry } from '@/features/billing/billingRegion';
+import { CheckoutReview } from '@/features/billing/CheckoutReview';
+import { CountryPicker } from '@/features/billing/CountryPicker';
 import { formatPlanDate, type OwnSubscription } from '@/features/billing/planStatus';
 import {
     TIER_CARDS,
@@ -8,6 +11,7 @@ import {
     isBillingConfigured,
     priceFor,
     type BillingInterval,
+    type PlanSlot,
 } from '@/features/billing/pricing';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import type { EffectiveTier } from '@/types/database';
@@ -15,6 +19,8 @@ import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
+
+import { currencyForCountry } from '../../../supabase/functions/_shared/billingTerms';
 
 export interface PricingDialogProps {
     onClose: () => void;
@@ -45,15 +51,28 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
     const [interval, setInterval] = useState<BillingInterval>('annual');
     const [busyPrice, setBusyPrice] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [country, setCountry] = useBillingCountry();
+    const currency = currencyForCountry(country);
+    /** The plan being reviewed before Checkout; null while the cards are shown. */
+    const [review, setReview] = useState<{ slot: PlanSlot; priceId: string } | null>(null);
     // The portal cannot switch anyone onto the Founding price (DEPLOY.md §1), so
     // for a subscriber it would only be reachable as a second subscription.
-    const founding = subscription ? null : foundingPrice();
+    const founding = subscription ? null : foundingPrice(currency);
 
-    const startCheckout = async (priceId: string) => {
+    /** Choosing a plan opens the review step; only its Continue button reaches Stripe. */
+    const reviewPlan = (slot: PlanSlot | null, priceId: string | null) => {
+        if (!slot || !priceId) {
+            return;
+        }
+        setError(null);
+        setReview({ slot, priceId });
+    };
+
+    const startCheckout = async (priceId: string, consentText: string) => {
         setError(null);
         setBusyPrice(priceId);
         try {
-            redirectTo(await createCheckoutSession(priceId));
+            redirectTo(await createCheckoutSession(priceId, { accepted: true, country, text: consentText }));
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not start checkout.');
             setBusyPrice(null);
@@ -82,8 +101,30 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
         );
     }
 
+    if (review) {
+        return (
+            // Keyed apart from the cards' dialog so it mounts fresh at the top:
+            // reusing that instance kept the list's scroll position and opened
+            // the review with the price line scrolled out of view.
+            <Dialog key="review" label="Plans" onClose={onClose} sheet>
+                <CheckoutReview
+                    slot={review.slot}
+                    country={country}
+                    onCountryChange={setCountry}
+                    busy={busyPrice !== null}
+                    error={error}
+                    onBack={() => {
+                        setError(null);
+                        setReview(null);
+                    }}
+                    onConfirm={(consentText) => void startCheckout(review.priceId, consentText)}
+                />
+            </Dialog>
+        );
+    }
+
     return (
-        <Dialog label="Plans" onClose={onClose} sheet>
+        <Dialog key="plans" label="Plans" onClose={onClose} sheet>
             <div className="w-full">
                 {reason ? <p className="mb-4 text-sm text-stone-600">{reason}</p> : null}
 
@@ -97,6 +138,8 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                         have changes there, and you are never billed for two.
                     </p>
                 ) : null}
+
+                <CountryPicker className="mb-3" value={country} onChange={setCountry} />
 
                 <div className="mb-5 flex items-center gap-2" role="group" aria-label="Billing interval">
                     {(['monthly', 'annual'] as const).map((option) => (
@@ -119,7 +162,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
 
                 <div className="flex flex-col gap-3">
                     {TIER_CARDS.map((card) => {
-                        const price = priceFor(card.tier, interval);
+                        const price = priceFor(card.tier, interval, currency);
                         const isCurrent = card.tier === currentTier;
                         return (
                             <section
@@ -194,9 +237,9 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                                         size="sm"
                                         className="mt-4 w-full"
                                         disabled={busyPrice !== null}
-                                        onClick={() => void startCheckout(price.priceId as string)}
+                                        onClick={() => reviewPlan(price.slot, price.priceId)}
                                     >
-                                        {busyPrice === price.priceId ? 'Opening checkout…' : `Choose ${card.name}`}
+                                        {`Choose ${card.name}`}
                                     </Button>
                                 ) : null}
                             </section>
@@ -224,9 +267,9 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                                 size="sm"
                                 className="mt-4 w-full"
                                 disabled={busyPrice !== null}
-                                onClick={() => void startCheckout(founding.priceId as string)}
+                                onClick={() => reviewPlan(founding.slot, founding.priceId)}
                             >
-                                {busyPrice === founding.priceId ? 'Opening checkout…' : 'Become a Founding Teacher'}
+                                Become a Founding Teacher
                             </Button>
                         </section>
                     ) : null}
@@ -235,7 +278,8 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                 {error ? <ErrorText className="mt-4">{error}</ErrorText> : null}
 
                 <p className="mt-4 text-xs text-stone-500">
-                    Plans renew automatically until you cancel, which you can do at any time from your Account page.
+                    Plans renew automatically until you cancel, which you can do at any time from your Account page or
+                    at cleffy.io/cancel. Full refund within 14 days of your first purchase.
                 </p>
                 <AgreementNote action="subscribing" className="mt-1" />
 

@@ -230,6 +230,29 @@ select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp
 select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
 ```
 
+The billing mail outbox (`billing_mail_outbox`, migration 20261020160200)
+uses the same pattern for its retry path. Deploy `billing-mail-outbox`
+(`--no-verify-jwt`), set `BILLING_OUTBOX_SECRET` as an Edge secret, and store
+the function URL and that same secret in Vault. `billing_mail_outbox_tick` then
+POSTs every minute while mail is due. Until both are set, purchase and
+cancellation confirmations and cancel links still go out right after they are
+queued, but a failed send is not retried:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/billing-mail-outbox', 'billing_outbox_url');
+select vault.create_secret('<same value as BILLING_OUTBOX_SECRET>', 'billing_outbox_secret');
+```
+
+**Billing mail rollout.** Apply the migrations first, then deploy
+`stripe-webhook`, `billing-mail-outbox`, `billing-cancel` and `stripe-checkout`
+together. Until the new `stripe-webhook` is live, the previous one keeps
+claiming confirmations in `billing_notices` and sending them inline, which is
+why migration 20261020160200 keeps that table rather than dropping it. Drop
+it in a separate, later migration
+(`drop table if exists public.billing_notices;`), only after the new webhook
+has been live for longer than Stripe's three-day retry window. Nothing in the
+new functions reads or writes it.
+
 Content notices (report acknowledgments, statements of reasons, reporter
 outcomes) wait in `content_notice_outbox` until they are sent, and
 `content_notice_retry_tick` retries them every five minutes the same way.

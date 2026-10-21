@@ -552,6 +552,20 @@ verify_jwt = true
 [functions.guest-email-confirm]
 verify_jwt = true
 
+# Signed-out cancellation (/cancel): the person cancelling may not be able to
+# sign in, and the emailed one-time token is the credential. Flow and limits in
+# functions/_shared/cancelFlow.ts.
+# `supabase functions deploy billing-cancel --no-verify-jwt`
+[functions.billing-cancel]
+verify_jwt = false
+
+# The billing mail outbox's retry path: pg_cron posts here (pg_net has no
+# Supabase JWT), proving itself with the BILLING_OUTBOX_SECRET shared secret.
+# Flow in functions/_shared/billingOutbox.ts.
+# `supabase functions deploy billing-mail-outbox --no-verify-jwt`
+[functions.billing-mail-outbox]
+verify_jwt = false
+
 # Notice and action (Copyright and Content Policy). Anyone may report a score,
 # signed in or not — a rights holder need not have an account — so
 # content-report cannot require a JWT, like student-claim. It is rate-limited

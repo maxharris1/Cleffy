@@ -7,6 +7,7 @@ import {
     resolvePrice as resolvePriceWith,
     secretKeyFor as secretKeyForWith,
     servedModes as servedModesWith,
+    slotForPrice as slotForPriceWith,
     webhookSecretFor as webhookSecretForWith,
     type StripeMode,
 } from './stripeMode.ts';
@@ -38,6 +39,9 @@ export const webhookSecretFor = (mode: StripeMode): string | null => webhookSecr
 export const resolvePrice = (priceId: string, mode: StripeMode): string | null => resolvePriceWith(priceId, mode, env);
 
 export const priceTiers = (mode: StripeMode) => priceTiersWith(mode, env);
+
+/** Which plan slot a price id names, in either catalogue. */
+export const slotForPrice = (priceId: string) => slotForPriceWith(priceId, env);
 
 export const appOrigin = (req: Request): string => appOriginFrom(req.headers.get('Origin'), env);
 

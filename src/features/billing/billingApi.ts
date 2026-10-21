@@ -51,9 +51,20 @@ const urlFrom = async (response: Response): Promise<string> => {
     return body.url;
 };
 
+/**
+ * The auto-renewal consent the buyer ticked: the exact sentence, and the
+ * country that set the currency. stripe-checkout rebuilds the sentence itself
+ * and refuses a checkout whose wording differs (supabase/functions/_shared/checkoutFlow.ts).
+ */
+export interface CheckoutConsent {
+    accepted: true;
+    country: string;
+    text: string;
+}
+
 /** Starts Checkout for a price and returns the hosted URL to send the teacher to. */
-export const createCheckoutSession = async (priceId: string): Promise<string> => {
-    const response = await callEdgeFunction('stripe-checkout', { priceId });
+export const createCheckoutSession = async (priceId: string, consent: CheckoutConsent): Promise<string> => {
+    const response = await callEdgeFunction('stripe-checkout', { priceId, consent });
     if (!response.ok) {
         throw new Error(await messageFromJsonBody(response));
     }
