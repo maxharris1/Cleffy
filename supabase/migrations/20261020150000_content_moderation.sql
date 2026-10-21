@@ -24,8 +24,16 @@
 --
 -- Both are enforced in document_role(), which already gates every read and
 -- write a client can make on a score — the documents and annotation policies,
--- the scores and thumbnails storage policies, both realtime topics — and in
--- library_documents(), which lists memberships directly.
+-- the scores and thumbnails storage policies, joining either realtime topic —
+-- in library_documents(), which lists memberships directly, and in
+-- documents_select, whose owner clause would otherwise still hand an owner the
+-- row of a removed score.
+--
+-- Realtime authorizes a channel when it is joined, not per message, so a
+-- takedown also reaches viewers who already have the score open: the server
+-- stops broadcasting the score's committed changes (doc-db:{id}) while it is
+-- taken down, and tells each viewer who lost access to re-check it (see
+-- "Realtime" below).
 
 -- ---------------------------------------------------------------------------
 -- Moderators
@@ -261,6 +269,9 @@ begin
     values (p_report, v_takedown, 'takedown', p_moderator,
             jsonb_build_object('document_id', p_document, 'action', p_action, 'ground', p_ground));
 
+    -- Viewers who already have the score open: re-check, and lose it.
+    perform public.content_takedown_notify_viewers (p_document, p_action);
+
     return jsonb_build_object(
         'takedown_id', v_takedown,
         'uploader_id', v_doc.owner_id,
@@ -466,6 +477,188 @@ drop trigger if exists share_links_refuse_taken_down on public.share_links;
 create trigger share_links_refuse_taken_down
 before insert on public.share_links
 for each row execute function public.refuse_share_links_on_taken_down ();
+
+-- ---------------------------------------------------------------------------
+-- Realtime: cutting off viewers who are already connected
+-- ---------------------------------------------------------------------------
+-- document_role() refuses a taken-down score when a channel JOINS, but a
+-- collaborator who joined before the takedown keeps the channel: Realtime does
+-- not re-run the realtime.messages policies per message. Two things close it:
+--
+--  1. The server stops sending the score's committed changes. Every
+--     server-authored event on doc-db:{id} (committed marks, the PDF being
+--     replaced, play-along status) comes from the three trigger functions
+--     below, which now send nothing while the score has a live takedown. A
+--     client that ignores everything we tell it still receives nothing more
+--     on doc-db:{id}. For a restricted score this pauses its owner's live
+--     sync between their own devices too (each still syncs by pulling, on
+--     reconnect and when it comes online); nobody else can be sent its
+--     changes, and a broadcast cannot pick out one recipient.
+--  2. Every viewer who lost access is sent the `membership` hint on
+--     doc:{id}, with role null, the way end_student_sessions does it. The
+--     app re-reads the score and its role over PostgREST, which IS checked
+--     per request, finds neither, closes the score and leaves both channels.
+--     It is only a hint: the client never trusts the payload.
+--
+-- What stays open is doc:{id} itself for a client that ignores the hint: live
+-- ink and presence, which clients send to each other (the server cannot drop
+-- one recipient's copy). It carries in-progress strokes, never the score or
+-- its committed markings, and only while the owner is drawing; Realtime
+-- re-runs the policies when the client refreshes its access token and closes
+-- the channel when that token expires (auth.jwt_expiry, an hour), so a
+-- refused re-check ends it there. tests/sql/content_moderation.sql proves the
+-- rest: no doc-db:{id} message while taken down, the hint to each member who
+-- lost access, a refused re-join on both topics, and broadcasts back on lift.
+
+-- Whether a score has a live takedown. Internal: the triggers below and the
+-- notification call it as their owner; no client can ask it about a score.
+create or replace function public.content_taken_down (doc uuid) returns boolean language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1 from public.content_takedowns ct
+        where ct.document_id = doc and ct.lifted_at is null
+    );
+$$;
+
+revoke all on function public.content_taken_down (uuid) from public;
+revoke all on function public.content_taken_down (uuid) from anon;
+revoke all on function public.content_taken_down (uuid) from authenticated;
+
+-- The membership hint to every member a takedown shuts out: everyone but the
+-- owner for restrict, everyone for remove.
+create or replace function public.content_takedown_notify_viewers (p_document uuid, p_action text) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_user uuid;
+begin
+    for v_user in
+        select dm.user_id
+        from public.document_members dm
+        where dm.document_id = p_document
+          and (p_action = 'remove' or dm.role <> 'owner')
+    loop
+        perform realtime.send(
+            jsonb_build_object(
+                'table', 'document_members',
+                'document_id', p_document,
+                'user_id', v_user,
+                'role', null
+            ),
+            'membership', -- event
+            'doc:' || p_document::text, -- topic
+            true -- private
+        );
+    end loop;
+end;
+$$;
+
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from public;
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from anon;
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from authenticated;
+
+-- 20261007120101's three fan-out functions, unchanged but for the takedown check.
+create or replace function public.broadcast_annotation_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.content_taken_down (new.document_id) then
+        return null;
+    end if;
+    perform realtime.broadcast_changes(
+        'doc-db:' || new.document_id::text, -- topic (receive-only for clients)
+        tg_op,                              -- event name ('INSERT' | 'UPDATE')
+        tg_op,                              -- operation
+        tg_table_name,
+        tg_table_schema,
+        new,
+        old
+    );
+    return null;
+end;
+$$;
+
+create or replace function public.broadcast_document_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.content_taken_down (new.id) then
+        return null;
+    end if;
+    perform realtime.broadcast_changes(
+        'doc-db:' || new.id::text, -- topic (receive-only for clients)
+        tg_op, tg_op, tg_table_name, tg_table_schema, new, old
+    );
+    return null;
+end;
+$$;
+
+create or replace function public.broadcast_score_analysis_changes () returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    if tg_op = 'UPDATE'
+       and old.status is not distinct from new.status
+       and old.progress is not distinct from new.progress then
+        return null;
+    end if;
+    if public.content_taken_down (new.document_id) then
+        return null;
+    end if;
+
+    perform realtime.send(
+        jsonb_build_object(
+            'table', 'score_analyses',
+            'document_id', new.document_id,
+            'status', new.status,
+            'error', new.error,
+            'progress', new.progress,
+            'updated_at', new.updated_at
+        ),
+        'score_analysis', -- event
+        'doc-db:' || new.document_id::text, -- topic (receive-only for clients)
+        true -- private
+    );
+    return null;
+end;
+$$;
+
+revoke all on function public.broadcast_annotation_changes () from public, anon, authenticated;
+revoke all on function public.broadcast_document_changes () from public, anon, authenticated;
+revoke all on function public.broadcast_score_analysis_changes () from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- The owner's own read of a removed score
+-- ---------------------------------------------------------------------------
+-- documents_select (20260802044133) lets an owner read their row without
+-- document_role(), so a removed score's title and storage path stayed one
+-- PostgREST request away from its uploader, and the app, re-checking after
+-- the hint above, would still have found it. The owner clause now stops at a
+-- removal; a restricted score stays readable by its owner, as document_role()
+-- has it. The function answers only about the caller's own scores.
+create or replace function public.owned_document_removed (doc uuid) returns boolean language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1
+        from public.content_takedowns ct
+        join public.documents d on d.id = ct.document_id
+        where ct.document_id = doc
+          and ct.lifted_at is null
+          and ct.action = 'remove'
+          and d.owner_id = (select auth.uid())
+    );
+$$;
+
+revoke all on function public.owned_document_removed (uuid) from public;
+revoke all on function public.owned_document_removed (uuid) from anon;
+grant execute on function public.owned_document_removed (uuid) to authenticated;
+
+-- ALTER, not drop and create: the policy keeps its name, command and role, and
+-- owners never lose their read mid-migration.
+alter policy documents_select on public.documents
+using (
+    (owner_id = (select auth.uid()) and not public.owned_document_removed (id))
+    or public.document_role (id) is not null
+);
 
 -- 20261014120000's library_documents(), unchanged but for the takedown clause:
 -- it lists memberships directly, so document_role() alone would leave a

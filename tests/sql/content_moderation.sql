@@ -1,6 +1,10 @@
 -- Behaviour proof for 20261020150000_content_moderation.sql: a restricted
--- score answers its owner only, a removed one nobody; neither can gain members
--- or share links; lifting restores exactly the access that was suspended; a
+-- score answers its owner only, a removed one nobody (its owner's direct read
+-- of the row included); neither can gain members or share links; viewers
+-- already connected are told to re-check and the score's committed changes
+-- stop going out on realtime until the takedown is lifted (needs the local
+-- stack running, so today's realtime.messages partition exists: `npm run
+-- cloud:up`); lifting restores exactly the access that was suspended; a
 -- copyright takedown is a strike and lifting it withdraws the strike; the
 -- moderator RPCs refuse everyone else; and no client role can read or write
 -- the moderation tables.
@@ -49,6 +53,25 @@ begin
 perform set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
 perform set_config('role', 'service_role', true);
 end $f$;
+create function pg_temp.a(n int) returns uuid language sql immutable as $f$ select ('c0de10a0-5ac0-4000-8000-00000000000' || n)::uuid $f$;
+-- A committed mark on a score, written the way the server writes it.
+create function pg_temp.mark(p_id uuid, p_doc uuid) returns void language sql as $f$
+    insert into public.annotations (id, document_id, page, kind, color, payload, created_by)
+    values (p_id, p_doc, 0, 'stroke', '#000', '{"pts":[0,0,1],"w":0.01}', pg_temp.u(2))
+$f$;
+create function pg_temp.broadcast_of(p_mark uuid) returns boolean language sql as $f$
+    select exists (
+        select 1 from realtime.messages
+        where topic like 'doc-db:%' and payload -> 'record' ->> 'id' = p_mark::text
+    )
+$f$;
+create function pg_temp.told_to_recheck(p_doc uuid, p_user uuid) returns boolean language sql as $f$
+    select exists (
+        select 1 from realtime.messages
+        where topic = 'doc:' || p_doc::text and event = 'membership'
+          and payload ->> 'user_id' = p_user::text and payload -> 'role' = 'null'::jsonb
+    )
+$f$;
 create function pg_temp.library_ids() returns uuid[] language sql as $f$
     select coalesce(array_agg((e ->> 'id')::uuid), '{}') from jsonb_array_elements(public.library_documents () -> 'documents') e
 $f$;
@@ -78,6 +101,13 @@ select pg_temp.as_user(2);
 select pg_temp.chk('01 before: the editor has the score', $q$select public.document_role(pg_temp.d(1)) = 'editor' and pg_temp.d(1) = any (pg_temp.library_ids())$q$);
 reset role;
 select pg_temp.chk('02 reference looks like CR-XXXXXXXXXX', $q$select reference ~ '^CR-[0-9A-F]{10}$' from public.content_reports limit 1$q$);
+
+-- ---- realtime, before: a mark goes out on doc-db:{id}. Realtime creates the
+-- day's realtime.messages partition only while it runs; without it every send
+-- is a swallowed WARNING and the realtime checks below would prove nothing.
+select pg_temp.chk('03 realtime is running (today''s realtime.messages partition exists)', $q$select exists (select 1 from pg_class where relnamespace = 'realtime'::regnamespace and relname = 'messages_' || to_char(now(), 'YYYY_MM_DD'))$q$);
+select pg_temp.mark(pg_temp.a(1), pg_temp.d(1));
+select pg_temp.chk('04 before: a committed mark is broadcast on doc-db:{id}', $q$select pg_temp.broadcast_of(pg_temp.a(1))$q$);
 
 -- ---- client roles cannot touch the moderation tables
 select pg_temp.as_user(4);
@@ -116,6 +146,34 @@ select pg_temp.as_user(3);
 select pg_temp.refused_with('37 a guest cannot join through the old link', $q$select * from public.redeem_share_link('c0deLINK1')$q$, '42501', 'content_unavailable');
 reset role;
 
+-- ---- viewers already connected (realtime authorizes at join, not per message)
+select pg_temp.chk('70 restrict: the connected editor is told to re-check', $q$select pg_temp.told_to_recheck(pg_temp.d(1), pg_temp.u(2))$q$);
+select pg_temp.chk('71 restrict: the owner, who keeps it, is not', $q$select not pg_temp.told_to_recheck(pg_temp.d(1), pg_temp.u(1))$q$);
+select pg_temp.chk('72 remove: the editor and the owner are both told', $q$select pg_temp.told_to_recheck(pg_temp.d(2), pg_temp.u(2)) and pg_temp.told_to_recheck(pg_temp.d(2), pg_temp.u(1))$q$);
+select pg_temp.mark(pg_temp.a(2), pg_temp.d(1));
+select pg_temp.mark(pg_temp.a(3), pg_temp.d(2));
+select pg_temp.chk('73 taken down: a new mark is not broadcast, restricted or removed', $q$select not pg_temp.broadcast_of(pg_temp.a(2)) and not pg_temp.broadcast_of(pg_temp.a(3))$q$);
+update public.documents set content_rev = content_rev + 1 where id = pg_temp.d(1);
+select pg_temp.chk('74 taken down: a replaced PDF is not broadcast', $q$select not exists (select 1 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text and payload ->> 'table' = 'documents')$q$);
+select pg_temp.chk('75 the hints carry ids only', $q$select bool_and(payload - 'table' - 'document_id' - 'user_id' - 'role' - 'id' = '{}'::jsonb) from realtime.messages where topic in ('doc:' || pg_temp.d(1)::text, 'doc:' || pg_temp.d(2)::text) and event = 'membership'$q$);
+-- Something on each topic to be refused: a join is a read of realtime.messages
+-- under the joining user with realtime.topic set (tests/sql/column_integrity.sql).
+insert into realtime.messages (topic, extension, event, payload, private)
+select t, 'broadcast', 'probe', '{}', true
+from unnest(array['doc:' || pg_temp.d(1)::text, 'doc-db:' || pg_temp.d(1)::text]) as t;
+select pg_temp.as_user(2);
+select set_config('realtime.topic', 'doc:' || pg_temp.d(1)::text, true);
+select pg_temp.chk('76 restricted: the editor cannot re-join doc:{id}', $q$select count(*) = 0 from realtime.messages where topic = 'doc:' || pg_temp.d(1)::text$q$);
+select set_config('realtime.topic', 'doc-db:' || pg_temp.d(1)::text, true);
+select pg_temp.chk('77 restricted: nor doc-db:{id}', $q$select count(*) = 0 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text$q$);
+select pg_temp.as_user(1);
+select set_config('realtime.topic', 'doc-db:' || pg_temp.d(1)::text, true);
+select pg_temp.chk('78 restricted: its owner still can', $q$select count(*) > 0 from realtime.messages where topic = 'doc-db:' || pg_temp.d(1)::text$q$);
+select set_config('realtime.topic', '', true);
+select pg_temp.chk('79 removed: its owner cannot read the row directly either', $q$select count(*) = 0 from public.documents where id = pg_temp.d(2)$q$);
+select pg_temp.chk('80 restricted: its owner still reads the row', $q$select count(*) = 1 from public.documents where id = pg_temp.d(1)$q$);
+reset role;
+
 -- ---- lift the restriction (counter-notice succeeded)
 select pg_temp.as_service();
 select pg_temp.chk('40 lift answers the score and uploader', $q$select (public.lift_content_takedown((select id from public.content_takedowns where document_id = pg_temp.d(1)), 'Counter-notice, no court action', pg_temp.u(4)) ->> 'uploader_id')::uuid = pg_temp.u(1)$q$);
@@ -125,6 +183,10 @@ reset role;
 select pg_temp.as_user(2);
 select pg_temp.chk('43 lifted: the editor has it back, membership intact', $q$select public.document_role(pg_temp.d(1)) = 'editor' and pg_temp.d(1) = any (pg_temp.library_ids())$q$);
 select pg_temp.chk('44 still removed: score 2 stays out of reach', $q$select public.document_role(pg_temp.d(2)) is null$q$);
+reset role;
+select pg_temp.mark(pg_temp.a(4), pg_temp.d(1));
+select pg_temp.mark(pg_temp.a(5), pg_temp.d(2));
+select pg_temp.chk('46 lifted: marks are broadcast again; still removed: not', $q$select pg_temp.broadcast_of(pg_temp.a(4)) and not pg_temp.broadcast_of(pg_temp.a(5))$q$);
 select pg_temp.as_user(3);
 select pg_temp.chk('45 lifted: the old link works again', $q$select granted_role = 'viewer' from public.redeem_share_link('c0deLINK1')$q$);
 reset role;
