@@ -442,3 +442,43 @@ describe('20261020160500_cancel_link_save_replayable — replays cleanly, and le
         }
     });
 });
+
+/**
+ * 20261020160600 (launch checkout, Codex round 6 on #62) serializes the
+ * cancel-link history: advisory locks taken by every delete and every insert
+ * of a token, a unique outbox-id tombstone, and the tick taking its locks
+ * before it deletes. It replaces functions 20261020160400 and 20261020160500
+ * made, adds one trigger and one index, and must apply twice cleanly -- CI's
+ * supabase-local job replays it after the three before it -- and sort before
+ * #61's first migration. Reconciled by hand at merge time, like the blocks
+ * above: the generator does not write it.
+ */
+describe('20261020160600_cancel_link_serialized_history — replays cleanly', () => {
+    const NAME = '20261020160600_cancel_link_serialized_history.sql';
+    const sql = (): string => migrations().find(({ name }) => name === NAME)?.sql ?? '';
+
+    it('exists, after 20261020160500 and before #61 district seats', () => {
+        const names = migrations().map(({ name }) => name);
+        expect(names.indexOf(NAME)).toBeGreaterThan(names.indexOf('20261020160500_cancel_link_save_replayable.sql'));
+        expect(NAME < '20261020180400').toBe(true);
+    });
+
+    it('guards every index and trigger it adds, drops no function, and only replaces functions', () => {
+        const text = sql();
+        expect(text).not.toMatch(/create\s+(table|function)\s/i);
+        expect(text).not.toMatch(/create\s+(unique\s+)?index\s+(?!if\s+not\s+exists)/i);
+        expect(text).not.toMatch(/add\s+(column|constraint)\s/i);
+        expect(text).not.toMatch(/drop\s+function/i);
+        expect(text).toMatch(/drop\s+index\s+if\s+exists\s+public\.billing_cancel_token_tombstones_outbox;/i);
+        for (const trigger of text.matchAll(/create\s+trigger\s+([a-z_]+)\s+[\s\S]*?\son\s+(public\.[a-z_]+)/gi)) {
+            expect(text).toContain(`drop trigger if exists ${trigger[1]} on ${trigger[2]}`);
+        }
+        for (const fn of ['save_cancel_link_token_v2 (uuid, uuid, text, uuid)', 'billing_mail_outbox_tick ()']) {
+            expect(text).toContain(`grant execute on function public.${fn} to service_role`);
+        }
+    });
+
+    it('leaves the cron job to the migration that schedules it', () => {
+        expect(sql()).not.toMatch(/cron\.(schedule|unschedule)/i);
+    });
+});
