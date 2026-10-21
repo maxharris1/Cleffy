@@ -75,7 +75,11 @@ for each row execute function public.subscriptions_track_past_due ();
 -- One row per district studio. Separate from studio_seat_overrides on purpose:
 -- clearing an override at contract end must not take the contract end with it,
 -- or the retention purge would never see the district.
-create table public.district_billing (
+--
+-- "if not exists" because PR #64's 20261021120700_district_retention.sql
+-- declares the same table the same way, so whichever reaches a database first
+-- creates it and the other is a no-op. In timestamp order this one runs first.
+create table if not exists public.district_billing (
     studio_id uuid primary key references public.studios (id) on delete cascade,
     stripe_subscription_id text references public.subscriptions (stripe_subscription_id) on delete set null,
     -- Null: never auto-purged.
@@ -90,9 +94,9 @@ create table public.district_billing (
     check ((contract_ends_source is null) = (contract_ends_at is null) or contract_ends_source = 'admin')
 );
 
-create index district_billing_subscription on public.district_billing (stripe_subscription_id);
+create index if not exists district_billing_subscription on public.district_billing (stripe_subscription_id);
 
-create index district_billing_contract_ends on public.district_billing (contract_ends_at)
+create index if not exists district_billing_contract_ends on public.district_billing (contract_ends_at)
 where contract_ends_at is not null;
 
 -- Append-only, and like studio_seat_override_log it outlives the studio.

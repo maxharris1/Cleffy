@@ -235,7 +235,7 @@ describe('the seat-cap migration', () => {
     });
 
     it('declares contract_ends_at nullable on the district billing record, where the retention purge reads it', () => {
-        expect(SQL).toMatch(/create table public\.district_billing \(/i);
+        expect(SQL).toMatch(/create table if not exists public\.district_billing \(/i);
         expect(SQL).toMatch(/\n\s+contract_ends_at timestamptz,\n/);
     });
 
