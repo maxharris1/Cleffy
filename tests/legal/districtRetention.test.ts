@@ -392,11 +392,9 @@ describe('the district purge’s scope (20261021120800)', () => {
     });
 
     it('bounds the evidence by the seat’s whole tenure, which outlives the seat', () => {
-        const inTenure = fn('district_evidence_in_tenure');
-        expect(inTenure).toMatch(
-            /t\.started_at <= ms\.created_at\s+and \(t\.ended_at is null or ms\.created_at < t\.ended_at\)/,
-        );
-        expect(inTenure).not.toMatch(/studio_members/);
+        const heldAt = fn('district_held_at');
+        expect(heldAt).toMatch(/t\.started_at <= p_at\s+and \(t\.ended_at is null or p_at < t\.ended_at\)/);
+        expect(heldAt).not.toMatch(/studio_members/);
         const tenure = fn('studio_members_seat_tenure');
         expect(tenure).toMatch(/values \(new\.studio_id, new\.user_id, new\.created_at\)/);
         expect(tenure).toMatch(/set ended_at = greatest\(now\(\), t\.started_at\)/);
@@ -404,6 +402,39 @@ describe('the district purge’s scope (20261021120800)', () => {
             /create trigger studio_members_seat_tenure after insert or delete on public\.studio_members/,
         );
         expect(scope).toMatch(/grant select on table public\.studio_seat_tenures to service_role;/);
+    });
+
+    it('never attributes a student to a time before the district existed, an owner’s included', () => {
+        const heldAt = fn('district_held_at');
+        expect(heldAt).toMatch(/p_at >= greatest\(st\.created_at, b\.created_at\)/);
+        // The owner branch is bound by that same moment: no owner shortcut around it.
+        expect(heldAt).toMatch(/and p_at >= greatest[^]*?and \(st\.owner_id = p_teacher/);
+        const trigger = fn('managed_students_district_attribution');
+        expect(trigger).toMatch(
+            /not public\.district_held_at \(new\.teacher_id, new\.district_studio_id, new\.created_at\)/,
+        );
+        const backfill = fn('backfill_district_student_attribution');
+        expect(backfill).toMatch(/then 'before_district'/);
+        expect(backfill).toMatch(/not public\.district_held_at \(l\.teacher_id, l\.studios\[1\], l\.created_at\)/);
+    });
+
+    it('leaves ambiguous rows unattributed and logs every run’s counts, attributed and skipped', () => {
+        const backfill = fn('backfill_district_student_attribution');
+        expect(backfill).toMatch(/when cardinality\(l\.studios\) > 1 then 'ambiguous'/);
+        expect(backfill).toMatch(/when cardinality\(l\.studios\) = 0 then 'no_evidence'/);
+        for (const key of [
+            'attributed',
+            'skipped_no_evidence',
+            'skipped_ambiguous',
+            'skipped_district_gone',
+            'skipped_before_district',
+            'skipped_outside_tenure',
+        ]) {
+            expect(backfill).toContain(`'${key}'`);
+        }
+        expect(backfill).toMatch(/values \(null, 'attribution_backfill_run', v_result\)/);
+        expect(backfill).toMatch(/'attribution_backfilled', v_district -> 'counts'/);
+        expect(scope).toMatch(/studio_id is not null or step = 'attribution_backfill_run'/);
     });
 
     it('is proven against a database for a private roster, a departed teacher and two districts', () => {
@@ -415,6 +446,9 @@ describe('the district purge’s scope (20261021120800)', () => {
             'a seat or ownership when the student was created is not evidence: with no record, no legacy row is attributed',
             "a departed teacher''s legacy student is attributed within the seat''s tenure, start to end",
             'but never on evidence outside the tenure: before the seat started, or once it ended',
+            "never a student created before the district existed, the owner''s own included (before its contract, before its studio)",
+            'evidence naming two districts is ambiguous: the student stays unattributed',
+            'the run returns and logs its counts, attributed and skipped by reason',
             "the hard delete removes the districts'' students, the departed teacher''s l1 included",
             "and never a private student (p1 from before joining, p2 added privately while seated, l2 from after leaving, oa0 from before the district), nor Q''s",
         ]) {

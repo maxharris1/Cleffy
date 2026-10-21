@@ -105,8 +105,10 @@ from unnest(array['a1', 'a2', 'a3', 'a4', 'a5', 'a6']) k;
 insert into auth.users (id, aud, role, email, raw_app_meta_data)
 select ('e2000000-0000-4000-8000-0000000000' || k)::uuid, 'authenticated', 'authenticated',
        'ds-' || k || '@students.cleffy.app', '{"user_type":"student"}'::jsonb
-from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'c1', 'c2']) k;
--- b1 p1, b2 p2, b8 p3, b3 l1, b4 l2, b5 t1, b9 oa0, b6 oa1, b7 q1; c1 and c2 are refusal probes
+from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'ba', 'bb', 'bc', 'c1', 'c2']) k;
+-- b1 p1, b2 p2, b8 p3, b3 l1, b4 l2, b5 t1, b9 oa0, b6 oa1, b7 q1; legacy-only rows: ba t2 (T, while seated in
+-- both districts), bb oa2 (OA, before A was a district), bc oa3 (OA, before A's studio existed); c1 and c2 are
+-- refusal probes
 
 -- Provisions a roster row the way student-provision does: the district is the
 -- one the call names (null: a private student).
@@ -207,6 +209,9 @@ select pg_temp.provision ('b3', 'a4', now() - interval '8 days', 'e2000000-0000-
 select pg_temp.provision ('b5', 'a5', now() - interval '1 day', 'e2000000-0000-4000-8000-0000000005db');
 select pg_temp.provision ('b6', 'a1', now() - interval '3 days', 'e2000000-0000-4000-8000-0000000005da');
 select pg_temp.provision ('b7', 'a6', now() - interval '2 days');
+select pg_temp.provision ('ba', 'a5', now() - interval '1 day');
+select pg_temp.provision ('bb', 'a1', now() - interval '25 days');
+select pg_temp.provision ('bc', 'a1', now() - interval '40 days');
 
 -- L leaves A, then provisions l2 as a private teacher.
 delete from public.studio_members
@@ -275,6 +280,18 @@ select pg_temp.refused (
 select pg_temp.refused (
     'nor into a studio that is not a district, their own included',
     $q$select pg_temp.provision ('c1', 'a3', now(), 'e2000000-0000-4000-8000-0000000005dc')$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor for a time before their seat started, even while seated now',
+    $q$select pg_temp.provision ('c1', 'a3', now() - interval '11 days', 'e2000000-0000-4000-8000-0000000005da')$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor, as the owner, for a time before the studio became a district',
+    $q$select pg_temp.provision ('c1', 'a1', now() - interval '25 days', 'e2000000-0000-4000-8000-0000000005da')$q$,
     '42501'
 );
 
@@ -420,34 +437,49 @@ select id, district_studio_id from public.managed_students where id::text like '
 
 grant select on before_backfill to public;
 
--- Pretend p1, p3, l1, l2, t1 and oa1 predate the column. p2 does not: it was
--- provisioned privately by a seated teacher, and stays decided.
+-- Pretend p1, p3, l1, l2, t1, t2 and oa1-oa3 predate the column. p2 and oa0
+-- do not: they were provisioned privately by a seated teacher and by the
+-- owner, and stay decided.
 select pg_temp.holds (
     'legacy rows can be prepared',
-    $q$select pg_temp.make_legacy (array['b1', 'b8', 'b3', 'b4', 'b5', 'b6'])$q$
+    $q$select pg_temp.make_legacy (array['b1', 'b8', 'b3', 'b4', 'b5', 'b6', 'ba', 'bb', 'bc'])$q$
 );
 
-select public.backfill_district_student_attribution ();
+create temp table backfill_runs (n serial, result jsonb);
+
+grant all on backfill_runs to public;
+
+grant usage on sequence backfill_runs_n_seq to public;
+
+insert into backfill_runs (result) select to_jsonb (public.backfill_district_student_attribution ());
 
 select pg_temp.holds (
     'a seat or ownership when the student was created is not evidence: with no record, no legacy row is attributed',
     $q$select pg_temp.district_of ('b8') is null and pg_temp.district_of ('b6') is null
        and pg_temp.district_of ('b3') is null and pg_temp.district_of ('b5') is null
-       and pg_temp.decided_by ('b8') = 'legacy'$q$
+       and pg_temp.decided_by ('b8') = 'legacy'
+       and (select result from backfill_runs where n = 1)
+           = '{"attributed": 0, "skipped_no_evidence": 9, "skipped_ambiguous": 0, "skipped_district_gone": 0,
+               "skipped_before_district": 0, "skipped_outside_tenure": 0}'::jsonb$q$
 );
 
 -- The district's own records: p3, l1, oa1, and (wrongly) p1 from before P's
--- seat and l2 from after L left, all named as A's.
+-- seat, l2 from after L left, and oa2 and oa3 from before A was a district,
+-- all named as A's; t2 named by both A and B.
 select pg_temp.holds (
     'evidence can be recorded',
     $q$select pg_temp.evidence ('b8', 'e2000000-0000-4000-8000-0000000005da')
           and pg_temp.evidence ('b3', 'e2000000-0000-4000-8000-0000000005da')
           and pg_temp.evidence ('b6', 'e2000000-0000-4000-8000-0000000005da')
           and pg_temp.evidence ('b1', 'e2000000-0000-4000-8000-0000000005da')
-          and pg_temp.evidence ('b4', 'e2000000-0000-4000-8000-0000000005da')$q$
+          and pg_temp.evidence ('b4', 'e2000000-0000-4000-8000-0000000005da')
+          and pg_temp.evidence ('bb', 'e2000000-0000-4000-8000-0000000005da')
+          and pg_temp.evidence ('bc', 'e2000000-0000-4000-8000-0000000005da')
+          and pg_temp.evidence ('ba', 'e2000000-0000-4000-8000-0000000005da')
+          and pg_temp.evidence ('ba', 'e2000000-0000-4000-8000-0000000005db')$q$
 );
 
-select public.backfill_district_student_attribution ();
+insert into backfill_runs (result) select to_jsonb (public.backfill_district_student_attribution ());
 
 select pg_temp.holds (
     'the backfill attributes, on evidence, the owner''s student and a seated teacher''s student created during the seat',
@@ -481,6 +513,37 @@ select pg_temp.holds (
 );
 
 select pg_temp.holds (
+    'never a student created before the district existed, the owner''s own included (before its contract, before its studio)',
+    $q$select pg_temp.district_of ('bb') is null and pg_temp.district_of ('bc') is null
+       and pg_temp.decided_by ('bb') = 'legacy' and pg_temp.decided_by ('bc') = 'legacy'$q$
+);
+
+select pg_temp.holds (
+    'evidence naming two districts is ambiguous: the student stays unattributed',
+    $q$select pg_temp.district_of ('ba') is null and pg_temp.decided_by ('ba') = 'legacy'$q$
+);
+
+select pg_temp.holds (
+    'the run returns and logs its counts, attributed and skipped by reason',
+    $q$select (select result from backfill_runs where n = 2)
+           = '{"attributed": 3, "skipped_no_evidence": 1, "skipped_ambiguous": 1, "skipped_district_gone": 0,
+               "skipped_before_district": 2, "skipped_outside_tenure": 2}'::jsonb
+       and exists (select 1 from public.district_retention_log
+                   where studio_id is null and step = 'attribution_backfill_run'
+                     and counts = (select result from backfill_runs where n = 2))$q$
+);
+
+select pg_temp.holds (
+    'and per district named, with every outcome the district''s records met',
+    $q$select exists (select 1 from public.district_retention_log
+                      where studio_id = 'e2000000-0000-4000-8000-0000000005da' and step = 'attribution_backfilled'
+                        and counts = '{"attributed": 3, "outside_tenure": 2, "before_district": 2, "ambiguous": 1}')
+       and exists (select 1 from public.district_retention_log
+                   where studio_id = 'e2000000-0000-4000-8000-0000000005db' and step = 'attribution_backfilled'
+                     and counts = '{"ambiguous": 1}')$q$
+);
+
+select pg_temp.holds (
     'a backfill never revisits a row decided at provisioning, a seated teacher''s private student included',
     $q$select pg_temp.district_of ('b2') is null and pg_temp.decided_by ('b2') = 'provisioned'
        and pg_temp.district_of ('b9') is null and pg_temp.decided_by ('b9') = 'provisioned'$q$
@@ -490,12 +553,12 @@ select pg_temp.holds (
 select pg_temp.holds (
     'evidence recorded later is picked up by the next run',
     $q$select pg_temp.evidence ('b5', 'e2000000-0000-4000-8000-0000000005db')
-          and public.backfill_district_student_attribution () = 1$q$
+          and (public.backfill_district_student_attribution () ->> 'attributed')::int = 1$q$
 );
 
 select pg_temp.holds (
     'the backfill touched nothing it was not asked to, and a second run changes nothing',
-    $q$select public.backfill_district_student_attribution () = 0
+    $q$select (public.backfill_district_student_attribution () ->> 'attributed')::int = 0
        and not exists (
            select 1 from before_backfill b join public.managed_students ms using (id)
            where ms.district_studio_id is distinct from b.district_studio_id)$q$
@@ -530,7 +593,8 @@ select pg_temp.holds (
 select pg_temp.holds (
     'and never a private student (p1 from before joining, p2 added privately while seated, l2 from after leaving, oa0 from before the district), nor Q''s',
     $q$select pg_temp.live ('b1') and pg_temp.live ('b2') and pg_temp.live ('b4') and pg_temp.live ('b7')
-       and pg_temp.live ('b9') and pg_temp.live ('c2')
+       and pg_temp.live ('b9') and pg_temp.live ('ba') and pg_temp.live ('bb') and pg_temp.live ('bc')
+       and pg_temp.live ('c2')
        and (select bool_and(deleted_at is null and payload ->> 'text' = 'student work') from public.annotations
             where created_by in ('e2000000-0000-4000-8000-0000000000b1', 'e2000000-0000-4000-8000-0000000000b2',
                                  'e2000000-0000-4000-8000-0000000000b4', 'e2000000-0000-4000-8000-0000000000b7',

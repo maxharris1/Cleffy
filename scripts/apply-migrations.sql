@@ -11175,6 +11175,9 @@ $$;
 --    or not; one that names a district the teacher is not in is refused.
 --  * Cleffy has no classes or invite records a student is created under, so
 --    the provisioning call is the only place that context exists.
+--  * Never for a time before the district (its studio and its contract) or
+--    the teacher's seat in it existed (district_held_at), and when in doubt,
+--    not at all: an unattributed student is never purged.
 --
 -- The record is checked by a BEFORE INSERT trigger, whatever path inserts the
 -- row (both student-provision branches today). It cannot be changed by an
@@ -11251,6 +11254,14 @@ begin
             raise exception 'the teacher does not own or hold a seat in that district'
                 using errcode = '42501';
         end if;
+        -- Never a student dated before the district or the seat existed: a
+        -- back-dated insert (none of the app's paths writes created_at) is
+        -- refused rather than attributed to a time the district did not cover.
+        if new.district_studio_id is not null
+           and not public.district_held_at (new.teacher_id, new.district_studio_id, new.created_at) then
+            raise exception 'the student predates the teacher''s seat in that district, or the district itself'
+                using errcode = '42501';
+        end if;
     elsif (new.district_studio_id is distinct from old.district_studio_id
            or new.district_attribution is distinct from old.district_attribution)
           and current_setting('cleffy.district_attribution', true) is distinct from 'admin' then
@@ -11300,7 +11311,7 @@ alter table public.district_retention_log drop constraint if exists district_ret
 alter table public.district_retention_log
 add constraint district_retention_log_step_check check (
     step in ('notice_queued', 'notice_sent', 'soft_deleted', 'hard_deleted', 'cancelled', 'attribution_changed',
-             'attribution_backfilled')
+             'attribution_backfilled', 'attribution_backfill_run')
 );
 
 -- ---------------------------------------------------------------------------
@@ -11419,64 +11430,131 @@ begin
 end;
 $$;
 
--- Was the student created while their teacher owned, or held a seat in, the
--- district: from the seat's start to its end, so a departed teacher counts for
--- the students they created while seated and for none after.
-create or replace function public.district_evidence_in_tenure (p_managed_student uuid, p_studio uuid)
+-- Did this teacher hold this district at this moment? Only if the district
+-- existed then -- its studio, and its district contract (district_billing's
+-- created_at: a studio is not a district before it has one) -- and the teacher
+-- owned the studio (from its creation; ownership never moves) or held a seat
+-- whose tenure covers the moment, from the seat's start to its end. So a
+-- departed teacher counts for the students they created while seated and for
+-- none after, and nobody counts for a time before the district existed.
+drop function if exists public.district_evidence_in_tenure (uuid, uuid);
+
+create or replace function public.district_held_at (p_teacher uuid, p_studio uuid, p_at timestamptz)
 returns boolean language sql stable security definer
 set search_path = public as $$
     select exists (
         select 1
-        from public.managed_students ms
-        join public.district_billing b on b.studio_id = p_studio
-        where ms.id = p_managed_student
-          and (exists (select 1 from public.studios st where st.id = p_studio and st.owner_id = ms.teacher_id)
+        from public.district_billing b
+        join public.studios st on st.id = b.studio_id
+        where b.studio_id = p_studio
+          and p_at >= greatest(st.created_at, b.created_at)
+          and (st.owner_id = p_teacher
                or exists (select 1 from public.studio_seat_tenures t
-                          where t.studio_id = p_studio and t.user_id = ms.teacher_id
-                            and t.started_at <= ms.created_at
-                            and (t.ended_at is null or ms.created_at < t.ended_at)))
+                          where t.studio_id = p_studio and t.user_id = p_teacher
+                            and t.started_at <= p_at
+                            and (t.ended_at is null or p_at < t.ended_at)))
     );
 $$;
 
+-- A record of each backfill run that is about no one studio has no studio_id.
+alter table public.district_retention_log alter column studio_id drop not null;
+
+alter table public.district_retention_log drop constraint if exists district_retention_log_studio_present;
+
+alter table public.district_retention_log
+add constraint district_retention_log_studio_present check (
+    studio_id is not null or step = 'attribution_backfill_run'
+);
+
 -- Legacy rows only. A row provisioned under this migration was decided at
 -- provisioning, a private one included, and the backfill never revisits it.
--- Rerunnable: it touches undecided legacy rows only, and new evidence is
--- picked up by running it again.
+-- Every undecided legacy row ends a run in exactly one outcome:
+--  attributed       one district's evidence, inside the teacher's tenure there
+--  no_evidence      no record names a district (a seat alone is not evidence)
+--  ambiguous        records name more than one district
+--  district_gone    the district named is no longer a district
+--  before_district  created before the district (its studio or its contract)
+--  outside_tenure   created when the teacher neither owned nor sat in it
+-- Only 'attributed' changes anything; every other row stays unattributed,
+-- and an unattributed student is never purged. The counts are logged per
+-- district named and once for the run, and returned. Rerunnable: it touches
+-- undecided legacy rows only, and evidence recorded later is picked up by
+-- running it again.
 drop function if exists public.backfill_district_student_attribution ();
 
-create function public.backfill_district_student_attribution () returns int language plpgsql
+create function public.backfill_district_student_attribution () returns jsonb language plpgsql
 security definer
 set search_path = public as $$
 declare
-    v_n int;
+    v_totals jsonb;
+    v_districts jsonb;
+    v_attributed int;
+    v_result jsonb;
+    v_district jsonb;
 begin
     perform set_config('cleffy.district_attribution', 'admin', true);
-    with evidence as (
-        select e.managed_student_id as id, array_agg(e.studio_id) as studios
-        from public.district_student_evidence e
-        join public.managed_students ms on ms.id = e.managed_student_id
-        where ms.district_attribution = 'legacy' and ms.district_studio_id is null
-        group by e.managed_student_id
-    ), decided as (
-        select ev.id, ev.studios[1] as studio_id
-        from evidence ev
-        where cardinality(ev.studios) = 1
-          and public.district_evidence_in_tenure (ev.id, ev.studios[1])
-    )
-    update public.managed_students ms
-    set district_studio_id = d.studio_id, district_attribution = 'backfilled'
-    from decided d
-    where ms.id = d.id;
-    get diagnostics v_n = row_count;
-    perform set_config('cleffy.district_attribution', '', true);
-    if v_n > 0 then
-        insert into public.district_retention_log (studio_id, step, counts)
-        select ms.district_studio_id, 'attribution_backfilled', jsonb_build_object('students', count(*))
+    with legacy as (
+        select ms.id, ms.teacher_id, ms.created_at,
+               array(select e.studio_id from public.district_student_evidence e
+                     where e.managed_student_id = ms.id order by e.studio_id) as studios
         from public.managed_students ms
-        where ms.district_attribution = 'backfilled'
-        group by ms.district_studio_id;
+        where ms.district_attribution = 'legacy' and ms.district_studio_id is null
+    ), classified as (
+        select l.id, l.studios,
+               case
+                   when cardinality(l.studios) = 0 then 'no_evidence'
+                   when cardinality(l.studios) > 1 then 'ambiguous'
+                   when not exists (select 1 from public.district_billing b
+                                    join public.studios st on st.id = b.studio_id
+                                    where b.studio_id = l.studios[1]) then 'district_gone'
+                   when l.created_at < (select greatest(st.created_at, b.created_at)
+                                        from public.district_billing b
+                                        join public.studios st on st.id = b.studio_id
+                                        where b.studio_id = l.studios[1]) then 'before_district'
+                   when not public.district_held_at (l.teacher_id, l.studios[1], l.created_at) then 'outside_tenure'
+                   else 'attributed'
+               end as outcome
+        from legacy l
+    ), updated as (
+        update public.managed_students ms
+        set district_studio_id = c.studios[1], district_attribution = 'backfilled'
+        from classified c
+        where c.outcome = 'attributed' and ms.id = c.id
+        returning ms.id
+    ), by_district as (
+        select d.studio_id, jsonb_object_agg(d.outcome, d.n) as counts
+        from (select s.studio_id, c.outcome, count(*) as n
+              from classified c cross join lateral unnest(c.studios) as s(studio_id)
+              group by s.studio_id, c.outcome) d
+        group by d.studio_id
+    )
+    select (select count(*) from updated),
+           coalesce((select jsonb_object_agg(o.outcome, o.n)
+                     from (select outcome, count(*) as n from classified group by outcome) o), '{}'::jsonb),
+           coalesce((select jsonb_agg(jsonb_build_object('studio_id', studio_id, 'counts', counts))
+                     from by_district), '[]'::jsonb)
+    into v_attributed, v_totals, v_districts;
+    perform set_config('cleffy.district_attribution', '', true);
+
+    v_result := jsonb_build_object(
+        'attributed', v_attributed,
+        'skipped_no_evidence', coalesce((v_totals ->> 'no_evidence')::int, 0),
+        'skipped_ambiguous', coalesce((v_totals ->> 'ambiguous')::int, 0),
+        'skipped_district_gone', coalesce((v_totals ->> 'district_gone')::int, 0),
+        'skipped_before_district', coalesce((v_totals ->> 'before_district')::int, 0),
+        'skipped_outside_tenure', coalesce((v_totals ->> 'outside_tenure')::int, 0)
+    );
+
+    if v_totals <> '{}'::jsonb then
+        for v_district in select * from jsonb_array_elements(v_districts) loop
+            insert into public.district_retention_log (studio_id, step, counts)
+            values ((v_district ->> 'studio_id')::uuid, 'attribution_backfilled', v_district -> 'counts');
+        end loop;
+        insert into public.district_retention_log (studio_id, step, counts)
+        values (null, 'attribution_backfill_run', v_result);
     end if;
-    return v_n;
+    raise notice 'district attribution backfill: %', v_result;
+    return v_result;
 end;
 $$;
 
@@ -11499,7 +11577,7 @@ begin
         'public.district_provisionable (uuid, uuid)',
         'public.studio_members_seat_tenure ()',
         'public.admin_record_district_evidence (uuid, uuid, text, text)',
-        'public.district_evidence_in_tenure (uuid, uuid)',
+        'public.district_held_at (uuid, uuid, timestamptz)',
         'public.managed_students_district_attribution ()',
         'public.admin_set_student_district (uuid, uuid, text)',
         'public.backfill_district_student_attribution ()',

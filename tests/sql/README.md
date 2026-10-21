@@ -364,13 +364,22 @@ for a student created within the teacher's seat tenure, which
 `studio_seat_tenures` keeps after the teacher leaves -- so a departed teacher's
 legacy student created while seated is attributed, and evidence from before
 the seat started or after it ended is not. Evidence recorded later is picked up
-by the next run, and a run with nothing new is a no-op. Two districts' contracts then end: the soft and hard
+by the next run, and a run with nothing new is a no-op. Item A3: nothing is
+ever attributed to a time before the district existed (its studio, or its
+contract) or the seat started -- neither by the backfill (an owner's students
+from before the studio or the contract stay unattributed even with evidence)
+nor by a back-dated insert, which is refused. Evidence naming two districts is
+ambiguous and left unattributed. Each run returns and logs its counts:
+attributed, and skipped by reason (no evidence, ambiguous, district gone,
+before the district, outside the tenure), per district named and once for the
+run. Two districts' contracts then end: the soft and hard
 deletes take exactly the four district students and leave every private
 student, an unrelated teacher's, every teacher account and the score untouched,
 with per-district counts in the log. Proven against the local stack on
-2026-10-21: all 41 checks passed; against the item-A1 migration (no tenure, no
-evidence table), 13 fail; against the round-2 migration, the item-A1 checks
-alone (33) had 20 failing.
+2026-10-21: all 47 checks passed. Each item's checks were run against the
+previous state first: the item-A1 checks (33) had 20 failing on the round-2
+migration, the item-A2 checks (41) 13 on the item-A1 migration, and the
+item-A3 checks (47) 13 on the item-A2 migration.
 
 `district_billing_canonical.sql` is a byte-for-byte copy of PR #61's proof of
 the canonical `public.district_billing` block, which this branch's
