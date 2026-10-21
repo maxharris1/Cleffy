@@ -159,8 +159,7 @@ export const parseWorkPageLicenses = (html: string): Map<string, FileLicense> =>
                 continue;
             }
             const bound = byIndex.get(entry.index);
-            const matches =
-                bound === cell || (!bound && entry.position > previousCellEnd && entry.position < cell.position);
+            const matches = bound === cell || (!bound && entry.position > previousCellEnd && entry.position < cell.position);
             if (matches) {
                 out.set(entry.filename, {
                     licenseLabel: cell.licenseLabel,
