@@ -6,10 +6,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
     buildDistrictNotice,
+    type DeliverDeps,
     deliverDistrictNotices,
+    type MailReservation,
     NOTICE_BATCH,
+    noticeIdempotencyKey,
     type DistrictNoticeRow,
 } from '../../supabase/functions/_shared/districtNotice';
+import { MAIL_CATEGORY_CAPS, MAIL_WINDOW_MS, mailLimit } from '../../supabase/functions/_shared/mailBudget';
 
 /**
  * District retention (decision 1): the export notice and the purge's shape.
@@ -25,6 +29,7 @@ const row = (id: number, overrides: Partial<DistrictNoticeRow> = {}): DistrictNo
     studio_name: 'Springfield Schools',
     contract_ends_at: '2026-09-30T00:00:00Z',
     purge_not_before: '2026-11-04T00:00:00Z',
+    created_at: '2026-10-17T03:57:00Z',
     ...overrides,
 });
 
@@ -43,14 +48,41 @@ describe('the district export notice', () => {
     });
 });
 
+const noticeSender = read('supabase/functions/district-retention-notices/index.ts');
+
+/** Every reservation is granted; `released` counts the ones handed back. */
+const openBudget = () => {
+    const budget = { reserved: 0, released: 0 };
+    const reserve = vi.fn(async (): Promise<MailReservation> => {
+        budget.reserved += 1;
+        return {
+            ok: true,
+            release: async () => {
+                budget.released += 1;
+            },
+        };
+    });
+    return { budget, reserve };
+};
+
+const deps = (overrides: Partial<DeliverDeps> = {}): DeliverDeps => ({
+    claim: async () => [row(1), row(2)],
+    reserve: openBudget().reserve,
+    hourlyLimit: MAIL_CATEGORY_CAPS.retentionNotice.hour,
+    send: vi.fn(async () => 'sent' as const),
+    finish: vi.fn(async () => true),
+    defer: vi.fn(async () => true),
+    ...overrides,
+});
+
 describe('delivering notices', () => {
     it('marks a sent notice sent, and a failed one failed (retried next run, never counted as sent)', async () => {
         const finish = vi.fn(async () => true);
         const send = vi.fn(async (to: string): Promise<'sent' | 'failed'> =>
             to === 'owner2@example.invalid' ? 'failed' : 'sent',
         );
-        const result = await deliverDistrictNotices({ claim: async () => [row(1), row(2)], send, finish });
-        expect(result).toEqual({ claimed: 2, sent: 1, failed: 1 });
+        const result = await deliverDistrictNotices(deps({ send, finish }));
+        expect(result).toEqual({ claimed: 2, sent: 1, failed: 1, deferred: 0 });
         expect(finish).toHaveBeenCalledWith(1, null);
         expect(finish).toHaveBeenCalledWith(2, 'send failed');
     });
@@ -65,23 +97,178 @@ describe('delivering notices', () => {
             }
             return 'sent' as const;
         });
-        const result = await deliverDistrictNotices({ claim: async () => [row(1), row(2)], send, finish });
-        expect(result).toEqual({ claimed: 2, sent: 1, failed: 1 });
+        const result = await deliverDistrictNotices(deps({ send, finish }));
+        expect(result).toEqual({ claimed: 2, sent: 1, failed: 1, deferred: 0 });
         expect(finish).toHaveBeenNthCalledWith(1, 1, 'send failed');
         expect(finish).toHaveBeenNthCalledWith(2, 2, null);
     });
 
     it('without a mail key nothing counts as sent', async () => {
         const finish = vi.fn(async () => true);
-        await deliverDistrictNotices({ claim: async () => [row(1)], send: async () => 'unconfigured', finish });
+        await deliverDistrictNotices(deps({ claim: async () => [row(1)], send: async () => 'unconfigured', finish }));
         expect(finish).toHaveBeenCalledWith(1, 'mail is not configured');
     });
 
-    it('claims a bounded batch, and reports a failed claim', async () => {
+    it('claims a bounded batch, no more than an hour of the budget, and reports a failed claim', async () => {
         const claim = vi.fn(async () => null);
-        expect(await deliverDistrictNotices({ claim, send: vi.fn(), finish: vi.fn() })).toBeNull();
-        expect(claim).toHaveBeenCalledWith(NOTICE_BATCH);
+        expect(await deliverDistrictNotices(deps({ claim }))).toBeNull();
+        expect(claim).toHaveBeenCalledWith(Math.min(NOTICE_BATCH, MAIL_CATEGORY_CAPS.retentionNotice.hour));
         expect(NOTICE_BATCH).toBeLessThanOrEqual(20);
+        const none = vi.fn(async () => []);
+        expect(await deliverDistrictNotices(deps({ claim: none, hourlyLimit: 0 }))).toEqual({
+            claimed: 0,
+            sent: 0,
+            failed: 0,
+            deferred: 0,
+        });
+        expect(none).not.toHaveBeenCalled();
+    });
+});
+
+describe('the shared mail budget (Codex round 2, new major 2)', () => {
+    it('reserves before every send, and never sends without a reservation', async () => {
+        const order: string[] = [];
+        const result = await deliverDistrictNotices(
+            deps({
+                reserve: async () => {
+                    order.push('reserve');
+                    return { ok: true, release: async () => undefined };
+                },
+                send: async () => {
+                    order.push('send');
+                    return 'sent';
+                },
+            }),
+        );
+        expect(result?.sent).toBe(2);
+        expect(order).toEqual(['reserve', 'send', 'reserve', 'send']);
+    });
+
+    it('once the budget is spent, defers that notice and every one after it, unsent and retryable', async () => {
+        let granted = 1;
+        const send = vi.fn(async () => 'sent' as const);
+        const finish = vi.fn(async () => true);
+        const defer = vi.fn(async () => true);
+        const reserve = vi.fn(async (): Promise<MailReservation> =>
+            granted-- > 0 ? { ok: true, release: async () => undefined } : { ok: false, retryAfterSec: 900 },
+        );
+        const result = await deliverDistrictNotices(
+            deps({ claim: async () => [row(1), row(2), row(3)], reserve, send, finish, defer }),
+        );
+        expect(result).toEqual({ claimed: 3, sent: 1, failed: 0, deferred: 2 });
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(finish).toHaveBeenCalledTimes(1);
+        expect(defer.mock.calls).toEqual([[2], [3]]);
+        // Asked once more after the first refusal? No: the window will not reopen mid-batch.
+        expect(reserve).toHaveBeenCalledTimes(2);
+    });
+
+    it('a reservation that errors is a spent budget, never a send', async () => {
+        const send = vi.fn(async () => 'sent' as const);
+        const defer = vi.fn(async () => true);
+        const result = await deliverDistrictNotices(
+            deps({ reserve: async () => Promise.reject(new Error('rpc down')), send, defer }),
+        );
+        expect(result).toEqual({ claimed: 2, sent: 0, failed: 0, deferred: 2 });
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    it('hands the reservation back when no mail went out, and keeps it when the send may have', async () => {
+        const { budget, reserve } = openBudget();
+        const outcomes = ['failed', 'unconfigured', 'throw', 'sent'] as const;
+        let i = 0;
+        const send = vi.fn(async (): Promise<'sent' | 'failed' | 'unconfigured'> => {
+            const outcome = outcomes[i++];
+            if (outcome === 'throw') {
+                throw new Error('connection reset after the request was written');
+            }
+            return outcome!;
+        });
+        await deliverDistrictNotices(deps({ claim: async () => [row(1), row(2), row(3), row(4)], reserve, send }));
+        expect(budget).toEqual({ reserved: 4, released: 2 });
+    });
+
+    it('gives every delivery a provider idempotency key, stable for the notice, new for a new cycle', async () => {
+        const send = vi.fn(async () => 'sent' as const);
+        await deliverDistrictNotices(deps({ claim: async () => [row(7)], send }));
+        const key = noticeIdempotencyKey(row(7));
+        expect(send).toHaveBeenCalledWith('owner7@example.invalid', buildDistrictNotice(row(7)), key);
+        expect(noticeIdempotencyKey(row(7))).toBe(key);
+        expect(noticeIdempotencyKey(row(7, { created_at: '2026-11-01T00:00:00Z' }))).not.toBe(key);
+        expect(noticeIdempotencyKey(row(8))).not.toBe(key);
+    });
+
+    it('integration: against the real retentionNotice windows, never more than its hour and day caps go out', async () => {
+        // A sliding-window limiter like check_edge_rate_limit, keyed as the
+        // sender keys it, sized by mailLimit() from the canonical split.
+        let now = Date.parse('2026-10-21T00:00:00Z');
+        const buckets = new Map<string, number[]>();
+        const windows = (['hour', 'day'] as const).map((w) => ({ key: w, ...mailLimit('retentionNotice', w) }));
+        const reserve = async (): Promise<MailReservation> => {
+            const taken: string[] = [];
+            for (const { key, limit, windowMs } of windows) {
+                const hits = (buckets.get(key) ?? []).filter((t) => t > now - windowMs);
+                if (hits.length >= limit) {
+                    for (const k of taken) {
+                        buckets.get(k)!.pop();
+                    }
+                    return { ok: false, retryAfterSec: 60 };
+                }
+                buckets.set(key, [...hits, now]);
+                taken.push(key);
+            }
+            return { ok: true, release: async () => taken.forEach((k) => buckets.get(k)!.pop()) };
+        };
+        // Sixty districts' notices queued at once; the sender is woken every 10 minutes for two days.
+        const queue = Array.from({ length: 60 }, (_, i) => row(i + 1));
+        const sentAt: number[] = [];
+        for (let tick = 0; tick < 6 * 48; tick += 1) {
+            await deliverDistrictNotices(
+                deps({
+                    claim: async (limit) => queue.splice(0, limit),
+                    reserve,
+                    hourlyLimit: windows[0]!.limit,
+                    send: async () => {
+                        sentAt.push(now);
+                        return 'sent';
+                    },
+                    defer: async (id) => {
+                        queue.unshift(row(id));
+                        return true;
+                    },
+                }),
+            );
+            now += 10 * 60_000;
+        }
+        const most = (windowMs: number): number =>
+            Math.max(...sentAt.map((t) => sentAt.filter((u) => u >= t && u < t + windowMs).length));
+        expect(MAIL_CATEGORY_CAPS.retentionNotice).toEqual({ hour: 5, day: 25 });
+        expect(most(MAIL_WINDOW_MS.hour)).toBeLessThanOrEqual(5);
+        expect(most(MAIL_WINDOW_MS.day)).toBeLessThanOrEqual(25);
+        // And the budget is used, not just respected: 25 the first day, the rest the next.
+        expect(sentAt.length).toBe(50);
+        expect(queue).toHaveLength(10);
+    });
+
+    it('the Deno sender reserves the retentionNotice share before calling Resend, with the idempotency key', () => {
+        expect(noticeSender).toContain("mailLimit('retentionNotice', 'hour', env)");
+        expect(noticeSender).toContain("mailLimit('retentionNotice', 'day', env)");
+        expect(noticeSender).toMatch(/const gate = await checkRateLimit\(key, limit, windowMs\);/);
+        expect(noticeSender).toContain("'Idempotency-Key': idempotencyKey");
+        expect(noticeSender).toMatch(/reserve,\s+hourlyLimit: BUDGET\[0\]\[1\]\.limit,\s+send,/);
+        expect(noticeSender).toContain("admin.rpc('defer_district_retention_notice'");
+        // One call site to Resend, inside the send deliverDistrictNotices only reaches with a reservation.
+        expect(noticeSender.match(/api\.resend\.com/g)).toHaveLength(1);
+        expect(noticeSender.match(/fetch\(/g)).toHaveLength(1);
+    });
+
+    it('a deferral hands the claim back without spending an attempt (20261021120900)', () => {
+        const defer = read('supabase/migrations/20261021120900_district_notice_mail_budget.sql');
+        expect(defer).toMatch(/set lease_until = null,\s+attempts = greatest\(attempts - 1, 0\)/);
+        expect(defer).toMatch(/where id = p_id and sent_at is null;/);
+        expect(defer).toContain(
+            'grant execute on function public.defer_district_retention_notice (bigint) to service_role;',
+        );
     });
 });
 

@@ -338,7 +338,10 @@ delete, which scrubs and deletes the rest and removes the studio, its seats
 and its billing record, while teachers' own accounts, scores and other
 students stay; the log keeps the counts after the studio is gone. Proven
 against the local stack (PostgreSQL 17.11) on 2026-10-21: all 26 checks
-passed.
+passed. Round 2 adds `20261021120900_district_notice_mail_budget.sql`: a notice
+the shared mail budget holds back is deferred (`defer_district_retention_notice`
+releases the claim, takes the claim's attempt back and leaves it unsent, so the
+purge keeps waiting), and only the service role may defer: 28 checks.
 
 `district_student_scope.sql` proves `20261021120800_district_student_attribution.sql`
 (Codex round-2 review of #64, new major 1): each roster row records the district

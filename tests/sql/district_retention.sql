@@ -1,4 +1,5 @@
--- District retention (20261021120700, scoped by 20261021120800), against a real database. LOCAL STACK
+-- District retention (20261021120700, scoped by 20261021120800, notices
+-- budgeted by 20261021120900), against a real database. LOCAL STACK
 -- or the dev branch project only. Same harness and same reading as
 -- launch_consent.sql: one transaction ending in ROLLBACK, every check a row in
 -- integrity_results, a clean run is exactly one row 'ALL n CHECKS PASSED'.
@@ -233,6 +234,34 @@ select pg_temp.holds (
                where studio_id = 'd1000000-0000-4000-8000-0000000005d1')
        from public.district_retention_notices n where n.id = (select id from claimed)$q$
 );
+
+-- The mail budget is spent (20261021120900): the sender hands the claim back.
+create temp table attempts_before as
+select attempts from public.district_retention_notices where studio_id = 'd1000000-0000-4000-8000-0000000005d1';
+
+grant select on attempts_before to public;
+
+select public.defer_district_retention_notice (id) from public.claim_district_retention_notices (20);
+
+select pg_temp.holds (
+    'a notice deferred for the mail budget is unsent, unleased, and its attempt taken back',
+    $q$select n.sent_at is null and n.lease_until is null and n.attempts = (select attempts from attempts_before)
+          and n.last_error like 'deferred:%'
+          and (select notice_sent_at is null from public.district_retention
+               where studio_id = 'd1000000-0000-4000-8000-0000000005d1')
+       from public.district_retention_notices n
+       where n.studio_id = 'd1000000-0000-4000-8000-0000000005d1'$q$
+);
+
+select pg_temp.act_as ('d1000000-0000-4000-8000-0000000000a1');
+
+select pg_temp.refused (
+    'a client cannot defer a notice',
+    $q$select public.defer_district_retention_notice (1)$q$,
+    '42501'
+);
+
+select pg_temp.act_as_server ();
 
 select public.finish_district_retention_notice (id) from public.claim_district_retention_notices (20);
 

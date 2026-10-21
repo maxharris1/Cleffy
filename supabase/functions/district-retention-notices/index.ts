@@ -3,9 +3,11 @@ import {
     deliverDistrictNotices,
     type DistrictNoticeMessage,
     type DistrictNoticeRow,
+    type MailReservation,
 } from '../_shared/districtNotice.ts';
 import { logError } from '../_shared/errorReporting.ts';
-import { serviceClient } from '../_shared/rateLimit.ts';
+import { mailLimit } from '../_shared/mailBudget.ts';
+import { checkRateLimit, refundRateLimit, serviceClient } from '../_shared/rateLimit.ts';
 import { secretsEqual } from '../_shared/secretCompare.ts';
 
 /**
@@ -16,6 +18,10 @@ import { secretsEqual } from '../_shared/secretCompare.ts';
  * Woken by retention_district_run through pg_net, which has no Supabase JWT:
  * the request is authenticated by x-district-notice-secret, or a service-role
  * bearer for a hand trigger, each compared in constant time, as imslp-sync is.
+ *
+ * No notice leaves without a reservation from the shared mail budget: the
+ * `retentionNotice` share of LAUNCH_MAIL_SPLIT, hour and day, counted in the
+ * same edge rate-limit buckets every other budgeted sender uses.
  */
 
 const RESEND_API = 'https://api.resend.com';
@@ -32,14 +38,46 @@ const authorized = async (req: Request): Promise<boolean> => {
     return secretOk || serviceOk;
 };
 
-const send = async (to: string, message: DistrictNoticeMessage): Promise<'sent' | 'failed' | 'unconfigured'> => {
+const env = (name: string): string | undefined => Deno.env.get(name);
+
+/** The budget buckets, hour then day. Past either, nothing is sent until it moves on. */
+const BUDGET = [
+    ['district-retention-notices:global', mailLimit('retentionNotice', 'hour', env)],
+    ['district-retention-notices:global-day', mailLimit('retentionNotice', 'day', env)],
+] as const;
+
+const reserve = async (): Promise<MailReservation> => {
+    const reserved: string[] = [];
+    const release = async (): Promise<void> => {
+        await Promise.all(reserved.map((key) => refundRateLimit(key).catch(() => undefined)));
+    };
+    for (const [key, { limit, windowMs }] of BUDGET) {
+        const gate = await checkRateLimit(key, limit, windowMs);
+        if (!gate.ok) {
+            await release();
+            return { ok: false, retryAfterSec: gate.retryAfterSec };
+        }
+        reserved.push(key);
+    }
+    return { ok: true, release };
+};
+
+const send = async (
+    to: string,
+    message: DistrictNoticeMessage,
+    idempotencyKey: string,
+): Promise<'sent' | 'failed' | 'unconfigured'> => {
     const apiKey = Deno.env.get('RESEND_API_KEY');
     if (!apiKey) {
         return 'unconfigured';
     }
     const res = await fetch(`${RESEND_API}/emails`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey,
+        },
         body: JSON.stringify({ from: mailFrom(), to: [to], reply_to: 'support@cleffy.io', ...message }),
     });
     if (!res.ok) {
@@ -77,6 +115,8 @@ Deno.serve(async (req) => {
             }
             return (data ?? []) as DistrictNoticeRow[];
         },
+        reserve,
+        hourlyLimit: BUDGET[0][1].limit,
         send,
         finish: async (id, failure) => {
             const { error } = await admin.rpc('finish_district_retention_notice', { p_id: id, p_error: failure });
@@ -87,9 +127,23 @@ Deno.serve(async (req) => {
             }
             return !error;
         },
+        defer: async (id) => {
+            const { error } = await admin.rpc('defer_district_retention_notice', { p_id: id });
+            if (error) {
+                // The lease runs out and the notice is claimed again later.
+                logError('district-retention-notices', new Error(error.message), { code: 'defer_failed' });
+            }
+            return !error;
+        },
     });
     if (!result) {
         return jsonResponse({ error: 'Could not read the notices' }, 502);
+    }
+    if (result.deferred > 0) {
+        logError('district-retention-notices', new Error('the retention notice mail budget is spent'), {
+            code: 'budget_deferred',
+            detail: `${result.deferred} deferred`,
+        });
     }
     return jsonResponse(result);
 });

@@ -17,9 +17,12 @@
  *  * GoTrue sends password resets and sign-up confirmations over Resend SMTP.
  *    Those are the mails a human is sitting in front of their inbox waiting
  *    for, and the ones whose absence locks somebody out of their account.
- *  * Our own Edge Functions send through the Resend HTTP API — today just the
- *    guest-email verification code (`_shared/guestEmail.ts`). Nobody is locked
- *    out when one of those is delayed; a guest can try again later.
+ *  * Our own Edge Functions send through the Resend HTTP API — the guest-email
+ *    verification code (`_shared/guestEmail.ts`), the content-report and
+ *    moderation notices (`_shared/contentReports.ts`), the billing cancel link
+ *    and purchase/cancellation confirmations (`_shared/billingMail.ts`), and
+ *    the district retention notice (`district-retention-notices`). Nobody is
+ *    locked out when one of those is delayed.
  *
  * The second kind is discretionary and the first is not, but until this module
  * existed nothing said so. `GUEST_EMAIL_LIMITS` carried the bare numbers 60/h
@@ -113,15 +116,70 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
 };
 
 /**
- * The senders we control, and what each may spend per window. Adding one here
- * is the whole registration step — and if the total then exceeds
- * budget minus reserve, `tests/security/mailBudget.test.ts` fails rather than
- * the reset budget quietly shrinking.
+ * The launch mail split: every sender we control, and what each may spend per
+ * window. Binding (Max, October 2026), and the ONE place these numbers live.
+ *
+ * The launch PRs (#63 legal pages, #62 checkout, #64 consent) merge separately
+ * but spend one budget, so this file is byte-identical on all three: checkout
+ * (#62) owns it and the others copy it from origin/mh/launch-checkout. A
+ * category whose sender is not on a branch yet keeps its entry anyway, which is
+ * what keeps the merged total what each branch tests:
+ *
+ *     guestEmailCode          28/150  guest and automated: share-link codes
+ *     contentReportAck         8/35   legal: report acknowledgments (#63)
+ *     moderationNotice         4/20   legal: statements of reasons (#63)
+ *     billingCancelLink        8/40   transactional: signed-out cancel link (#62)
+ *     billingConfirmation      7/30   transactional: purchase and cancellation
+ *                                     confirmations (#62)
+ *     retentionNotice          5/25   legal: district export notice before purge (#64)
+ *                             ------
+ *                             60/300  = budget 100/500 minus the 40/200 reserve
+ *
+ * Adding a sender is the whole registration step, and no sender sends outside
+ * one: if the total then exceeds budget minus reserve,
+ * `tests/security/mailBudget.test.ts` fails rather than the reset budget
+ * quietly shrinking. A sender whose window is spent waits (its outbox retries
+ * when the window reopens); it never sends past it.
  */
-export const MAIL_CATEGORY_CAPS = {
-    /** `guest-email-start`: the one-time code a share-link guest proves an address with. */
-    guestEmailCode: { hour: 60, day: 300 },
+export const LAUNCH_MAIL_SPLIT = {
+    /**
+     * `guest-email-start`: the one-time code a share-link guest proves an
+     * address with — the guest and automated mail, which anyone can trigger.
+     * 60/300 until October 2026, when the legal and transactional senders
+     * needed room.
+     */
+    guestEmailCode: { hour: 28, day: 150 },
+    /**
+     * `content-report`: the acknowledgment a reporter gets, blind-copied to the
+     * legal mailbox. The endpoint is open to anyone, so it is the aimable one.
+     */
+    contentReportAck: { hour: 8, day: 35 },
+    /**
+     * `content-moderation`: statements of reasons and decisions mailed after a
+     * moderator acts. Moderator-initiated, so a handful a day; capped anyway so
+     * a runaway client cannot spend the reserve.
+     */
+    moderationNotice: { hour: 4, day: 20 },
+    /**
+     * `billing-cancel`: the signed-out "cancel my subscription" link, queued in
+     * the billing mail outbox and sent when the window has room.
+     */
+    billingCancelLink: { hour: 8, day: 40 },
+    /**
+     * The purchase and cancellation confirmations the webhook queues in the
+     * billing mail outbox. One per Stripe event; a confirmation the window
+     * holds back stays queued and goes out when it reopens, never dropped.
+     */
+    billingConfirmation: { hour: 7, day: 30 },
+    /**
+     * `district-retention-notices`: the 14-day export notice a district owner
+     * gets before its data is purged. Deferred, never dropped, when spent.
+     */
+    retentionNotice: { hour: 5, day: 25 },
 } as const;
+
+/** The caps the budget functions below read: the launch split. */
+export const MAIL_CATEGORY_CAPS = LAUNCH_MAIL_SPLIT;
 
 export type MailCategory = keyof typeof MAIL_CATEGORY_CAPS;
 
