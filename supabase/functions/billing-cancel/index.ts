@@ -1,4 +1,4 @@
-import { cancellableSubscription, sha256Hex } from '../_shared/billingCancelStore.ts';
+import { cancellableSubscription, consumeToken, sha256Hex } from '../_shared/billingCancelStore.ts';
 import { emailOfUser, enqueueBillingMail } from '../_shared/billingMail.ts';
 import { drainInBackground, sendBillingEmailWithinBudget } from '../_shared/billingMailWorker.ts';
 import * as billingTerms from '../_shared/billingTerms.ts';
@@ -87,18 +87,10 @@ Deno.serve((req) =>
             }
             return { userId, mode };
         },
-        consumeToken: async (hash, nowIso) => {
-            const { data, error } = await admin()
-                .from('billing_cancel_tokens')
-                .update({ used_at: nowIso })
-                .eq('token_hash', hash)
-                .is('used_at', null)
-                .select('token_hash');
-            if (error) {
-                throw new Error(`could not spend the cancel link: ${error.message}`);
-            }
-            return (data ?? []).length > 0;
-        },
+        // Spent only while unused and unexpired on the database's clock, in one
+        // statement (consume_cancel_link_token, migration 20261020160700), and
+        // before any Stripe call: cancelFlow.ts goes on only after `consumed`.
+        consumeToken,
         liveSubscription: async (subscriptionId, mode) => {
             try {
                 return liveOf(await stripeFor(mode).subscriptions.retrieve(subscriptionId));

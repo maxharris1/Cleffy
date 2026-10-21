@@ -486,3 +486,54 @@ describe('20261020160600_cancel_link_serialized_history — replays cleanly', ()
         expect(sql()).not.toMatch(/cron\.(schedule|unschedule)/i);
     });
 });
+
+/**
+ * 20261020160700 (launch checkout, Codex round 7 on #62) makes spending a
+ * cancel link one statement gated on the database's clock: a new service-role
+ * RPC, consume_cancel_link_token, and the token guard (20261020160400's
+ * billing_cancel_tokens_lifetime) refusing an update that spends an expired
+ * link. It only replaces functions -- the guard's trigger is 20261020160300's
+ * -- and must apply twice cleanly -- CI's supabase-local job replays it after
+ * the four before it -- and sort before #61's first migration. Reconciled by
+ * hand at merge time, like the blocks above: the generator does not write it.
+ */
+describe('20261020160700_cancel_link_consume_db_clock — replays cleanly', () => {
+    const NAME = '20261020160700_cancel_link_consume_db_clock.sql';
+    const sql = (): string => migrations().find(({ name }) => name === NAME)?.sql ?? '';
+
+    it('exists, after 20261020160600 and before #61 district seats', () => {
+        const names = migrations().map(({ name }) => name);
+        expect(names.indexOf(NAME)).toBeGreaterThan(names.indexOf('20261020160600_cancel_link_serialized_history.sql'));
+        expect(NAME < '20261020180400').toBe(true);
+    });
+
+    it('only replaces functions: no table, index, trigger, column or dropped function', () => {
+        const text = sql();
+        expect(text).toMatch(/create\s+or\s+replace\s+function\s+public\.consume_cancel_link_token\s/i);
+        expect(text).toMatch(/create\s+or\s+replace\s+function\s+public\.billing_cancel_tokens_lifetime\s/i);
+        expect(text).not.toMatch(/create\s+(table|function|trigger|(unique\s+)?index)\s/i);
+        expect(text).not.toMatch(/add\s+(column|constraint)\s/i);
+        expect(text).not.toMatch(/drop\s+(function|trigger|table|index)/i);
+    });
+
+    it('grants the RPC to the service role alone, with search_path pinned', () => {
+        const text = sql();
+        expect(text).toContain(
+            'revoke all on function public.consume_cancel_link_token (text) from public, anon, authenticated;',
+        );
+        expect(text).toContain('grant execute on function public.consume_cancel_link_token (text) to service_role;');
+        expect(text).not.toMatch(
+            /grant\s+execute\s+on\s+function\s+public\.consume_cancel_link_token[^;]*(anon|authenticated)/i,
+        );
+        expect(text).toMatch(
+            /consume_cancel_link_token \(p_hash text\)[\s\S]*?security definer\s+set search_path = ''/,
+        );
+        expect(text).toContain(
+            'revoke all on function public.billing_cancel_tokens_lifetime () from public, anon, authenticated, service_role;',
+        );
+    });
+
+    it('leaves the cron job to the migration that schedules it', () => {
+        expect(sql()).not.toMatch(/cron\.(schedule|unschedule)/i);
+    });
+});

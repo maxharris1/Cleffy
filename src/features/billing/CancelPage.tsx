@@ -107,6 +107,9 @@ const RequestLink = ({ notice }: { notice?: string }) => {
     );
 };
 
+/** Answers after which the link is no use, so the page asks for a new one (cancelFlow.ts CANCEL_ERRORS). */
+const LINK_DONE = new Set(['link_invalid', 'nothing_to_cancel', 'not_cancelled']);
+
 /** Step 2: the emailed link -- what it would cancel, and "Cancel now". */
 const ConfirmCancel = ({ token }: { token: string }) => {
     const [summary, setSummary] = useState<CancelSummary | null>(null);
@@ -137,13 +140,19 @@ const ConfirmCancel = ({ token }: { token: string }) => {
         try {
             setResult(await confirmCancel(token, refund));
         } catch (err) {
+            // A link that ran out or was spent -- even by this press, when
+            // Stripe then failed -- cannot be tried again: offer a new one.
+            if (err instanceof CancelError && LINK_DONE.has(err.code)) {
+                setFailure(err);
+                return;
+            }
             setError(err instanceof Error ? err.message : 'Could not cancel. Please try again.');
             setBusy(false);
         }
     };
 
     if (failure) {
-        if (failure.code === 'link_invalid' || failure.code === 'nothing_to_cancel') {
+        if (LINK_DONE.has(failure.code)) {
             return <RequestLink notice={failure.message} />;
         }
         return (

@@ -80,6 +80,11 @@ export const CANCEL_ERRORS = {
         code: 'nothing_to_cancel',
     },
     unavailable: { error: 'We could not reach our billing system. Please try again in a minute.', code: 'unavailable' },
+    /** Stripe failed after the link was spent (decision 27): the link cannot be tried again. */
+    notCancelled: {
+        error: 'We could not reach our billing system, so your subscription has not been cancelled, and this link has now been used. Ask for a new one below, or cancel from your Account page while signed in.',
+        code: 'not_cancelled',
+    },
     tooMany: { error: 'Too many attempts. Please wait a few minutes and try again.', code: 'rate_limited' },
 } as const;
 
@@ -115,6 +120,20 @@ export interface LiveCancelToken {
     userId: string;
     mode: StripeMode;
 }
+
+/**
+ * What spending a link answered (consume_cancel_link_token, migration
+ * 20261020160700), on the database's clock after its locks.
+ */
+export type ConsumeTokenAnswer =
+    /** This request spent it: only now may Stripe be called or support mailed. */
+    | 'consumed'
+    /** Unused, but past its expiry. */
+    | 'expired'
+    /** Already spent. */
+    | 'used'
+    /** No such link. */
+    | 'not_found';
 
 type Gate = { ok: true } | { ok: false; retryAfterSec: number };
 
@@ -230,8 +249,12 @@ export interface CancelDeps {
      * compared with this function's clock.
      */
     readToken: (hash: string) => Promise<LiveCancelToken | null>;
-    /** Marks the token used if it still is not; false when another request got there first. */
-    consumeToken: (hash: string, nowIso: string) => Promise<boolean>;
+    /**
+     * Spends the token in one statement, only if it is unused AND unexpired on
+     * the DATABASE's clock at that moment; anything else is refused, with why.
+     * The one thing that authorizes the Stripe calls and the refund request.
+     */
+    consumeToken: (hash: string) => Promise<ConsumeTokenAnswer>;
     /** Stripe's own copy of the subscription; null when Stripe has no such subscription. */
     liveSubscription: (subscriptionId: string, mode: StripeMode) => Promise<LiveSubscription | null>;
     /**
@@ -502,10 +525,12 @@ interface Resolved {
     hash: string;
     row: LiveCancelToken;
     email: string | null;
-    subscription: CancellableSubscription | null;
+    /** The mirror's copy: only which subscription. What it is now is Stripe's answer (liveCopy). */
+    mirrored: CancellableSubscription | null;
     firstPurchaseAt: number | null;
 }
 
+/** The link and the account behind it, from the database alone: no Stripe call. */
 const resolveToken = async (deps: CancelDeps, token: unknown): Promise<Resolved | Response> => {
     const live = await liveToken(deps, token);
     if (live === 'error') {
@@ -520,35 +545,42 @@ const resolveToken = async (deps: CancelDeps, token: unknown): Promise<Resolved 
             deps.cancellableSubscription(live.row.userId, live.row.mode),
             deps.firstPurchaseAt(live.row.userId, live.row.mode),
         ]);
-        // The mirror only says WHICH subscription; everything the page shows
-        // and the button acts on is read back from Stripe. A subscription
-        // Stripe has ended (or no longer has) is nothing to cancel, whatever
-        // the mirror still says.
-        let subscription: CancellableSubscription | null = null;
-        if (mirrored) {
-            const current = await deps.liveSubscription(mirrored.subscriptionId, live.row.mode);
-            if (current && CANCELLABLE_STATUSES.includes(current.status)) {
-                subscription = {
-                    ...mirrored,
-                    status: current.status,
-                    periodEnd: current.endsAt ?? mirrored.periodEnd,
-                    cancelAtPeriodEnd: current.cancelling,
-                };
-            }
-        }
-        return { ...live, email, subscription, firstPurchaseAt };
+        return { ...live, email, mirrored, firstPurchaseAt };
     } catch (err) {
         deps.logError('cancel_lookup_failed', err);
         return deps.json(CANCEL_ERRORS.unavailable, 503);
     }
 };
 
-const summaryOf = (deps: CancelDeps, resolved: Resolved) => ({
+/**
+ * The mirror only says WHICH subscription; everything the page shows and the
+ * button acts on is read back from Stripe. A subscription Stripe has ended (or
+ * no longer has) is nothing to cancel, whatever the mirror still says. Throws
+ * when Stripe cannot be read.
+ */
+const liveCopy = async (deps: CancelDeps, resolved: Resolved): Promise<CancellableSubscription | null> => {
+    const mirrored = resolved.mirrored;
+    if (!mirrored) {
+        return null;
+    }
+    const current = await deps.liveSubscription(mirrored.subscriptionId, resolved.row.mode);
+    if (!current || !CANCELLABLE_STATUSES.includes(current.status)) {
+        return null;
+    }
+    return {
+        ...mirrored,
+        status: current.status,
+        periodEnd: current.endsAt ?? mirrored.periodEnd,
+        cancelAtPeriodEnd: current.cancelling,
+    };
+};
+
+const summaryOf = (deps: CancelDeps, resolved: Resolved, subscription: CancellableSubscription) => ({
     email: resolved.email ? maskEmail(resolved.email) : null,
-    plan: deps.planNameForPrice(resolved.subscription?.priceId ?? null),
-    status: resolved.subscription?.status ?? null,
-    periodEnd: resolved.subscription?.periodEnd ?? null,
-    alreadyCancelling: resolved.subscription?.cancelAtPeriodEnd ?? false,
+    plan: deps.planNameForPrice(subscription.priceId),
+    status: subscription.status,
+    periodEnd: subscription.periodEnd,
+    alreadyCancelling: subscription.cancelAtPeriodEnd,
     refundEligible: deps.terms.withinRefundWindow(resolved.firstPurchaseAt, deps.now()),
 });
 
@@ -557,10 +589,17 @@ const peekCancel = async (deps: CancelDeps, body: Record<string, unknown>): Prom
     if (resolved instanceof Response) {
         return resolved;
     }
-    if (!resolved.subscription) {
+    let subscription: CancellableSubscription | null;
+    try {
+        subscription = await liveCopy(deps, resolved);
+    } catch (err) {
+        deps.logError('cancel_lookup_failed', err);
+        return deps.json(CANCEL_ERRORS.unavailable, 503);
+    }
+    if (!subscription) {
         return deps.json(CANCEL_ERRORS.nothingToCancel, 404);
     }
-    return deps.json(summaryOf(deps, resolved));
+    return deps.json(summaryOf(deps, resolved, subscription));
 };
 
 const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): Promise<Response> => {
@@ -568,21 +607,44 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     if (resolved instanceof Response) {
         return resolved;
     }
-    const subscription = resolved.subscription;
-    if (!subscription) {
+    if (!resolved.mirrored) {
         return deps.json(CANCEL_ERRORS.nothingToCancel, 404);
     }
 
-    // Stripe first, the token after: a Stripe failure leaves the link usable for
-    // a retry, and setting cancel_at_period_end twice is harmless. The token's
-    // conditional update then decides which of two racing clicks sends the
-    // refund request, so support hears about it once.
-    //
-    // `subscription` is Stripe's live copy (resolveToken), so "already
-    // cancelling" is Stripe's answer and not the mirror's. And success is only
-    // reported when Stripe's answer to the update SAYS cancelling: a buyer told
-    // "cancelled" while Stripe is still going to renew is the one outcome this
-    // page must never produce.
+    // The link first, before any Stripe call or the refund request (Codex
+    // round 7 on #62; decisions 38 and 39). The read above said it was good,
+    // but the lookups since -- and Stripe's, below -- can outlast its hour:
+    // the spend asks again, on the database's clock, in the statement that
+    // spends it, and only `consumed` goes on. It also decides which of two
+    // racing clicks goes on, so support hears about a refund once. A Stripe
+    // failure after it leaves the link spent: the buyer asks for a new one
+    // (decision 27). This function's clock decides nothing here.
+    let spent: ConsumeTokenAnswer;
+    try {
+        spent = await deps.consumeToken(resolved.hash);
+    } catch (err) {
+        deps.logError('cancel_token_consume_failed', err);
+        return deps.json(CANCEL_ERRORS.unavailable, 503);
+    }
+    if (spent !== 'consumed') {
+        return deps.json({ ...CANCEL_ERRORS.linkInvalid, reason: spent }, 404);
+    }
+
+    // `subscription` is Stripe's live copy, so "already cancelling" is
+    // Stripe's answer and not the mirror's. And success is only reported when
+    // Stripe's answer to the update SAYS cancelling: a buyer told "cancelled"
+    // while Stripe is still going to renew is the one outcome this page must
+    // never produce.
+    let subscription: CancellableSubscription | null;
+    try {
+        subscription = await liveCopy(deps, resolved);
+    } catch (err) {
+        deps.logError('cancel_lookup_failed', err);
+        return deps.json(CANCEL_ERRORS.notCancelled, 502);
+    }
+    if (!subscription) {
+        return deps.json(CANCEL_ERRORS.nothingToCancel, 404);
+    }
     let endsAt: string | null = subscription.periodEnd;
     if (!subscription.cancelAtPeriodEnd) {
         let updated: LiveSubscription;
@@ -590,32 +652,23 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
             updated = await deps.cancelAtPeriodEnd(subscription.subscriptionId, resolved.row.mode);
         } catch (err) {
             deps.logError('cancel_stripe_failed', err);
-            return deps.json(CANCEL_ERRORS.unavailable, 502);
+            return deps.json(CANCEL_ERRORS.notCancelled, 502);
         }
         if (!updated.cancelling) {
             deps.logError(
                 'cancel_not_confirmed',
                 new Error(`Stripe did not confirm the cancellation of ${subscription.subscriptionId}`),
             );
-            return deps.json(CANCEL_ERRORS.unavailable, 502);
+            return deps.json(CANCEL_ERRORS.notCancelled, 502);
         }
         endsAt = updated.endsAt ?? endsAt;
     }
 
     const cancelledAt = new Date(deps.now()).toISOString();
-    let first: boolean;
-    try {
-        first = await deps.consumeToken(resolved.hash, cancelledAt);
-    } catch (err) {
-        // Cancelled in Stripe already; only the link stays usable a little longer.
-        deps.logError('cancel_token_consume_failed', err);
-        first = false;
-    }
-
     const wantsRefund = body.requestRefund === true;
     const refundEligible = deps.terms.withinRefundWindow(resolved.firstPurchaseAt, deps.now());
     let refundRequested = false;
-    if (first && wantsRefund && refundEligible && resolved.email) {
+    if (wantsRefund && refundEligible && resolved.email) {
         const sent = await deps.sendEmail(
             deps.terms.TRADER.supportEmail,
             deps.terms.refundRequestEmail({
@@ -651,7 +704,7 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
         endsAt,
         refundRequested,
         // Said so the page can tell the buyer to email support themselves.
-        refundRequestFailed: first && wantsRefund && refundEligible && !refundRequested,
+        refundRequestFailed: wantsRefund && refundEligible && !refundRequested,
     });
 };
 

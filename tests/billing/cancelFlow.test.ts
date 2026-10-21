@@ -211,14 +211,23 @@ const harness = (
             const row = tokens.get(hash);
             return row && row.usedAt === null && Date.parse(row.expiresAt) > dbNow() ? row : null;
         },
-        consumeToken: async (hash, nowIso) => {
+        // consume_cancel_link_token, modelled: one statement that spends the
+        // link only while it is unused and unexpired on the DATABASE's clock,
+        // and otherwise says why not (migration 20261020160700).
+        consumeToken: vi.fn(async (hash: string) => {
             const row = tokens.get(hash);
-            if (!row || row.usedAt !== null) {
-                return false;
+            if (!row) {
+                return 'not_found' as const;
             }
-            row.usedAt = nowIso;
-            return true;
-        },
+            if (row.usedAt !== null) {
+                return 'used' as const;
+            }
+            if (Date.parse(row.expiresAt) <= dbNow()) {
+                return 'expired' as const;
+            }
+            row.usedAt = new Date(dbNow()).toISOString();
+            return 'consumed' as const;
+        }),
         liveSubscription: vi.fn(async () => {
             if (options.stripeReadFails) {
                 throw new Error('Stripe is down');
@@ -829,13 +838,6 @@ describe('billing-cancel: using the link', () => {
         expect(h.sent.filter((mail) => mail.to === 'support@cleffy.io')).toEqual([]);
     });
 
-    it('keeps the link usable when Stripe could not be reached', async () => {
-        const h = await linked({ stripeFails: true });
-        const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
-        expect(response.status).toBe(502);
-        expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(200);
-    });
-
     it('refuses an expired link and one it never issued', async () => {
         const h = await linked();
         const [hash] = [...h.tokens.keys()];
@@ -871,6 +873,179 @@ describe('billing-cancel: using the link', () => {
             expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(404);
             expect((await handleCancel(post({ action: 'cancel', token: h.token }), h.deps)).status).toBe(404);
             expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('the link is spent first, on the database clock, before any Stripe call or email (Codex round 7 on #62, decisions 38 and 39)', () => {
+        /** Every call the cancel button makes that matters, in order. */
+        const ordered = (h: Awaited<ReturnType<typeof linked>>) => {
+            const order: string[] = [];
+            const { consumeToken, liveSubscription, cancelAtPeriodEnd, sendEmail } = h.deps;
+            h.deps.consumeToken = async (hash) => {
+                const answer = await consumeToken(hash);
+                order.push(`consume:${answer}`);
+                return answer;
+            };
+            h.deps.liveSubscription = vi.fn(async (...args: Parameters<CancelDeps['liveSubscription']>) => {
+                order.push('stripe:read');
+                return liveSubscription(...args);
+            });
+            h.deps.cancelAtPeriodEnd = vi.fn(async (...args: Parameters<CancelDeps['cancelAtPeriodEnd']>) => {
+                order.push('stripe:update');
+                return cancelAtPeriodEnd(...args);
+            });
+            h.deps.sendEmail = vi.fn(async (...args: Parameters<CancelDeps['sendEmail']>) => {
+                order.push('email');
+                return sendEmail(...args);
+            });
+            return order;
+        };
+        /** Something happening to the link between the read that opened it and the spend. */
+        const meanwhile = (h: Awaited<ReturnType<typeof linked>>, change: () => void) => {
+            const firstPurchaseAt = h.deps.firstPurchaseAt;
+            h.deps.firstPurchaseAt = async (...args) => {
+                const answer = await firstPurchaseAt(...args);
+                change();
+                return answer;
+            };
+        };
+        const storedRow = async (h: Awaited<ReturnType<typeof linked>>) => h.tokens.get(await sha256Hex(h.token));
+
+        it('spends the link before Stripe is read or updated and before support is mailed', async () => {
+            const h = await linked();
+            const order = ordered(h);
+
+            const response = await handleCancel(
+                post({ action: 'cancel', token: h.token, requestRefund: true }),
+                h.deps,
+            );
+
+            expect(await body(response)).toMatchObject({ cancelled: true, refundRequested: true });
+            expect(order).toEqual(['consume:consumed', 'stripe:read', 'stripe:update', 'email']);
+        });
+
+        it('a link read as good that expires before it is spent is refused: no Stripe call, no email, still unused', async () => {
+            const h = await linked();
+            const order = ordered(h);
+            // The read finds it good; the lookups after it outlast its hour. By
+            // the edge function's clock nothing has passed at all.
+            meanwhile(h, () => {
+                h.later(CANCEL_LINK_TTL_MS);
+                h.skewEdge(-CANCEL_LINK_TTL_MS);
+            });
+            const refunds = h.refunded.length;
+
+            const response = await handleCancel(
+                post({ action: 'cancel', token: h.token, requestRefund: true }),
+                h.deps,
+            );
+
+            expect(response.status).toBe(404);
+            expect(await body(response)).toMatchObject({ code: 'link_invalid', reason: 'expired' });
+            expect(order).toEqual(['consume:expired']);
+            expect(h.deps.liveSubscription).not.toHaveBeenCalled();
+            expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+            expect(h.deps.sendEmail).not.toHaveBeenCalled();
+            expect(h.sent.filter((mail) => mail.to === 'support@cleffy.io')).toEqual([]);
+            expect((await storedRow(h))?.usedAt).toBeNull();
+            // Nothing is handed back for it either (decision 38).
+            expect(h.refunded).toHaveLength(refunds);
+        });
+
+        it.each([
+            ['used', (row: { usedAt: string | null }) => (row.usedAt = new Date(NOW).toISOString())],
+            ['not_found', null],
+        ] as const)(
+            'a link %s by the time it is spent is refused, with no Stripe call and no email',
+            async (reason, change) => {
+                const h = await linked();
+                const order = ordered(h);
+                const hash = await sha256Hex(h.token);
+                meanwhile(h, () => {
+                    const row = h.tokens.get(hash);
+                    if (change && row) {
+                        change(row);
+                    } else {
+                        h.tokens.delete(hash);
+                    }
+                });
+
+                const response = await handleCancel(
+                    post({ action: 'cancel', token: h.token, requestRefund: true }),
+                    h.deps,
+                );
+
+                expect(response.status).toBe(404);
+                expect(await body(response)).toMatchObject({ code: 'link_invalid', reason });
+                expect(order).toEqual([`consume:${reason}`]);
+                expect(h.deps.sendEmail).not.toHaveBeenCalled();
+            },
+        );
+
+        it('two clicks at once: one spends the link and goes on to Stripe and support, the other stops at the spend', async () => {
+            const h = await linked();
+            const order = ordered(h);
+
+            const [first, second] = await Promise.all([
+                handleCancel(post({ action: 'cancel', token: h.token, requestRefund: true }), h.deps),
+                handleCancel(post({ action: 'cancel', token: h.token, requestRefund: true }), h.deps),
+            ]);
+
+            expect([first.status, second.status].sort()).toEqual([200, 404]);
+            expect(order.filter((step) => step.startsWith('consume:')).sort()).toEqual([
+                'consume:consumed',
+                'consume:used',
+            ]);
+            expect(h.deps.cancelAtPeriodEnd).toHaveBeenCalledTimes(1);
+            expect(h.sent.filter((mail) => mail.to === 'support@cleffy.io')).toHaveLength(1);
+        });
+
+        it('a Stripe failure after the spend leaves the link spent, and the buyer asks for a new one (decision 27)', async () => {
+            const h = await linked({ stripeFails: true });
+            const order = ordered(h);
+
+            const response = await handleCancel(
+                post({ action: 'cancel', token: h.token, requestRefund: true }),
+                h.deps,
+            );
+
+            expect(response.status).toBe(502);
+            expect(await body(response)).toMatchObject({ code: 'not_cancelled' });
+            expect(order).toEqual(['consume:consumed', 'stripe:read', 'stripe:update']);
+            expect((await storedRow(h))?.usedAt).not.toBeNull();
+            expect(h.sent.filter((mail) => mail.to === 'support@cleffy.io')).toEqual([]);
+            // Pressed again: refused (the read already says spent), and Stripe
+            // is not asked again.
+            const again = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+            expect(again.status).toBe(404);
+            expect(await body(again)).toMatchObject({ code: 'link_invalid' });
+            expect(h.deps.cancelAtPeriodEnd).toHaveBeenCalledTimes(1);
+        });
+
+        it('a spend the database could not answer touches neither Stripe nor support', async () => {
+            const h = await linked();
+            const order = ordered(h);
+            h.deps.consumeToken = async () => {
+                throw new Error('connection reset');
+            };
+
+            const response = await handleCancel(
+                post({ action: 'cancel', token: h.token, requestRefund: true }),
+                h.deps,
+            );
+
+            expect(response.status).toBe(503);
+            expect(order).toEqual([]);
+            expect(h.errors).toContain('cancel_token_consume_failed');
+        });
+
+        it('nothing to cancel in the mirror leaves the link unspent', async () => {
+            const h = await linked();
+            h.deps.cancellableSubscription = async () => null;
+            const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+            expect(await body(response)).toMatchObject({ code: 'nothing_to_cancel' });
+            expect(h.deps.consumeToken).not.toHaveBeenCalled();
+            expect((await storedRow(h))?.usedAt).toBeNull();
         });
     });
 
@@ -923,10 +1098,11 @@ describe('billing-cancel: using the link', () => {
             const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
 
             expect(response.status).toBe(502);
-            expect(await body(response)).toMatchObject({ code: 'unavailable' });
+            expect(await body(response)).toMatchObject({ code: 'not_cancelled' });
             expect(h.errors).toContain('cancel_not_confirmed');
-            // The link is not spent, so the buyer can try again.
-            expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(200);
+            // The link was spent before Stripe was asked (decision 27): the
+            // buyer asks for a new one.
+            expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(404);
         });
 
         it('still cancels at period end when Stripe holds a cancel_at months after it', async () => {
@@ -972,8 +1148,10 @@ describe('billing-cancel: using the link', () => {
 
         it('refuses to guess when Stripe cannot be read', async () => {
             const h = await linked({ stripeReadFails: true });
+            expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(503);
             const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
-            expect(response.status).toBe(503);
+            expect(response.status).toBe(502);
+            expect(await body(response)).toMatchObject({ code: 'not_cancelled' });
             expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
         });
     });
@@ -1069,6 +1247,28 @@ describe('billing-cancel/index.ts is wiring only', () => {
         expect(migration).toMatch(
             /function public\.read_cancel_link_token[\s\S]*?t\.used_at is null\s+and t\.expires_at > pg_catalog\.clock_timestamp\(\)/,
         );
+    });
+
+    it('spends a link only through consume_cancel_link_token, gated on the database clock (Codex round 7 on #62)', () => {
+        const store = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingCancelStore.ts'), 'utf8');
+        expect(store).toContain("rpc('consume_cancel_link_token', { p_hash: hash })");
+        expect(source).toContain('consumeToken,');
+        expect(source).not.toContain('used_at');
+        expect(source).not.toContain("from('billing_cancel_tokens')");
+        const migration = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20261020160700_cancel_link_consume_db_clock.sql'),
+            'utf8',
+        );
+        expect(migration).toMatch(
+            /perform public\.billing_cancel_link_lock \(v_outbox, p_hash\);[\s\S]*?update public\.billing_cancel_tokens t\s+set used_at = pg_catalog\.clock_timestamp\(\)\s+where t\.token_hash = p_hash\s+and t\.used_at is null\s+and t\.expires_at > pg_catalog\.clock_timestamp\(\)/,
+        );
+        // The flow: the spend comes before the first Stripe call.
+        const flow = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/cancelFlow.ts'), 'utf8');
+        const confirm = flow.slice(flow.indexOf('const confirmCancel'), flow.indexOf('export const handleCancel'));
+        expect(confirm.indexOf('deps.consumeToken(')).toBeGreaterThan(0);
+        expect(confirm.indexOf('deps.consumeToken(')).toBeLessThan(confirm.indexOf('liveCopy(deps'));
+        expect(confirm.indexOf('deps.consumeToken(')).toBeLessThan(confirm.indexOf('deps.cancelAtPeriodEnd('));
+        expect(confirm.indexOf('deps.consumeToken(')).toBeLessThan(confirm.indexOf('deps.sendEmail('));
     });
 
     it("reads the subscription back from Stripe rather than trusting the mirror's copy", () => {

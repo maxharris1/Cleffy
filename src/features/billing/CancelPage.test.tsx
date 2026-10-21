@@ -76,4 +76,28 @@ describe('CancelPage', () => {
         expect(await screen.findByText('This cancellation link has expired.')).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Email me a cancel link' })).toBeInTheDocument();
     });
+
+    it.each([
+        ['link_invalid', 'This cancellation link has expired or has already been used.'],
+        ['not_cancelled', 'Your subscription has not been cancelled, and this link has now been used.'],
+    ])('offers a new link when "Cancel now" answers %s: the link cannot be tried again', async (code, message) => {
+        const user = userEvent.setup();
+        const { CancelError } = await import('@/features/billing/cancelApi');
+        peekCancel.mockResolvedValue({
+            email: 'a•••@example.com',
+            plan: 'Teacher',
+            status: 'active',
+            periodEnd: '2026-11-20T20:00:00.000Z',
+            alreadyCancelling: false,
+            refundEligible: false,
+        });
+        confirmCancel.mockRejectedValue(new CancelError(message, code));
+        renderAt('/cancel?token=tok-123');
+
+        await user.click(await screen.findByRole('button', { name: 'Cancel now' }));
+
+        expect(await screen.findByText(message)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Email me a cancel link' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Cancel now' })).not.toBeInTheDocument();
+    });
 });

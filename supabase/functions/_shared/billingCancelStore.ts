@@ -1,5 +1,5 @@
 import type { ConfirmationDeps } from './billingOutbox.ts';
-import type { CancellableSubscription, CancelLinkDeps } from './cancelFlow.ts';
+import type { CancelDeps, CancellableSubscription, CancelLinkDeps } from './cancelFlow.ts';
 import { CANCELLABLE_STATUSES } from './cancelFlow.ts';
 import { mailLimit } from './mailBudget.ts';
 import { serviceClient } from './rateLimit.ts';
@@ -137,4 +137,24 @@ export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, out
         throw new Error(`save_cancel_link_token_v2 answered ${JSON.stringify(data)}`);
     }
     return { answer, remainingSeconds: remaining };
+};
+
+/**
+ * Spends a cancel link through consume_cancel_link_token (migration
+ * 20261020160700): one statement, under the link's history locks, that sets
+ * used_at only where the link is unused AND unexpired on the database's clock
+ * at that moment. Anything else is refused with its reason -- `expired`,
+ * `used` or `not_found` -- and writes nothing. cancelFlow.ts calls Stripe, or
+ * mails support, only after `consumed`.
+ */
+export const consumeToken: CancelDeps['consumeToken'] = async (hash) => {
+    const { data, error } = await admin().rpc('consume_cancel_link_token', { p_hash: hash });
+    if (error) {
+        throw new Error(`could not spend the cancel link: ${error.message}`);
+    }
+    const answer = (data as { answer?: unknown } | null)?.answer;
+    if (answer !== 'consumed' && answer !== 'expired' && answer !== 'used' && answer !== 'not_found') {
+        throw new Error(`consume_cancel_link_token answered ${JSON.stringify(data)}`);
+    }
+    return answer;
 };

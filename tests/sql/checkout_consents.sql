@@ -113,7 +113,7 @@ select pg_temp.chk('30 a hashed token is stored', $q$with ins as (
     values (repeat('a', 64), pg_temp.u(1), 'test', now() + interval '1 hour', 'c0c5e000-5ac0-4000-8000-0000000000aa') returning 1) select count(*) = 1 from ins$q$);
 select pg_temp.refused('31 anything but a SHA-256 hex digest is refused', $q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id) values ('the-raw-token', pg_temp.u(1), 'test', now(), 'c0c5e000-5ac0-4000-8000-0000000000aa')$q$, '23514');
 select pg_temp.as_service();
-select pg_temp.chk('32 a token is spent once (what consumeToken does)', $q$with first as (
+select pg_temp.chk('32 a token with time left is spent once by a direct update', $q$with first as (
     update public.billing_cancel_tokens set used_at = now() where token_hash = repeat('a', 64) and used_at is null returning 1)
     select count(*) = 1 from first$q$);
 select pg_temp.chk('33 ... and not twice', $q$with second as (

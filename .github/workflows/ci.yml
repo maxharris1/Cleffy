@@ -57,7 +57,7 @@ jobs:
             - name: Re-apply the cancel-link migrations
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-                  for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history; do
+                  for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock; do
                       psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "supabase/migrations/${migration}.sql"
                   done
             - name: Cancel-link store test (billingCancelStore.ts against the local stack)
@@ -70,7 +70,7 @@ jobs:
             - name: Checkout and cancel-link SQL proofs
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-                  for proof in cancel_link_lifetime cancel_link_tombstones cancel_link_db_clock cancel_link_tombstone_race cancel_link_read_db_clock cancel_link_save_after_insert checkout_consents launch_checkout_fixes; do
+                  for proof in cancel_link_lifetime cancel_link_tombstones cancel_link_db_clock cancel_link_tombstone_race cancel_link_read_db_clock cancel_link_save_after_insert cancel_link_consume_db_clock checkout_consents launch_checkout_fixes; do
                       bash scripts/ci/sql-proof.sh "$DB_URL" "tests/sql/${proof}.sql"
                   done
 

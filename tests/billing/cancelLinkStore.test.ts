@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import {
+    type CancelDeps,
     type CancelLinkDeps,
     type CancelLinkRequest,
     deliverCancelLink,
@@ -71,6 +72,7 @@ interface Store {
     sha256Hex: CancelLinkDeps['sha256Hex'];
     cancelSecret: CancelLinkDeps['secret'];
     cancelLinkMailBudget: () => CancelLinkDeps['mailBudget'];
+    consumeToken: CancelDeps['consumeToken'];
 }
 const shared = (name: string) => `../../supabase/functions/_shared/${name}`;
 const store = (await import(/* @vite-ignore */ shared('billingCancelStore'))) as Store;
@@ -347,17 +349,54 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         expect(await linkWorks(hash)).toBe(false);
     });
 
-    /** What billing-cancel consumeToken does when the customer presses "Cancel now". */
-    const spend = async (hash: string, at: string) => {
-        const { data, error } = await db
+    /**
+     * What billing-cancel does when the customer presses "Cancel now":
+     * billingCancelStore.ts consumeToken, through consume_cancel_link_token
+     * (migration 20261020160700) -- spent only while unused and unexpired on
+     * the database's clock.
+     */
+    const spend = (hash: string) => store.consumeToken(hash);
+
+    it('a link read as good that expires before it is spent is refused, stays unused, and nothing more is mailed (Codex round 7 on #62)', async () => {
+        const { rowId } = await subscriber();
+        const hash = await hashOf(rowId);
+        await drainBillingMailNow();
+        expect(resend.delivered).toHaveLength(1);
+        // The cancel page reads it as good ...
+        expect(await linkWorks(hash)).toBe(true);
+        // ... and its hour runs out on the database's clock before the spend.
+        ok(
+            await db
+                .from('billing_cancel_tokens')
+                .update({ expires_at: new Date(Date.now() - 1000).toISOString() })
+                .eq('token_hash', hash),
+            'expire the link',
+        );
+        expect(await spend(hash)).toBe('expired');
+        expect((await tokenRow(hash))?.used_at).toBeNull();
+        // Nor can it be spent the way consumeToken used to, directly: the
+        // token's guard refuses an expired link.
+        const direct = await db
             .from('billing_cancel_tokens')
-            .update({ used_at: at })
+            .update({ used_at: new Date().toISOString() })
             .eq('token_hash', hash)
             .is('used_at', null)
             .select('token_hash');
-        ok({ error }, 'spend the link');
-        return (data ?? []).length;
-    };
+        expect(direct.error?.message).toContain('an expired cancel link cannot be spent');
+        expect((await tokenRow(hash))?.used_at).toBeNull();
+        expect(resend.requests).toHaveLength(1);
+
+        // A link with time left is spent once; then used; and one never
+        // issued is not found.
+        const other = await subscriber();
+        await drainBillingMailNow();
+        const otherHash = await hashOf(other.rowId);
+        expect(await spend(otherHash)).toBe('consumed');
+        expect((await tokenRow(otherHash))?.used_at).not.toBeNull();
+        expect(await spend(otherHash)).toBe('used');
+        expect(await spend(sha256(randomUUID()))).toBe('not_found');
+        expect(resend.requests).toHaveLength(2);
+    });
 
     it('a link sent with its answer lost, used, then retried late and cleaned up, never works again', async () => {
         // Codex round 4, the major on #62, step by step.
@@ -372,7 +411,7 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         expect((await outboxRow(rowId))?.status).toBe('pending');
 
         // The email arrived; the customer uses it.
-        expect(await spend(hash, new Date().toISOString())).toBe(1);
+        expect(await spend(hash)).toBe('consumed');
         expect(await linkWorks(hash)).toBe(false);
 
         // The row's next turn comes after the link expired, on the
@@ -418,8 +457,7 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
 
         resend.dropNextAnswer = true;
         await drainBillingMailNow();
-        const usedAt = new Date().toISOString();
-        expect(await spend(hash, usedAt)).toBe(1);
+        expect(await spend(hash)).toBe('consumed');
         const spent = await tokenRow(hash);
 
         // Ten minutes on, the retry: Resend answers it from the first request.
@@ -456,7 +494,7 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         await drainBillingMailNow();
         expect(resend.delivered).toHaveLength(1);
         expect(await outboxRow(rowId)).toBeNull();
-        expect(await spend(hash, new Date().toISOString())).toBe(1);
+        expect(await spend(hash)).toBe('consumed');
 
         // Its hour over, the cleanup deletes it, and keeps its tombstone.
         ok(
@@ -577,7 +615,7 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         await drainBillingMailNow();
         const otherHash = await hashOf(other.rowId);
         expect(await linkWorks(otherHash)).toBe(true);
-        expect(await spend(otherHash, new Date().toISOString())).toBe(1);
+        expect(await spend(otherHash)).toBe('consumed');
         expect(await linkWorks(otherHash)).toBe(false);
     });
 });
