@@ -215,3 +215,8 @@ What it changes in the work above:
   - Supabase Preview was skipped.
   - `78ee399` was also green; `62bd6e0` was superseded within a minute.
 - No review comments arrived. The PR is still a draft.
+- **Later still: `6ab8228e7f7a3e867a642816abdd2ea17c11b3c9`, "Cancel links: a spent link can never be revived".** The same other session pushed it at 20:57 UTC, and it is now the PR head.
+  - It touches only the cancel-link token lifetime: migration `20261020160300`, `billingCancelStore.ts`, the SQL and billing tests, and `tests/migrationRecoverability.test.ts`.
+  - It does not touch `resendDelivery.ts`, the guest-email files or `mailBudget`.
+  - **CI on `6ab8228` is all green** (checked at 21:07 UTC): `checks`, `supabase-drift` and `omr-service` passed in both runs, and Vercel passed.
+  - There are still no review threads, and the PR is still a draft.
