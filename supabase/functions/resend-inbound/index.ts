@@ -1,7 +1,7 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
-import { isOwnForward } from '../_shared/supportMail.ts';
+import { forwardedSubject, inboxTagFor, isOwnForward } from '../_shared/supportMail.ts';
 import { type SvixFailure, verifySvixSignature } from '../_shared/svixSignature.ts';
 
 /**
@@ -192,7 +192,9 @@ Deno.serve(async (req) => {
     }
 
     const from = event.data?.from ?? 'unknown sender';
-    const subject = event.data?.subject ?? '(no subject)';
+    // Tagged by the inbox it reached, so privacy@ and legal@ stand out in the
+    // one mailbox all three forward to.
+    const subject = forwardedSubject(inboxTagFor(event.data?.received_for, event.data?.to), event.data?.subject);
 
     if (isOwnForward(from, forwardFrom())) {
         // Stored, so the loop is still visible in the table, but not re-sent.
@@ -213,7 +215,7 @@ Deno.serve(async (req) => {
                 to: [to],
                 // Replying goes to the person who wrote in, not to our own relay.
                 reply_to: from,
-                subject: `[cleffy support] ${subject}`,
+                subject,
                 text: text ?? undefined,
                 html: html ?? undefined,
                 headers: { 'X-Cleffy-Inbound-Id': emailId },
