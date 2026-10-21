@@ -256,3 +256,23 @@ Use the helpers at the top of the file:
 - `pg_temp.removed(name, table, where, rows)` — row removal that must succeed.
 
 Write each SQL argument in `$q$ … $q$` so it needs no escaping.
+
+`launch_consent.sql` proves the launch consent and retention migrations
+(`20261021120000` through `20261021120300`): `consent_age()` answers the
+EU/EEA ages and 13 elsewhere; `hook_before_user_created` lets a passing
+`age_gate` through, refuses a missing one with 400 and an under-age one with
+403 whose message names no age, and is callable by `supabase_auth_admin`
+alone; the roster's attestation columns refuse a lower-case country and a
+partial attestation, a teacher reads their own `teacher_attestations` and
+nobody else's and cannot write one; `scrub_student_markings` refuses a
+non-student, tombstones the student's marks with their content replaced by
+a valid empty shape (bumping `seq`), cuts them out of a lesson-history
+snapshot that keeps the teacher's marks and stops naming the student, and
+finds nothing to cut a second time; and the purges remove an archived
+student 13 months on (scrubbed, account and roster row gone) while keeping
+one archived six months ago, remove a guest idle for 100 days while keeping
+an old guest whose session refreshed today, a new guest and an old
+registered account, drop stale rate-limit and login buckets but not live
+ones, and drop support mail older than 24 months; the five cron jobs are
+scheduled off the hour. Proven against the local stack (PostgreSQL 17.11) on
+2026-10-21: all 29 checks passed.

@@ -132,7 +132,7 @@ describe('imslp-sync — the cron job the push has to pause', () => {
      * operator. Pinning the whole map rather than each half means a third job
      * appearing anywhere also has to come through here.
      */
-    it('and omr-sweep are the only jobs any migration touches', () => {
+    it('and omr-sweep (plus the retention jobs) are the only jobs any migration touches', () => {
         const touched = new Map<string, string[]>();
         for (const { name, sql } of migrations()) {
             for (const match of sql.matchAll(/cron\.(?:schedule|unschedule)\s*\(\s*'([a-z0-9-]+)'/gi)) {
@@ -143,9 +143,21 @@ describe('imslp-sync — the cron job the push has to pause', () => {
                 );
             }
         }
+        // The five retention jobs (20261021120300) are safe to let run across
+        // a push: each calls a function the same migration defines, against
+        // tables no pending migration drops, and touches only rows already past
+        // their retention period. What they do on their first night — delete
+        // archived students older than 12 months and guests idle for 90 days —
+        // is the policy, and the PR lists the counts to check beforehand.
+        const retention = ['20261021120300_retention_jobs.sql'];
         expect(Object.fromEntries([...touched].sort())).toEqual({
             'imslp-sync': ['20260902120000_imslp_category_index.sql'],
             'omr-sweep': ['20260806140000_omr_cron.sql'],
+            'retention-archived-students': retention,
+            'retention-compact-tombstones': retention,
+            'retention-rate-limits': retention,
+            'retention-stale-guests': retention,
+            'retention-support-messages': retention,
         });
     });
 });
