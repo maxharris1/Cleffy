@@ -458,6 +458,14 @@ export type ManagedStudentRow = {
     archived_at: string | null;
     created_at: string;
     updated_at: string;
+    /**
+     * The teacher's latest age attestation (20261021120100): the student's
+     * country, when it was given, and the age it vouched for. All null on rows
+     * from before attestations, until their next restore.
+     */
+    country: string | null;
+    age_attested_at: string | null;
+    age_attested_min_age: number | null;
 };
 
 /** 'edit' makes the student an editor on the score; 'view' makes them a viewer. */

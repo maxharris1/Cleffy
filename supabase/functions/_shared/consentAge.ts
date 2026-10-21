@@ -84,3 +84,65 @@ export const TEACHER_ATTESTATION_VERSION = '2026-10-21';
  */
 export const teacherAttestationText = (minAge: number, countryName: string): string =>
     `I confirm this student is at least ${minAge} years old, the minimum age to use Cleffy in ${countryName}.`;
+
+/** What the add-student and restore forms send, as `attestation` on the request. */
+export interface TeacherAttestationInput {
+    country?: unknown;
+    countryName?: unknown;
+    confirmed?: unknown;
+    wording?: unknown;
+    version?: unknown;
+}
+
+export interface TeacherAttestation {
+    /** Upper case. */
+    country: string;
+    minAge: number;
+    /** The sentence the teacher ticked, exactly as shown. */
+    wording: string;
+    version: string;
+}
+
+export type AttestationCheck =
+    { ok: true; attestation: TeacherAttestation } | { ok: false; status: 400 | 409; code: string; error: string };
+
+const MAX_COUNTRY_NAME = 80;
+
+/**
+ * student-provision's reading of a teacher's attestation (server copy only;
+ * the browser builds one, it never judges one).
+ *
+ * The age is the server's, not the form's: the wording must be the sentence
+ * this table produces for that country, so a form that named a lower age —
+ * an old build, or a hand-written request — is refused rather than recorded.
+ * A different wording version is a 409, the "reload the page" kind.
+ */
+export const readTeacherAttestation = (input: unknown): AttestationCheck => {
+    const refuse = (code: string, error: string, status: 400 | 409 = 400): AttestationCheck => ({
+        ok: false,
+        status,
+        code,
+        error,
+    });
+    if (!input || typeof input !== 'object') {
+        return refuse('attestation_required', 'Confirm the student’s country and age to continue.');
+    }
+    const { country, countryName, confirmed, wording, version } = input as TeacherAttestationInput;
+    if (!isCountryCode(country)) {
+        return refuse('attestation_country', 'Choose the country the student lives in.');
+    }
+    if (confirmed !== true) {
+        return refuse('attestation_unconfirmed', 'Confirm the student meets the minimum age for their country.');
+    }
+    if (typeof countryName !== 'string' || !countryName.trim() || countryName.length > MAX_COUNTRY_NAME) {
+        return refuse('attestation_country', 'Choose the country the student lives in.');
+    }
+    if (version !== TEACHER_ATTESTATION_VERSION) {
+        return refuse('attestation_outdated', 'This page is out of date. Reload it and try again.', 409);
+    }
+    const minAge = consentAgeFor(country);
+    if (wording !== teacherAttestationText(minAge, countryName)) {
+        return refuse('attestation_outdated', 'This page is out of date. Reload it and try again.', 409);
+    }
+    return { ok: true, attestation: { country: country.toUpperCase(), minAge, wording, version } };
+};

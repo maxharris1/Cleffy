@@ -17,6 +17,7 @@ const provisionStudent = vi.fn();
 const resetStudentAccess = vi.fn();
 const archiveStudent = vi.fn();
 const restoreStudent = vi.fn();
+const deleteStudent = vi.fn();
 const assignScore = vi.fn();
 const unassignScore = vi.fn();
 
@@ -28,6 +29,14 @@ vi.mock('@/features/roster/rosterService', () => ({
     resetStudentAccess: (...args: unknown[]) => resetStudentAccess(...args),
     archiveStudent: (...args: unknown[]) => archiveStudent(...args),
     restoreStudent: (...args: unknown[]) => restoreStudent(...args),
+    deleteStudent: (...args: unknown[]) => deleteStudent(...args),
+    attestationFor: (country: string, countryName: string) => ({ country, countryName, attested: true }),
+    attestationProblem: (country: string, confirmed: boolean) =>
+        !country
+            ? 'Choose the country the student lives in.'
+            : !confirmed
+              ? 'Confirm the student meets the minimum age for their country.'
+              : null,
     assignScore: (...args: unknown[]) => assignScore(...args),
     unassignScore: (...args: unknown[]) => unassignScore(...args),
 }));
@@ -46,6 +55,9 @@ const student = (id: string, displayName: string, overrides: Partial<ManagedStud
     archived_at: null,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
+    country: null,
+    age_attested_at: null,
+    age_attested_min_age: null,
     ...overrides,
 });
 
@@ -100,6 +112,14 @@ const renderRoster = () =>
             </Routes>
         </MemoryRouter>,
     );
+
+/** The age attestation, as the add form and the restore dialog both ask it. */
+const attest = async (user: ReturnType<typeof userEvent.setup>, scope: HTMLElement = document.body) => {
+    await user.selectOptions(within(scope).getByLabelText('Student’s country'), 'DE');
+    await user.click(within(scope).getByRole('checkbox', { name: /at least 16 years old/ }));
+};
+
+const ATTESTED = { country: 'DE', countryName: 'Germany', attested: true };
 
 /** Opens the only row's action menu and picks the item with this label. */
 const pickRowAction = async (user: ReturnType<typeof userEvent.setup>, label: string) => {
@@ -196,11 +216,13 @@ describe('RosterPage', () => {
 
         await user.type(await screen.findByLabelText('Student name'), 'Ada Lovelace');
         await user.type(screen.getByLabelText('Parent email (optional)'), 'parent@example.com');
+        await attest(user);
         await user.click(screen.getByRole('button', { name: 'Add student' }));
 
         expect(provisionStudent).toHaveBeenCalledWith('Ada Lovelace', {
             parentEmail: 'parent@example.com',
             method: 'code',
+            attestation: ATTESTED,
         });
         const card = await screen.findByRole('dialog', { name: 'Setup card' });
         expect(within(card).getByText('ABCD-EFGH-JKMN')).toBeInTheDocument();
@@ -221,6 +243,7 @@ describe('RosterPage', () => {
 
         await user.click(screen.getByRole('radio', { name: /Email invite/ }));
         await user.type(screen.getByLabelText('Student email'), 'ada@example.com');
+        await attest(user);
         await user.click(screen.getByRole('button', { name: 'Add student' }));
 
         // The parent's address stays independent of the student's own.
@@ -228,10 +251,71 @@ describe('RosterPage', () => {
             parentEmail: undefined,
             method: 'email',
             studentEmail: 'ada@example.com',
+            attestation: ATTESTED,
         });
         const sent = await screen.findByRole('dialog', { name: 'Invite sent' });
         expect(within(sent).getByText('ada@example.com')).toBeInTheDocument();
         expect(within(sent).getByText(/Archive this student and add them again/)).toBeInTheDocument();
+    });
+
+    it('will not add a student until the teacher vouches for their age', async () => {
+        const user = userEvent.setup();
+        renderRoster();
+
+        await user.type(await screen.findByLabelText('Student name'), 'Ada Lovelace');
+        await user.click(screen.getByRole('button', { name: 'Add student' }));
+        expect(screen.getByRole('status')).toHaveTextContent('Choose the country the student lives in.');
+
+        await user.selectOptions(screen.getByLabelText('Student’s country'), 'FR');
+        // The sentence names that country's age, not a fixed one.
+        expect(screen.getByRole('checkbox', { name: /at least 15 years old/ })).not.toBeChecked();
+        await user.click(screen.getByRole('button', { name: 'Add student' }));
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Confirm the student meets the minimum age for their country.',
+        );
+        expect(provisionStudent).not.toHaveBeenCalled();
+    });
+
+    it('restores only with a fresh attestation, starting from the country on file', async () => {
+        const user = userEvent.setup();
+        restoreStudent.mockResolvedValue(undefined);
+        listRoster.mockResolvedValue([
+            student('s1', 'Ada Lovelace', {
+                archived_at: '2026-08-02T00:00:00Z',
+                country: 'DE',
+                age_attested_at: '2026-08-01T00:00:00Z',
+                age_attested_min_age: 16,
+            }),
+        ]);
+        renderRoster();
+
+        await pickRowAction(user, 'Restore…');
+        const dialog = await screen.findByRole('dialog', { name: 'Restore this student?' });
+        expect(within(dialog).getByLabelText('Student’s country')).toHaveValue('DE');
+        await user.click(within(dialog).getByRole('button', { name: 'Restore' }));
+        expect(within(dialog).getByRole('status')).toHaveTextContent('Confirm the student meets the minimum age');
+        expect(restoreStudent).not.toHaveBeenCalled();
+
+        await user.click(within(dialog).getByRole('checkbox', { name: /at least 16 years old/ }));
+        await user.click(within(dialog).getByRole('button', { name: 'Restore' }));
+        await waitFor(() => expect(restoreStudent).toHaveBeenCalledWith('s1', ATTESTED));
+    });
+
+    it('deletes a student only after a warning that says what goes with them', async () => {
+        const user = userEvent.setup();
+        deleteStudent.mockResolvedValue(undefined);
+        listRoster.mockResolvedValueOnce([student('s1', 'Ada Lovelace')]).mockResolvedValue([]);
+        renderRoster();
+
+        await pickRowAction(user, 'Delete student…');
+        const dialog = await screen.findByRole('dialog', { name: 'Delete this student?' });
+        expect(dialog).toHaveTextContent(/every mark they made on your scores/);
+        expect(dialog).toHaveTextContent(/can’t be undone/);
+        expect(deleteStudent).not.toHaveBeenCalled();
+
+        await user.click(within(dialog).getByRole('button', { name: 'Delete student' }));
+        await waitFor(() => expect(deleteStudent).toHaveBeenCalledWith('s1'));
+        expect(await screen.findByText(/No students yet/)).toBeInTheDocument();
     });
 
     it('will not send an invite without an address to send it to', async () => {
@@ -367,6 +451,7 @@ describe('RosterPage', () => {
         renderRoster();
 
         await user.type(await screen.findByLabelText('Student name'), 'Ada Lovelace');
+        await attest(user);
         await user.click(screen.getByRole('button', { name: 'Add student' }));
 
         expect(await screen.findByText(/doesn’t include a student roster/)).toBeInTheDocument();
@@ -486,8 +571,11 @@ describe('RosterPage', () => {
             expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
             expect(screen.getAllByRole('status')).toHaveLength(1);
 
-            await pickRowAction(user, 'Restore');
-            await waitFor(() => expect(restoreStudent).toHaveBeenCalledWith('s1'));
+            await pickRowAction(user, 'Restore…');
+            const dialog = await screen.findByRole('dialog', { name: 'Restore this student?' });
+            await attest(user, dialog);
+            await user.click(within(dialog).getByRole('button', { name: 'Restore' }));
+            await waitFor(() => expect(restoreStudent).toHaveBeenCalledWith('s1', ATTESTED));
 
             expect(screen.getAllByRole('status')).toHaveLength(1);
             expect(screen.getAllByRole('button', { name: 'See plans' })).toHaveLength(1);

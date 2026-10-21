@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as billingApiModule from '@/features/billing/billingApi';
-import { provisionStudent, resetStudentAccess } from '@/features/roster/rosterService';
+import {
+    attestationFor,
+    deleteStudent,
+    provisionStudent,
+    resetStudentAccess,
+    restoreStudent,
+} from '@/features/roster/rosterService';
 
 const callEdgeFunction = vi.fn();
 
@@ -16,6 +22,8 @@ const jsonResponse = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 const STUDENT = { id: 's1', studentUserId: 's1-user', displayName: 'Ada Lovelace' };
+
+const ATTESTATION = attestationFor('DE', 'Germany');
 
 /** The payload the page never sees, read back off the one call that was made. */
 const sentPayload = (): Record<string, unknown> =>
@@ -33,10 +41,15 @@ describe('provisionStudent', () => {
     it('asks for a code and gets one, without offering the server an address', async () => {
         callEdgeFunction.mockResolvedValue(jsonResponse({ student: STUDENT, loginCode: 'ABCD-EFGH-JKMN' }));
 
-        const result = await provisionStudent('  Ada Lovelace  ', { method: 'code' });
+        const result = await provisionStudent('  Ada Lovelace  ', { method: 'code', attestation: ATTESTATION });
 
         expect(result).toEqual({ student: STUDENT, loginCode: 'ABCD-EFGH-JKMN' });
-        expect(sentPayload()).toEqual({ action: 'create', displayName: 'Ada Lovelace', method: 'code' });
+        expect(sentPayload()).toEqual({
+            action: 'create',
+            displayName: 'Ada Lovelace',
+            method: 'code',
+            attestation: ATTESTATION,
+        });
     });
 
     it('sends the invite branch the address and the page the link has to land on', async () => {
@@ -48,6 +61,7 @@ describe('provisionStudent', () => {
             method: 'email',
             studentEmail: ' ada@example.com ',
             parentEmail: ' parent@example.com ',
+            attestation: ATTESTATION,
         });
 
         expect(result).toEqual({ student: STUDENT, invited: true, studentEmail: 'ada@example.com' });
@@ -57,6 +71,7 @@ describe('provisionStudent', () => {
             action: 'create',
             displayName: 'Ada Lovelace',
             method: 'email',
+            attestation: ATTESTATION,
             parentEmail: 'parent@example.com',
             studentEmail: 'ada@example.com',
             redirectTo: `${window.location.origin}/student/welcome`,
@@ -69,7 +84,11 @@ describe('provisionStudent', () => {
         );
 
         await expect(
-            provisionStudent('Ada Lovelace', { method: 'email', studentEmail: 'ada@example.com' }),
+            provisionStudent('Ada Lovelace', {
+                method: 'email',
+                studentEmail: 'ada@example.com',
+                attestation: ATTESTATION,
+            }),
         ).rejects.toThrow('That email address is already in use.');
     });
 });
@@ -97,5 +116,34 @@ describe('resetStudentAccess', () => {
     it('reports an emailed link as sent rather than as a card', async () => {
         callEdgeFunction.mockResolvedValue(jsonResponse({ invited: true, studentEmail: 'clara@example.com' }));
         await expect(resetStudentAccess('s1')).resolves.toEqual({ invited: true, studentEmail: 'clara@example.com' });
+    });
+});
+
+describe('the age attestation', () => {
+    it('is the exact sentence for the country’s age, versioned', () => {
+        expect(ATTESTATION).toEqual({
+            country: 'DE',
+            countryName: 'Germany',
+            confirmed: true,
+            wording: 'I confirm this student is at least 16 years old, the minimum age to use Cleffy in Germany.',
+            version: '2026-10-21',
+        });
+    });
+
+    it('goes with a restore', async () => {
+        callEdgeFunction.mockResolvedValue(jsonResponse({ ok: true }));
+        await restoreStudent('s1', ATTESTATION);
+        expect(sentPayload()).toEqual({ action: 'restore', studentId: 's1', attestation: ATTESTATION });
+    });
+});
+
+describe('deleteStudent', () => {
+    it('asks student-provision to delete, and surfaces a refusal', async () => {
+        callEdgeFunction.mockResolvedValue(jsonResponse({ ok: true }));
+        await deleteStudent('s1');
+        expect(sentPayload()).toEqual({ action: 'delete', studentId: 's1' });
+
+        callEdgeFunction.mockResolvedValue(jsonResponse({ error: 'Could not delete the student' }, 502));
+        await expect(deleteStudent('s1')).rejects.toThrow('Could not delete the student');
     });
 });

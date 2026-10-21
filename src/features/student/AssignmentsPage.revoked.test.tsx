@@ -72,6 +72,9 @@ const rosterRow: ManagedStudentRow = {
     archived_at: null,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-10-10T00:00:00Z',
+    country: null,
+    age_attested_at: null,
+    age_attested_min_age: null,
 };
 
 /** Stands in for the login page, showing what it was told. */

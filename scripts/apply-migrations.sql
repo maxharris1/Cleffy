@@ -9855,3 +9855,164 @@ $$;
 
 revoke all on function public.hook_before_user_created (jsonb) from public, anon, authenticated;
 grant execute on function public.hook_before_user_created (jsonb) to supabase_auth_admin;
+
+-- ===== supabase/migrations/20261021120100_teacher_attestations.sql =====
+-- A teacher vouches for a student's age, and the record of it is kept.
+--
+-- A roster student never sees the age screen: their account is made by their
+-- teacher through student-provision. So the teacher answers for them instead.
+-- Adding a student, and restoring an archived one, now needs the student's
+-- country and a ticked statement that the student is at least the consent age
+-- there (consent_age(), 20261021120000_consent_age.sql). student-provision
+-- refuses either action without both, and writes:
+--
+--  * managed_students.country / age_attested_at / age_attested_min_age — the
+--    current state, on the row the teacher already reads;
+--  * one teacher_attestations row per create or restore — the history: who
+--    attested, for which student, which country and age, the exact sentence
+--    they ticked and its wording version, and when.
+--
+-- Nothing about the student's birthday is asked or stored, here or anywhere.
+--
+-- Existing rows predate this and carry nulls; the restore flow asks the
+-- teacher for them the next time it runs, and nothing reads a null as "old
+-- enough".
+
+alter table public.managed_students
+    add column if not exists country text,
+    add column if not exists age_attested_at timestamptz,
+    add column if not exists age_attested_min_age int;
+
+alter table public.managed_students
+    drop constraint if exists managed_students_country_shape;
+
+alter table public.managed_students
+    add constraint managed_students_country_shape check (country is null or country ~ '^[A-Z]{2}$');
+
+alter table public.managed_students
+    drop constraint if exists managed_students_attestation_complete;
+
+-- All three or none: an attestation without its country (or age) is no record at all.
+alter table public.managed_students
+    add constraint managed_students_attestation_complete check (
+        (country is null and age_attested_at is null and age_attested_min_age is null)
+        or (country is not null and age_attested_at is not null and age_attested_min_age is not null)
+    );
+
+-- The teacher reads their own roster with a column-level grant
+-- (20260826194426_roster.sql, 20260827150000_student_credentials.sql); the new
+-- columns join it. Writes stay the service role's alone.
+grant select (country, age_attested_at, age_attested_min_age) on table public.managed_students to authenticated;
+
+create table if not exists public.teacher_attestations (
+    id uuid primary key default gen_random_uuid(),
+    teacher_id uuid not null references auth.users (id) on delete cascade,
+    -- Survives the student: a deleted roster row leaves the attestation that
+    -- was given for it, with the link cleared.
+    managed_student_id uuid references public.managed_students (id) on delete set null,
+    action text not null check (action in ('create', 'restore')),
+    country text not null check (country ~ '^[A-Z]{2}$'),
+    min_age int not null check (min_age between 13 and 21),
+    wording text not null check (length(wording) between 1 and 500),
+    wording_version text not null check (length(wording_version) between 1 and 40),
+    attested_at timestamptz not null default now()
+);
+
+create index if not exists teacher_attestations_teacher on public.teacher_attestations (teacher_id, attested_at desc);
+
+create index if not exists teacher_attestations_student on public.teacher_attestations (managed_student_id);
+
+alter table public.teacher_attestations enable row level security;
+
+revoke all on table public.teacher_attestations from public, anon, authenticated;
+
+grant all on table public.teacher_attestations to service_role;
+
+-- A teacher may read what they attested; nobody but the service role writes.
+drop policy if exists teacher_attestations_select on public.teacher_attestations;
+
+create policy teacher_attestations_select on public.teacher_attestations for select to authenticated
+using (teacher_id = (select auth.uid()));
+
+grant select on table public.teacher_attestations to authenticated;
+
+-- ===== supabase/migrations/20261021120200_delete_student_markings.sql =====
+-- Deleting a roster student takes their markings with them.
+--
+-- Account deletion keeps a departed collaborator's marks on other people's
+-- scores, authorless (20261007120600_account_deletion.sql): a fellow teacher's
+-- fingerings on a shared score are part of that score. A roster student is a
+-- different case. Their teacher is deleting a child's or teenager's account,
+-- usually because the family asked, and what that student drew is the
+-- student's data — so the teacher's "Delete student" (student-provision
+-- action 'delete') and the 12-month purge of archived students
+-- (20261021120300_retention_jobs.sql) both scrub it first:
+--
+--  * every live annotation the student made is TOMBSTONED (deleted_at set),
+--    never hard-deleted, so annotations_stamp bumps `seq`,
+--    annotations_broadcast fires, and every device that already pulled the
+--    mark converges by sync the ordinary way. Its payload is replaced in the
+--    same write by the smallest shape annotation_payload_valid() admits, so
+--    the strokes and text themselves are gone at once rather than when
+--    compact_annotation_tombstones() finally removes the row;
+--  * every lesson-history snapshot loses the student's marks from its
+--    payload, and stops naming the student as the one who captured it. The
+--    rest of each snapshot (the teacher's marks) stays.
+--
+-- Only then is the auth user deleted, whose cascades take the roster row,
+-- assignments, memberships and practice notes.
+--
+-- Service role (student-provision) and the owner (the cron job) only. It
+-- refuses an account that is not a provisioned student, so it can never be
+-- pointed at a teacher's own marks.
+
+create or replace function public.scrub_student_markings (p_student uuid) returns jsonb
+language plpgsql security definer
+set search_path = public as $$
+declare
+    marks int;
+    snapshots int;
+begin
+    if not exists (
+        select 1 from auth.users u
+        where u.id = p_student and u.raw_app_meta_data ->> 'user_type' = 'student'
+    ) then
+        raise exception 'scrub_student_markings: % is not a provisioned student', p_student
+            using errcode = '22023';
+    end if;
+
+    update public.annotations a
+    set deleted_at = coalesce(a.deleted_at, now()),
+        payload = case
+            when a.kind = 'text' then '{"x":0,"y":0,"size":0.01,"text":""}'::jsonb
+            else '{"pts":[0,0,0],"w":0.001}'::jsonb
+        end
+    where a.created_by = p_student;
+    get diagnostics marks = row_count;
+
+    update public.annotation_snapshots s
+    set payload = coalesce(
+            (
+                select jsonb_agg(e order by ord)
+                from jsonb_array_elements(s.payload) with ordinality as t (e, ord)
+                where e ->> 'createdBy' is distinct from p_student::text
+            ),
+            '[]'::jsonb
+        ),
+        created_by = case when s.created_by = p_student then null else s.created_by end
+    where jsonb_typeof(s.payload) = 'array'
+      and (
+          s.created_by = p_student
+          or exists (
+              select 1 from jsonb_array_elements(s.payload) e
+              where e ->> 'createdBy' = p_student::text
+          )
+      );
+    get diagnostics snapshots = row_count;
+
+    return jsonb_build_object('annotations', marks, 'snapshots', snapshots);
+end;
+$$;
+
+revoke all on function public.scrub_student_markings (uuid) from public, anon, authenticated;
+grant execute on function public.scrub_student_markings (uuid) to service_role;
