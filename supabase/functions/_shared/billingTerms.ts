@@ -487,11 +487,16 @@ export const cancellationConfirmationEmail = (input: CancellationEmailInput): Bi
     };
 };
 
-/** The signed-out cancel link (the "magic link" of item 19). */
-export const cancelLinkEmail = (link: string, ttlMinutes: number): BillingEmail => {
+/**
+ * The signed-out cancel link (the "magic link" of item 19). `expiresAtMs` is the link's own expiry, fixed when
+ * it was asked for (billing_mail_outbox.link_expires_at): the email names that
+ * moment rather than a duration, so it stays true for a link the mail budget
+ * held back, and stays byte-identical on every retry of the row.
+ */
+export const cancelLinkEmail = (link: string, expiresAtMs: number): BillingEmail => {
     const paragraphs = [
         'Someone — hopefully you — asked to cancel the Cleffy subscription for this email address.',
-        `Open this link to review and cancel it. It works once and expires in ${ttlMinutes} minutes:\n${link}`,
+        `Open this link to review and cancel it. It works once, until ${formatUtc(expiresAtMs)}:\n${link}`,
         'If you did not ask for this, you can ignore this email: nothing changes until the link is used.',
         traderBlock(),
     ];

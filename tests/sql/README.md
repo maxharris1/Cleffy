@@ -187,6 +187,21 @@ SECURITY INVOKER and would otherwise answer 42501 before it reached the lease
 check. Proven against PostgreSQL 17.11 on 2026-10-12 (53 checks) and again, with
 the review's additions, on 2026-10-13: all 98 checks passed.
 
+`cancel_link_lifetime.sql` proves
+`supabase/migrations/20261020160300_cancel_link_token_lifetime.sql` (Codex round
+4 on #62): a cancel link's expiry is fixed on its `billing_mail_outbox` row when
+it is asked for and never moved later; its token is saved only through
+`save_cancel_link_token`, under the row's lease, with the row's expiry, and a
+second save — or the upsert the store used to make — changes nothing. Its last
+section is a real race: two dblink sessions save the same link at once, the
+second waits on the first's row lock, and the one token keeps the first save's
+expiry. Because that section needs committed rows it creates its own (fixed
+ids, deleted before and after) and logs in as `postgres`; pass
+`-v peer_password=…` for anything but the local stack. Against hosted
+databases, use only sections 1-2. `tests/billing/cancelLinkStore.test.ts` runs
+billingCancelStore.ts itself against the same local stack (skipped unless
+`CLEFFY_LOCAL_SUPABASE_URL` and `CLEFFY_LOCAL_SERVICE_ROLE_KEY` are set).
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's

@@ -41,6 +41,8 @@ export interface OutboxRow {
     attempts: number;
     claimToken: string;
     createdAt: string;
+    /** A cancel link's expiry, fixed when it was asked for (migration 20261020160300); null for the rest. */
+    linkExpiresAt: string | null;
 }
 
 export type Delivery =

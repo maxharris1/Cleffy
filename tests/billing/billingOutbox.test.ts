@@ -62,6 +62,7 @@ class FakeOutbox {
             attempts: 0,
             claimToken: '',
             createdAt: new Date(this.clock).toISOString(),
+            linkExpiresAt: kind === 'cancel_link' ? new Date(this.clock + 60 * MINUTE).toISOString() : null,
             status: 'pending',
             dueAt: this.clock,
             claimedUntil: null,
@@ -281,6 +282,7 @@ describe('the confirmations the outbox sends', () => {
         attempts: 1,
         claimToken: 'claim-1',
         createdAt: '2026-10-21T08:00:00.000Z',
+        linkExpiresAt: null,
     });
 
     it('names the policy versions the buyer consented under, not the ones deployed now', async () => {
@@ -423,7 +425,10 @@ describe('the confirmations the outbox sends', () => {
     });
 
     it("answers billing-cancel's refund request by what certainly happened", async () => {
-        const message = billingTerms.cancelLinkEmail('https://cleffy.io/cancel?token=x', 60);
+        const message = billingTerms.cancelLinkEmail(
+            'https://cleffy.io/cancel?token=x',
+            Date.parse('2026-10-21T09:00:00Z'),
+        );
         const options = { tag: 'refund_request', idempotencyKey: 'billing-refund-request-abc' };
         for (const [result, expected, kept] of [
             [SENT, 'sent', 1],

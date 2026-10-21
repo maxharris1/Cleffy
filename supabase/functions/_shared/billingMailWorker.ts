@@ -49,6 +49,7 @@ interface OutboxRecord {
     attempts: number;
     claim_token: string;
     created_at: string;
+    link_expires_at: string | null;
 }
 
 const admin = () => {
@@ -114,7 +115,10 @@ const deliver = async (row: OutboxRow): Promise<Delivery> => {
         case 'cancellation_confirmation':
             return deliverCancellationConfirmation(confirmationDeps(), row);
         case 'cancel_link':
-            return deliverCancelLink(cancelLinkDeps(), row.mode, row.payload as unknown as CancelLinkRequest, row.id);
+            return deliverCancelLink(cancelLinkDeps(), row.mode, row.payload as unknown as CancelLinkRequest, row.id, {
+                claimToken: row.claimToken,
+                linkExpiresAt: row.linkExpiresAt,
+            });
         default:
             return { outcome: 'retry', reason: `no deliverer for ${row.kind as string}` };
     }
@@ -138,6 +142,7 @@ export const drainBillingMailNow = (): Promise<DrainSummary> =>
                 attempts: record.attempts,
                 claimToken: record.claim_token,
                 createdAt: record.created_at,
+                linkExpiresAt: record.link_expires_at ?? null,
             }));
         },
         settle: async (row, delivery, retryAfterMs) => {

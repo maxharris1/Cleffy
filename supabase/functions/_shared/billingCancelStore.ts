@@ -103,7 +103,14 @@ export const cancellableSubscription = async (
         : null;
 };
 
-export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, mode, expiresAt }) => {
+/**
+ * The link's token, saved through save_cancel_link_token (migration
+ * 20261020160300): only by the worker holding the row's lease, with the row's
+ * own expiry -- set once, when the link was asked for -- and INSERT ... ON
+ * CONFLICT (token_hash) DO NOTHING, so a retry of the row, or two at once,
+ * never moves the expiry an earlier save stored or touches its used_at.
+ */
+export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, outboxId, claimToken }) => {
     const client = admin();
     // Spent and long-expired links are worth nothing; clear this account's
     // before adding another, so the table cannot grow.
@@ -112,13 +119,17 @@ export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, mod
         .delete()
         .eq('user_id', userId)
         .lt('expires_at', new Date(Date.now() - 24 * 60 * 60_000).toISOString());
-    // An upsert: a retry of the same outbox row saves the same token
-    // (cancelLinkToken) and gives it its hour again from this send. used_at is
-    // not among the columns written, so a link already spent stays spent.
-    const { error } = await client
-        .from('billing_cancel_tokens')
-        .upsert({ token_hash: hash, user_id: userId, mode, expires_at: expiresAt }, { onConflict: 'token_hash' });
+    const { data, error } = await client.rpc('save_cancel_link_token', {
+        p_outbox_id: outboxId,
+        p_claim: claimToken,
+        p_hash: hash,
+        p_user: userId,
+    });
     if (error) {
         throw new Error(`could not save the cancel link: ${error.message}`);
     }
+    if (data !== 'saved' && data !== 'not_held') {
+        throw new Error(`save_cancel_link_token answered ${String(data)}`);
+    }
+    return data;
 };

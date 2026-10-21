@@ -82,7 +82,11 @@ const harness = (
     const trace: string[] = [];
     /** billing_mail_outbox, modelled: what /cancel wrote down, and what the worker made of it. */
     const queue: Array<{ id: string; request: CancelLinkRequest; mode: StripeMode }> = [];
+    /** Each row's lease and its link's expiry, fixed when it was written down (link_expires_at). */
+    const outbox = new Map<string, { mode: StripeMode; claimToken: string; linkExpiresAt: string }>();
     let rows = 0;
+    let claims = 0;
+    const clock = { now: NOW };
     const deliveries: Delivery[] = [];
     const subscription: CancellableSubscription | null =
         options.subscription === undefined
@@ -164,7 +168,13 @@ const harness = (
             if (options.queueFails) {
                 throw new Error('connection reset');
             }
-            queue.push({ id: `row-${++rows}`, request, mode });
+            const id = `row-${++rows}`;
+            queue.push({ id, request, mode });
+            outbox.set(id, {
+                mode,
+                claimToken: '',
+                linkExpiresAt: new Date(clock.now + CANCEL_LINK_TTL_MS).toISOString(),
+            });
         }),
         sendQueued: vi.fn(() => {
             trace.push('send-queued');
@@ -204,7 +214,7 @@ const harness = (
         idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
         planNameForPrice: (priceId) => (priceId === 'price_teacher_monthly' ? 'Teacher' : null),
-        now: () => NOW,
+        now: () => clock.now,
         logError: (code) => errors.push(code),
     };
     const linkDeps: CancelLinkDeps = {
@@ -224,14 +234,23 @@ const harness = (
         linkToken: async (secret, rowId) => `token-${createHash('sha256').update(`${secret}:${rowId}`).digest('hex')}`,
         userForEmail: vi.fn(async (email: string) => (email === EMAIL ? USER : null)),
         cancellableSubscription,
-        // An upsert that leaves used_at alone, as billingCancelStore.ts does.
-        saveToken: async ({ hash, userId, mode, expiresAt }) => {
-            tokens.set(hash, { userId, mode, expiresAt, usedAt: tokens.get(hash)?.usedAt ?? null });
+        // save_cancel_link_token, modelled: under the row's lease, with the
+        // row's expiry, and DO NOTHING for a token already saved.
+        // tests/billing/cancelLinkStore.test.ts holds the real one to this.
+        saveToken: async ({ hash, userId, outboxId, claimToken }) => {
+            const row = outbox.get(outboxId);
+            if (!row || row.claimToken !== claimToken) {
+                return 'not_held';
+            }
+            if (!tokens.has(hash)) {
+                tokens.set(hash, { userId, mode: row.mode, expiresAt: row.linkExpiresAt, usedAt: null });
+            }
+            return 'saved';
         },
         sendEmail,
         idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
-        now: () => NOW,
+        now: () => clock.now,
         logError: (code) => errors.push(code),
     };
     /**
@@ -242,10 +261,20 @@ const harness = (
         const due = queue.splice(0);
         const outcomes: Delivery[] = [];
         for (const item of due) {
-            const outcome = await deliverCancelLink(linkDeps, item.mode, item.request, item.id);
+            const row = outbox.get(item.id);
+            if (!row) {
+                continue;
+            }
+            row.claimToken = `claim-${++claims}`;
+            const outcome = await deliverCancelLink(linkDeps, item.mode, item.request, item.id, {
+                claimToken: row.claimToken,
+                linkExpiresAt: row.linkExpiresAt,
+            });
             outcomes.push(outcome);
             if (outcome.outcome === 'retry') {
                 queue.push(item);
+            } else {
+                outbox.delete(item.id);
             }
         }
         deliveries.push(...outcomes);
@@ -253,7 +282,11 @@ const harness = (
     };
     /** The window reopening: what the budget and recipient limits had counted is forgotten. */
     const newHour = () => limiter.clear();
-    return { deps, linkDeps, tokens, sent, refunded, errors, trace, queue, flush, newHour, deliveries };
+    /** Time passing, for the worker and the cancel page alike. */
+    const later = (ms: number) => {
+        clock.now += ms;
+    };
+    return { deps, linkDeps, tokens, sent, refunded, errors, trace, queue, outbox, flush, newHour, later, deliveries };
 };
 
 const body = async (response: Response) => (await response.json()) as Record<string, unknown>;
@@ -373,6 +406,62 @@ describe('billing-cancel: asking for a link', () => {
         expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
         expect(h.sent).toHaveLength(1);
         expect(h.queue).toEqual([]);
+    });
+
+    describe('the link keeps the expiry it was asked with (Codex round 4 on #62)', () => {
+        it('a link the mail budget held back is good until an hour after it was asked for, and says so', async () => {
+            const h = harness({
+                mailBudget: { hour: { limit: 1, windowMs: 3_600_000 }, day: { limit: 50, windowMs: DAY } },
+            });
+            h.linkDeps.checkRateLimit('billing-cancel:global', 1, 3_600_000);
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            expect(await h.flush()).toEqual([{ outcome: 'retry', reason: 'mail budget spent', afterMs: 60_000 }]);
+
+            h.later(20 * 60_000);
+            h.newHour();
+            expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
+            const asked = NOW + CANCEL_LINK_TTL_MS;
+            const token = tokenFrom(h.sent[0]?.text ?? '');
+            // Not an hour from the send: the hour it was asked for.
+            expect(h.tokens.get(await sha256Hex(token))?.expiresAt).toBe(new Date(asked).toISOString());
+            expect(h.sent[0]?.text).toContain(`It works once, until ${billingTerms.formatUtc(asked)}:`);
+            expect(h.sent[0]?.text).not.toMatch(/expires in \d+ minutes/);
+        });
+
+        it('a retry after a lost answer mails the identical email, and leaves the expiry where it was', async () => {
+            const resend = new FakeResend();
+            const h = harness({ resend });
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            resend.dropNextAnswer = true;
+            await h.flush();
+            const [hash] = [...h.tokens.keys()];
+
+            h.later(25 * 60_000);
+            expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
+            expect(resend.requests).toHaveLength(2);
+            expect(resend.requests[1]).toEqual(resend.requests[0]);
+            expect(h.tokens.get(hash ?? '')?.expiresAt).toBe(new Date(NOW + CANCEL_LINK_TTL_MS).toISOString());
+        });
+
+        it("a worker that lost the row's lease saves nothing and sends nothing", async () => {
+            const h = harness();
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            const [item] = h.queue;
+            const outcome = await deliverCancelLink(
+                h.linkDeps,
+                'live',
+                item?.request ?? { email: '', origin: '' },
+                'row-1',
+                {
+                    claimToken: 'a-lease-someone-else-holds',
+                    linkExpiresAt: h.outbox.get('row-1')?.linkExpiresAt ?? null,
+                },
+            );
+            expect(outcome).toEqual({ outcome: 'retry', reason: 'lease taken over' });
+            expect(h.sent).toEqual([]);
+            expect(h.tokens.size).toBe(0);
+            expect(h.refunded).toEqual(expect.arrayContaining(['billing-cancel:global', 'billing-cancel:global-day']));
+        });
     });
 
     it('retries a link Resend refused, handing the budget back', async () => {
@@ -696,6 +785,23 @@ describe('billing-cancel/index.ts is wiring only', () => {
         expect(source).not.toContain('mailLimit(');
         const worker = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingMailWorker.ts'), 'utf8');
         expect(worker).toMatch(/case 'cancel_link':\s*\n\s*return deliverCancelLink\(/);
+    });
+
+    it('saves a link only through save_cancel_link_token, with the expiry the database fixed (Codex round 4 on #62)', () => {
+        const store = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingCancelStore.ts'), 'utf8');
+        expect(store).toContain("rpc('save_cancel_link_token', {");
+        // The upsert that refreshed the expiry on every retry is gone.
+        expect(store).not.toContain('.upsert(');
+        const worker = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingMailWorker.ts'), 'utf8');
+        expect(worker).toContain('linkExpiresAt: row.linkExpiresAt');
+        expect(worker).toContain('linkExpiresAt: record.link_expires_at');
+        // The hour the database counts from created_at is the hour this module knows.
+        const migration = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20261020160300_cancel_link_token_lifetime.sql'),
+            'utf8',
+        );
+        expect(CANCEL_LINK_TTL_MS).toBe(60 * 60_000);
+        expect(migration).toContain("then new.created_at + interval '1 hour'");
     });
 
     it("reads the subscription back from Stripe rather than trusting the mirror's copy", () => {

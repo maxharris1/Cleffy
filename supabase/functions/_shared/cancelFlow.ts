@@ -41,6 +41,12 @@ import type { StripeMode } from './stripeMode.ts';
  * NO runtime imports, for the reason checkoutFlow.ts gives.
  */
 
+/**
+ * How long a cancel link works, counted from when it was asked for. The
+ * database sets it, once, on the outbox row (`link_expires_at`, migration
+ * 20261020160300 -- an hour after `created_at`); this is the same hour, for
+ * the tests that hold the two together.
+ */
 export const CANCEL_LINK_TTL_MS = 60 * 60_000;
 
 export const CANCEL_LIMITS = {
@@ -111,6 +117,23 @@ export interface CancelLinkRequest {
     origin: string;
 }
 
+/**
+ * The outbox row's lease and the link's expiry, as claim_billing_mail handed
+ * them over: the token is saved under the lease, with the row's expiry.
+ */
+export interface CancelLinkLease {
+    claimToken: string;
+    /** billing_mail_outbox.link_expires_at (ISO), fixed when the request was written down. */
+    linkExpiresAt: string | null;
+}
+
+/** What saving a link's token answered (save_cancel_link_token). */
+export type SaveTokenResult =
+    /** Stored -- now, or by an earlier attempt at this row, whose expiry and used_at stand. */
+    | 'saved'
+    /** This worker no longer holds the row's lease: it must not send. */
+    | 'not_held';
+
 /** Resend, with an Idempotency-Key that is the same on every attempt at one mail (resendDelivery.ts). */
 type SendEmail = (
     to: string,
@@ -145,8 +168,17 @@ export interface CancelLinkDeps {
     linkToken: (secret: string, rowId: string) => Promise<string>;
     userForEmail: (email: string) => Promise<string | null>;
     cancellableSubscription: (userId: string, mode: StripeMode) => Promise<CancellableSubscription | null>;
-    /** Saves the token's hash, or refreshes the expiry of one a retry saved before. */
-    saveToken: (token: { hash: string; userId: string; mode: StripeMode; expiresAt: string }) => Promise<void>;
+    /**
+     * Saves the token's hash for its outbox row, with the row's expiry, under
+     * the row's lease. A token an earlier attempt saved is left exactly as it
+     * is: its expiry is never moved and its used_at never touched.
+     */
+    saveToken: (token: {
+        hash: string;
+        userId: string;
+        outboxId: string;
+        claimToken: string;
+    }) => Promise<SaveTokenResult>;
     sendEmail: SendEmail;
     idempotencyKey: IdempotencyKey;
     terms: Pick<typeof BillingTerms, 'cancelLinkEmail' | 'BILLING_PATHS'>;
@@ -264,6 +296,7 @@ export const deliverCancelLink = async (
     request: CancelLinkRequest,
     /** The billing_mail_outbox row: what the link's token and the Resend key derive from. */
     rowId: string,
+    lease: CancelLinkLease,
 ): Promise<Delivery> => {
     const secret = deps.secret();
     if (!secret) {
@@ -328,18 +361,30 @@ export const deliverCancelLink = async (
         counted.push(key);
     }
 
-    // Derived from the row, so every retry mails the same link; saved (or its
-    // expiry refreshed) at send time, so a link that waited for the budget is
-    // still good for its whole hour when it arrives.
+    // Derived from the row, so every retry mails the same link, and saved with
+    // the row's expiry -- fixed when the link was asked for, never refreshed
+    // by a retry (Codex round 4 on #62): a link that waited is good for what
+    // is left of its hour, and the email says until when.
+    const expiresAtMs = Date.parse(lease.linkExpiresAt ?? '');
+    if (!Number.isFinite(expiresAtMs)) {
+        await handBack();
+        deps.logError('cancel_link_expiry_missing', new Error(`outbox row ${rowId} has no link expiry`));
+        return { outcome: 'retry', reason: 'link has no expiry' };
+    }
     let token: string;
     try {
         token = await deps.linkToken(secret, rowId);
-        await deps.saveToken({
+        const saved = await deps.saveToken({
             hash: await deps.sha256Hex(token),
             userId,
-            mode,
-            expiresAt: new Date(deps.now() + CANCEL_LINK_TTL_MS).toISOString(),
+            outboxId: rowId,
+            claimToken: lease.claimToken,
         });
+        if (saved === 'not_held') {
+            // Another worker holds the row now and sends it under the same key.
+            await handBack();
+            return { outcome: 'retry', reason: 'lease taken over' };
+        }
     } catch (err) {
         await handBack();
         deps.logError('cancel_token_save_failed', err);
@@ -347,7 +392,7 @@ export const deliverCancelLink = async (
     }
 
     const link = `${request.origin}${deps.terms.BILLING_PATHS.cancel}?token=${encodeURIComponent(token)}`;
-    const sent = await deps.sendEmail(email, deps.terms.cancelLinkEmail(link, CANCEL_LINK_TTL_MS / 60_000), {
+    const sent = await deps.sendEmail(email, deps.terms.cancelLinkEmail(link, expiresAtMs), {
         tag: 'cancel_link',
         idempotencyKey: deps.idempotencyKey(BILLING_OUTBOX_KEY, rowId),
     });
