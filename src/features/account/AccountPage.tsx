@@ -440,7 +440,9 @@ export const AccountPage = () => {
                         <h2 className={SECTION_HEADING}>Plan &amp; billing</h2>
                         <p className="mt-1.5 flex items-center gap-2 text-stone-900">
                             <PlanBadge tier={tier} />
-                            {entitlements?.source === 'studio_member' ? (
+                            {entitlements?.seat_read_only ? (
+                                <span className="text-sm text-amber-800">read-only academy seat</span>
+                            ) : entitlements?.source === 'studio_member' ? (
                                 <span className="text-sm text-stone-600">through your academy</span>
                             ) : null}
                         </p>
@@ -530,7 +532,12 @@ export const AccountPage = () => {
                 </p>
             </section>
 
-            <StudioSeats userId={userId} tier={tier} source={entitlements?.source ?? 'none'} />
+            <StudioSeats
+                userId={userId}
+                tier={tier}
+                source={entitlements?.source ?? 'none'}
+                seatReadOnly={entitlements?.seat_read_only === true}
+            />
 
             <section className={SECTION}>
                 <h2 className={SECTION_HEADING}>Preferences</h2>
