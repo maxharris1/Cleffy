@@ -146,6 +146,15 @@ create function pg_temp.live (p_key text) returns boolean language sql as $$
                    where id = ('e2000000-0000-4000-8000-0000000005' || p_key)::uuid and archived_at is null);
 $$;
 
+-- Records the district's own evidence that a student was provisioned for it.
+create function pg_temp.evidence (p_key text, p_studio uuid) returns boolean language plpgsql as $$
+begin
+    perform public.admin_record_district_evidence (
+        ('e2000000-0000-4000-8000-0000000005' || p_key)::uuid, p_studio, 'district roster export', 'test admin');
+    return true;
+end;
+$$;
+
 -- Turns rows into what a row provisioned before 20261021120800 looks like: no
 -- district, and nothing recorded about the context it was provisioned in.
 create function pg_temp.make_legacy (p_keys text[]) returns boolean language plpgsql as $$
@@ -359,7 +368,33 @@ select pg_temp.refused (
     '42501'
 );
 
+select pg_temp.refused (
+    'nor record district evidence',
+    $q$select public.admin_record_district_evidence ('e2000000-0000-4000-8000-0000000005b1',
+           'e2000000-0000-4000-8000-0000000005da', 'x', 'x')$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor read the evidence',
+    $q$select * from public.district_student_evidence$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor the seat tenure history',
+    $q$select * from public.studio_seat_tenures$q$,
+    '42501'
+);
+
 select pg_temp.act_as_server ();
+
+select pg_temp.refused (
+    'evidence can only name a district',
+    $q$select public.admin_record_district_evidence ('e2000000-0000-4000-8000-0000000005b1',
+           'e2000000-0000-4000-8000-0000000005dc', 'district roster export', 'test admin')$q$,
+    '22023'
+);
 
 select pg_temp.holds (
     'the admin correction runs',
@@ -385,26 +420,64 @@ select id, district_studio_id from public.managed_students where id::text like '
 
 grant select on before_backfill to public;
 
--- Pretend p1, p3, l1 and oa1 predate the column. p2 does not: it was
+-- Pretend p1, p3, l1, l2, t1 and oa1 predate the column. p2 does not: it was
 -- provisioned privately by a seated teacher, and stays decided.
 select pg_temp.holds (
     'legacy rows can be prepared',
-    $q$select pg_temp.make_legacy (array['b1', 'b8', 'b3', 'b6'])$q$
+    $q$select pg_temp.make_legacy (array['b1', 'b8', 'b3', 'b4', 'b5', 'b6'])$q$
 );
 
 select public.backfill_district_student_attribution ();
 
 select pg_temp.holds (
-    'the backfill attributes the owner''s student and a seated teacher''s student created since the seat',
+    'a seat or ownership when the student was created is not evidence: with no record, no legacy row is attributed',
+    $q$select pg_temp.district_of ('b8') is null and pg_temp.district_of ('b6') is null
+       and pg_temp.district_of ('b3') is null and pg_temp.district_of ('b5') is null
+       and pg_temp.decided_by ('b8') = 'legacy'$q$
+);
+
+-- The district's own records: p3, l1, oa1, and (wrongly) p1 from before P's
+-- seat and l2 from after L left, all named as A's.
+select pg_temp.holds (
+    'evidence can be recorded',
+    $q$select pg_temp.evidence ('b8', 'e2000000-0000-4000-8000-0000000005da')
+          and pg_temp.evidence ('b3', 'e2000000-0000-4000-8000-0000000005da')
+          and pg_temp.evidence ('b6', 'e2000000-0000-4000-8000-0000000005da')
+          and pg_temp.evidence ('b1', 'e2000000-0000-4000-8000-0000000005da')
+          and pg_temp.evidence ('b4', 'e2000000-0000-4000-8000-0000000005da')$q$
+);
+
+select public.backfill_district_student_attribution ();
+
+select pg_temp.holds (
+    'the backfill attributes, on evidence, the owner''s student and a seated teacher''s student created during the seat',
     $q$select pg_temp.district_of ('b8') = 'e2000000-0000-4000-8000-0000000005da'
        and pg_temp.district_of ('b6') = 'e2000000-0000-4000-8000-0000000005da'
        and pg_temp.decided_by ('b8') = 'backfilled'$q$
 );
 
 select pg_temp.holds (
-    'but never a private student from before the seat, nor a departed teacher''s (no record is left)',
-    $q$select pg_temp.district_of ('b1') is null and pg_temp.district_of ('b3') is null
-       and pg_temp.decided_by ('b1') = 'legacy'$q$
+    'a departed teacher''s legacy student is attributed within the seat''s tenure, start to end',
+    $q$select pg_temp.district_of ('b3') = 'e2000000-0000-4000-8000-0000000005da'
+       and pg_temp.decided_by ('b3') = 'backfilled'$q$
+);
+
+select pg_temp.holds (
+    'but never on evidence outside the tenure: before the seat started, or once it ended',
+    $q$select pg_temp.district_of ('b1') is null and pg_temp.decided_by ('b1') = 'legacy'
+       and pg_temp.district_of ('b4') is null and pg_temp.decided_by ('b4') = 'legacy'$q$
+);
+
+select pg_temp.holds (
+    'leaving closes the seat''s tenure, and the record outlives the seat',
+    $q$select exists (select 1 from public.studio_seat_tenures
+                      where studio_id = 'e2000000-0000-4000-8000-0000000005da'
+                        and user_id = 'e2000000-0000-4000-8000-0000000000a4'
+                        and started_at = now() - interval '12 days' and ended_at = now())
+       and not exists (select 1 from public.studio_members
+                       where user_id = 'e2000000-0000-4000-8000-0000000000a4')
+       and (select count(*) = 2 from public.studio_seat_tenures
+            where user_id = 'e2000000-0000-4000-8000-0000000000a5' and ended_at is null)$q$
 );
 
 select pg_temp.holds (
@@ -413,9 +486,11 @@ select pg_temp.holds (
        and pg_temp.district_of ('b9') is null and pg_temp.decided_by ('b9') = 'provisioned'$q$
 );
 
+-- B's record of t1 arrives later; running the backfill again picks it up.
 select pg_temp.holds (
-    'a human reconciles the departed teacher''s student',
-    $q$select pg_temp.admin_set ('b3', 'e2000000-0000-4000-8000-0000000005da')$q$
+    'evidence recorded later is picked up by the next run',
+    $q$select pg_temp.evidence ('b5', 'e2000000-0000-4000-8000-0000000005db')
+          and public.backfill_district_student_attribution () = 1$q$
 );
 
 select pg_temp.holds (

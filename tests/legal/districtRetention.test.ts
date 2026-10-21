@@ -383,12 +383,38 @@ describe('the district purge’s scope (20261021120800)', () => {
         expect(backfill).toMatch(/district_attribution = 'backfilled'/);
     });
 
+    it('backfills on recorded evidence only, never on a seat or ownership alone', () => {
+        const backfill = fn('backfill_district_student_attribution');
+        expect(backfill).toMatch(/from public\.district_student_evidence e/);
+        expect(backfill).not.toMatch(/studio_members|owner_id/);
+        expect(scope).toContain('drop function if exists public.district_studio_for_teacher (uuid, timestamptz);');
+        expect(scope).not.toMatch(/create or replace function public\.district_studio_for_teacher/);
+    });
+
+    it('bounds the evidence by the seat’s whole tenure, which outlives the seat', () => {
+        const inTenure = fn('district_evidence_in_tenure');
+        expect(inTenure).toMatch(
+            /t\.started_at <= ms\.created_at\s+and \(t\.ended_at is null or ms\.created_at < t\.ended_at\)/,
+        );
+        expect(inTenure).not.toMatch(/studio_members/);
+        const tenure = fn('studio_members_seat_tenure');
+        expect(tenure).toMatch(/values \(new\.studio_id, new\.user_id, new\.created_at\)/);
+        expect(tenure).toMatch(/set ended_at = greatest\(now\(\), t\.started_at\)/);
+        expect(scope).toMatch(
+            /create trigger studio_members_seat_tenure after insert or delete on public\.studio_members/,
+        );
+        expect(scope).toMatch(/grant select on table public\.studio_seat_tenures to service_role;/);
+    });
+
     it('is proven against a database for a private roster, a departed teacher and two districts', () => {
         for (const check of [
             'a private student provisioned before the teacher joined a district belongs to no district',
             'a seated teacher who names no district provisions a private student',
             'a teacher cannot provision into a district they are not in',
             "a backfill never revisits a row decided at provisioning, a seated teacher''s private student included",
+            'a seat or ownership when the student was created is not evidence: with no record, no legacy row is attributed',
+            "a departed teacher''s legacy student is attributed within the seat''s tenure, start to end",
+            'but never on evidence outside the tenure: before the seat started, or once it ended',
             "the hard delete removes the districts'' students, the departed teacher''s l1 included",
             "and never a private student (p1 from before joining, p2 added privately while seated, l2 from after leaving, oa0 from before the district), nor Q''s",
         ]) {

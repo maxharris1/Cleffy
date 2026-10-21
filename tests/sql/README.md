@@ -356,13 +356,21 @@ they provision after leaving are their own. The service role cannot change the
 record (or how it was decided) by UPDATE, and every new row is recorded as
 decided at provisioning whatever the insert says; clients cannot read it, ask
 `district_provisionable`, or call the logged admin correction. The backfill
-reads legacy rows only and never revisits a row decided at provisioning, and is
-a no-op on a second run. Two districts' contracts then end: the soft and hard
+reads legacy rows only and never revisits a row decided at provisioning
+(round 3, items A2 and Max's decision 3): a seat or ownership when a legacy
+student was created attributes nothing on its own; only the district's recorded
+evidence (`admin_record_district_evidence`, service role only) does, and only
+for a student created within the teacher's seat tenure, which
+`studio_seat_tenures` keeps after the teacher leaves -- so a departed teacher's
+legacy student created while seated is attributed, and evidence from before
+the seat started or after it ended is not. Evidence recorded later is picked up
+by the next run, and a run with nothing new is a no-op. Two districts' contracts then end: the soft and hard
 deletes take exactly the four district students and leave every private
 student, an unrelated teacher's, every teacher account and the score untouched,
 with per-district counts in the log. Proven against the local stack on
-2026-10-21: all 33 checks passed; against the round-2 migration (membership
-inferred at provisioning), 20 fail.
+2026-10-21: all 41 checks passed; against the item-A1 migration (no tenure, no
+evidence table), 13 fail; against the round-2 migration, the item-A1 checks
+alone (33) had 20 failing.
 
 `district_billing_canonical.sql` is a byte-for-byte copy of PR #61's proof of
 the canonical `public.district_billing` block, which this branch's
