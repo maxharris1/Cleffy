@@ -541,6 +541,14 @@ verify_jwt = false
 [functions.student-login]
 verify_jwt = false
 
+# The 14-day export notice before a district's data is purged
+# (20261021120700_district_retention.sql). pg_net wakes it and has no Supabase
+# JWT: it authenticates with x-district-notice-secret (or a service-role bearer
+# for a hand trigger). Deploy with
+# `supabase functions deploy district-retention-notices --no-verify-jwt`.
+[functions.district-retention-notices]
+verify_jwt = false
+
 # Self-serve account deletion. The caller's own JWT is the only identity it
 # acts for, and the function additionally re-verifies the account password and
 # a typed confirmation before cancelling billing and deleting anything.

@@ -319,3 +319,23 @@ per-run id prefix and removes them at the end, pass or fail:
 node tests/sql/launch_consent_concurrency.mjs          # every scenario
 node tests/sql/launch_consent_concurrency.mjs delete   # one group
 ```
+
+`district_retention.sql` proves `20261021120700_district_retention.sql`
+(decision 1: district data goes 30 days after `contract_ends_at`), moving time
+with the functions' `p_now`: only the service role may run the purge, its dry
+run, read the billing record or the log, or claim notices; the purge ships
+unscheduled; the dry run counts a district's students and seated teachers,
+never lists one whose `contract_ends_at` is null, and writes nothing; the run
+queues one notice to the owner at contract end + 16 days and logs its counts;
+nothing is soft deleted while the notice is unsent, nor within 14 days of it
+being sent; the sender's claim holds a notice against a second sender, a
+failed send is kept for a retry and a delivered one is stamped and logged; the
+soft delete archives the district's students (refusing their tokens) and
+leaves another teacher's alone; a renewed contract cancels and un-archives
+only the students the soft delete archived; the next cycle mails the owner
+again; a student the teacher restored after the soft delete survives the hard
+delete, which scrubs and deletes the rest and removes the studio, its seats
+and its billing record, while teachers' own accounts, scores and other
+students stay; the log keeps the counts after the studio is gone. Proven
+against the local stack (PostgreSQL 17.11) on 2026-10-21: all 26 checks
+passed.
