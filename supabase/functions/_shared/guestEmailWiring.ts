@@ -3,13 +3,12 @@ import { jsonResponse, optionsResponse } from './cors.ts';
 import { logError } from './errorReporting.ts';
 import type { GuestCaller, GuestEmailMessage } from './guestEmail.ts';
 import { checkRateLimit, clientKey, serviceClient } from './rateLimit.ts';
+import { type ResendResult, sendViaResend } from './resendDelivery.ts';
 
 /**
  * What guest-email-start and guest-email-confirm run against — the Deno half
  * of _shared/guestEmail.ts, which holds the control flow and says why.
  */
-
-const RESEND_API = 'https://api.resend.com';
 
 /**
  * The sender. Auth mail already goes out through Resend as noreply@cleffy.io
@@ -62,31 +61,27 @@ export const deletePending = async (userId: string): Promise<void> => {
     }
 };
 
+/**
+ * One guest code through Resend (resendDelivery.ts), under the Idempotency-Key
+ * guestEmail.ts derived for this code, placed as `sent`, `rejected` or
+ * `unknown` -- which decides whether the reservations are handed back.
+ */
 export const sendEmail = async (
     to: string,
     message: GuestEmailMessage,
-): Promise<'sent' | 'failed' | 'unconfigured'> => {
-    const apiKey = Deno.env.get('RESEND_API_KEY');
-    if (!apiKey) {
-        return 'unconfigured';
-    }
-    try {
-        const res = await fetch(`${RESEND_API}/emails`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ from: mailFrom(), to: [to], ...message }),
+    idempotencyKey: string,
+): Promise<ResendResult> => {
+    const result = await sendViaResend({
+        apiKey: Deno.env.get('RESEND_API_KEY'),
+        idempotencyKey,
+        email: { from: mailFrom(), to: [to], ...message },
+    });
+    if (result.outcome !== 'sent' && result.reason !== 'unconfigured') {
+        // The outcome, status and Resend's reason, never the address or the code.
+        logError('guest-email-start', new Error(`resend ${result.outcome}: ${result.reason}`), {
+            code: `send_${result.outcome}`,
+            detail: result.detail ?? result.errorName ?? '',
         });
-        if (!res.ok) {
-            // The status and Resend's reason, never the address or the code.
-            logError('guest-email-start', new Error(`resend returned ${res.status}`), {
-                code: 'send_failed',
-                detail: (await res.text()).slice(0, 300),
-            });
-            return 'failed';
-        }
-        return 'sent';
-    } catch (err) {
-        logError('guest-email-start', err, { code: 'send_failed' });
-        return 'failed';
     }
+    return result;
 };

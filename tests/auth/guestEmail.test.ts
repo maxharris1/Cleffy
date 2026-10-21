@@ -20,8 +20,13 @@ import {
     type GuestCaller,
     type GuestEmailConfirmDeps,
     type GuestEmailStartDeps,
+    GUEST_EMAIL_KEY_OUTBOX,
+    guestEmailSendId,
+    type GuestSendResult,
 } from '../../supabase/functions/_shared/guestEmail';
 import { mailLimit } from '../../supabase/functions/_shared/mailBudget';
+import { resendIdempotencyKey, sendViaResend } from '../../supabase/functions/_shared/resendDelivery';
+import { FakeResend } from '../billing/fakeResend';
 import { passwordProblem, passwordProblemMessage } from '../../supabase/functions/_shared/passwordPolicy';
 
 /**
@@ -73,7 +78,8 @@ const MAIL_BUDGET = { hour: mailLimit('guestEmailCode', 'hour'), day: mailLimit(
 const startHarness = (
     options: {
         taken?: boolean | null;
-        send?: 'sent' | 'failed' | 'unconfigured';
+        /** `failed` is a definite rejection (a 4xx); `unknown`, a send Resend may have taken. */
+        send?: 'sent' | 'failed' | 'unconfigured' | 'unknown';
         caller?: GuestCaller | Response;
         save?: boolean;
         /** The Turnstile verdict for the request; a configured deploy that passes by default. */
@@ -82,7 +88,13 @@ const startHarness = (
 ) => {
     const calls: string[] = [];
     const saved: { userId: string; email: string; codeHash: string; expiresAt: string }[] = [];
-    const sent: { to: string; subject: string; text: string }[] = [];
+    const sent: { to: string; subject: string; text: string; idempotencyKey: string }[] = [];
+    const results: Record<NonNullable<typeof options.send>, GuestSendResult> = {
+        sent: { outcome: 'sent', reason: 'sent' },
+        failed: { outcome: 'rejected', reason: 'http_422' },
+        unconfigured: { outcome: 'rejected', reason: 'unconfigured' },
+        unknown: { outcome: 'unknown', reason: 'network' },
+    };
     const deps: GuestEmailStartDeps = {
         ...common(calls, options.caller),
         verifyCaptcha: vi.fn(async (_req: Request, body: Record<string, unknown> | null) => {
@@ -102,11 +114,12 @@ const startHarness = (
         deletePending: vi.fn(async () => {
             calls.push('delete');
         }),
-        sendEmail: vi.fn(async (to, message) => {
+        sendEmail: vi.fn(async (to, message, idempotencyKey) => {
             calls.push('send');
-            sent.push({ to, subject: message.subject, text: message.text });
-            return options.send ?? 'sent';
+            sent.push({ to, subject: message.subject, text: message.text, idempotencyKey });
+            return results[options.send ?? 'sent'];
         }),
+        idempotencyKey: resendIdempotencyKey,
         refundRateLimit: vi.fn(async (key: string) => {
             calls.push(
                 `refund:${key.split(':')[0]}${key.startsWith('guest-email-start:') ? `:${key.split(':')[1]}` : ''}`,
@@ -389,6 +402,108 @@ describe('guest-email-start', () => {
         }
         expect(await attempt('sent', 99)).toBe(429);
         expect(counts.get('guest-email-start:global')).toBe(GUEST_EMAIL_LIMITS.startPerRecipient.limit);
+    });
+
+    describe('a send Resend may have taken (the outbox contract, resendDelivery.ts)', () => {
+        it('KEEPS every reservation and the code, and still tells the guest it did not go', async () => {
+            const h = startHarness({ send: 'unknown' });
+            const response = await handleGuestEmailStart(post({ email: 'a@example.com' }), h.deps);
+            expect(response.status).toBe(502);
+            expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.sendFailed);
+            // Nothing handed back: the mail may be out, so it counts against
+            // the mailbox and the project's 60/300.
+            expect(h.deps.refundRateLimit).not.toHaveBeenCalled();
+            // And the code it may have carried still works.
+            expect(h.deps.deletePending).not.toHaveBeenCalled();
+            expect(h.deps.logError).toHaveBeenCalledWith('guest-email-start: send outcome unknown (network)');
+        });
+
+        it('refunds only on a definite rejection', async () => {
+            for (const send of ['failed', 'unconfigured'] as const) {
+                const h = startHarness({ send });
+                await handleGuestEmailStart(post({ email: 'a@example.com' }), h.deps);
+                expect(
+                    h.calls.filter((c) => c.startsWith('refund:')),
+                    send,
+                ).toHaveLength(4);
+                expect(h.deps.deletePending, send).toHaveBeenCalled();
+            }
+        });
+
+        it('accepted, then the connection dropped: the reservations stay spent', async () => {
+            const resend = new FakeResend();
+            const counts = new Map<string, number>();
+            const h = startHarness();
+            h.deps.checkRateLimit = async (key, limit) => {
+                const n = counts.get(key) ?? 0;
+                if (n >= limit) {
+                    return { ok: false, retryAfterSec: 60 };
+                }
+                counts.set(key, n + 1);
+                return { ok: true };
+            };
+            h.deps.refundRateLimit = vi.fn(async (key: string) => {
+                counts.set(key, Math.max(0, (counts.get(key) ?? 0) - 1));
+            });
+            // guestEmailWiring.ts sendEmail, minus Deno.env.
+            h.deps.sendEmail = (to, message, idempotencyKey) =>
+                sendViaResend({
+                    apiKey: 're_test_key',
+                    idempotencyKey,
+                    email: { from: 'Cleffy <noreply@cleffy.io>', to: [to], ...message },
+                    fetch: resend.fetch,
+                });
+
+            resend.dropNextAnswer = true;
+            expect((await handleGuestEmailStart(post({ email: 'ada@example.com' }), h.deps)).status).toBe(502);
+            expect(resend.delivered).toHaveLength(1);
+            expect(h.deps.refundRateLimit).not.toHaveBeenCalled();
+            expect(counts.get('guest-email-start:global')).toBe(1);
+            expect(counts.get('guest-email-start:global-day')).toBe(1);
+            expect(counts.get(await recipientRateKey(SECRET, 'ada@example.com'))).toBe(1);
+            // Sent under this code's key, which carries no address.
+            expect(resend.requests[0]?.key).toBe(
+                resendIdempotencyKey(
+                    GUEST_EMAIL_KEY_OUTBOX,
+                    await guestEmailSendId(
+                        SECRET,
+                        GUEST.userId,
+                        await hashGuestEmailCode(SECRET, GUEST.userId, 'ada@example.com', '482913'),
+                    ),
+                ),
+            );
+            expect(resend.requests[0]?.key).not.toMatch(/ada|example|482913/);
+        });
+
+        it('is wired through the shared helper, with the key handed in', () => {
+            const read = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8');
+            const wiring = read('supabase/functions/_shared/guestEmailWiring.ts');
+            expect(wiring).toContain('sendViaResend({');
+            expect(wiring).not.toMatch(/\bfetch\(/);
+            expect(read('supabase/functions/guest-email-start/index.ts')).toContain(
+                'idempotencyKey: resendIdempotencyKey',
+            );
+        });
+
+        it('keys each code send stably: the same for this code, different for any other code or guest', async () => {
+            const hash = (user: string, code: string) => hashGuestEmailCode(SECRET, user, 'ada@example.com', code);
+            const id = async (user: string, code: string) => guestEmailSendId(SECRET, user, await hash(user, code));
+            expect(await id('guest-1', '111111')).toBe(await id('guest-1', '111111'));
+            expect(await id('guest-1', '111111')).not.toBe(await id('guest-1', '222222'));
+            expect(await id('guest-1', '111111')).not.toBe(await id('guest-2', '111111'));
+            // Not the stored hash either.
+            expect(await hash('guest-1', '111111')).not.toContain(await id('guest-1', '111111'));
+
+            const h = startHarness();
+            await handleGuestEmailStart(post({ email: 'ada@example.com' }), h.deps);
+            await handleGuestEmailStart(post({ email: 'ada@example.com' }), h.deps);
+            h.deps.generateCode = () => '000111';
+            await handleGuestEmailStart(post({ email: 'ada@example.com' }), h.deps);
+            const keys = h.sent.map((mail) => mail.idempotencyKey);
+            expect(keys[0]).toMatch(/^guest-email-code-[0-9a-f]{40}$/);
+            expect(keys[1]).toBe(keys[0]);
+            expect(keys[2]).not.toBe(keys[0]);
+        });
     });
 
     it('fails closed when the account lookup cannot answer', async () => {
