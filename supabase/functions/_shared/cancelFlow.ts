@@ -1,3 +1,4 @@
+import type { Delivery } from './billingOutbox.ts';
 import type * as BillingTerms from './billingTerms.ts';
 import type { StripeMode } from './stripeMode.ts';
 
@@ -17,11 +18,20 @@ import type { StripeMode } from './stripeMode.ts';
  *  * `cancel` {token, refund}  -> cancels at period end, spends the link
  *
  * `start` answers identically whether or not the address has an account or a
- * subscription, so the form is not a way to learn who subscribes. What stops
- * it being a way to spam strangers: mail only goes to an address that already
- * holds a running subscription with us, and three limits sit in front of it --
- * per IP, per recipient, and the project's share of the mail budget
- * (`billingCancelLink` in mailBudget.ts).
+ * subscription, so the form is not a way to learn who subscribes -- and it
+ * does so by not knowing (Codex finding 4 on #62). It writes every well-formed
+ * address into the billing mail outbox and answers; the lookup, the limits and
+ * the send happen afterwards in `deliverCancelLink`, run by the outbox worker
+ * once the response has gone. The answer used to be decided after the lookup,
+ * so a spent mail budget or a failed send answered 503 for a subscriber and
+ * 200 for everyone else, and the time the lookup and send took showed too.
+ * Now every address costs the same one insert and gets the same 200; a link
+ * the budget holds back is queued and goes out when the window reopens.
+ *
+ * What stops it being a way to spam strangers: mail only goes to an address
+ * that already holds a running subscription with us, and three limits sit in
+ * front of it -- per IP (here), per recipient and the project's share of the
+ * mail budget (`billingCancelLink` in mailBudget.ts), both in the worker.
  *
  * Cancelling is `cancel_at_period_end`, exactly what the Customer Portal does:
  * the buyer keeps what they paid for, nothing is refunded automatically, and
@@ -94,27 +104,56 @@ export interface MailWindow {
     windowMs: number;
 }
 
-export interface CancelDeps {
-    json: (body: unknown, status?: number) => Response;
-    options: () => Response;
-    clientKey: (req: Request) => string;
+/** What /cancel writes into the outbox for an address: the lookup still to make, and where to link. */
+export interface CancelLinkRequest {
+    email: string;
+    /** The storefront the request came from, for the link. */
+    origin: string;
+}
+
+type SendEmail = (
+    to: string,
+    message: BillingTerms.BillingEmail,
+    options: { replyTo?: string; tag: string },
+) => Promise<'sent' | 'failed' | 'unconfigured'>;
+
+/** What delivering a queued link needs; billingMailWorker.ts wires it. */
+export interface CancelLinkDeps {
     checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
     refundRateLimit: (key: string) => Promise<void>;
     /** mailLimit('billingCancelLink', …) from mailBudget.ts. */
     mailBudget: { hour: MailWindow; day: MailWindow };
-    modeForRequest: (req: Request) => StripeMode | null;
-    appOrigin: (req: Request) => string;
     /** SHA-256, lower-case hex. */
     sha256Hex: (value: string) => Promise<string>;
     /** Server-side pepper for the per-recipient limiter key, so the rate table holds no address. */
     secret: () => string | null;
     newToken: () => string;
     userForEmail: (email: string) => Promise<string | null>;
+    cancellableSubscription: (userId: string, mode: StripeMode) => Promise<CancellableSubscription | null>;
+    saveToken: (token: { hash: string; userId: string; mode: StripeMode; expiresAt: string }) => Promise<void>;
+    sendEmail: SendEmail;
+    terms: Pick<typeof BillingTerms, 'cancelLinkEmail' | 'BILLING_PATHS'>;
+    now: () => number;
+    logError: (code: string, err: unknown) => void;
+}
+
+export interface CancelDeps {
+    json: (body: unknown, status?: number) => Response;
+    options: () => Response;
+    clientKey: (req: Request) => string;
+    checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
+    modeForRequest: (req: Request) => StripeMode | null;
+    appOrigin: (req: Request) => string;
+    /** SHA-256, lower-case hex. */
+    sha256Hex: (value: string) => Promise<string>;
+    /** Writes a link request into billing_mail_outbox. Throws when it cannot. */
+    queueCancelLink: (request: CancelLinkRequest, mode: StripeMode) => Promise<void>;
+    /** Sends what is queued, after the response (billingMailWorker.ts drainInBackground). */
+    sendQueued: () => void;
     emailOfUser: (userId: string) => Promise<string | null>;
     cancellableSubscription: (userId: string, mode: StripeMode) => Promise<CancellableSubscription | null>;
     /** Earliest subscription this account ever started in this mode (ms), for the refund window. */
     firstPurchaseAt: (userId: string, mode: StripeMode) => Promise<number | null>;
-    saveToken: (token: { hash: string; userId: string; mode: StripeMode; expiresAt: string }) => Promise<void>;
     readToken: (hash: string) => Promise<StoredCancelToken | null>;
     /** Marks the token used if it still is not; false when another request got there first. */
     consumeToken: (hash: string, nowIso: string) => Promise<boolean>;
@@ -125,15 +164,8 @@ export interface CancelDeps {
      * update left it, which is what decides whether the buyer is told it worked.
      */
     cancelAtPeriodEnd: (subscriptionId: string, mode: StripeMode) => Promise<LiveSubscription>;
-    sendEmail: (
-        to: string,
-        message: BillingTerms.BillingEmail,
-        options: { replyTo?: string; tag: string },
-    ) => Promise<'sent' | 'failed' | 'unconfigured'>;
-    terms: Pick<
-        typeof BillingTerms,
-        'cancelLinkEmail' | 'refundRequestEmail' | 'withinRefundWindow' | 'TRADER' | 'BILLING_PATHS'
-    >;
+    sendEmail: SendEmail;
+    terms: Pick<typeof BillingTerms, 'refundRequestEmail' | 'withinRefundWindow' | 'TRADER'>;
     planNameForPrice: (priceId: string | null) => string | null;
     now: () => number;
     logError: (code: string, err: unknown) => void;
@@ -159,6 +191,10 @@ const tooMany = (deps: CancelDeps, retryAfterSec: number) =>
     deps.json({ ...CANCEL_ERRORS.tooMany, retryAfterSec }, 429);
 
 const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, unknown>): Promise<Response> => {
+    // Everything this function does before answering is the same for every
+    // address: a per-IP limit, a format check, and one insert. Nothing that
+    // depends on whether the address subscribes -- the lookup, the per-recipient
+    // limit, the mail budget, the send -- runs until the answer has gone.
     const ipGate = await deps.checkRateLimit(
         `billing-cancel:start:ip:${deps.clientKey(req)}`,
         CANCEL_LIMITS.startPerIp.limit,
@@ -175,16 +211,50 @@ const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, 
     if (!mode) {
         return deps.json({ error: 'Unrecognised origin', code: 'unknown_origin' }, 400);
     }
+    try {
+        await deps.queueCancelLink({ email, origin: deps.appOrigin(req) }, mode);
+    } catch (err) {
+        // The one failure we cannot hide, and it does not depend on the address.
+        deps.logError('cancel_link_queue_failed', err);
+        return deps.json(CANCEL_ERRORS.unavailable, 503);
+    }
+    deps.sendQueued();
+    return deps.json({ sent: true });
+};
+
+/**
+ * The worker's half of `start`: decide whether a queued request gets a link,
+ * and send it. Runs from the billing mail outbox, so its outcome is never part
+ * of any answer the person typing the address sees.
+ *
+ *  * `done`  -- no account, no running subscription, or a recipient already
+ *               sent their share of links this hour: nothing to send, and the
+ *               request (and the address in it) is deleted;
+ *  * `retry` -- the mail budget is spent, the lookup failed, or Resend did:
+ *               queued, and sent when it can be. Every limit counted on the way
+ *               is handed back, so a retry is counted once, when it succeeds;
+ *  * `sent`  -- a fresh one-time link went out.
+ */
+export const deliverCancelLink = async (
+    deps: CancelLinkDeps,
+    mode: StripeMode,
+    request: CancelLinkRequest,
+): Promise<Delivery> => {
     const secret = deps.secret();
     if (!secret) {
         deps.logError('cancel_secret_missing', new Error('no secret for the recipient limiter'));
-        return deps.json(CANCEL_ERRORS.unavailable, 503);
+        return { outcome: 'retry', reason: 'no limiter secret' };
+    }
+    const email = normalizeEmail(request.email);
+    if (!email) {
+        return { outcome: 'done', reason: 'invalid_email' };
     }
 
-    // The same answer for every address, so the form cannot be used to learn
-    // who subscribes. Only failures we cannot hide (the limiter, a dead
-    // database) answer differently, and those do not depend on the address.
-    const accepted = deps.json({ sent: true });
+    // Counted as it goes, and handed back on every way out that did not send.
+    const counted: string[] = [];
+    const handBack = async () => {
+        await Promise.all(counted.map((key) => deps.refundRateLimit(key).catch(() => undefined)));
+    };
 
     const recipientKey = `billing-cancel:start:to:${await deps.sha256Hex(`${secret}:${email}`)}`;
     const recipientGate = await deps.checkRateLimit(
@@ -193,9 +263,10 @@ const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, 
         CANCEL_LIMITS.startPerRecipient.windowMs,
     );
     if (!recipientGate.ok) {
-        // Said as accepted: a link is already on its way to this address.
-        return accepted;
+        // A link is already on its way to this address.
+        return { outcome: 'done', reason: 'recipient_limited' };
     }
+    counted.push(recipientKey);
 
     let userId: string | null;
     let subscription: CancellableSubscription | null;
@@ -203,33 +274,37 @@ const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, 
         userId = await deps.userForEmail(email);
         subscription = userId ? await deps.cancellableSubscription(userId, mode) : null;
     } catch (err) {
+        await handBack();
         deps.logError('cancel_lookup_failed', err);
-        return deps.json(CANCEL_ERRORS.unavailable, 503);
+        return { outcome: 'retry', reason: 'lookup failed' };
     }
     if (!userId || !subscription) {
-        await deps.refundRateLimit(recipientKey).catch(() => undefined);
-        return accepted;
+        await handBack();
+        return { outcome: 'done', reason: 'no_subscription' };
     }
 
-    // The project's share of the mail budget, reserved before the send and
-    // handed back if nothing goes out (the guestEmail.ts pattern).
-    const reserved: string[] = [];
-    const release = async () => {
-        await Promise.all(reserved.map((key) => deps.refundRateLimit(key).catch(() => undefined)));
-    };
+    // The project's share of the mail budget. Spent, the link waits in the
+    // outbox for the window to reopen rather than being refused -- which is
+    // what used to show in the answer.
     for (const [key, window] of [
         ['billing-cancel:global', deps.mailBudget.hour],
         ['billing-cancel:global-day', deps.mailBudget.day],
     ] as const) {
         const gate = await deps.checkRateLimit(key, window.limit, window.windowMs);
         if (!gate.ok) {
-            await release();
+            await handBack();
             deps.logError('cancel_mail_budget_reached', new Error(`${key} is spent`));
-            return deps.json(CANCEL_ERRORS.unavailable, 503);
+            return {
+                outcome: 'retry',
+                reason: 'mail budget spent',
+                afterMs: Math.max(60, gate.retryAfterSec) * 1000,
+            };
         }
-        reserved.push(key);
+        counted.push(key);
     }
 
+    // Minted at send time, so a link that waited for the budget is still good
+    // for its whole hour when it arrives.
     const token = deps.newToken();
     try {
         await deps.saveToken({
@@ -239,21 +314,21 @@ const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, 
             expiresAt: new Date(deps.now() + CANCEL_LINK_TTL_MS).toISOString(),
         });
     } catch (err) {
-        await release();
+        await handBack();
         deps.logError('cancel_token_save_failed', err);
-        return deps.json(CANCEL_ERRORS.unavailable, 503);
+        return { outcome: 'retry', reason: 'token not saved' };
     }
 
-    const link = `${deps.appOrigin(req)}${deps.terms.BILLING_PATHS.cancel}?token=${encodeURIComponent(token)}`;
+    const link = `${request.origin}${deps.terms.BILLING_PATHS.cancel}?token=${encodeURIComponent(token)}`;
     const sent = await deps.sendEmail(email, deps.terms.cancelLinkEmail(link, CANCEL_LINK_TTL_MS / 60_000), {
         tag: 'cancel_link',
     });
     if (sent !== 'sent') {
-        await release();
+        await handBack();
         deps.logError('cancel_link_not_sent', new Error(sent));
-        return deps.json(CANCEL_ERRORS.unavailable, 503);
+        return { outcome: 'retry', reason: `resend ${sent}` };
     }
-    return accepted;
+    return { outcome: 'sent' };
 };
 
 /** The token's row, if it can still be used. */

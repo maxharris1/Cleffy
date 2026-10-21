@@ -1,3 +1,12 @@
+import {
+    cancellableSubscription,
+    cancelLinkMailBudget,
+    cancelSecret,
+    newToken,
+    saveToken,
+    sha256Hex,
+    userForEmail,
+} from './billingCancelStore.ts';
 import { emailOfUser, sendBillingEmail, storefrontOrigin } from './billingMail.ts';
 import {
     deliverCancellationConfirmation,
@@ -10,8 +19,9 @@ import {
     type OutboxRow,
 } from './billingOutbox.ts';
 import * as billingTerms from './billingTerms.ts';
+import { type CancelLinkDeps, type CancelLinkRequest, deliverCancelLink } from './cancelFlow.ts';
 import { logError } from './errorReporting.ts';
-import { serviceClient } from './rateLimit.ts';
+import { checkRateLimit, refundRateLimit, serviceClient } from './rateLimit.ts';
 import { slotForPrice } from './stripe.ts';
 
 /**
@@ -52,14 +62,32 @@ const confirmationDeps: ConfirmationDeps = {
     log: (message) => console.log(message),
 };
 
+const cancelLinkDeps = (): CancelLinkDeps => ({
+    checkRateLimit,
+    refundRateLimit,
+    mailBudget: cancelLinkMailBudget(),
+    sha256Hex,
+    secret: cancelSecret,
+    newToken,
+    userForEmail,
+    cancellableSubscription,
+    saveToken,
+    sendEmail: sendBillingEmail,
+    terms: billingTerms,
+    now: () => Date.now(),
+    logError: (code, err) => logError('billing-cancel', err, { code }),
+});
+
 const deliver = async (row: OutboxRow): Promise<Delivery> => {
     switch (row.kind) {
         case 'purchase_confirmation':
             return deliverPurchaseConfirmation(confirmationDeps, row);
         case 'cancellation_confirmation':
             return deliverCancellationConfirmation(confirmationDeps, row);
+        case 'cancel_link':
+            return deliverCancelLink(cancelLinkDeps(), row.mode, row.payload as unknown as CancelLinkRequest);
         default:
-            return { outcome: 'retry', reason: `no deliverer for ${row.kind}` };
+            return { outcome: 'retry', reason: `no deliverer for ${row.kind as string}` };
     }
 };
 

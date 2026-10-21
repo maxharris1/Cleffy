@@ -5,16 +5,21 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
+import type { Delivery } from '../../supabase/functions/_shared/billingOutbox';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import {
     CANCEL_LINK_TTL_MS,
+    deliverCancelLink,
     handleCancel,
     maskEmail,
     type CancelDeps,
+    type CancelLinkDeps,
+    type CancelLinkRequest,
     type CancellableSubscription,
     type LiveSubscription,
     type StoredCancelToken,
 } from '../../supabase/functions/_shared/cancelFlow';
+import type { StripeMode } from '../../supabase/functions/_shared/stripeMode';
 
 /**
  * The signed-out cancellation flow, run for real against in-memory stand-ins
@@ -55,6 +60,10 @@ const harness = (
         stripeReadFails?: boolean;
         /** Stripe answers the update without the subscription cancelling. */
         updateNotApplied?: boolean;
+        /** billing_mail_outbox cannot be written. */
+        queueFails?: boolean;
+        /** The mail budget windows, smaller to model them being spent. */
+        mailBudget?: CancelLinkDeps['mailBudget'];
     } = {},
 ) => {
     const tokens = new Map<string, StoredCancelToken>();
@@ -62,6 +71,11 @@ const harness = (
     const limiter = new Map<string, number>();
     const refunded: string[] = [];
     const errors: string[] = [];
+    /** Every call the HANDLER makes, in order -- what an observer could time. */
+    const trace: string[] = [];
+    /** billing_mail_outbox, modelled: what /cancel wrote down, and what the worker made of it. */
+    const queue: Array<{ request: CancelLinkRequest; mode: StripeMode }> = [];
+    const deliveries: Delivery[] = [];
     const subscription: CancellableSubscription | null =
         options.subscription === undefined
             ? {
@@ -81,35 +95,48 @@ const harness = (
                   endsAt: subscription.periodEnd,
               };
     let tokenCount = 0;
+    const checkRateLimit = vi.fn(async (key: string, limit: number, _windowMs?: number) => {
+        if (options.limited?.some((prefix) => key.startsWith(prefix))) {
+            return { ok: false as const, retryAfterSec: 60 };
+        }
+        const used = (limiter.get(key) ?? 0) + 1;
+        limiter.set(key, used);
+        return used > limit ? { ok: false as const, retryAfterSec: 60 } : { ok: true as const };
+    });
+    const sendEmail = vi.fn(
+        async (to: string, message: billingTerms.BillingEmail, mailOptions: { replyTo?: string }) => {
+            if (options.sendFails) {
+                return 'failed' as const;
+            }
+            sent.push({ to, subject: message.subject, text: message.text, replyTo: mailOptions.replyTo });
+            return 'sent' as const;
+        },
+    );
+    const cancellableSubscription = vi.fn(async () => subscription);
     const deps: CancelDeps = {
         json,
         options: () => new Response(null, { status: 204 }),
         clientKey: () => '203.0.113.7',
-        checkRateLimit: vi.fn(async (key: string, limit: number) => {
-            if (options.limited?.some((prefix) => key.startsWith(prefix))) {
-                return { ok: false as const, retryAfterSec: 60 };
-            }
-            const used = (limiter.get(key) ?? 0) + 1;
-            limiter.set(key, used);
-            return used > limit ? { ok: false as const, retryAfterSec: 60 } : { ok: true as const };
-        }),
-        refundRateLimit: vi.fn(async (key: string) => {
-            refunded.push(key);
-            limiter.set(key, Math.max(0, (limiter.get(key) ?? 0) - 1));
-        }),
-        mailBudget: { hour: { limit: 10, windowMs: 3_600_000 }, day: { limit: 50, windowMs: DAY } },
+        checkRateLimit: async (key, limit, windowMs) => {
+            trace.push(`rate:${key.replace(/[^:]+$/, '*')}`);
+            return checkRateLimit(key, limit, windowMs);
+        },
         modeForRequest: () => 'live',
         appOrigin: () => 'https://cleffy.io',
         sha256Hex,
-        secret: () => 'pepper',
-        newToken: () => `token-${++tokenCount}-abcdefghijklmnop`,
-        userForEmail: vi.fn(async (email: string) => (email === EMAIL ? USER : null)),
+        queueCancelLink: vi.fn(async (request: CancelLinkRequest, mode: StripeMode) => {
+            trace.push('queue');
+            if (options.queueFails) {
+                throw new Error('connection reset');
+            }
+            queue.push({ request, mode });
+        }),
+        sendQueued: vi.fn(() => {
+            trace.push('send-queued');
+        }),
         emailOfUser: async () => EMAIL,
-        cancellableSubscription: vi.fn(async () => subscription),
+        cancellableSubscription,
         firstPurchaseAt: async () => (options.firstPurchaseAt === undefined ? NOW - 3 * DAY : options.firstPurchaseAt),
-        saveToken: async ({ hash, userId, mode, expiresAt }) => {
-            tokens.set(hash, { userId, mode, expiresAt, usedAt: null });
-        },
         readToken: async (hash) => tokens.get(hash) ?? null,
         consumeToken: async (hash, nowIso) => {
             const row = tokens.get(hash);
@@ -138,19 +165,55 @@ const harness = (
             }
             return live;
         }),
-        sendEmail: vi.fn(async (to, message, mailOptions) => {
-            if (options.sendFails) {
-                return 'failed' as const;
-            }
-            sent.push({ to, subject: message.subject, text: message.text, replyTo: mailOptions.replyTo });
-            return 'sent' as const;
-        }),
+        sendEmail,
         terms: billingTerms,
         planNameForPrice: (priceId) => (priceId === 'price_teacher_monthly' ? 'Teacher' : null),
         now: () => NOW,
         logError: (code) => errors.push(code),
     };
-    return { deps, tokens, sent, refunded, errors };
+    const linkDeps: CancelLinkDeps = {
+        checkRateLimit,
+        refundRateLimit: vi.fn(async (key: string) => {
+            refunded.push(key);
+            limiter.set(key, Math.max(0, (limiter.get(key) ?? 0) - 1));
+        }),
+        mailBudget: options.mailBudget ?? {
+            hour: { limit: 10, windowMs: 3_600_000 },
+            day: { limit: 50, windowMs: DAY },
+        },
+        sha256Hex,
+        secret: () => 'pepper',
+        newToken: () => `token-${++tokenCount}-abcdefghijklmnop`,
+        userForEmail: vi.fn(async (email: string) => (email === EMAIL ? USER : null)),
+        cancellableSubscription,
+        saveToken: async ({ hash, userId, mode, expiresAt }) => {
+            tokens.set(hash, { userId, mode, expiresAt, usedAt: null });
+        },
+        sendEmail,
+        terms: billingTerms,
+        now: () => NOW,
+        logError: (code) => errors.push(code),
+    };
+    /**
+     * The outbox worker, after the response: delivers everything queued, and
+     * keeps what it is told to retry, as settle_billing_mail does.
+     */
+    const flush = async (): Promise<Delivery[]> => {
+        const due = queue.splice(0);
+        const outcomes: Delivery[] = [];
+        for (const item of due) {
+            const outcome = await deliverCancelLink(linkDeps, item.mode, item.request);
+            outcomes.push(outcome);
+            if (outcome.outcome === 'retry') {
+                queue.push(item);
+            }
+        }
+        deliveries.push(...outcomes);
+        return outcomes;
+    };
+    /** The window reopening: what the budget and recipient limits had counted is forgotten. */
+    const newHour = () => limiter.clear();
+    return { deps, linkDeps, tokens, sent, refunded, errors, trace, queue, flush, newHour, deliveries };
 };
 
 const body = async (response: Response) => (await response.json()) as Record<string, unknown>;
@@ -165,13 +228,19 @@ const tokenFrom = (text: string): string => {
 };
 
 describe('billing-cancel: asking for a link', () => {
-    it('mails a one-time link to an address with a running subscription', async () => {
+    it('mails a one-time link to an address with a running subscription, after answering', async () => {
         const h = harness();
 
         const response = await handleCancel(post({ action: 'start', email: ' Ada@Example.com ' }), h.deps);
 
         expect(response.status).toBe(200);
         expect(await body(response)).toEqual({ sent: true });
+        // Answered before anything was looked up or sent.
+        expect(h.sent).toEqual([]);
+        expect(h.queue).toEqual([{ request: { email: EMAIL, origin: 'https://cleffy.io' }, mode: 'live' }]);
+        expect(h.deps.sendQueued).toHaveBeenCalledTimes(1);
+
+        expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
         expect(h.sent).toHaveLength(1);
         expect(h.sent[0]?.to).toBe(EMAIL);
         expect(h.sent[0]?.text).toContain('https://cleffy.io/cancel?token=');
@@ -181,43 +250,118 @@ describe('billing-cancel: asking for a link', () => {
         expect(h.tokens.get(await sha256Hex(token))?.expiresAt).toBe(new Date(NOW + CANCEL_LINK_TTL_MS).toISOString());
     });
 
-    it('answers exactly the same for an address with no account or no subscription, and sends nothing', async () => {
+    it('sends nothing to an address with no account or no subscription, and keeps nothing of it', async () => {
         const stranger = harness();
         const lapsed = harness({ subscription: null });
 
-        const a = await handleCancel(post({ action: 'start', email: 'nobody@example.com' }), stranger.deps);
-        const b = await handleCancel(post({ action: 'start', email: EMAIL }), lapsed.deps);
+        await handleCancel(post({ action: 'start', email: 'nobody@example.com' }), stranger.deps);
+        await handleCancel(post({ action: 'start', email: EMAIL }), lapsed.deps);
 
-        expect([a.status, b.status]).toEqual([200, 200]);
-        expect(await body(a)).toEqual({ sent: true });
-        expect(await body(b)).toEqual({ sent: true });
+        expect(await stranger.flush()).toEqual([{ outcome: 'done', reason: 'no_subscription' }]);
+        expect(await lapsed.flush()).toEqual([{ outcome: 'done', reason: 'no_subscription' }]);
         expect(stranger.sent).toEqual([]);
         expect(lapsed.sent).toEqual([]);
         expect(lapsed.tokens.size).toBe(0);
+        // `done` deletes the outbox row, address and all.
+        expect(stranger.queue).toEqual([]);
     });
 
-    it('limits how many links one address can be sent, and still answers the same', async () => {
+    /**
+     * Codex finding 4 on #62: a subscriber was answered 503 when the mail budget
+     * was spent or Resend failed, everyone else 200, and the subscriber's lookup
+     * and send took time nobody else's did. The answer, and every call made
+     * before it, must not depend on the address.
+     */
+    describe('answers every address the same, in the same way (Codex finding 4 on #62)', () => {
+        const SCENARIOS: Array<[string, Parameters<typeof harness>[0], string]> = [
+            ['a subscriber', {}, EMAIL],
+            ['an address with no account', {}, 'nobody@example.com'],
+            ['an account with no subscription', { subscription: null }, EMAIL],
+            [
+                'a subscriber while the mail budget is spent',
+                { mailBudget: { hour: { limit: 0, windowMs: 3_600_000 }, day: { limit: 50, windowMs: DAY } } },
+                EMAIL,
+            ],
+            ['a subscriber while Resend is failing', { sendFails: true }, EMAIL],
+        ];
+
+        it.each(SCENARIOS)('for %s', async (_label, options, email) => {
+            const h = harness(options);
+            const response = await handleCancel(post({ action: 'start', email }), h.deps);
+
+            expect(response.status).toBe(200);
+            expect(await body(response)).toEqual({ sent: true });
+            // The same calls, in the same order, whoever the address belongs
+            // to: an IP limit, one insert, the background send. No lookup, no
+            // per-recipient limit, no budget and no Resend call before the
+            // answer -- so nothing about the address can show in its timing.
+            expect(h.trace).toEqual(['rate:billing-cancel:start:ip:*', 'queue', 'send-queued']);
+            expect(h.deps.cancellableSubscription).not.toHaveBeenCalled();
+            expect(h.linkDeps.userForEmail).not.toHaveBeenCalled();
+            expect(h.deps.sendEmail).not.toHaveBeenCalled();
+        });
+
+        it('answers a failure to queue identically for every address', async () => {
+            const answers = [];
+            for (const email of [EMAIL, 'nobody@example.com']) {
+                const h = harness({ queueFails: true });
+                const response = await handleCancel(post({ action: 'start', email }), h.deps);
+                answers.push([response.status, await body(response)]);
+            }
+            expect(answers[0]).toEqual([503, expect.objectContaining({ code: 'unavailable' })]);
+            expect(answers[1]).toEqual(answers[0]);
+        });
+    });
+
+    it('queues a link the mail budget holds back, and sends it when the window reopens', async () => {
+        const h = harness({
+            mailBudget: { hour: { limit: 1, windowMs: 3_600_000 }, day: { limit: 50, windowMs: DAY } },
+        });
+        // Someone else's link spends this hour's budget.
+        h.linkDeps.checkRateLimit('billing-cancel:global', 1, 3_600_000);
+
+        await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+        expect(await h.flush()).toEqual([{ outcome: 'retry', reason: 'mail budget spent', afterMs: 60_000 }]);
+        expect(h.sent).toEqual([]);
+        // Still queued, and nothing it counted on the way is kept against it.
+        expect(h.queue).toHaveLength(1);
+        expect(h.refunded.some((key) => key.startsWith('billing-cancel:start:to:'))).toBe(true);
+
+        h.newHour();
+        expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
+        expect(h.sent).toHaveLength(1);
+        expect(h.queue).toEqual([]);
+    });
+
+    it('retries a link Resend failed to send, handing the budget back', async () => {
+        const h = harness({ sendFails: true });
+        await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+
+        expect(await h.flush()).toEqual([{ outcome: 'retry', reason: 'resend failed' }]);
+        expect(h.refunded).toEqual(expect.arrayContaining(['billing-cancel:global', 'billing-cancel:global-day']));
+        expect(h.queue).toHaveLength(1);
+    });
+
+    it('limits how many links one address can be sent', async () => {
         const h = harness();
         for (let i = 0; i < 5; i += 1) {
             expect(await body(await handleCancel(post({ action: 'start', email: EMAIL }), h.deps))).toEqual({
                 sent: true,
             });
         }
+        await h.flush();
         expect(h.sent).toHaveLength(3);
+        expect(h.deliveries.filter((d) => d.outcome === 'done')).toEqual([
+            { outcome: 'done', reason: 'recipient_limited' },
+            { outcome: 'done', reason: 'recipient_limited' },
+        ]);
     });
 
-    it('refuses a caller over the per-IP limit', async () => {
+    it('refuses a caller over the per-IP limit, before writing anything down', async () => {
         const h = harness({ limited: ['billing-cancel:start:ip:'] });
         const response = await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
         expect(response.status).toBe(429);
-        expect(h.deps.userForEmail).not.toHaveBeenCalled();
-    });
-
-    it('hands the mail budget back when the link could not be sent', async () => {
-        const h = harness({ sendFails: true });
-        const response = await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
-        expect(response.status).toBe(503);
-        expect(h.refunded).toEqual(['billing-cancel:global', 'billing-cancel:global-day']);
+        expect(h.deps.queueCancelLink).not.toHaveBeenCalled();
     });
 
     it('rejects something that is not an email address', async () => {
@@ -225,6 +369,7 @@ describe('billing-cancel: asking for a link', () => {
         const response = await handleCancel(post({ action: 'start', email: 'not an email' }), h.deps);
         expect(response.status).toBe(400);
         expect(await body(response)).toMatchObject({ code: 'invalid_email' });
+        expect(h.deps.queueCancelLink).not.toHaveBeenCalled();
     });
 });
 
@@ -232,6 +377,7 @@ describe('billing-cancel: using the link', () => {
     const linked = async (options: Parameters<typeof harness>[0] = {}) => {
         const h = harness(options);
         await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+        await h.flush();
         return { ...h, token: tokenFrom(h.sent[0]?.text ?? '') };
     };
 
@@ -402,6 +548,16 @@ describe('billing-cancel/index.ts is wiring only', () => {
     it('cancels at the period end, as the Customer Portal does', () => {
         expect(source).toContain('cancel_at_period_end: true');
         expect(source).not.toMatch(/subscriptions\.cancel\(/);
+    });
+
+    it('writes every address down and sends after the answer, through the billing mail outbox', () => {
+        expect(source).toContain("enqueueBillingMail('cancel_link', null, mode");
+        expect(source).toContain('sendQueued: drainInBackground');
+        // Nothing that looks an address up or sends a link runs in the request.
+        expect(source).not.toContain('userForEmail');
+        expect(source).not.toContain('mailLimit(');
+        const worker = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingMailWorker.ts'), 'utf8');
+        expect(worker).toMatch(/case 'cancel_link':\s*\n\s*return deliverCancelLink\(/);
     });
 
     it("reads the subscription back from Stripe rather than trusting the mirror's copy", () => {
