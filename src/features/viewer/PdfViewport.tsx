@@ -649,6 +649,10 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                 onPeers: (peers) => syncOnPeers?.(peers),
                 onReconnect: () => {
                     ink.clearRemoteInk();
+                    // Committed rows may have gone unheard meanwhile (a drop, or
+                    // a takedown moving the score's topics): live rows must not
+                    // move the watermark past them before this pull lands.
+                    engine?.noteGap();
                     void engine?.sync();
                     installSnapshotRetry();
                     // A role change made while the connection was down sent
@@ -656,6 +660,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                     syncOnMembershipChanged?.();
                 },
                 onResync: () => {
+                    engine?.noteGap();
                     void engine?.sync();
                 },
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
