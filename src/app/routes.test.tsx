@@ -49,6 +49,9 @@ describe('AppRoutes public pages', () => {
     it.each([
         ['/privacy', 'Privacy Policy'],
         ['/terms', 'Terms of Service'],
+        ['/refunds', 'Refund Policy'],
+        ['/copyright', 'Copyright and Content Policy'],
+        ['/report', 'Report content'],
         ['/account-deleted', 'Your account is deleted'],
         ['/account-deleted?guest=1', 'Your guest profile is deleted'],
     ])('renders %s whatever the session', async (path, heading) => {

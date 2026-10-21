@@ -1,17 +1,37 @@
 # Legal review before launch
 
-The Privacy Policy (`/privacy`) and Terms of Service (`/terms`) were drafted by
-engineering from what the code actually does. They have **not** been reviewed by a
-lawyer. Everything below is an assumption, placeholder or open question that a
-lawyer (and the owner) must confirm or change before Cleffy takes payments.
+There are four public documents, each its own versioned module in
+`src/features/legal/`: the Privacy Policy (`privacyPolicy.ts`, `/privacy`), the
+Terms of Service with the School Use Addendum (`termsOfService.ts`, `/terms`),
+the Refund Policy with the model withdrawal form (`refundPolicy.ts`,
+`/refunds`) and the Copyright and Content Policy (`copyrightPolicy.ts`,
+`/copyright`). Business details are in `legalEntity.ts`; versions, dates and
+paths in `legalVersions.ts` (`LEGAL_VERSIONS`, mirrored for the Edge Functions
+in `supabase/functions/_shared/legalVersions.ts`). Comments next to each
+privacy-policy statement name the code it describes. Sections for features
+switched off in this build are omitted automatically — including every mention
+of Anthropic while `VITE_FEATURE_SMART_IMPORT` is off.
 
-All the text lives in one module: `src/features/legal/legalContent.ts`. Business
-details are in `LEGAL_ENTITY` at the top; the last-updated date is
-`LEGAL_LAST_UPDATED`. Comments next to each privacy-policy statement name the code
-it describes, so a change in data practice has an obvious place to be reflected.
-Sections for features switched off in this build (`src/lib/features.ts`:
-play-along, fingering) are omitted from the policy automatically; turning a flag on
-adds its section, and that new text needs review too.
+**October 2026 launch decisions (Max), now in the text:** operator Cleffy LLC,
+a New York LLC (being formed), 245 East 37th Street, Apt 3E, New York, NY
+10016; legal@ / privacy@ / support@cleffy.io; hosting region United States (AWS
+us-west-2, Oregon); ages 13+, up to 16 where a country requires; retention
+(archived students 12 months, guests 90 days, support mail 24 months, district
+data 30 days after contract end, with a 14-day export notice to the owner, and
+never for a contract with no end date); a full refund within 14 days of first purchase
+for everyone, no withdrawal waiver; schools buy by order form and invoice.
+
+**Still drafts.** Every document's version ends `-draft`, each page shows a
+draft banner, and wording counsel must settle is a `placeholder(...)` block,
+rendered as a marked "Placeholder — awaiting legal review" callout: legal bases,
+EU/UK representatives, transfer safeguards, governing law, the liability cap,
+the rest of the School Use Addendum, refund edge cases, the DMCA agent
+registration number, the strike threshold and the DSA legal representative.
+When counsel's text lands: replace the placeholders, drop `-draft` from the
+versions and set `LEGAL_DOCUMENTS_ARE_DRAFTS` to false.
+
+The sections below are the original engineering review (October 2026, before
+those decisions); where a decision above answers one, the decision wins.
 
 Section numbers here are referenced from code comments (`LEGAL_REVIEW.md §n`).
 

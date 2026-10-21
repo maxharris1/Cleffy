@@ -566,6 +566,26 @@ verify_jwt = false
 [functions.billing-mail-outbox]
 verify_jwt = false
 
+# Notice and action (Copyright and Content Policy). Anyone may report a score,
+# signed in or not — a rights holder need not have an account — so
+# content-report cannot require a JWT, like student-claim. It is rate-limited
+# per IP and per reporter, behind the Turnstile gate, and only ever inserts a
+# report and mails its acknowledgment. Deploy with the flag:
+# `supabase functions deploy content-report --no-verify-jwt`
+[functions.content-report]
+verify_jwt = false
+
+# Moderators only: the caller's JWT, then a content_moderators row.
+[functions.content-moderation]
+verify_jwt = true
+
+# The content-notice outbox retry, posted by pg_cron (content_notice_retry_tick)
+# through pg_net, which has no user JWT: the x-content-notice-secret header,
+# checked against CONTENT_NOTICE_SECRET, is the gate. Deploy with the flag:
+# `supabase functions deploy content-notices --no-verify-jwt`
+[functions.content-notices]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54427

@@ -52,7 +52,7 @@ import { peerColor } from '@/lib/colors';
 import { useLockedPageZoom } from '@/lib/viewportZoom';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
-import { DocRealtimeChannel } from '@/sync/realtimeChannel';
+import { DocRealtimeChannel, fetchRealtimeTopicEpoch } from '@/sync/realtimeChannel';
 import {
     createSupabaseAnnotationsApi,
     SyncEngine,
@@ -649,6 +649,10 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                 onPeers: (peers) => syncOnPeers?.(peers),
                 onReconnect: () => {
                     ink.clearRemoteInk();
+                    // Committed rows may have gone unheard meanwhile (a drop, or
+                    // a takedown moving the score's topics): live rows must not
+                    // move the watermark past them before this pull lands.
+                    engine?.noteGap();
                     void engine?.sync();
                     installSnapshotRetry();
                     // A role change made while the connection was down sent
@@ -656,11 +660,13 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                     syncOnMembershipChanged?.();
                 },
                 onResync: () => {
+                    engine?.noteGap();
                     void engine?.sync();
                 },
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
                 onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
                 onMembershipChanged: () => syncOnMembershipChanged?.(),
+                fetchTopicEpoch: () => fetchRealtimeTopicEpoch(getSupabase(), docId),
             });
             if (syncCanWrite) {
                 ink.setLivePublisher(channel.publisher);

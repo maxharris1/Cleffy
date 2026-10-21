@@ -253,6 +253,20 @@ it in a separate, later migration
 has been live for longer than Stripe's three-day retry window. Nothing in the
 new functions reads or writes it.
 
+Content notices (report acknowledgments, statements of reasons, reporter
+outcomes) wait in `content_notice_outbox` until they are sent, and
+`content_notice_retry_tick` retries them every five minutes the same way.
+Deploy `content-notices` (`--no-verify-jwt`), set `CONTENT_NOTICE_SECRET` as an
+Edge secret, then:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/content-notices', 'content_notice_url');
+select vault.create_secret('<same value as CONTENT_NOTICE_SECRET>', 'content_notice_secret');
+```
+
+Without them, queued notices still go out, but only with the next report or
+moderator action. The moderation page counts what is still owed.
+
 Chip browse reads the live `public.imslp_works` snapshot: one row per IMSLP
 work with the array of taxonomy categories it belongs to. Refresh ticks write
 `imslp_works_building` and only promote after a category walk completes, so a
