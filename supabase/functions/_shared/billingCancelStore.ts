@@ -27,13 +27,31 @@ export const sha256Hex = async (value: string): Promise<string> => {
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 };
 
-/** 32 random bytes, base64url: what the link carries and nothing ever stores. */
-export const newToken = (): string => {
-    const bytes = crypto.getRandomValues(new Uint8Array(32));
-    return btoa(String.fromCharCode(...bytes))
+const base64url = (bytes: Uint8Array): string =>
+    btoa(String.fromCharCode(...bytes))
         .replace(/\+/g, '-')
         .replace(/\//g, '_')
         .replace(/=+$/, '');
+
+/**
+ * The cancel link's token for one outbox row: HMAC-SHA256 of the row id under
+ * the server-side secret, base64url -- 256 bits nobody without the secret can
+ * produce, like the random token it replaces, but the SAME on every retry of
+ * the row. That keeps the email byte-identical across retries, so Resend
+ * answers a retry under the row's Idempotency-Key from the first attempt
+ * instead of a 409 (resendDelivery.ts), and a link that did go out is the link
+ * that works. Only its SHA-256 is stored; the token exists only in the email.
+ */
+export const cancelLinkToken = async (secret: string, rowId: string): Promise<string> => {
+    const key = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+    );
+    const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`billing-cancel-link:${rowId}`));
+    return base64url(new Uint8Array(mac));
 };
 
 export const cancelSecret = (): string | null =>
@@ -94,9 +112,12 @@ export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, mod
         .delete()
         .eq('user_id', userId)
         .lt('expires_at', new Date(Date.now() - 24 * 60 * 60_000).toISOString());
+    // An upsert: a retry of the same outbox row saves the same token
+    // (cancelLinkToken) and gives it its hour again from this send. used_at is
+    // not among the columns written, so a link already spent stays spent.
     const { error } = await client
         .from('billing_cancel_tokens')
-        .insert({ token_hash: hash, user_id: userId, mode, expires_at: expiresAt });
+        .upsert({ token_hash: hash, user_id: userId, mode, expires_at: expiresAt }, { onConflict: 'token_hash' });
     if (error) {
         throw new Error(`could not save the cancel link: ${error.message}`);
     }

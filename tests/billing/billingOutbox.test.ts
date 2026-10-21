@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
     ALERT_AFTER_ATTEMPTS,
+    BILLING_OUTBOX_KEY,
     cancellationMailKey,
     type ConfirmationDeps,
     type Delivery,
@@ -19,10 +20,14 @@ import {
     type OutboxRow,
     type PurchaseMail,
     retryDelayMs,
+    type SendResult,
+    sendRequestMailWithinBudget,
 } from '../../supabase/functions/_shared/billingOutbox';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import { LEGAL_VERSIONS } from '../../supabase/functions/_shared/legalVersions';
 import { LAUNCH_MAIL_SPLIT, mailLimit } from '../../supabase/functions/_shared/mailBudget';
+import { resendIdempotencyKey, sendViaResend } from '../../supabase/functions/_shared/resendDelivery';
+import { FakeResend } from './fakeResend';
 
 /**
  * The billing mail outbox (Codex findings 3 and 4 on #62), run against an
@@ -115,6 +120,8 @@ const harness = (deliver: (row: OutboxRow) => Promise<Delivery>) => {
     };
     return { outbox, deps, logs, errors };
 };
+
+const SENT: SendResult = { outcome: 'sent', reason: 'sent' };
 
 const PURCHASE: PurchaseMail = {
     userId: 'teacher-9',
@@ -224,7 +231,7 @@ describe('draining the billing mail outbox', () => {
 
 describe('the confirmations the outbox sends', () => {
     const confirmation = (overrides: Partial<ConfirmationDeps> = {}) => {
-        const sent: Array<{ to: string; subject: string; text: string; tag: string }> = [];
+        const sent: Array<{ to: string; subject: string; text: string; tag: string; idempotencyKey: string }> = [];
         const logs: string[] = [];
         // check_edge_rate_limit / refund_edge_rate_limit, modelled: a count per
         // key against the limit it is asked with.
@@ -247,9 +254,16 @@ describe('the confirmations the outbox sends', () => {
             },
             emailOfUser: async () => 'ada@example.com',
             sendEmail: async (to, message, options) => {
-                sent.push({ to, subject: message.subject, text: message.text, tag: options.tag });
-                return 'sent';
+                sent.push({
+                    to,
+                    subject: message.subject,
+                    text: message.text,
+                    tag: options.tag,
+                    idempotencyKey: options.idempotencyKey,
+                });
+                return SENT;
             },
+            idempotencyKey: resendIdempotencyKey,
             slotForPrice: (priceId) => (priceId === 'price_academy_annual' ? 'academyAnnual' : null),
             storefrontOrigin: () => 'https://cleffy.io',
             terms: billingTerms,
@@ -300,14 +314,41 @@ describe('the confirmations the outbox sends', () => {
         expect(h.sent[0]?.text).toContain(`version ${LEGAL_VERSIONS.terms}`);
     });
 
-    it('waits, rather than giving up, for a send that failed or a Resend key that is missing', async () => {
-        for (const outcome of ['failed', 'unconfigured'] as const) {
-            const h = confirmation({ sendEmail: async () => outcome });
+    it('waits, rather than giving up, for a send Resend refused or a Resend key that is missing', async () => {
+        for (const reason of ['http_422', 'unconfigured']) {
+            const h = confirmation({ sendEmail: async () => ({ outcome: 'rejected', reason }) });
             expect(await deliverPurchaseConfirmation(h.deps, row('purchase_confirmation', { ...PURCHASE }))).toEqual({
                 outcome: 'retry',
-                reason: `resend ${outcome}`,
+                reason: `resend rejected: ${reason}`,
             });
         }
+    });
+
+    it("sends each confirmation under its outbox row's Idempotency-Key", async () => {
+        const h = confirmation();
+        await deliverPurchaseConfirmation(h.deps, { ...row('purchase_confirmation', { ...PURCHASE }), id: 'row-a' });
+        await deliverPurchaseConfirmation(h.deps, {
+            ...row('purchase_confirmation', { ...PURCHASE }),
+            id: 'row-a',
+            attempts: 2,
+            claimToken: 'claim-2',
+        });
+        await deliverCancellationConfirmation(h.deps, {
+            ...row('cancellation_confirmation', {
+                userId: 'teacher-1',
+                subscriptionId: 'sub_1',
+                priceId: null,
+                endsAt: null,
+                cancelledAt: '2026-10-21T08:00:00.000Z',
+            }),
+            id: 'row-b',
+        });
+        expect(h.sent.map((mail) => mail.idempotencyKey)).toEqual([
+            'billing-outbox-row-a',
+            'billing-outbox-row-a',
+            'billing-outbox-row-b',
+        ]);
+        expect(BILLING_OUTBOX_KEY).toBe('billing-outbox');
     });
 
     it('sends inside the billingConfirmation share of the mail budget, and waits when it is spent', async () => {
@@ -339,14 +380,69 @@ describe('the confirmations the outbox sends', () => {
         expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.day)).toBe(hourly);
     });
 
-    it('hands back what it counted when the send fails, so the retry is counted once', async () => {
-        const h = confirmation({ sendEmail: async () => 'failed' });
+    it('hands back what it counted when Resend certainly sent nothing, so the retry is counted once', async () => {
+        // Codex round 3, new major on #62: only a DEFINITE rejection is
+        // refunded now (a 4xx, or a send that never left: no API key).
+        for (const reason of ['http_422', 'http_401', 'unconfigured']) {
+            const h = confirmation({ sendEmail: async () => ({ outcome: 'rejected', reason }) });
+            expect(await deliverPurchaseConfirmation(h.deps, row('purchase_confirmation', { ...PURCHASE }))).toEqual({
+                outcome: 'retry',
+                reason: `resend rejected: ${reason}`,
+            });
+            expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour), reason).toBe(0);
+            expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.day), reason).toBe(0);
+        }
+    });
+
+    it('waits as long as a 429 asks, and hands its place back: Resend sent nothing', async () => {
+        const h = confirmation({
+            sendEmail: async () => ({ outcome: 'rejected', reason: 'http_429', retryAfterMs: 5 * MINUTE }),
+        });
         expect(await deliverPurchaseConfirmation(h.deps, row('purchase_confirmation', { ...PURCHASE }))).toEqual({
             outcome: 'retry',
-            reason: 'resend failed',
+            reason: 'resend rejected: http_429',
+            afterMs: 5 * MINUTE,
         });
         expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour)).toBe(0);
-        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.day)).toBe(0);
+    });
+
+    it('KEEPS what it counted when Resend may have sent it, and retries', async () => {
+        // Codex round 3, new major on #62: the connection dropped after
+        // Resend had the request, a timeout, a 5xx, a 409 -- the email may be
+        // out, so its place in the 60/300 stays taken.
+        for (const reason of ['network', 'timeout', 'http_500', 'http_503', 'http_409', 'unparseable_response']) {
+            const h = confirmation({ sendEmail: async () => ({ outcome: 'unknown', reason }) });
+            expect(await deliverPurchaseConfirmation(h.deps, row('purchase_confirmation', { ...PURCHASE }))).toEqual({
+                outcome: 'retry',
+                reason: `resend unknown: ${reason}`,
+                uncertain: true,
+            });
+            expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour), reason).toBe(1);
+            expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.day), reason).toBe(1);
+        }
+    });
+
+    it("answers billing-cancel's refund request by what certainly happened", async () => {
+        const message = billingTerms.cancelLinkEmail('https://cleffy.io/cancel?token=x', 60);
+        const options = { tag: 'refund_request', idempotencyKey: 'billing-refund-request-abc' };
+        for (const [result, expected, kept] of [
+            [SENT, 'sent', 1],
+            [{ outcome: 'rejected', reason: 'http_422' }, 'rejected', 0],
+            [{ outcome: 'unknown', reason: 'network' }, 'unknown', 1],
+        ] as const) {
+            const h = confirmation({ sendEmail: async () => result });
+            expect((await sendRequestMailWithinBudget(h.deps, 'support@cleffy.io', message, options)).outcome).toBe(
+                expected,
+            );
+            expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour), expected).toBe(kept);
+        }
+        // A spent budget sent nothing.
+        const spent = confirmation({
+            mailBudget: { hour: { limit: 0, windowMs: 3_600_000 }, day: mailLimit('billingConfirmation', 'day') },
+        });
+        expect((await sendRequestMailWithinBudget(spent.deps, 'support@cleffy.io', message, options)).outcome).toBe(
+            'rejected',
+        );
     });
 
     it('spends nothing on a confirmation with nobody to go to', async () => {
@@ -397,6 +493,133 @@ describe('the confirmations the outbox sends', () => {
     });
 });
 
+describe('a confirmation Resend accepted but whose answer was lost (Codex round 3, new major on #62)', () => {
+    /**
+     * The whole path, end to end: the drain claims the row, the deliverer
+     * reserves the budget, resendDelivery.ts sends it to a Resend that keeps
+     * Resend's idempotency rules, and the connection drops after Resend has
+     * accepted the email.
+     */
+    const run = () => {
+        const resend = new FakeResend();
+        const counts = new Map<string, number>();
+        const refunds: string[] = [];
+        const confirmationDeps: ConfirmationDeps = {
+            checkRateLimit: async (key, limit) => {
+                const used = counts.get(key) ?? 0;
+                if (used >= limit) {
+                    return { ok: false, retryAfterSec: 120 };
+                }
+                counts.set(key, used + 1);
+                return { ok: true };
+            },
+            refundRateLimit: async (key) => {
+                refunds.push(key);
+                counts.set(key, Math.max(0, (counts.get(key) ?? 0) - 1));
+            },
+            mailBudget: {
+                hour: mailLimit('billingConfirmation', 'hour'),
+                day: mailLimit('billingConfirmation', 'day'),
+            },
+            emailOfUser: async () => 'ada@example.com',
+            // billingMail.ts sendBillingEmail, minus Deno.env.
+            sendEmail: (to, message, options) =>
+                sendViaResend({
+                    apiKey: 're_test_key',
+                    idempotencyKey: options.idempotencyKey,
+                    email: {
+                        from: 'Cleffy <noreply@cleffy.io>',
+                        to: [to],
+                        subject: message.subject,
+                        text: message.text,
+                        html: message.html,
+                    },
+                    fetch: resend.fetch,
+                }),
+            idempotencyKey: resendIdempotencyKey,
+            slotForPrice: (priceId) => (priceId === 'price_academy_annual' ? 'academyAnnual' : null),
+            storefrontOrigin: () => 'https://cleffy.io',
+            terms: billingTerms,
+            legalVersions: LEGAL_VERSIONS,
+            log: () => undefined,
+        };
+        const h = harness((row) => deliverPurchaseConfirmation(confirmationDeps, row));
+        return { ...h, resend, counts, refunds };
+    };
+
+    it('keeps the reservation, and the retry reuses the key: one email, never two', async () => {
+        const h = run();
+        const mail = h.outbox.add('purchase_confirmation', { ...PURCHASE });
+
+        h.resend.dropNextAnswer = true;
+        expect(await drainBillingMail(h.deps)).toMatchObject({ claimed: 1, sent: 0, retried: 1 });
+        // Resend has it; we do not know that.
+        expect(h.resend.delivered).toHaveLength(1);
+        expect(mail.status).toBe('pending');
+        expect(mail.lastError).toBe('resend unknown: network');
+        // Nothing handed back: the email may be out, so its place stays taken.
+        expect(h.refunds).toEqual([]);
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour)).toBe(1);
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.day)).toBe(1);
+
+        h.outbox.clock = mail.dueAt;
+        expect(await drainBillingMail(h.deps)).toMatchObject({ claimed: 1, sent: 1 });
+        expect(mail.status).toBe('sent');
+        // Resend answered the retry from the first request: still one email.
+        expect(h.resend.delivered).toHaveLength(1);
+        expect(h.resend.requests.map((request) => request.key)).toEqual([
+            `billing-outbox-${mail.id}`,
+            `billing-outbox-${mail.id}`,
+        ]);
+        // Each attempt reserves its own place (billingOutbox.ts
+        // sendWithinBudget): this one email is counted twice, never zero times.
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour)).toBe(2);
+        expect(h.refunds).toEqual([]);
+    });
+
+    it('a 5xx is kept and retried under the same key, stable per row and distinct between rows', async () => {
+        const h = run();
+        const mail = h.outbox.add('purchase_confirmation', { ...PURCHASE });
+        const other = h.outbox.add('purchase_confirmation', { ...PURCHASE, sessionId: 'cs_10' });
+        h.resend.failNext = [503, 503];
+
+        await drainBillingMail(h.deps);
+        expect(h.refunds).toEqual([]);
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour)).toBe(2);
+        h.outbox.clock = Math.max(mail.dueAt, other.dueAt);
+        await drainBillingMail(h.deps);
+
+        expect(mail.status).toBe('sent');
+        expect(other.status).toBe('sent');
+        expect(h.resend.delivered.map((email) => email.key).sort()).toEqual(
+            [`billing-outbox-${mail.id}`, `billing-outbox-${other.id}`].sort(),
+        );
+        // Stable per row, distinct between rows.
+        const keysOf = (id: string) =>
+            h.resend.requests.filter((request) => request.key === `billing-outbox-${id}`).length;
+        expect(keysOf(mail.id)).toBe(2);
+        expect(keysOf(other.id)).toBe(2);
+    });
+
+    it('a definite rejection is handed back, and the retry is counted once', async () => {
+        const h = run();
+        const mail = h.outbox.add('purchase_confirmation', { ...PURCHASE });
+        h.resend.failNext = [422];
+
+        await drainBillingMail(h.deps);
+        expect(mail.lastError).toBe('resend rejected: http_422');
+        expect(h.refunds).toEqual([CONFIRMATION_BUDGET_KEYS.hour, CONFIRMATION_BUDGET_KEYS.day]);
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour)).toBe(0);
+
+        h.outbox.clock = mail.dueAt;
+        await drainBillingMail(h.deps);
+        expect(mail.status).toBe('sent');
+        expect(h.resend.delivered).toHaveLength(1);
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour)).toBe(1);
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.day)).toBe(1);
+    });
+});
+
 describe('the outbox wiring', () => {
     const read = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8');
 
@@ -417,11 +640,19 @@ describe('the outbox wiring', () => {
         const worker = read('supabase/functions/_shared/billingMailWorker.ts');
         expect(worker).toContain('mailBudget: confirmationMailBudget()');
         expect(worker).toContain('mailBudget: cancelLinkMailBudget()');
+        // Every send carries a row-derived Resend Idempotency-Key, through the
+        // one shared helper (Codex round 3, new major on #62).
+        expect(worker.match(/idempotencyKey: resendIdempotencyKey/g)).toHaveLength(2);
+        const mail = read('supabase/functions/_shared/billingMail.ts');
+        expect(mail).toContain('sendViaResend({');
+        expect(mail).toContain('idempotencyKey: options.idempotencyKey');
+        expect(mail).not.toMatch(/\bfetch\(/);
         expect(read('supabase/functions/_shared/billingCancelStore.ts')).toContain(
             "mailLimit('billingConfirmation', 'hour', env)",
         );
         const cancel = read('supabase/functions/billing-cancel/index.ts');
         expect(cancel).toContain('sendEmail: sendBillingEmailWithinBudget');
+        expect(cancel).toContain('idempotencyKey: resendIdempotencyKey');
         expect(cancel).not.toContain('sendBillingEmail,');
         expect(read('supabase/functions/_shared/cancelFlow.ts')).toMatch(/billing-cancel:global/);
     });

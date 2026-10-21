@@ -1,9 +1,9 @@
 import {
     cancellableSubscription,
     cancelLinkMailBudget,
+    cancelLinkToken,
     cancelSecret,
     confirmationMailBudget,
-    newToken,
     saveToken,
     sha256Hex,
     userForEmail,
@@ -19,13 +19,15 @@ import {
     type DrainSummary,
     OUTBOX_LEASE,
     type OutboxRow,
-    sendWithinBudget,
+    sendRequestMailWithinBudget,
+    type SendResult,
 } from './billingOutbox.ts';
 import * as billingTerms from './billingTerms.ts';
 import { LEGAL_VERSIONS } from './legalVersions.ts';
 import { type CancelLinkDeps, type CancelLinkRequest, deliverCancelLink } from './cancelFlow.ts';
 import { logError } from './errorReporting.ts';
 import { checkRateLimit, refundRateLimit, serviceClient } from './rateLimit.ts';
+import { resendIdempotencyKey } from './resendDelivery.ts';
 import { slotForPrice } from './stripe.ts';
 
 /**
@@ -62,20 +64,21 @@ const budgetedSendDeps = (): BudgetedSendDeps => ({
     refundRateLimit,
     mailBudget: confirmationMailBudget(),
     sendEmail: sendBillingEmail,
+    idempotencyKey: resendIdempotencyKey,
 });
 
 /**
  * Billing mail sent from a request rather than the outbox (billing-cancel's
  * refund request to support), inside the same budget share as the
- * confirmations. A spent window reads as a failed send, which the cancel page
- * already answers by telling the buyer to write to support themselves.
+ * confirmations, with the Idempotency-Key the caller derived. Anything but
+ * `sent` -- a spent window, a rejection, an outcome Resend left unknown -- the
+ * cancel page answers by telling the buyer to write to support themselves.
  */
-export const sendBillingEmailWithinBudget = async (
+export const sendBillingEmailWithinBudget = (
     to: string,
     message: billingTerms.BillingEmail,
-    options: { replyTo?: string; tag: string },
-): Promise<'sent' | 'failed'> =>
-    (await sendWithinBudget(budgetedSendDeps(), to, message, options)).outcome === 'sent' ? 'sent' : 'failed';
+    options: { replyTo?: string; tag: string; idempotencyKey: string },
+): Promise<SendResult> => sendRequestMailWithinBudget(budgetedSendDeps(), to, message, options);
 
 const confirmationDeps = (): ConfirmationDeps => ({
     ...budgetedSendDeps(),
@@ -93,11 +96,12 @@ const cancelLinkDeps = (): CancelLinkDeps => ({
     mailBudget: cancelLinkMailBudget(),
     sha256Hex,
     secret: cancelSecret,
-    newToken,
+    linkToken: cancelLinkToken,
     userForEmail,
     cancellableSubscription,
     saveToken,
     sendEmail: sendBillingEmail,
+    idempotencyKey: resendIdempotencyKey,
     terms: billingTerms,
     now: () => Date.now(),
     logError: (code, err) => logError('billing-cancel', err, { code }),
@@ -110,7 +114,7 @@ const deliver = async (row: OutboxRow): Promise<Delivery> => {
         case 'cancellation_confirmation':
             return deliverCancellationConfirmation(confirmationDeps(), row);
         case 'cancel_link':
-            return deliverCancelLink(cancelLinkDeps(), row.mode, row.payload as unknown as CancelLinkRequest);
+            return deliverCancelLink(cancelLinkDeps(), row.mode, row.payload as unknown as CancelLinkRequest, row.id);
         default:
             return { outcome: 'retry', reason: `no deliverer for ${row.kind as string}` };
     }

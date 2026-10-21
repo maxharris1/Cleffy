@@ -1,7 +1,8 @@
-import type { OutboxKind } from './billingOutbox.ts';
+import type { BillingSendOptions, OutboxKind } from './billingOutbox.ts';
 import type { BillingEmail } from './billingTerms.ts';
 import { logError } from './errorReporting.ts';
 import { serviceClient } from './rateLimit.ts';
+import { type ResendResult, sendViaResend } from './resendDelivery.ts';
 import type { StripeMode } from './stripe.ts';
 
 /**
@@ -10,49 +11,43 @@ import type { StripeMode } from './stripe.ts';
  * finding the address and storefront to write to.
  */
 
-const RESEND_API = 'https://api.resend.com';
-
 /** Same verified domain as auth mail (DEPLOY.md §7); replies go to a human. */
 const mailFrom = (): string => Deno.env.get('BILLING_EMAIL_FROM') ?? 'Cleffy <noreply@cleffy.io>';
 
-export type SendOutcome = 'sent' | 'failed' | 'unconfigured';
-
+/**
+ * One billing email through Resend (resendDelivery.ts), with the
+ * Idempotency-Key the caller derived from its outbox row, placed as `sent`,
+ * `rejected` (certainly not sent) or `unknown` (may have been) -- what decides
+ * whether its share of the mail budget is handed back (billingOutbox.ts
+ * sendWithinBudget). Never throws.
+ */
 export const sendBillingEmail = async (
     to: string,
     message: BillingEmail,
-    options: { replyTo?: string; tag: string },
-): Promise<SendOutcome> => {
-    const apiKey = Deno.env.get('RESEND_API_KEY');
-    if (!apiKey) {
+    options: BillingSendOptions,
+): Promise<ResendResult> => {
+    const result = await sendViaResend({
+        apiKey: Deno.env.get('RESEND_API_KEY'),
+        idempotencyKey: options.idempotencyKey,
+        email: {
+            from: mailFrom(),
+            to: [to],
+            reply_to: options.replyTo ?? 'support@cleffy.io',
+            subject: message.subject,
+            text: message.text,
+            html: message.html,
+        },
+    });
+    if (result.reason === 'unconfigured') {
         console.log(`billing mail (${options.tag}) not sent: RESEND_API_KEY is not set`);
-        return 'unconfigured';
-    }
-    try {
-        const res = await fetch(`${RESEND_API}/emails`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                from: mailFrom(),
-                to: [to],
-                reply_to: options.replyTo ?? 'support@cleffy.io',
-                subject: message.subject,
-                text: message.text,
-                html: message.html,
-            }),
+    } else if (result.outcome !== 'sent') {
+        // The outcome, status and Resend's reason, never the address.
+        logError('billing-mail', new Error(`resend ${result.outcome}: ${result.reason}`), {
+            code: `${options.tag}_send_${result.outcome}`,
+            detail: result.detail ?? result.errorName ?? '',
         });
-        if (!res.ok) {
-            // The status and Resend's reason, never the address.
-            logError('billing-mail', new Error(`resend returned ${res.status}`), {
-                code: `${options.tag}_send_failed`,
-                detail: (await res.text()).slice(0, 300),
-            });
-            return 'failed';
-        }
-        return 'sent';
-    } catch (err) {
-        logError('billing-mail', err, { code: `${options.tag}_send_failed` });
-        return 'failed';
     }
+    return result;
 };
 
 /**

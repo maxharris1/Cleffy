@@ -1,4 +1,4 @@
-import type { Delivery } from './billingOutbox.ts';
+import type { Delivery, SendResult } from './billingOutbox.ts';
 import type * as BillingTerms from './billingTerms.ts';
 import type { StripeMode } from './stripeMode.ts';
 
@@ -111,11 +111,20 @@ export interface CancelLinkRequest {
     origin: string;
 }
 
+/** Resend, with an Idempotency-Key that is the same on every attempt at one mail (resendDelivery.ts). */
 type SendEmail = (
     to: string,
     message: BillingTerms.BillingEmail,
-    options: { replyTo?: string; tag: string },
-) => Promise<'sent' | 'failed' | 'unconfigured'>;
+    options: { replyTo?: string; tag: string; idempotencyKey: string },
+) => Promise<SendResult>;
+
+/** resendDelivery.ts resendIdempotencyKey, handed in so this module has no runtime imports. */
+type IdempotencyKey = (outbox: string, rowId: string) => string;
+
+/** The outbox name in a cancel link's Resend key: billingOutbox.ts BILLING_OUTBOX_KEY, the row's own key. */
+const BILLING_OUTBOX_KEY = 'billing-outbox';
+/** One refund request per spent link: keyed by the link's stored hash, never the address. */
+const REFUND_REQUEST_KEY = 'billing-refund-request';
 
 /** What delivering a queued link needs; billingMailWorker.ts wires it. */
 export interface CancelLinkDeps {
@@ -127,11 +136,19 @@ export interface CancelLinkDeps {
     sha256Hex: (value: string) => Promise<string>;
     /** Server-side pepper for the per-recipient limiter key, so the rate table holds no address. */
     secret: () => string | null;
-    newToken: () => string;
+    /**
+     * The link's token for one outbox row, from the secret and the row id
+     * (billingCancelStore.ts cancelLinkToken): the same on every retry, so a
+     * retry's email is byte-identical and Resend can answer it under the
+     * row's Idempotency-Key without sending a second.
+     */
+    linkToken: (secret: string, rowId: string) => Promise<string>;
     userForEmail: (email: string) => Promise<string | null>;
     cancellableSubscription: (userId: string, mode: StripeMode) => Promise<CancellableSubscription | null>;
+    /** Saves the token's hash, or refreshes the expiry of one a retry saved before. */
     saveToken: (token: { hash: string; userId: string; mode: StripeMode; expiresAt: string }) => Promise<void>;
     sendEmail: SendEmail;
+    idempotencyKey: IdempotencyKey;
     terms: Pick<typeof BillingTerms, 'cancelLinkEmail' | 'BILLING_PATHS'>;
     now: () => number;
     logError: (code: string, err: unknown) => void;
@@ -165,6 +182,7 @@ export interface CancelDeps {
      */
     cancelAtPeriodEnd: (subscriptionId: string, mode: StripeMode) => Promise<LiveSubscription>;
     sendEmail: SendEmail;
+    idempotencyKey: IdempotencyKey;
     terms: Pick<typeof BillingTerms, 'refundRequestEmail' | 'withinRefundWindow' | 'TRADER'>;
     planNameForPrice: (priceId: string | null) => string | null;
     now: () => number;
@@ -230,15 +248,22 @@ const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, 
  *  * `done`  -- no account, no running subscription, or a recipient already
  *               sent their share of links this hour: nothing to send, and the
  *               request (and the address in it) is deleted;
- *  * `retry` -- the mail budget is spent, the lookup failed, or Resend did:
- *               queued, and sent when it can be. Every limit counted on the way
- *               is handed back, so a retry is counted once, when it succeeds;
- *  * `sent`  -- a fresh one-time link went out.
+ *  * `retry` -- the mail budget is spent, the lookup failed, Resend refused
+ *               the send, or Resend may have taken it without our hearing
+ *               back: queued, and sent when it can be. Every limit counted on
+ *               the way is handed back when nothing can have gone out; when
+ *               something may have (`unknown`), the mail budget stays spent
+ *               (Codex round 3, new major on #62) and the retry carries the
+ *               same Idempotency-Key and the same link, so it is not a second
+ *               email;
+ *  * `sent`  -- the row's one-time link went out.
  */
 export const deliverCancelLink = async (
     deps: CancelLinkDeps,
     mode: StripeMode,
     request: CancelLinkRequest,
+    /** The billing_mail_outbox row: what the link's token and the Resend key derive from. */
+    rowId: string,
 ): Promise<Delivery> => {
     const secret = deps.secret();
     if (!secret) {
@@ -303,10 +328,12 @@ export const deliverCancelLink = async (
         counted.push(key);
     }
 
-    // Minted at send time, so a link that waited for the budget is still good
-    // for its whole hour when it arrives.
-    const token = deps.newToken();
+    // Derived from the row, so every retry mails the same link; saved (or its
+    // expiry refreshed) at send time, so a link that waited for the budget is
+    // still good for its whole hour when it arrives.
+    let token: string;
     try {
+        token = await deps.linkToken(secret, rowId);
         await deps.saveToken({
             hash: await deps.sha256Hex(token),
             userId,
@@ -322,13 +349,30 @@ export const deliverCancelLink = async (
     const link = `${request.origin}${deps.terms.BILLING_PATHS.cancel}?token=${encodeURIComponent(token)}`;
     const sent = await deps.sendEmail(email, deps.terms.cancelLinkEmail(link, CANCEL_LINK_TTL_MS / 60_000), {
         tag: 'cancel_link',
+        idempotencyKey: deps.idempotencyKey(BILLING_OUTBOX_KEY, rowId),
     });
-    if (sent !== 'sent') {
-        await handBack();
-        deps.logError('cancel_link_not_sent', new Error(sent));
-        return { outcome: 'retry', reason: `resend ${sent}` };
+    if (sent.outcome === 'sent') {
+        return { outcome: 'sent' };
     }
-    return { outcome: 'sent' };
+    if (sent.outcome === 'rejected') {
+        await handBack();
+        deps.logError('cancel_link_not_sent', new Error(`rejected: ${sent.reason}`));
+        return {
+            outcome: 'retry',
+            reason: `resend rejected: ${sent.reason}`,
+            ...(sent.retryAfterMs !== undefined ? { afterMs: Math.max(60_000, sent.retryAfterMs) } : {}),
+        };
+    }
+    // `unknown`: the link may be on its way. The mail budget keeps it -- each
+    // attempt reserves its own place, as billingOutbox.ts sendWithinBudget
+    // explains, so a retry that does send is counted in its own window. The
+    // per-recipient count is handed back: it limits links to an address, this
+    // row can only ever be one (same key, same link), and its retry counts it
+    // again; kept, a few lost answers would use up the address's hour and
+    // drop the row as `recipient_limited` before its link ever went.
+    await deps.refundRateLimit(recipientKey).catch(() => undefined);
+    deps.logError('cancel_link_unknown', new Error(`unknown: ${sent.reason}`));
+    return { outcome: 'retry', reason: `resend unknown: ${sent.reason}`, uncertain: true };
 };
 
 /** The token's row, if it can still be used. */
@@ -481,11 +525,21 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
                 firstPurchaseAtMs: resolved.firstPurchaseAt,
                 requestedAtMs: deps.now(),
             }),
-            { replyTo: resolved.email, tag: 'refund_request' },
+            // Keyed by this link's hash: one request per spent link, never
+            // the address. Resend answers a repeat under it without mailing
+            // support again.
+            {
+                replyTo: resolved.email,
+                tag: 'refund_request',
+                idempotencyKey: deps.idempotencyKey(REFUND_REQUEST_KEY, resolved.hash),
+            },
         );
-        refundRequested = sent === 'sent';
+        // Only a send Resend confirmed counts. On `unknown` support may have
+        // it, but the buyer is still told to write in: a second note to
+        // support is harmless, a 14-day refund request lost is not.
+        refundRequested = sent.outcome === 'sent';
         if (!refundRequested) {
-            deps.logError('refund_request_not_sent', new Error(sent));
+            deps.logError('refund_request_not_sent', new Error(`${sent.outcome}: ${sent.reason}`));
         }
     }
 

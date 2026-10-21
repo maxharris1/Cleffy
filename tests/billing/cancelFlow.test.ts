@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import type { Delivery } from '../../supabase/functions/_shared/billingOutbox';
+import type { Delivery, SendResult } from '../../supabase/functions/_shared/billingOutbox';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import {
     CANCEL_LINK_TTL_MS,
@@ -19,8 +19,10 @@ import {
     type LiveSubscription,
     type StoredCancelToken,
 } from '../../supabase/functions/_shared/cancelFlow';
+import { resendIdempotencyKey, sendViaResend } from '../../supabase/functions/_shared/resendDelivery';
 import { liveSubscriptionOf } from '../../supabase/functions/_shared/stripeEvents';
 import type { StripeMode } from '../../supabase/functions/_shared/stripeMode';
+import { FakeResend } from './fakeResend';
 
 /**
  * The signed-out cancellation flow, run for real against in-memory stand-ins
@@ -49,6 +51,10 @@ const harness = (
         subscription?: CancellableSubscription | null;
         firstPurchaseAt?: number | null;
         sendFails?: boolean;
+        /** What every send answers instead of `sent` (sendFails is a definite rejection). */
+        sendResult?: SendResult;
+        /** Send through resendDelivery.ts to this Resend instead. */
+        resend?: FakeResend;
         stripeFails?: boolean;
         limited?: string[];
         /**
@@ -68,14 +74,15 @@ const harness = (
     } = {},
 ) => {
     const tokens = new Map<string, StoredCancelToken>();
-    const sent: Array<{ to: string; subject: string; text: string; replyTo?: string }> = [];
+    const sent: Array<{ to: string; subject: string; text: string; replyTo?: string; idempotencyKey: string }> = [];
     const limiter = new Map<string, number>();
     const refunded: string[] = [];
     const errors: string[] = [];
     /** Every call the HANDLER makes, in order -- what an observer could time. */
     const trace: string[] = [];
     /** billing_mail_outbox, modelled: what /cancel wrote down, and what the worker made of it. */
-    const queue: Array<{ request: CancelLinkRequest; mode: StripeMode }> = [];
+    const queue: Array<{ id: string; request: CancelLinkRequest; mode: StripeMode }> = [];
+    let rows = 0;
     const deliveries: Delivery[] = [];
     const subscription: CancellableSubscription | null =
         options.subscription === undefined
@@ -95,7 +102,6 @@ const harness = (
                   cancelling: subscription.cancelAtPeriodEnd,
                   endsAt: subscription.periodEnd,
               };
-    let tokenCount = 0;
     const checkRateLimit = vi.fn(async (key: string, limit: number, _windowMs?: number) => {
         if (options.limited?.some((prefix) => key.startsWith(prefix))) {
             return { ok: false as const, retryAfterSec: 60 };
@@ -105,12 +111,40 @@ const harness = (
         return used > limit ? { ok: false as const, retryAfterSec: 60 } : { ok: true as const };
     });
     const sendEmail = vi.fn(
-        async (to: string, message: billingTerms.BillingEmail, mailOptions: { replyTo?: string }) => {
-            if (options.sendFails) {
-                return 'failed' as const;
+        async (
+            to: string,
+            message: billingTerms.BillingEmail,
+            mailOptions: { replyTo?: string; tag: string; idempotencyKey: string },
+        ): Promise<SendResult> => {
+            if (options.resend) {
+                return sendViaResend({
+                    apiKey: 're_test_key',
+                    idempotencyKey: mailOptions.idempotencyKey,
+                    email: {
+                        from: 'Cleffy <noreply@cleffy.io>',
+                        to: [to],
+                        reply_to: mailOptions.replyTo ?? 'support@cleffy.io',
+                        subject: message.subject,
+                        text: message.text,
+                        html: message.html,
+                    },
+                    fetch: options.resend.fetch,
+                });
             }
-            sent.push({ to, subject: message.subject, text: message.text, replyTo: mailOptions.replyTo });
-            return 'sent' as const;
+            if (options.sendFails) {
+                return { outcome: 'rejected', reason: 'http_422' };
+            }
+            if (options.sendResult) {
+                return options.sendResult;
+            }
+            sent.push({
+                to,
+                subject: message.subject,
+                text: message.text,
+                replyTo: mailOptions.replyTo,
+                idempotencyKey: mailOptions.idempotencyKey,
+            });
+            return { outcome: 'sent', reason: 'sent' };
         },
     );
     const cancellableSubscription = vi.fn(async () => subscription);
@@ -130,7 +164,7 @@ const harness = (
             if (options.queueFails) {
                 throw new Error('connection reset');
             }
-            queue.push({ request, mode });
+            queue.push({ id: `row-${++rows}`, request, mode });
         }),
         sendQueued: vi.fn(() => {
             trace.push('send-queued');
@@ -167,6 +201,7 @@ const harness = (
             return live;
         }),
         sendEmail,
+        idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
         planNameForPrice: (priceId) => (priceId === 'price_teacher_monthly' ? 'Teacher' : null),
         now: () => NOW,
@@ -184,13 +219,17 @@ const harness = (
         },
         sha256Hex,
         secret: () => 'pepper',
-        newToken: () => `token-${++tokenCount}-abcdefghijklmnop`,
+        // billingCancelStore.ts cancelLinkToken is an HMAC; any function of
+        // the secret and the row will do here.
+        linkToken: async (secret, rowId) => `token-${createHash('sha256').update(`${secret}:${rowId}`).digest('hex')}`,
         userForEmail: vi.fn(async (email: string) => (email === EMAIL ? USER : null)),
         cancellableSubscription,
+        // An upsert that leaves used_at alone, as billingCancelStore.ts does.
         saveToken: async ({ hash, userId, mode, expiresAt }) => {
-            tokens.set(hash, { userId, mode, expiresAt, usedAt: null });
+            tokens.set(hash, { userId, mode, expiresAt, usedAt: tokens.get(hash)?.usedAt ?? null });
         },
         sendEmail,
+        idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
         now: () => NOW,
         logError: (code) => errors.push(code),
@@ -203,7 +242,7 @@ const harness = (
         const due = queue.splice(0);
         const outcomes: Delivery[] = [];
         for (const item of due) {
-            const outcome = await deliverCancelLink(linkDeps, item.mode, item.request);
+            const outcome = await deliverCancelLink(linkDeps, item.mode, item.request, item.id);
             outcomes.push(outcome);
             if (outcome.outcome === 'retry') {
                 queue.push(item);
@@ -238,7 +277,9 @@ describe('billing-cancel: asking for a link', () => {
         expect(await body(response)).toEqual({ sent: true });
         // Answered before anything was looked up or sent.
         expect(h.sent).toEqual([]);
-        expect(h.queue).toEqual([{ request: { email: EMAIL, origin: 'https://cleffy.io' }, mode: 'live' }]);
+        expect(h.queue).toEqual([
+            { id: 'row-1', request: { email: EMAIL, origin: 'https://cleffy.io' }, mode: 'live' },
+        ]);
         expect(h.deps.sendQueued).toHaveBeenCalledTimes(1);
 
         expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
@@ -334,13 +375,76 @@ describe('billing-cancel: asking for a link', () => {
         expect(h.queue).toEqual([]);
     });
 
-    it('retries a link Resend failed to send, handing the budget back', async () => {
+    it('retries a link Resend refused, handing the budget back', async () => {
         const h = harness({ sendFails: true });
         await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
 
-        expect(await h.flush()).toEqual([{ outcome: 'retry', reason: 'resend failed' }]);
+        expect(await h.flush()).toEqual([{ outcome: 'retry', reason: 'resend rejected: http_422' }]);
         expect(h.refunded).toEqual(expect.arrayContaining(['billing-cancel:global', 'billing-cancel:global-day']));
         expect(h.queue).toHaveLength(1);
+    });
+
+    describe('a link Resend may have sent (Codex round 3, new major on #62)', () => {
+        it('keeps the mail budget, hands back only the per-recipient count, and retries', async () => {
+            const h = harness({ sendResult: { outcome: 'unknown', reason: 'timeout' } });
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+
+            expect(await h.flush()).toEqual([{ outcome: 'retry', reason: 'resend unknown: timeout', uncertain: true }]);
+            expect(h.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+            expect(h.refunded).toEqual([expect.stringMatching(/^billing-cancel:start:to:/)]);
+            expect(h.queue).toHaveLength(1);
+        });
+
+        it('accepted, then the connection dropped: the retry mails the same link under the same key, once', async () => {
+            const resend = new FakeResend();
+            const h = harness({ resend });
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+
+            resend.dropNextAnswer = true;
+            expect(await h.flush()).toEqual([{ outcome: 'retry', reason: 'resend unknown: network', uncertain: true }]);
+            expect(resend.delivered).toHaveLength(1);
+            expect(h.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+
+            expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
+            // Byte-identical retry, so Resend answered it from the first
+            // request: one email, and its link is the one that works.
+            expect(resend.delivered).toHaveLength(1);
+            expect(resend.requests).toHaveLength(2);
+            expect(resend.requests[0]?.key).toBe('billing-outbox-row-1');
+            expect(resend.requests[1]).toEqual(resend.requests[0]);
+            const text = (JSON.parse(resend.delivered[0]?.body ?? '{}') as { text: string }).text;
+            const peek = await handleCancel(post({ action: 'peek', token: tokenFrom(text) }), h.deps);
+            expect(peek.status).toBe(200);
+            expect(h.tokens.size).toBe(1);
+        });
+
+        it('a row retried through several lost answers is not dropped by its own per-recipient count', async () => {
+            const resend = new FakeResend();
+            const h = harness({ resend });
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+
+            resend.failNext = [503, 503, 503, 503];
+            for (let attempt = 0; attempt < 4; attempt += 1) {
+                expect((await h.flush())[0]).toMatchObject({ outcome: 'retry', uncertain: true });
+            }
+            expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
+            expect(resend.delivered).toHaveLength(1);
+            expect(new Set(resend.requests.map((request) => request.key))).toEqual(new Set(['billing-outbox-row-1']));
+        });
+
+        it('different requests get different links and keys', async () => {
+            const resend = new FakeResend();
+            const h = harness({ resend });
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            await h.flush();
+            expect(resend.delivered.map((email) => email.key)).toEqual([
+                'billing-outbox-row-1',
+                'billing-outbox-row-2',
+            ]);
+            expect(resend.delivered[0]?.body).not.toBe(resend.delivered[1]?.body);
+            expect(h.tokens.size).toBe(2);
+        });
     });
 
     it('limits how many links one address can be sent', async () => {
@@ -424,6 +528,16 @@ describe('billing-cancel: using the link', () => {
         expect(toSupport[0]?.replyTo).toBe(EMAIL);
         expect(toSupport[0]?.subject).toContain('[support]');
         expect(toSupport[0]?.text).toContain('sub_1');
+        // One request per spent link, keyed by the link's stored hash -- never the address.
+        expect(toSupport[0]?.idempotencyKey).toBe(`billing-refund-request-${await sha256Hex(h.token)}`);
+    });
+
+    it('tells the buyer to write in when Resend may or may not have passed the refund request on', async () => {
+        const h = await linked();
+        h.deps.sendEmail = async () => ({ outcome: 'unknown', reason: 'timeout' });
+        const response = await handleCancel(post({ action: 'cancel', token: h.token, requestRefund: true }), h.deps);
+        expect(await body(response)).toMatchObject({ refundRequested: false, refundRequestFailed: true });
+        expect(h.errors).toContain('refund_request_not_sent');
     });
 
     it('sends no refund request once the 14 days are over', async () => {

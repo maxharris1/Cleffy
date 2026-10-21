@@ -6,6 +6,7 @@ import { handleCancel, type LiveSubscription } from '../_shared/cancelFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
+import { resendIdempotencyKey } from '../_shared/resendDelivery.ts';
 import { appOrigin, modeForRequest, slotForPrice, stripeClient, type StripeMode } from '../_shared/stripe.ts';
 import { liveSubscriptionOf, type StripeSubscriptionLike } from '../_shared/stripeEvents.ts';
 
@@ -113,6 +114,7 @@ Deno.serve((req) =>
             ),
         // The refund request to support, inside the billingConfirmation share.
         sendEmail: sendBillingEmailWithinBudget,
+        idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
         planNameForPrice: (priceId) => {
             const slot = priceId ? slotForPrice(priceId) : null;
