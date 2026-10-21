@@ -258,7 +258,7 @@ Use the helpers at the top of the file:
 Write each SQL argument in `$q$ … $q$` so it needs no escaping.
 
 `launch_consent.sql` proves the launch consent and retention migrations
-(`20261021120000` through `20261021120300`): `consent_age()` answers the
+(`20261021120000` through `20261021120300`, and the fix pass's `120400` to `120600`): `consent_age()` answers the
 EU/EEA ages and 13 elsewhere; `hook_before_user_created` lets a passing
 `age_gate` through, refuses a missing one with 400 and an under-age one with
 403 whose message names no age, and is callable by `supabase_auth_admin`
@@ -275,7 +275,7 @@ an old guest whose session refreshed today, a new guest and an old
 registered account, drop stale rate-limit and login buckets but not live
 ones, and drop support mail older than 24 months; the five cron jobs are
 scheduled off the hour. Proven against the local stack (PostgreSQL 17.11) on
-2026-10-21: all 29 checks passed.
+2026-10-21: all 29 checks passed, and 43 with the fix pass's checks below.
 
 The fix pass adds `20261021120400_delete_student_one_transaction.sql`:
 `revoke_and_scrub_student` is the service role's alone and refuses an account

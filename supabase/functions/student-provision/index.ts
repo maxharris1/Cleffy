@@ -742,8 +742,14 @@ const restoreStudent = async (admin: SupabaseClient, userId: string, body: Provi
     // in the safe direction: a failure here leaves the student archived and still
     // revoked, where the reverse would leave an active roster row whose account
     // is silently banned — a student refused for a reason no teacher could see.
+    //
+    // The account carries the restore's attestation as its age_gate, the same
+    // shape create writes, so the account side never keeps a stale (or, for a
+    // student provisioned before attestations, missing) one. GoTrue merges
+    // user_metadata keys, so display_name is untouched.
     const { error: unbanError } = await admin.auth.admin.updateUserById(owned.row.student_user_id, {
         ban_duration: 'none',
+        user_metadata: { age_gate: ageGateOf(checked.attestation) },
     });
     if (unbanError) {
         console.error(`could not restore access for student ${owned.row.id}: ${unbanError.message}`);

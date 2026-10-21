@@ -118,6 +118,14 @@ describe('student-provision asks for it, and deletes in a safe order', () => {
         }
     });
 
+    it('carries a restore’s attestation into the account too, with the unban', () => {
+        const fn = body('restoreStudent');
+        expect(fn).toMatch(
+            /updateUserById\(owned\.row\.student_user_id, \{\s*ban_duration: 'none',\s*user_metadata: \{ age_gate: ageGateOf\(checked\.attestation\) \},/,
+        );
+        expect(fn).toMatch(/\.\.\.attestationColumns\(checked\.attestation\)/);
+    });
+
     it('scrubs a deleted student’s markings before the account goes', () => {
         const fn = body('deleteStudent');
         // Revoke and scrub in one transaction (20261021120400), then the account.
