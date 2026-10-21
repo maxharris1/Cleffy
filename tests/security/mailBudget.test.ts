@@ -10,6 +10,7 @@ import {
     AUTH_MAIL_RESERVE,
     DEFAULT_MAIL_BUDGET,
     discretionaryMailBudget,
+    LAUNCH_MAIL_SPLIT,
     MAIL_BUDGET_ENV,
     MAIL_CATEGORIES,
     MAIL_CATEGORY_CAPS,
@@ -58,7 +59,7 @@ describe('the auth-mail reserve', () => {
     it('says which window over-allocates and by how much, rather than just failing', () => {
         // Proving the guard really catches it — the assertion above only shows
         // today's numbers are fine. A budget of 50/hour leaves 10 after the
-        // 40 reserved, and the guest-email cap of 60 does not fit in 10.
+        // 40 reserved, and the launch split's 60 does not fit in 10.
         const tight = env({ [MAIL_BUDGET_ENV.hour]: '50' });
         const problems = mailBudgetProblems(tight);
         expect(problems).toHaveLength(1);
@@ -139,11 +140,16 @@ describe('guest-email derives its ceilings from the budget', () => {
         }
     });
 
-    it('moves no behaviour today: the derived ceilings are the literals they replaced', () => {
-        // Deliberately the same size as before this module existed, so the
-        // change is a statement about ownership and not a quiet retune.
-        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 60, windowMs: MAIL_WINDOW_MS.hour });
-        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 300, windowMs: MAIL_WINDOW_MS.day });
+    it('gets its declared cap in full: the clamp is inert at the declared budget', () => {
+        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 28, windowMs: MAIL_WINDOW_MS.hour });
+        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 150, windowMs: MAIL_WINDOW_MS.day });
+        for (const category of MAIL_CATEGORIES) {
+            for (const window of MAIL_WINDOWS) {
+                expect(mailLimit(category, window).limit, `${category}/${window}`).toBe(
+                    LAUNCH_MAIL_SPLIT[category][window],
+                );
+            }
+        }
     });
 
     it('counts over windows a rate limiter can actually use', () => {
@@ -161,6 +167,37 @@ describe('guest-email derives its ceilings from the budget', () => {
     it('lets a day hold more than an hour, for every declared sender', () => {
         for (const category of MAIL_CATEGORIES) {
             expect(MAIL_CATEGORY_CAPS[category].day, category).toBeGreaterThan(MAIL_CATEGORY_CAPS[category].hour);
+        }
+    });
+});
+
+describe('the launch mail split', () => {
+    it('is the binding split, category by category', () => {
+        // Binding (Max, October 2026). Identical on #63, #62 and #64, so this
+        // is also what the merged branches spend: every sender is registered
+        // on every branch, whether or not its code has landed there yet.
+        expect(LAUNCH_MAIL_SPLIT).toEqual({
+            guestEmailCode: { hour: 28, day: 150 },
+            contentReportAck: { hour: 8, day: 35 },
+            moderationNotice: { hour: 4, day: 20 },
+            billingCancelLink: { hour: 8, day: 40 },
+            billingConfirmation: { hour: 7, day: 30 },
+            retentionNotice: { hour: 5, day: 25 },
+        });
+        expect(MAIL_CATEGORY_CAPS).toBe(LAUNCH_MAIL_SPLIT);
+    });
+
+    it('adds up to exactly the discretionary 60/hour and 300/day', () => {
+        // Derived from the shared constants, not restated per branch: the
+        // registered total IS the merged total, so nothing is added here for a
+        // sender another PR brings (the 75/360 a hypothetical addition gave).
+        expect(discretionaryMailBudget('hour')).toBe(60);
+        expect(discretionaryMailBudget('day')).toBe(300);
+        expect(allocatedMailCaps('hour')).toBe(60);
+        expect(allocatedMailCaps('day')).toBe(300);
+        for (const window of MAIL_WINDOWS) {
+            const sum = Object.values(LAUNCH_MAIL_SPLIT).reduce((total, caps) => total + caps[window], 0);
+            expect(sum, window).toBe(DEFAULT_MAIL_BUDGET[window] - AUTH_MAIL_RESERVE[window]);
         }
     });
 });

@@ -671,6 +671,42 @@ export type Database = {
                 Args: { doc: string };
                 Returns: MemberRole | null;
             };
+            // Takedown topic generation (20261020150100): null when the caller
+            // may not open the score.
+            realtime_topic_epoch: {
+                Args: { p_document: string };
+                Returns: number | null;
+            };
+            // Notice and action (20261020150000). The browser only asks and reads;
+            // every write is the content-report / content-moderation functions'.
+            is_content_moderator: {
+                Args: Record<string, never>;
+                Returns: boolean;
+            };
+            // Moderators only (42501 otherwise), a page at a time; parsed in
+            // moderationApi.ts.
+            moderation_reports: {
+                Args: {
+                    p_status?: 'open' | 'decided' | 'all';
+                    p_after_created_at?: string;
+                    p_after_id?: string;
+                    p_limit?: number;
+                };
+                Returns: unknown;
+            };
+            moderation_takedowns: {
+                Args: {
+                    p_state?: 'active' | 'lifted' | 'all';
+                    p_after_created_at?: string;
+                    p_after_id?: string;
+                    p_limit?: number;
+                };
+                Returns: unknown;
+            };
+            moderation_log: {
+                Args: { p_before_id?: number; p_limit?: number };
+                Returns: unknown;
+            };
             // Storage-policy helper: the caller owned this deleted score's folder
             // and has not finished cleaning it up.
             document_storage_cleanup_pending: {

@@ -42,13 +42,26 @@ describe('realtime topics stay in sync with the database', () => {
         expect(latestDefinition('db_topic_document_role')).toContain("'doc-db:%'");
     });
 
+    it('names a rotated generation the way the database does', () => {
+        // document_live_topic / document_db_topic: ':' || generation, none at 0.
+        expect(docTopic('x', 2)).toBe('doc:x:2');
+        expect(docDbTopic('x', 2)).toBe('doc-db:x:2');
+        expect(latestDefinition('document_live_topic')).toContain("'doc:' || doc::text");
+        expect(latestDefinition('document_db_topic')).toContain("'doc-db:' || doc::text");
+        for (const fn of ['document_live_topic', 'document_db_topic']) {
+            expect(latestDefinition(fn)).toMatch(/when public\.document_realtime_epoch \(doc\) = 0 then ''/);
+            expect(latestDefinition(fn)).toMatch(/else ':' \|\| public\.document_realtime_epoch \(doc\)::text/);
+        }
+    });
+
     it.each(['broadcast_annotation_changes', 'broadcast_document_changes', 'broadcast_score_analysis_changes'])(
         '%s broadcasts on the receive-only doc-db topic',
         (fn) => {
             const body = latestDefinition(fn);
-            expect(body).toContain("'doc-db:' ||");
+            expect(body).toMatch(/public\.document_db_topic \(/);
             // Never on the topic every editor may send on.
             expect(body).not.toMatch(/'doc:'\s*\|\|/);
+            expect(body).not.toMatch(/document_live_topic/);
         },
     );
 });
