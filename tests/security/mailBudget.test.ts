@@ -8,8 +8,10 @@ import { GUEST_EMAIL_LIMITS } from '../../supabase/functions/_shared/guestEmail'
 import {
     allocatedMailCaps,
     AUTH_MAIL_RESERVE,
+    BILLING_CANCEL_SHARE,
     DEFAULT_MAIL_BUDGET,
     discretionaryMailBudget,
+    GUEST_AND_AUTOMATED_MAIL_CAP,
     MAIL_BUDGET_ENV,
     MAIL_CATEGORIES,
     MAIL_CATEGORY_CAPS,
@@ -104,6 +106,29 @@ describe('the auth-mail reserve', () => {
     });
 });
 
+describe('the split between the launch senders', () => {
+    it('holds the guest and automated mail to its cap (about 35/hour, 190/day)', () => {
+        for (const window of MAIL_WINDOWS) {
+            expect(MAIL_CATEGORY_CAPS.guestEmailCode[window], window).toBeLessThanOrEqual(
+                GUEST_AND_AUTOMATED_MAIL_CAP[window],
+            );
+        }
+        expect(GUEST_AND_AUTOMATED_MAIL_CAP).toEqual({ hour: 35, day: 190 });
+    });
+
+    it('leaves the signed-out cancel link (#62) its share, so both PRs together fit 60/300', () => {
+        // #62 registers billingCancelLink in MAIL_CATEGORY_CAPS; until it does,
+        // its share must still be free, or the merge would over-allocate.
+        const claimed = (window: (typeof MAIL_WINDOWS)[number]): number =>
+            allocatedMailCaps(window) + ('billingCancelLink' in MAIL_CATEGORY_CAPS ? 0 : BILLING_CANCEL_SHARE[window]);
+        for (const window of MAIL_WINDOWS) {
+            expect(claimed(window), window).toBeLessThanOrEqual(discretionaryMailBudget(window));
+        }
+        expect(discretionaryMailBudget('hour')).toBe(60);
+        expect(discretionaryMailBudget('day')).toBe(300);
+    });
+});
+
 describe('the budget override', () => {
     it('ignores a value that is not a positive whole number', () => {
         // A typo must not quietly become a ceiling of zero — which would stop
@@ -141,10 +166,10 @@ describe('guest-email derives its ceilings from the budget', () => {
 
     it('gets its declared cap in full: the clamp is inert at the declared budget', () => {
         // The same size as the literals this module replaced (60/300) until the
-        // content-report and moderation senders took 15/60 of it in October
-        // 2026 — a deliberate retune, pinned here so the next one is too.
-        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 45, windowMs: MAIL_WINDOW_MS.hour });
-        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 240, windowMs: MAIL_WINDOW_MS.day });
+        // legal and transactional senders needed room in October 2026 — a
+        // deliberate retune, pinned here so the next one is too.
+        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 35, windowMs: MAIL_WINDOW_MS.hour });
+        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 190, windowMs: MAIL_WINDOW_MS.day });
         expect(mailLimit('contentReportAck', 'hour').limit).toBe(MAIL_CATEGORY_CAPS.contentReportAck.hour);
         expect(mailLimit('moderationNotice', 'day').limit).toBe(MAIL_CATEGORY_CAPS.moderationNotice.day);
     });

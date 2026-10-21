@@ -114,6 +114,34 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
 };
 
 /**
+ * The most the guest and automated mail may take of the discretionary 60/300,
+ * so the legal and transactional mail always has the rest (25/110).
+ *
+ * That rest is shared by the launch PRs, which merge separately but spend one
+ * budget, so the split is written down here, once:
+ *
+ *     guestEmailCode      35/190  guest and automated (this cap)
+ *     contentReportAck    10/40   legal: report acknowledgments, BCC legal@ (#63)
+ *     moderationNotice     5/20   legal: statements of reasons, outcomes (#63)
+ *     billingCancelLink   10/50   transactional: signed-out cancel link (#62)
+ *                         -----
+ *                         60/300  = budget 100/500 minus the 40/200 reserve
+ *
+ * `tests/security/mailBudget.test.ts` holds guestEmailCode to this cap and
+ * keeps BILLING_CANCEL_SHARE free until #62's category takes it.
+ */
+export const GUEST_AND_AUTOMATED_MAIL_CAP: Record<MailWindowName, number> = {
+    hour: 35,
+    day: 190,
+};
+
+/** The share of the discretionary budget the signed-out cancel link (#62) is allotted. */
+export const BILLING_CANCEL_SHARE: Record<MailWindowName, number> = {
+    hour: 10,
+    day: 50,
+};
+
+/**
  * The senders we control, and what each may spend per window. Adding one here
  * is the whole registration step — and if the total then exceeds
  * budget minus reserve, `tests/security/mailBudget.test.ts` fails rather than
@@ -122,11 +150,12 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
 export const MAIL_CATEGORY_CAPS = {
     /**
      * `guest-email-start`: the one-time code a share-link guest proves an
-     * address with. 60/300 until the two content senders below arrived
-     * (October 2026); their caps were carved out of this one rather than out
-     * of the reserve or an unconfirmed bigger budget.
+     * address with — the guest and automated mail, which anyone can trigger.
+     * 60/300 until October 2026, when the legal and transactional senders
+     * needed room: it is held to GUEST_AND_AUTOMATED_MAIL_CAP so the rest of
+     * the discretionary 60/300 stays theirs.
      */
-    guestEmailCode: { hour: 45, day: 240 },
+    guestEmailCode: { hour: 35, day: 190 },
     /**
      * `content-report`: the acknowledgment a reporter gets, blind-copied to the
      * legal mailbox. The endpoint is open to anyone, so it is the aimable one.
