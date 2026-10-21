@@ -14,9 +14,11 @@ import {
     STRIPE_SUBSCRIPTION_LOCK_STALE_AFTER_MS,
     SUBSCRIPTION_MISSING,
     subscriptionRowFrom,
+    type CancellationNotice,
     type ClaimOutcome,
     type DuplicateUndo,
     type DuplicateUndoState,
+    type PurchaseNotice,
     type StripeEventLike,
     type StripeSubscriptionLike,
     type SubscriptionUpsert,
@@ -270,6 +272,22 @@ class FakeStore implements WebhookStore {
             this.events.delete(id);
         }
     };
+    purchases: PurchaseNotice[] = [];
+    cancellations: CancellationNotice[] = [];
+    /** Makes the next notice throw, as a Resend outage would. */
+    noticeFails = false;
+    notifyPurchase = async (notice: PurchaseNotice) => {
+        if (this.noticeFails) {
+            throw new Error('resend returned 500');
+        }
+        this.purchases.push(notice);
+    };
+    notifyCancellation = async (notice: CancellationNotice) => {
+        if (this.noticeFails) {
+            throw new Error('resend returned 500');
+        }
+        this.cancellations.push(notice);
+    };
     log = (message: string) => {
         this.logs.push(message);
     };
@@ -449,6 +467,162 @@ describe('stripe event handling', () => {
         expect(store.archived).toEqual([]);
         // A checkout is how a lapsed teacher comes back, so it restores too.
         expect(store.restored).toEqual(['teacher-9']);
+    });
+
+    describe('purchase and cancellation notices', () => {
+        const paidCheckout = (id = 'evt_checkout_paid'): StripeEventLike => ({
+            id,
+            type: 'checkout.session.completed',
+            created: EVENT_CREATED,
+            data: {
+                object: {
+                    id: 'cs_9',
+                    customer: 'cus_9',
+                    subscription: 'sub_9',
+                    client_reference_id: 'teacher-9',
+                    metadata: { user_id: 'teacher-9', consent_id: 'consent-1' },
+                    amount_total: 2100,
+                    currency: 'eur',
+                    total_details: { amount_tax: 335 },
+                    customer_details: { address: { country: 'de' } },
+                },
+            },
+        });
+
+        beforeEach(() => {
+            store.remote.set('sub_9', {
+                id: 'sub_9',
+                status: 'active',
+                customer: 'cus_9',
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_academy_annual' } }] },
+            });
+        });
+
+        it('hands the applied purchase to the confirmation, with its consent and billing country', async () => {
+            const result = await handleStripeEvent(paidCheckout(), store, PRICE_TIERS);
+
+            expect(result.status).toBe(200);
+            expect(store.purchases).toEqual([
+                {
+                    userId: 'teacher-9',
+                    sessionId: 'cs_9',
+                    subscriptionId: 'sub_9',
+                    consentId: 'consent-1',
+                    priceId: 'price_academy_annual',
+                    billingCountry: 'DE',
+                    currency: 'eur',
+                    amountTotalMinor: 2100,
+                    amountTaxMinor: 335,
+                    renewsAt: new Date(1_800_000_000 * 1000).toISOString(),
+                    purchasedAt: new Date(EVENT_CREATED * 1000).toISOString(),
+                },
+            ]);
+        });
+
+        it('confirms a purchase once, however often Stripe delivers it', async () => {
+            await handleStripeEvent(paidCheckout(), store, PRICE_TIERS);
+            await handleStripeEvent(paidCheckout(), store, PRICE_TIERS);
+            expect(store.purchases).toHaveLength(1);
+        });
+
+        it('still acknowledges the purchase when the confirmation cannot be sent', async () => {
+            // The subscription is written; failing the event would only ask
+            // Stripe to redeliver a purchase that has already been applied.
+            store.noticeFails = true;
+            const result = await handleStripeEvent(paidCheckout(), store, PRICE_TIERS);
+
+            expect(result.status).toBe(200);
+            expect(store.subscriptions.get('sub_9')).toMatchObject({ user_id: 'teacher-9', status: 'active' });
+            expect(store.logs.some((line) => line.startsWith('ALERT') && line.includes('notice not sent'))).toBe(true);
+            expect(store.events.get('evt_checkout_paid')?.status).toBe('done');
+        });
+
+        it('sends nothing for a duplicate purchase the unique index refused', async () => {
+            store.subscriptions.set('sub_other', {
+                ...subscriptionRowFrom(
+                    {
+                        id: 'sub_other',
+                        status: 'active',
+                        items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                    },
+                    'teacher-9',
+                    PRICE_TIERS,
+                    null,
+                ),
+            });
+            await handleStripeEvent(paidCheckout('evt_checkout_dup'), store, PRICE_TIERS);
+            expect(store.purchases).toEqual([]);
+        });
+
+        const scheduled = (previous: Record<string, unknown> | null): StripeEventLike => ({
+            ...subscriptionEvent('evt_cancel', 'customer.subscription.updated', { cancel_at_period_end: true }),
+            data: {
+                object: {
+                    id: 'sub_1',
+                    status: 'active',
+                    customer: 'cus_1',
+                    cancel_at_period_end: true,
+                    current_period_end: 1_800_000_000,
+                    items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                    metadata: { user_id: 'teacher-1' },
+                },
+                previous_attributes: previous,
+            },
+        });
+
+        it('confirms a cancellation when one is scheduled, from the portal or /cancel alike', async () => {
+            store.remote.set('sub_1', {
+                id: 'sub_1',
+                status: 'active',
+                customer: 'cus_1',
+                cancel_at_period_end: true,
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                metadata: { user_id: 'teacher-1' },
+            });
+            await handleStripeEvent(scheduled({ cancel_at_period_end: false }), store, PRICE_TIERS);
+
+            expect(store.cancellations).toEqual([
+                {
+                    userId: 'teacher-1',
+                    subscriptionId: 'sub_1',
+                    priceId: 'price_teacher_annual',
+                    endsAt: new Date(1_800_000_000 * 1000).toISOString(),
+                    cancelledAt: new Date(EVENT_CREATED * 1000).toISOString(),
+                },
+            ]);
+        });
+
+        it('says nothing for an update that did not schedule the cancellation', async () => {
+            store.remote.set('sub_1', {
+                id: 'sub_1',
+                status: 'active',
+                customer: 'cus_1',
+                cancel_at_period_end: true,
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                metadata: { user_id: 'teacher-1' },
+            });
+            // Already cancelling before; only the metadata changed.
+            await handleStripeEvent(scheduled({ metadata: {} }), store, PRICE_TIERS);
+            expect(store.cancellations).toEqual([]);
+        });
+
+        it('says nothing when the cancellation was undone before the event was read', async () => {
+            // Stripe's current state wins over the event, as for every update.
+            store.remote.set('sub_1', {
+                id: 'sub_1',
+                status: 'active',
+                customer: 'cus_1',
+                cancel_at_period_end: false,
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                metadata: { user_id: 'teacher-1' },
+            });
+            await handleStripeEvent(scheduled({ cancel_at_period_end: false }), store, PRICE_TIERS);
+            expect(store.cancellations).toEqual([]);
+        });
     });
 
     it('releases the claim and asks for a retry when checkout cannot read the subscription', async () => {

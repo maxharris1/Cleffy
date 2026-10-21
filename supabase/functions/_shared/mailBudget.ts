@@ -120,7 +120,15 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
  */
 export const MAIL_CATEGORY_CAPS = {
     /** `guest-email-start`: the one-time code a share-link guest proves an address with. */
-    guestEmailCode: { hour: 60, day: 300 },
+    guestEmailCode: { hour: 50, day: 250 },
+    /**
+     * `billing-cancel`: the signed-out "cancel my subscription" link. Taken out
+     * of the guest-email share (60/300 before) rather than out of the reserve.
+     * Purchase and cancellation CONFIRMATIONS are not counted here: one goes
+     * out per Stripe event, which no caller can multiply, and a confirmation
+     * the law requires must not be the mail a ceiling drops.
+     */
+    billingCancelLink: { hour: 10, day: 50 },
 } as const;
 
 export type MailCategory = keyof typeof MAIL_CATEGORY_CAPS;

@@ -4,14 +4,17 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
+import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import {
     CHECKOUT_ATTEMPT_STALE_AFTER,
     CHECKOUT_ATTEMPT_STALE_AFTER_MS,
     checkoutIdempotencyKey,
     EDGE_FUNCTION_WALL_CLOCK_MS,
     handleCheckout,
+    purchaseKey,
     type CheckoutDeps,
     type CheckoutSessionParams,
+    type ConsentRecord,
 } from '../../supabase/functions/_shared/checkoutFlow';
 import {
     EDGE_FUNCTION_WALL_CLOCK_MS as WEBHOOK_WALL_CLOCK_MS,
@@ -50,7 +53,23 @@ const ACADEMY_PRICE = 'price_academy_annual_live';
 const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
-const post = (body: unknown = { priceId: 'price_teacher_annual' }, method = 'POST') =>
+/** What the lock and the idempotency key match on: the price AND the currency the consent named. */
+const PRICE_KEY = purchaseKey(PRICE, 'usd');
+const ACADEMY_KEY = purchaseKey(ACADEMY_PRICE, 'usd');
+
+/** The consent the pricing dialog sends with a checkout, for a buyer in `country`. */
+const consentFor = (slot: billingTerms.PlanSlot, country = 'US') => ({
+    accepted: true,
+    country,
+    text: billingTerms.autoRenewalConsentText(
+        billingTerms.purchaseTermsFor(slot, billingTerms.currencyForCountry(country)),
+    ),
+});
+
+const post = (
+    body: unknown = { priceId: 'price_teacher_annual', consent: consentFor('teacherAnnual') },
+    method = 'POST',
+) =>
     new Request('https://edge.test/functions/v1/stripe-checkout', {
         method,
         headers: { 'Content-Type': 'application/json', Origin: 'https://cleffy.io', Authorization: 'Bearer jwt' },
@@ -58,7 +77,7 @@ const post = (body: unknown = { priceId: 'price_teacher_annual' }, method = 'POS
     });
 
 /** A request for Academy rather than Teacher: the other half of a two-tab race. */
-const postAcademy = () => post({ priceId: 'price_academy_annual' });
+const postAcademy = () => post({ priceId: 'price_academy_annual', consent: consentFor('academyAnnual') });
 
 interface FakeSession {
     id: string;
@@ -305,6 +324,8 @@ const harness = (
          * to end -- which is what a lease takeover mid-attempt looks like.
          */
         pauseBeforeStage?: Latch;
+        /** checkout_consents cannot be written. */
+        consentFails?: boolean;
     } = {},
 ) => {
     const stripe = new FakeStripe();
@@ -317,6 +338,7 @@ const harness = (
     let paused = false;
     let pausedCreate = false;
     let customerId = options.customerId ?? null;
+    const consents: Array<ConsentRecord & { id: string; sessionId: string | null }> = [];
     const deps: CheckoutDeps = {
         json,
         options: () => new Response(null, { status: 204 }),
@@ -339,6 +361,23 @@ const harness = (
             }
             return priceId === 'price_academy_annual' ? ACADEMY_PRICE : null;
         },
+        slotForPrice: (priceId) =>
+            priceId === PRICE ? 'teacherAnnual' : priceId === ACADEMY_PRICE ? 'academyAnnual' : null,
+        terms: billingTerms,
+        recordConsent: vi.fn(async (record: ConsentRecord) => {
+            if (options.consentFails) {
+                throw new Error('connection reset');
+            }
+            const id = `consent-${consents.length + 1}`;
+            consents.push({ ...record, id, sessionId: null });
+            return id;
+        }),
+        linkConsent: vi.fn(async (consentId: string, sessionId: string) => {
+            const row = consents.find((candidate) => candidate.id === consentId);
+            if (row) {
+                row.sessionId = sessionId;
+            }
+        }),
         appOrigin: () => 'https://cleffy.io',
         billingConfigured: () => true,
         runningSubscriptions: vi.fn(async () => {
@@ -445,7 +484,7 @@ const harness = (
         log: (message) => logs.push(message),
         logError: (code) => errors.push(code),
     };
-    return { deps, stripe, attempts, params, calls, logs, errors };
+    return { deps, stripe, attempts, params, calls, logs, errors, consents };
 };
 
 const body = async (response: Response) => (await response.json()) as Record<string, unknown>;
@@ -496,7 +535,7 @@ describe('stripe-checkout flow', () => {
         expect(response.status).toBe(200);
         expect(await body(response)).toEqual({ url: 'https://checkout.stripe.com/cs_1' });
         expect(h.stripe.openSessions()).toHaveLength(1);
-        expect(h.stripe.keysUsed).toEqual([checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1')]);
+        expect(h.stripe.keysUsed).toEqual([checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-1')]);
         // The lock before anything is read from Stripe, the customer before the
         // sessions that belong to it, and the expiries before the new session.
         // The lock is released by the record, not beside it.
@@ -518,7 +557,7 @@ describe('stripe-checkout flow', () => {
         expect(h.deps.releaseAttempt).not.toHaveBeenCalled();
         // And the session is remembered, so the next request can hand it back.
         expect(h.attempts.sessionId).toBe('cs_1');
-        expect(h.attempts.priceId).toBe(PRICE);
+        expect(h.attempts.priceId).toBe(PRICE_KEY);
         expect(h.attempts.holder).toBeNull();
     });
 
@@ -532,8 +571,12 @@ describe('stripe-checkout flow', () => {
             customer: 'cus_existing',
             line_items: [{ price: PRICE, quantity: 1 }],
             client_reference_id: USER,
-            subscription_data: { metadata: { user_id: USER } },
-            metadata: { user_id: USER, checkout_key: checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1') },
+            subscription_data: { metadata: { user_id: USER, consent_id: 'consent-1' } },
+            metadata: {
+                user_id: USER,
+                checkout_key: checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-1'),
+                consent_id: 'consent-1',
+            },
             success_url: 'https://cleffy.io/settings?checkout=success',
             cancel_url: 'https://cleffy.io/settings?checkout=cancelled',
             allow_promotion_codes: true,
@@ -734,8 +777,8 @@ describe('stripe-checkout flow', () => {
             expect(next.status).toBe(200);
             // The SAME key, so Stripe answers with the session it already made.
             expect(h.stripe.keysUsed).toEqual([
-                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
-                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-1'),
             ]);
             expect(h.stripe.sessions).toHaveLength(1);
             expect(h.stripe.openSessions()).toHaveLength(1);
@@ -771,8 +814,8 @@ describe('stripe-checkout flow', () => {
 
             expect(academy.status).toBe(200);
             expect(h.stripe.keysUsed).toEqual([
-                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
-                checkoutIdempotencyKey(USER, 'live', ACADEMY_PRICE, 'attempt-2'),
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', ACADEMY_KEY, 'attempt-2'),
             ]);
             // Two sessions made over the two attempts, exactly one payable.
             expect(h.stripe.sessions).toHaveLength(2);
@@ -929,8 +972,8 @@ describe('stripe-checkout flow', () => {
             // A FRESH key, so Stripe creates a session rather than replaying its
             // own error at the buyer.
             expect(h.stripe.keysUsed).toEqual([
-                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
-                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-2'),
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-2'),
             ]);
             expect(h.stripe.openSessions()).toHaveLength(1);
         });
@@ -962,8 +1005,8 @@ describe('stripe-checkout flow', () => {
             expect(h.stripe.sessions).toHaveLength(2);
             expect(h.stripe.openSessions().map((session) => session.id)).toEqual(['cs_2']);
             expect(h.stripe.keysUsed).toEqual([
-                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-1'),
-                checkoutIdempotencyKey(USER, 'live', PRICE, 'attempt-2'),
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-2'),
             ]);
         });
 
@@ -1308,6 +1351,153 @@ describe('stripe-checkout flow', () => {
             expect(h.deps.createSession).not.toHaveBeenCalled();
             expect(h.deps.beginAttempt).not.toHaveBeenCalled();
         });
+    });
+});
+
+describe('auto-renewal consent, currency and Stripe Tax (launch items 13-17)', () => {
+    it('refuses a checkout whose box was not ticked, before taking the lock or recording anything', async () => {
+        const h = harness();
+
+        for (const consent of [undefined, { ...consentFor('teacherAnnual'), accepted: false }]) {
+            const response = await handleCheckout(post({ priceId: 'price_teacher_annual', consent }), h.deps);
+            expect(response.status).toBe(400);
+            expect(await body(response)).toMatchObject({ code: 'consent_required' });
+        }
+        expect(h.deps.beginAttempt).not.toHaveBeenCalled();
+        expect(h.consents).toEqual([]);
+    });
+
+    it('refuses a country it cannot price for', async () => {
+        const h = harness();
+        const response = await handleCheckout(
+            post({ priceId: 'price_teacher_annual', consent: { ...consentFor('teacherAnnual'), country: 'Narnia' } }),
+            h.deps,
+        );
+        expect(response.status).toBe(400);
+        expect(await body(response)).toMatchObject({ code: 'country_required' });
+    });
+
+    it('refuses wording that is not what this server would charge under', async () => {
+        // The euro wording sent from a US address, and a bundle from before a
+        // wording change: neither is consent to the purchase about to be made.
+        const h = harness();
+        for (const text of [consentFor('teacherAnnual', 'DE').text, `${consentFor('teacherAnnual').text} `]) {
+            const response = await handleCheckout(
+                post({ priceId: 'price_teacher_annual', consent: { ...consentFor('teacherAnnual'), text } }),
+                h.deps,
+            );
+            expect(response.status).toBe(409);
+            expect(await body(response)).toMatchObject({ code: 'consent_outdated' });
+        }
+        expect(h.deps.createSession).not.toHaveBeenCalled();
+        expect(h.consents).toEqual([]);
+    });
+
+    it('records the exact wording, versions, country and IP, and ties the session to it', async () => {
+        const h = harness({ customerId: 'cus_1' });
+
+        await handleCheckout(post(), h.deps);
+
+        expect(h.consents).toEqual([
+            {
+                id: 'consent-1',
+                sessionId: 'cs_1',
+                userId: USER,
+                mode: 'live',
+                stripeCustomerId: 'cus_1',
+                priceId: PRICE,
+                planSlot: 'teacherAnnual',
+                currency: 'usd',
+                amountMinor: 19000,
+                renewalInterval: 'year',
+                taxInclusive: false,
+                wording: consentFor('teacherAnnual').text,
+                wordingVersion: billingTerms.CONSENT_WORDING_VERSION,
+                termsVersion: billingTerms.LEGAL_VERSIONS.terms,
+                refundPolicyVersion: billingTerms.LEGAL_VERSIONS.refunds,
+                declaredCountry: 'US',
+                ip: '203.0.113.9',
+                userAgent: null,
+            },
+        ]);
+    });
+
+    it('opens the session with Stripe Tax, a required billing address and the renewal terms by the Pay button', async () => {
+        const h = harness({ customerId: 'cus_1' });
+
+        await handleCheckout(post(), h.deps);
+
+        expect(h.params[0]).toMatchObject({
+            currency: 'usd',
+            automatic_tax: { enabled: true },
+            billing_address_collection: 'required',
+            customer_update: { address: 'auto', name: 'auto' },
+            custom_text: {
+                submit: {
+                    message: billingTerms.checkoutSubmitMessage(billingTerms.purchaseTermsFor('teacherAnnual', 'usd')),
+                },
+            },
+        });
+        expect(h.params[0]?.custom_text.submit.message.length).toBeLessThanOrEqual(1200);
+    });
+
+    it('charges a buyer in Germany in euros, VAT included', async () => {
+        const h = harness({ customerId: 'cus_1' });
+
+        const response = await handleCheckout(
+            post({ priceId: 'price_teacher_annual', consent: consentFor('teacherAnnual', 'DE') }),
+            h.deps,
+        );
+
+        expect(response.status).toBe(200);
+        expect(h.params[0]?.currency).toBe('eur');
+        expect(h.consents[0]).toMatchObject({ currency: 'eur', amountMinor: 21000, taxInclusive: true });
+        expect(h.consents[0]?.wording).toContain('€210 (VAT included)');
+        expect(h.attempts.priceId).toBe(purchaseKey(PRICE, 'eur'));
+    });
+
+    it('never hands back an open session priced in the other currency', async () => {
+        // Same plan, new country: the open USD session is not what the buyer
+        // just agreed to, so it is expired and a euro one opened in its place.
+        const h = harness({ customerId: 'cus_1' });
+
+        const dollars = await body(await handleCheckout(post(), h.deps));
+        const euros = await body(
+            await handleCheckout(
+                post({ priceId: 'price_teacher_annual', consent: consentFor('teacherAnnual', 'FR') }),
+                h.deps,
+            ),
+        );
+
+        expect(euros.url).not.toBe(dollars.url);
+        expect(h.stripe.openSessions()).toHaveLength(1);
+        expect(h.params.map((params) => params.currency)).toEqual(['usd', 'eur']);
+    });
+
+    it('records a fresh consent when the buyer is sent back to their open session', async () => {
+        const h = harness({ customerId: 'cus_1' });
+
+        const first = await body(await handleCheckout(post(), h.deps));
+        const second = await body(await handleCheckout(post(), h.deps));
+
+        expect(second.url).toBe(first.url);
+        expect(h.consents.map((row) => [row.id, row.sessionId])).toEqual([
+            ['consent-1', 'cs_1'],
+            ['consent-2', 'cs_1'],
+        ]);
+    });
+
+    it('opens nothing when the consent cannot be stored', async () => {
+        const h = harness({ customerId: 'cus_1', consentFails: true });
+
+        const response = await handleCheckout(post(), h.deps);
+
+        expect(response.status).toBe(502);
+        expect(h.deps.createSession).not.toHaveBeenCalled();
+        expect(h.deps.expireOpenSessions).not.toHaveBeenCalled();
+        expect(h.errors).toContain('consent_record_failed');
+        // And the lock is given back for the retry.
+        expect(h.attempts.holder).toBeNull();
     });
 });
 

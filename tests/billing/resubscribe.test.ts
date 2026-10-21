@@ -98,6 +98,8 @@ class BillingBackedStore implements WebhookStore {
     pendingDuplicateUndo = async () => null;
     recordPendingDuplicateUndo = async () => undefined;
     settleDuplicateUndo = async () => undefined;
+    notifyPurchase = async () => undefined;
+    notifyCancellation = async () => undefined;
     log = () => undefined;
 }
 

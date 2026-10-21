@@ -51,6 +51,7 @@ const AssignmentsPage = lazy(() =>
 // Lazy: the legal pages are long, rarely read, and reached from links only.
 const PrivacyPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.PrivacyPage })));
 const TermsPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.TermsPage })));
+const CancelPage = lazy(() => import('@/features/billing/CancelPage').then((m) => ({ default: m.CancelPage })));
 const AccountDeletedPage = lazy(() =>
     import('@/features/account/AccountDeletedPage').then((m) => ({ default: m.AccountDeletedPage })),
 );
@@ -225,6 +226,16 @@ export const AppRoutes = () => {
                 element={
                     <Suspense fallback={<PageFallback label="Loading…" />}>
                         <TermsPage />
+                    </Suspense>
+                }
+            />
+            {/* Public on purpose: cancelling must not need a working sign-in
+                (CA BPC §17602(d)). The emailed one-time link is the credential. */}
+            <Route
+                path="/cancel"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <CancelPage />
                     </Suspense>
                 }
             />

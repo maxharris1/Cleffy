@@ -139,11 +139,14 @@ describe('guest-email derives its ceilings from the budget', () => {
         }
     });
 
-    it('moves no behaviour today: the derived ceilings are the literals they replaced', () => {
-        // Deliberately the same size as before this module existed, so the
-        // change is a statement about ownership and not a quiet retune.
-        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 60, windowMs: MAIL_WINDOW_MS.hour });
-        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 300, windowMs: MAIL_WINDOW_MS.day });
+    it('takes its declared ceilings, and shares the old 60/300 with the cancel link', () => {
+        // The ceilings were 60/hour and 300/day before the signed-out cancel
+        // link (billing-cancel) needed a share of its own; that share came out
+        // of these, not out of the auth reserve.
+        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 50, windowMs: MAIL_WINDOW_MS.hour });
+        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 250, windowMs: MAIL_WINDOW_MS.day });
+        expect(mailLimit('billingCancelLink', 'hour')).toEqual({ limit: 10, windowMs: MAIL_WINDOW_MS.hour });
+        expect(mailLimit('billingCancelLink', 'day')).toEqual({ limit: 50, windowMs: MAIL_WINDOW_MS.day });
     });
 
     it('counts over windows a rate limiter can actually use', () => {

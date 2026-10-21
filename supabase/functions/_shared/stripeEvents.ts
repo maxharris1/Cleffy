@@ -99,10 +99,18 @@ export interface StripeSubscriptionLike {
 }
 
 export interface StripeCheckoutSessionLike {
+    id?: string;
     customer?: string | { id?: string } | null;
     subscription?: string | { id?: string } | null;
     client_reference_id?: string | null;
     metadata?: Record<string, string> | null;
+    /** What was charged, tax included, in minor units of `currency`. */
+    amount_total?: number | null;
+    currency?: string | null;
+    total_details?: { amount_tax?: number | null } | null;
+    /** The billing address Checkout collected (billing_address_collection: required). */
+    customer_details?: { address?: { country?: string | null } | null } | null;
+    created?: number | null;
 }
 
 export interface StripeInvoiceLike {
@@ -114,7 +122,12 @@ export interface StripeInvoiceLike {
 export interface StripeEventLike {
     id: string;
     type: string;
-    data: { object: unknown };
+    /**
+     * `previous_attributes` is on `*.updated` events only, and holds the old
+     * value of exactly the fields that changed -- which is how a cancellation
+     * being SCHEDULED is told apart from any other update.
+     */
+    data: { object: unknown; previous_attributes?: Record<string, unknown> | null };
     /** Stripe stamps the sending account's mode on every event. */
     livemode?: boolean;
     /**
@@ -213,6 +226,37 @@ export type ClaimOutcome = 'claimed' | 'done' | 'in_flight';
  * that is the whole reason the check lives in the write statement and not
  * beside it.
  */
+/**
+ * A purchase that has just been applied, for the confirmation email and the
+ * consent record (launch packet items 14 and 18).
+ */
+export interface PurchaseNotice {
+    userId: string;
+    sessionId: string;
+    subscriptionId: string;
+    /** checkout_consents.id, from the session metadata stripe-checkout stamped. */
+    consentId: string | null;
+    priceId: string | null;
+    billingCountry: string | null;
+    currency: string | null;
+    amountTotalMinor: number | null;
+    amountTaxMinor: number | null;
+    /** When it next renews -- the end of the period just paid for. */
+    renewsAt: string | null;
+    purchasedAt: string;
+}
+
+/** A subscription that has just been set to end instead of renewing. */
+export interface CancellationNotice {
+    userId: string;
+    subscriptionId: string;
+    priceId: string | null;
+    /** When access ends. */
+    endsAt: string | null;
+    /** When the cancellation was made (the event's own clock). */
+    cancelledAt: string;
+}
+
 export type SubscriptionWriteOutcome =
     { outcome: 'written' } | { outcome: 'duplicate'; otherSubscriptionId: string | null } | { outcome: 'lost_lock' };
 
@@ -317,6 +361,16 @@ export interface WebhookStore {
     pendingDuplicateUndo: (subscriptionId: string) => Promise<{ userId: string | null } | null>;
     recordPendingDuplicateUndo: (subscriptionId: string, userId: string | null) => Promise<void>;
     settleDuplicateUndo: (subscriptionId: string, state: DuplicateUndoState, undone: DuplicateUndo) => Promise<void>;
+    /**
+     * After a checkout is applied: completes its consent record (subscription id,
+     * billing country) and sends the purchase confirmation email, once per
+     * session. May throw; the handler logs it and still acknowledges the event,
+     * because the purchase itself HAS been applied and a retry would only risk
+     * applying it again.
+     */
+    notifyPurchase: (notice: PurchaseNotice) => Promise<void>;
+    /** After a cancellation is scheduled: the cancellation confirmation email, once. Same failure rule. */
+    notifyCancellation: (notice: CancellationNotice) => Promise<void>;
     log: (message: string) => void;
 }
 
@@ -423,6 +477,87 @@ const endingOf = (sub: StripeSubscriptionLike): { periodEnd: string | null; canc
         periodEnd: end === null ? null : new Date(end * 1000).toISOString(),
         cancelling: sub.cancel_at_period_end === true || scheduled,
     };
+};
+
+/**
+ * Whether this event is a subscription being SET to cancel -- from the portal,
+ * from /cancel, or from the dashboard -- as opposed to any other update to one
+ * that was already cancelling (or a cancellation being undone).
+ *
+ * `previous_attributes` names the fields that changed with their old values, so
+ * a cancel_at_period_end that WAS false, or a cancel_at that WAS null, is the
+ * transition; `current` is the subscription as Stripe holds it now, so a
+ * cancellation already reversed by the time this is read sends nothing.
+ */
+export const isCancellationScheduled = (event: StripeEventLike, current: StripeSubscriptionLike): boolean => {
+    if (event.type !== 'customer.subscription.updated') {
+        return false;
+    }
+    const previous = event.data.previous_attributes ?? null;
+    if (!previous) {
+        return false;
+    }
+    const wasNotCancelling =
+        ('cancel_at_period_end' in previous && previous.cancel_at_period_end === false) ||
+        ('cancel_at' in previous && previous.cancel_at === null);
+    return wasNotCancelling && endingOf(current).cancelling && !isTerminalStatus(current.status);
+};
+
+export const cancellationNoticeFrom = (
+    event: StripeEventLike,
+    current: StripeSubscriptionLike,
+    userId: string,
+): CancellationNotice => ({
+    userId,
+    subscriptionId: current.id,
+    priceId: priceIdOf(current),
+    endsAt: endingOf(current).periodEnd,
+    cancelledAt: eventStampOf(event) ?? new Date().toISOString(),
+});
+
+export const purchaseNoticeFrom = (
+    event: StripeEventLike,
+    session: StripeCheckoutSessionLike,
+    sub: StripeSubscriptionLike,
+    userId: string,
+): PurchaseNotice | null => {
+    if (!session.id) {
+        return null;
+    }
+    const country = session.customer_details?.address?.country?.trim().toUpperCase() ?? '';
+    const periodEnd = periodEndSecondsOf(sub);
+    return {
+        userId,
+        sessionId: session.id,
+        subscriptionId: sub.id,
+        consentId: session.metadata?.consent_id ?? sub.metadata?.consent_id ?? null,
+        priceId: priceIdOf(sub),
+        billingCountry: /^[A-Z]{2}$/.test(country) ? country : null,
+        currency: session.currency?.toLowerCase() ?? null,
+        amountTotalMinor: typeof session.amount_total === 'number' ? session.amount_total : null,
+        amountTaxMinor: typeof session.total_details?.amount_tax === 'number' ? session.total_details.amount_tax : null,
+        renewsAt: periodEnd === null ? null : new Date(periodEnd * 1000).toISOString(),
+        purchasedAt:
+            eventStampOf(event) ??
+            (typeof session.created === 'number' ? new Date(session.created * 1000).toISOString() : null) ??
+            new Date().toISOString(),
+    };
+};
+
+/**
+ * Runs a notice and swallows its failure into a log line. A notice is what
+ * follows an APPLIED write: failing the event for it would ask Stripe to
+ * redeliver a purchase we have already recorded, and the email is not worth
+ * that risk. The ALERT prefix is what the error log watches for.
+ */
+const bestEffortNotice = async (store: WebhookStore, event: StripeEventLike, send: () => Promise<void>) => {
+    try {
+        await send();
+    } catch (err) {
+        store.log(
+            `ALERT ${event.type} ${event.id}: notice not sent: ${err instanceof Error ? err.message : String(err)}`,
+        );
+    }
 };
 
 /**
@@ -805,12 +940,15 @@ const dispatchStripeEvent = async (
                     return retryLater(store, event, 'subscription_unavailable');
                 }
 
-                return (
-                    (await applySubscription(store, event, sub, userId, priceTiers, holder)) ?? {
-                        status: 200,
-                        body: { received: true, applied: 'subscription_upserted' },
-                    }
-                );
+                const refused = await applySubscription(store, event, sub, userId, priceTiers, holder);
+                if (refused) {
+                    return refused;
+                }
+                const notice = purchaseNoticeFrom(event, session, sub, userId);
+                if (notice) {
+                    await bestEffortNotice(store, event, () => store.notifyPurchase(notice));
+                }
+                return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
             });
         }
 
@@ -893,12 +1031,15 @@ const dispatchStripeEvent = async (
                     return { status: 200, body: { received: true, ignored: 'terminal_status' } };
                 }
 
-                return (
-                    (await applySubscription(store, event, current, userId, priceTiers, holder)) ?? {
-                        status: 200,
-                        body: { received: true, applied: 'subscription_upserted' },
-                    }
-                );
+                const refused = await applySubscription(store, event, current, userId, priceTiers, holder);
+                if (refused) {
+                    return refused;
+                }
+                if (isCancellationScheduled(event, current)) {
+                    const notice = cancellationNoticeFrom(event, current, userId);
+                    await bestEffortNotice(store, event, () => store.notifyCancellation(notice));
+                }
+                return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
             });
         }
 

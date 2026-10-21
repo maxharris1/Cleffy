@@ -1,3 +1,4 @@
+import type * as BillingTerms from './billingTerms.ts';
 import type { StripeMode } from './stripeMode.ts';
 import type * as StripeEvents from './stripeEvents.ts';
 
@@ -166,6 +167,27 @@ export const CHECKOUT_IN_PROGRESS = {
 } as const;
 
 /** Layer 4: this buyer has paid and we are waiting for Stripe to tell us. */
+/**
+ * The auto-renewal checkbox was not ticked, or the request did not say so.
+ * The dialog cannot send a checkout without it; this is the server refusing to
+ * take that on trust (CA BPC §17602(a)(2) wants affirmative consent).
+ */
+export const CONSENT_REQUIRED = {
+    error: 'Please confirm the automatic-renewal terms before you continue to payment.',
+    code: 'consent_required',
+} as const;
+
+/**
+ * The wording the buyer ticked is not the wording this server would charge
+ * under -- almost always a browser running a bundle from before a price or
+ * wording change. Refused rather than recorded, because a consent record whose
+ * text the buyer never saw proves nothing.
+ */
+export const CONSENT_OUTDATED = {
+    error: 'The subscription terms have changed since this page loaded. Reload the page to see the current terms.',
+    code: 'consent_outdated',
+} as const;
+
 export const CHECKOUT_PENDING = {
     error: 'Your payment is being confirmed. Refresh your Account page in a moment.',
     code: 'checkout_pending',
@@ -244,6 +266,15 @@ export interface CheckoutSessionParams {
     mode: 'subscription';
     customer: string;
     line_items: Array<{ price: string; quantity: number }>;
+    /** Which of the price's `currency_options` to charge in -- the one the consent named. */
+    currency: BillingTerms.Currency;
+    /** Stripe Tax: VAT / sales tax from the billing address, per each price's tax_behavior. */
+    automatic_tax: { enabled: true };
+    billing_address_collection: 'required';
+    /** Required beside automatic_tax for an existing customer: Checkout saves the address it collects. */
+    customer_update: { address: 'auto'; name: 'auto' };
+    /** The renewal terms again, directly above Stripe's Pay button. */
+    custom_text: { submit: { message: string } };
     client_reference_id: string;
     subscription_data: { metadata: Record<string, string> };
     metadata: Record<string, string>;
@@ -251,6 +282,55 @@ export interface CheckoutSessionParams {
     cancel_url: string;
     allow_promotion_codes: boolean;
 }
+
+/**
+ * What the buyer consented to, as this server re-derives it. `key` is what the
+ * attempt lock matches on and what the idempotency key is built from: the price
+ * AND the currency, so a buyer who goes back and changes country is never
+ * handed the open session priced in the other currency.
+ */
+export interface Purchase {
+    priceId: string;
+    key: string;
+    terms: BillingTerms.PurchaseTerms;
+    consentText: string;
+    country: string;
+}
+
+/** One row of `checkout_consents`, as the flow hands it to be stored. */
+export interface ConsentRecord {
+    userId: string;
+    mode: StripeMode;
+    stripeCustomerId: string;
+    priceId: string;
+    planSlot: BillingTerms.PlanSlot;
+    currency: BillingTerms.Currency;
+    amountMinor: number;
+    renewalInterval: BillingTerms.RenewalInterval;
+    taxInclusive: boolean;
+    wording: string;
+    wordingVersion: string;
+    termsVersion: string;
+    refundPolicyVersion: string;
+    declaredCountry: string;
+    ip: string | null;
+    userAgent: string | null;
+}
+
+/** The parts of billingTerms.ts the flow uses -- injected, so this file stays import-free. */
+export type CheckoutTermsDeps = Pick<
+    typeof BillingTerms,
+    | 'normalizeCountry'
+    | 'currencyForCountry'
+    | 'purchaseTermsFor'
+    | 'autoRenewalConsentText'
+    | 'checkoutSubmitMessage'
+    | 'LEGAL_VERSIONS'
+    | 'CONSENT_WORDING_VERSION'
+>;
+
+/** `price_…|eur` -- see Purchase.key. */
+export const purchaseKey = (priceId: string, currency: BillingTerms.Currency): string => `${priceId}|${currency}`;
 
 export interface CheckoutDeps {
     json: (body: unknown, status?: number) => Response;
@@ -265,6 +345,17 @@ export interface CheckoutDeps {
     authenticate: (req: Request) => Promise<CheckoutCaller | Response>;
     modeForRequest: (req: Request) => StripeMode | null;
     resolvePrice: (priceId: string, mode: StripeMode) => string | null;
+    /** Which plan a (resolved) price id names, so the wording can be rebuilt for it. */
+    slotForPrice: (priceId: string) => BillingTerms.PlanSlot | null;
+    terms: CheckoutTermsDeps;
+    /**
+     * Stores the buyer's consent and answers with its id. Called before the
+     * buyer is handed any Checkout URL; a failure refuses the checkout, because
+     * a purchase whose consent we cannot prove is one we must not take.
+     */
+    recordConsent: (record: ConsentRecord) => Promise<string>;
+    /** Attaches the Checkout Session to a stored consent. Best effort: the session's metadata carries the id too. */
+    linkConsent: (consentId: string, sessionId: string) => Promise<void>;
     appOrigin: (req: Request) => string;
     /**
      * Whether this deployment can transact in `mode` at all — a Stripe secret
@@ -383,12 +474,15 @@ const openSessionUnderLock = async (
     deps: CheckoutDeps,
     caller: CheckoutCaller,
     mode: StripeMode,
-    priceId: string,
+    purchase: Purchase,
     holder: string,
     stored: StoredAttempt,
 ): Promise<{ response: Response; recorded: boolean }> => {
     /** An answer that opened no session for the lock to remember. */
     const unrecorded = (response: Response) => ({ response, recorded: false });
+    // From here on the lock and the idempotency key speak in purchase keys
+    // (price AND currency); only the line item wants the bare Stripe price.
+    const priceId = purchase.key;
 
     // The customer FIRST, because everything below is scoped to it: the
     // subscriptions Stripe holds for it, the session the last attempt opened,
@@ -402,6 +496,52 @@ const openSessionUnderLock = async (
         return unrecorded(deps.json({ error: 'Could not start checkout. Please try again.' }, 502));
     }
     const customerId = found.customerId ?? (await deps.createCustomer(caller.userId, await caller.email(), mode));
+
+    /**
+     * Stores the consent this request carries, answering with its id -- or null,
+     * which every caller turns into a refusal: no buyer is handed a Checkout URL
+     * we hold no consent record for. Called only once every layer that might
+     * refuse the buyer outright has passed, so a refused attempt leaves no
+     * consent behind for a purchase that was never offered.
+     */
+    const recordConsent = async (): Promise<string | null> => {
+        try {
+            return await deps.recordConsent({
+                userId: caller.userId,
+                mode,
+                stripeCustomerId: customerId,
+                priceId: purchase.priceId,
+                planSlot: purchase.terms.slot,
+                currency: purchase.terms.currency,
+                amountMinor: purchase.terms.amountMinor,
+                renewalInterval: purchase.terms.interval,
+                taxInclusive: purchase.terms.taxInclusive,
+                wording: purchase.consentText,
+                wordingVersion: deps.terms.CONSENT_WORDING_VERSION,
+                termsVersion: deps.terms.LEGAL_VERSIONS.terms,
+                refundPolicyVersion: deps.terms.LEGAL_VERSIONS.refunds,
+                declaredCountry: purchase.country,
+                ip: deps.clientKey(req) === 'unknown' ? null : deps.clientKey(req),
+                userAgent: req.headers.get('User-Agent')?.slice(0, 512) ?? null,
+            });
+        } catch (err) {
+            deps.logError('consent_record_failed', err);
+            return null;
+        }
+    };
+    const consentUnavailable = () =>
+        unrecorded(
+            deps.json({ error: 'Could not start checkout. Please try again.', code: 'checkout_unavailable' }, 502),
+        );
+    const linkConsent = async (consentId: string, sessionId: string): Promise<void> => {
+        try {
+            await deps.linkConsent(consentId, sessionId);
+        } catch (err) {
+            // The session's metadata names the consent too, and the webhook
+            // links them on completion, so this costs nothing but a log line.
+            deps.logError('consent_link_failed', err);
+        }
+    };
 
     // Layer 3. The mirror above answers for a purchase the webhook has already
     // applied; this answers for one it has not. A Checkout Session that has been
@@ -429,6 +569,14 @@ const openSessionUnderLock = async (
         }
         const session = read.session;
         if (session?.status === 'open' && session.url && stored.priceId === priceId) {
+            // The buyer ticked the box again for the same plan and currency, so
+            // this is a consent of its own -- recorded, and tied to the session
+            // they are being sent back to.
+            const consentId = await recordConsent();
+            if (!consentId) {
+                return consentUnavailable();
+            }
+            await linkConsent(consentId, stored.sessionId);
             deps.log(`checkout: reusing open session ${stored.sessionId} for ${caller.userId}`);
             return unrecorded(deps.json({ url: session.url }));
         }
@@ -483,6 +631,12 @@ const openSessionUnderLock = async (
     // Nothing is kept: the session the buyer might have wanted back was handed to
     // them above, and the key minted below is one no previous attempt could have
     // used.
+    // Before anything is expired or staged, so a refusal here has nothing to undo.
+    const consentId = await recordConsent();
+    if (!consentId) {
+        return consentUnavailable();
+    }
+
     if (resumed === null) {
         try {
             const expired = await deps.expireOpenSessions(customerId, mode);
@@ -549,17 +703,27 @@ const openSessionUnderLock = async (
             {
                 mode: 'subscription',
                 customer: customerId,
-                line_items: [{ price: priceId, quantity: 1 }],
+                line_items: [{ price: purchase.priceId, quantity: 1 }],
+                // The currency the consent named; the price carries a
+                // `currency_options` entry for each, with its own tax_behavior.
+                currency: purchase.terms.currency,
+                // Stripe Tax works out VAT / sales tax from the billing address,
+                // which is why the address is required rather than optional.
+                automatic_tax: { enabled: true },
+                billing_address_collection: 'required',
+                customer_update: { address: 'auto', name: 'auto' },
+                custom_text: { submit: { message: deps.terms.checkoutSubmitMessage(purchase.terms) } },
                 // Both are belt-and-braces for the webhook's user resolution:
                 // either survives even if the billing_customers row is somehow
                 // missing.
                 client_reference_id: caller.userId,
-                subscription_data: { metadata: { user_id: caller.userId } },
+                subscription_data: { metadata: { user_id: caller.userId, consent_id: consentId } },
                 // `checkout_key` is provenance only now: nothing reads it back
                 // (the expire step no longer spares a session by it), but a
                 // session in the Stripe dashboard saying which attempt opened it
                 // is what makes a double-charge report answerable afterwards.
-                metadata: { user_id: caller.userId, checkout_key: idempotencyKey },
+                // `consent_id` is the checkout_consents row this purchase rests on.
+                metadata: { user_id: caller.userId, checkout_key: idempotencyKey, consent_id: consentId },
                 success_url: `${origin}/settings?checkout=success`,
                 cancel_url: `${origin}/settings?checkout=cancelled`,
                 allow_promotion_codes: true,
@@ -594,6 +758,9 @@ const openSessionUnderLock = async (
     if (!session.url) {
         await discardStagedKey();
         return unrecorded(deps.json({ error: 'Stripe did not return a checkout URL' }, 502));
+    }
+    if (session.id) {
+        await linkConsent(consentId, session.id);
     }
 
     // What a REPLAY answers with is the response Stripe saved at the time, not
@@ -671,6 +838,12 @@ const openSessionUnderLock = async (
     }
 };
 
+/** What the pricing dialog posts. */
+interface CheckoutRequestBody {
+    priceId?: string;
+    consent?: { accepted?: boolean; country?: string; text?: string };
+}
+
 /**
  * Free signup stays card-free -- the free tier is simply "no subscriptions row"
  * -- so nothing here runs until a teacher chooses to pay.
@@ -697,9 +870,9 @@ export const handleCheckout = async (req: Request, deps: CheckoutDeps): Promise<
         return caller;
     }
 
-    let body: { priceId?: string };
+    let body: CheckoutRequestBody;
     try {
-        body = (await req.json()) as { priceId?: string };
+        body = (await req.json()) as CheckoutRequestBody;
     } catch {
         return deps.json({ error: 'Invalid JSON body' }, 400);
     }
@@ -719,9 +892,31 @@ export const handleCheckout = async (req: Request, deps: CheckoutDeps): Promise<
     // caller's own mode, so a bundle cached from before the live flip still
     // checks out against the right account.
     const priceId = requested ? deps.resolvePrice(requested, mode) : null;
-    if (!priceId) {
+    const slot = priceId ? deps.slotForPrice(priceId) : null;
+    if (!priceId || !slot) {
         return deps.json({ error: 'Unknown price', code: 'unknown_price' }, 400);
     }
+
+    // The consent, re-derived rather than trusted: the currency follows from the
+    // country the buyer chose, the wording from the plan and that currency, and
+    // what the dialog sent has to match it exactly (see billingTerms.ts).
+    if (body.consent?.accepted !== true) {
+        return deps.json(CONSENT_REQUIRED, 400);
+    }
+    const country = deps.terms.normalizeCountry(body.consent.country);
+    if (!country) {
+        return deps.json(
+            { error: 'Choose your country to see the price you will pay.', code: 'country_required' },
+            400,
+        );
+    }
+    const currency = deps.terms.currencyForCountry(country);
+    const terms = deps.terms.purchaseTermsFor(slot, currency);
+    const consentText = deps.terms.autoRenewalConsentText(terms);
+    if (body.consent.text !== consentText) {
+        return deps.json(CONSENT_OUTDATED, 409);
+    }
+    const purchase: Purchase = { priceId, key: purchaseKey(priceId, currency), terms, consentText, country };
 
     if (!deps.billingConfigured(mode)) {
         return deps.json({ error: 'Billing is not configured' }, 500);
@@ -758,7 +953,7 @@ export const handleCheckout = async (req: Request, deps: CheckoutDeps): Promise<
 
         let recorded = false;
         try {
-            const outcome = await openSessionUnderLock(req, deps, caller, mode, priceId, start.holder, start.stored);
+            const outcome = await openSessionUnderLock(req, deps, caller, mode, purchase, start.holder, start.stored);
             recorded = outcome.recorded;
             return outcome.response;
         } finally {

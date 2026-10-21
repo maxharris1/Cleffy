@@ -1,3 +1,5 @@
+import { claimNotice, emailOfUser, releaseNotice, sendBillingEmail, storefrontOrigin } from '../_shared/billingMail.ts';
+import * as billingTerms from '../_shared/billingTerms.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
     type DeletedAccountStripe,
@@ -10,6 +12,7 @@ import {
     cancelAndRefundDuplicate,
     priceTiers,
     servedModes,
+    slotForPrice,
     stripeClient,
     type StripeMode,
     webhookSecretFor,
@@ -450,6 +453,82 @@ Deno.serve(async (req) => {
                 // Nothing more to do from here: the retry will read as a
                 // duplicate. Loud, because that is a lost billing event.
                 console.error(`could not release claim on ${id}: ${error.message}`);
+            }
+        },
+        notifyPurchase: async (notice) => {
+            // The consent record first: it is the half with legal weight, and it
+            // is idempotent, so a redelivery that gets this far again only
+            // rewrites the same values. Matched by the id stripe-checkout put in
+            // the session metadata, or failing that by the session itself.
+            const completion = {
+                stripe_subscription_id: notice.subscriptionId,
+                checkout_session_id: notice.sessionId,
+                billing_country: notice.billingCountry,
+                completed_at: notice.purchasedAt,
+            };
+            const linked = notice.consentId
+                ? await admin.from('checkout_consents').update(completion).eq('id', notice.consentId)
+                : await admin.from('checkout_consents').update(completion).eq('checkout_session_id', notice.sessionId);
+            if (linked.error) {
+                console.log(`ALERT could not complete the consent for ${notice.sessionId}: ${linked.error.message}`);
+            }
+
+            if (!(await claimNotice('purchase_confirmation', notice.sessionId))) {
+                return;
+            }
+            const email = await emailOfUser(notice.userId);
+            const slot = notice.priceId ? slotForPrice(notice.priceId) : null;
+            const currency = (billingTerms.CURRENCIES as readonly string[]).includes(notice.currency ?? '')
+                ? (notice.currency as billingTerms.Currency)
+                : null;
+            if (!email || !slot || !currency || notice.amountTotalMinor === null) {
+                await releaseNotice('purchase_confirmation', notice.sessionId);
+                throw new Error(
+                    `purchase confirmation for ${notice.sessionId} lacks ` +
+                        [!email && 'an email', !slot && 'a known price', !currency && 'a known currency']
+                            .filter(Boolean)
+                            .join(', '),
+                );
+            }
+            const message = billingTerms.purchaseConfirmationEmail({
+                planName: billingTerms.PLAN_NAMES[slot],
+                interval: billingTerms.PLAN_INTERVALS[slot],
+                currency,
+                amountTotalMinor: notice.amountTotalMinor,
+                amountTaxMinor: notice.amountTaxMinor,
+                renewsAtMs: notice.renewsAt ? Date.parse(notice.renewsAt) : null,
+                purchasedAtMs: Date.parse(notice.purchasedAt),
+                origin: storefrontOrigin(mode),
+                termsVersion: billingTerms.LEGAL_VERSIONS.terms,
+                refundsVersion: billingTerms.LEGAL_VERSIONS.refunds,
+            });
+            const sent = await sendBillingEmail(email, message, { tag: 'purchase_confirmation' });
+            if (sent !== 'sent') {
+                await releaseNotice('purchase_confirmation', notice.sessionId);
+                throw new Error(`purchase confirmation for ${notice.sessionId}: ${sent}`);
+            }
+        },
+        notifyCancellation: async (notice) => {
+            const key = `${notice.subscriptionId}:${notice.endsAt ?? 'open'}`;
+            if (!(await claimNotice('cancellation_confirmation', key))) {
+                return;
+            }
+            const email = await emailOfUser(notice.userId);
+            if (!email) {
+                await releaseNotice('cancellation_confirmation', key);
+                throw new Error(`cancellation confirmation for ${notice.subscriptionId} has no address`);
+            }
+            const slot = notice.priceId ? slotForPrice(notice.priceId) : null;
+            const message = billingTerms.cancellationConfirmationEmail({
+                planName: slot ? billingTerms.PLAN_NAMES[slot] : null,
+                cancelledAtMs: Date.parse(notice.cancelledAt),
+                endsAtMs: notice.endsAt ? Date.parse(notice.endsAt) : null,
+                origin: storefrontOrigin(mode),
+            });
+            const sent = await sendBillingEmail(email, message, { tag: 'cancellation_confirmation' });
+            if (sent !== 'sent') {
+                await releaseNotice('cancellation_confirmation', key);
+                throw new Error(`cancellation confirmation for ${notice.subscriptionId}: ${sent}`);
             }
         },
         log: (message) => console.log(message),

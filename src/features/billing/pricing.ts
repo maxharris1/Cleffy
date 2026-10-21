@@ -2,6 +2,16 @@ import { PAID_VISION_READS } from '@/features/billing/paidAllowances';
 import { features } from '@/lib/features';
 import type { BillingTier } from '@/types/database';
 
+import {
+    formatMoney,
+    PLAN_PRICES,
+    TAX_INCLUSIVE,
+    type Currency,
+    type PlanSlot,
+} from '../../../supabase/functions/_shared/billingTerms';
+
+export type { Currency, PlanSlot };
+
 /**
  * Pricing catalogue. Every price id comes from env — nothing is hardcoded, so
  * the Stripe catalogue can be re-created without a code change.
@@ -129,7 +139,7 @@ export const tierCards = (flags: TierCardFlags): TierCard[] => {
         {
             tier: 'teacher',
             name: 'Teacher',
-            tagline: 'For a teaching studio: a class of twenty works out at under $1 per student.',
+            tagline: 'For a teaching studio: one price, however many students you teach.',
             features: [
                 'Unlimited students',
                 'Everything in Personal',
@@ -156,49 +166,79 @@ export const TIER_CARDS: TierCard[] = tierCards(features);
 
 export interface PriceDisplay {
     priceId: string | null;
+    /** Which catalogue slot this is, for the consent wording; null on Free. */
+    slot: PlanSlot | null;
     amount: string;
     caption: string;
     note?: string;
 }
 
-export const priceFor = (tier: BillingTier, interval: BillingInterval): PriceDisplay | null => {
+/** "per month, VAT incl." / "per year + tax" -- every paid price says how tax applies to it. */
+const withTax = (caption: string, currency: Currency): string =>
+    `${caption}${TAX_INCLUSIVE[currency] ? ', VAT incl.' : ' + tax'}`;
+
+const paid = (
+    slot: PlanSlot,
+    priceId: string | null,
+    currency: Currency,
+    caption: string,
+    note?: string,
+): PriceDisplay => ({
+    priceId,
+    slot,
+    amount: formatMoney(PLAN_PRICES[slot][currency], currency),
+    caption: withTax(caption, currency),
+    ...(note ? { note } : {}),
+});
+
+/**
+ * A tier's price in the buyer's currency. The amounts live in billingTerms.ts,
+ * which the checkout function also reads, so the card, the consent wording and
+ * the charge cannot name three different numbers.
+ */
+export const priceFor = (
+    tier: BillingTier,
+    interval: BillingInterval,
+    currency: Currency = 'usd',
+): PriceDisplay | null => {
     const prices = stripePrices();
     const monthly = interval === 'monthly';
     if (tier === 'free') {
-        return { priceId: null, amount: 'Free', caption: 'no card required' };
+        return { priceId: null, slot: null, amount: 'Free', caption: 'no card required' };
     }
     if (tier === 'personal') {
         return monthly
-            ? { priceId: prices.personalMonthly, amount: '$7', caption: 'per month' }
-            : { priceId: prices.personalAnnual, amount: '$70', caption: 'per year', note: 'Two months free' };
+            ? paid('personalMonthly', prices.personalMonthly, currency, 'per month')
+            : paid('personalAnnual', prices.personalAnnual, currency, 'per year', 'Two months free');
     }
     if (tier === 'academy') {
         return monthly
-            ? { priceId: prices.academyMonthly, amount: '$49', caption: 'per month, up to 5 teachers' }
-            : {
-                  priceId: prices.academyAnnual,
-                  amount: '$490',
-                  caption: 'per year, up to 5 teachers',
-                  note: 'Two months free',
-              };
+            ? paid('academyMonthly', prices.academyMonthly, currency, 'per month, up to 5 teachers')
+            : paid('academyAnnual', prices.academyAnnual, currency, 'per year, up to 5 teachers', 'Two months free');
     }
     return monthly
-        ? { priceId: prices.teacherMonthly, amount: '$19', caption: 'per month' }
-        : { priceId: prices.teacherAnnual, amount: '$190', caption: 'per year', note: 'Two months free' };
+        ? paid('teacherMonthly', prices.teacherMonthly, currency, 'per month')
+        : paid('teacherAnnual', prices.teacherAnnual, currency, 'per year', 'Two months free');
 };
 
-/** The Founding Teacher price — a second annual price on the Teacher product. */
-export const foundingPrice = (): PriceDisplay | null => {
+/** The Founding Teacher price -- a second annual price on the Teacher product. */
+export const foundingPrice = (currency: Currency = 'usd'): PriceDisplay | null => {
     if (!isFoundingOfferEnabled()) {
         return null;
     }
-    return {
-        priceId: stripePrices().foundingAnnual,
-        amount: '$99',
-        caption: 'per year, forever',
-        note: 'Founding Teacher — $99/yr on Teacher, and it keeps this price for as long as you stay subscribed',
-    };
+    const amount = formatMoney(PLAN_PRICES.foundingAnnual[currency], currency);
+    return paid(
+        'foundingAnnual',
+        stripePrices().foundingAnnual,
+        currency,
+        'per year, forever',
+        `Founding Teacher — ${amount}/yr on Teacher, and it keeps this price for as long as you stay subscribed`,
+    );
 };
+
+/** "plans from $7/month" -- the cheapest monthly plan, for the landing page. */
+export const lowestMonthlyPrice = (currency: Currency = 'usd'): string =>
+    formatMoney(PLAN_PRICES.personalMonthly[currency], currency);
 
 export const TIER_LABELS: Record<BillingTier, string> = {
     free: 'Free',
