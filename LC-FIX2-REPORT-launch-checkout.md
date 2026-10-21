@@ -54,7 +54,7 @@ Before every push: `npx prettier --write` on changed files, `npm run lint:check`
 
 ## CI on the new head
 
-Pending at the time of writing: on `664ab41`, supabase-drift, omr-service and Vercel Preview Comments are green and `checks` is running. This section is updated once `checks` finishes.
+**Green** on `664ab41ceca3d9e5a6644e284a46ff94dcf33437` (both CI runs, completed 19:30–19:31 UTC): `checks` ✅ (lint, typecheck, tests, build) · `supabase-drift` ✅ · `omr-service` ✅ · Vercel Preview ✅ · Supabase Preview skipped (as on every earlier head). GitHub reports PR #62 `mergeable_state: clean` against `dev`; it is still draft.
 
 ## Skipped minors
 
