@@ -240,13 +240,41 @@ describe('the seat-cap migration', () => {
     });
 
     it('derives the contract end from the actual end only: never a scheduled date or a period date', () => {
-        const def = definition(SQL, 'district_billing_follow');
-        const derivation = def.slice(def.indexOf('v_end :='), def.indexOf('end;', def.indexOf('v_end :=')));
-        expect(derivation).toMatch(/when s\.status in \('canceled', 'incomplete_expired'\) then/);
-        expect(derivation).toMatch(/coalesce\(\s*s\.ended_at,/);
-        expect(derivation).not.toMatch(/current_period_end|cancel_at_period_end/);
+        const def = definition(SQL, 'district_billing_rederive');
+        const derivation = def.slice(
+            def.indexOf('v_end := coalesce('),
+            def.indexOf(');', def.indexOf('v_end := coalesce(')),
+        );
+        expect(def).toMatch(/v_linked\.status in \('canceled', 'incomplete_expired'\) then/);
+        expect(derivation).toMatch(/coalesce\(\s*v_linked\.ended_at,/);
+        expect(def).not.toMatch(/current_period_end|cancel_at_period_end|cancel_at\b/);
         expect(read('supabase/migrations', '20261020180400_district_seat_overrides.sql')).toMatch(
             /ended_at = coalesce\(excluded\.ended_at, subscriptions\.ended_at\)/,
+        );
+    });
+
+    it('never leaves a paying district purgeable (Codex #61 round 2, major 2)', () => {
+        const def = definition(SQL, 'district_billing_rederive');
+        // Any live Stripe Invoicing Academy subscription of the owner clears it,
+        // whichever subscription the record or the override still names.
+        expect(def).toMatch(
+            /if not exists \(\s*select 1 from public\.subscriptions s\s*where s\.user_id = v_owner\s*and s\.collection_method = 'send_invoice'\s*and s\.tier = 'academy'\s*and public\.subscription_is_live \(s\)/,
+        );
+        // An admin's pin is the contract's own date.
+        expect(def).toMatch(/v_row\.contract_ends_source = 'admin' then\s*return;/);
+        // Every path that moves the link derives the end again.
+        expect(definition(SQL, 'studio_seat_overrides_reconcile')).toMatch(
+            /perform public\.district_billing_rederive \(new\.studio_id\)/,
+        );
+        expect(definition(SQL, 'district_billing_follow')).toMatch(
+            /perform public\.district_billing_rederive \(p_studio\)/,
+        );
+        expect(definition(SQL, 'admin_set_district_contract_end')).toMatch(
+            /perform public\.district_billing_rederive \(p_studio\)/,
+        );
+        // A live replacement takes over the link from an ended subscription.
+        expect(definition(SQL, 'district_billing_follow')).toMatch(
+            /public\.subscription_is_live \(s\)\s*and not exists \(\s*select 1 from public\.subscriptions l/,
         );
     });
 

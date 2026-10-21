@@ -10714,12 +10714,19 @@ begin
     if tg_op <> 'DELETE' then
         -- The override names the district's subscription; the billing record
         -- follows it, so grace and the contract end are read from the same one.
+        -- Pointing it at a replacement subscription derives the contract end
+        -- again at once (Codex round-2 review of #61, major 2): the old
+        -- subscription's end must not outlive the renewal.
+        perform set_config('cleffy.district_billing_actor', new.updated_by, true);
         insert into public.district_billing (studio_id, stripe_subscription_id, updated_by)
         values (new.studio_id, new.stripe_subscription_id, new.updated_by)
         on conflict (studio_id) do update
         set stripe_subscription_id = excluded.stripe_subscription_id,
+            updated_by = excluded.updated_by,
             updated_at = now()
         where district_billing.stripe_subscription_id is distinct from excluded.stripe_subscription_id;
+        perform public.district_billing_rederive (new.studio_id);
+        perform set_config('cleffy.district_billing_actor', '', true);
     end if;
     perform public.reconcile_studio_seats (case when tg_op = 'DELETE' then old.studio_id else new.studio_id end);
     return null;
@@ -10774,12 +10781,74 @@ for each row execute function public.studio_members_release_seat ();
 -- ended_at (a webhook deployed before 20261020180400) falls back to the end
 -- already stored, then to the event that ended it; a redelivery changes
 -- nothing, because ended_at does not change once Stripe has set it.
-create or replace function public.district_billing_follow (p_studio uuid, s public.subscriptions) returns void
+--
+-- And never while the district pays (major 2): a district renewing on a NEW
+-- subscription -- the old one ended and recorded its end, then the owner signed
+-- again -- has a live Stripe Invoicing Academy subscription, and that alone
+-- makes the Stripe-derived end null, whichever subscription the record or the
+-- override still names. Derived from scratch on every call, so whatever moved
+-- (a subscription write, the override naming another subscription, an admin
+-- handing the date back to Stripe) leaves the same answer. An admin's pin is
+-- the contract's own date and is left alone. Clearing the date is also what
+-- stops a purge cycle already under way: the retention workflow (#64) cancels
+-- any cycle whose contract end is cleared or moved.
+create or replace function public.district_billing_rederive (p_studio uuid) returns void
 language plpgsql security definer
 set search_path = public as $$
 declare
+    v_row public.district_billing;
+    v_owner uuid;
+    v_linked public.subscriptions;
     v_end timestamptz;
-    v_current record;
+begin
+    select * into v_row from public.district_billing b where b.studio_id = p_studio for update;
+    if not found or v_row.contract_ends_source = 'admin' then
+        return;
+    end if;
+
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+
+    if not exists (
+        select 1 from public.subscriptions s
+        where s.user_id = v_owner
+          and s.collection_method = 'send_invoice'
+          and s.tier = 'academy'
+          and public.subscription_is_live (s)
+    ) then
+        select * into v_linked from public.subscriptions s where s.stripe_subscription_id = v_row.stripe_subscription_id;
+        if found and v_linked.status in ('canceled', 'incomplete_expired') then
+            v_end := coalesce(
+                v_linked.ended_at,
+                case when v_row.contract_ends_source = 'stripe' then v_row.contract_ends_at end,
+                v_linked.last_event_created_at,
+                now()
+            );
+        end if;
+    end if;
+
+    update public.district_billing b
+    set contract_ends_at = v_end,
+        contract_ends_source = case when v_end is null then null else 'stripe' end,
+        updated_by = coalesce(nullif(current_setting('cleffy.district_billing_actor', true), ''), 'stripe'),
+        updated_at = now()
+    where b.studio_id = p_studio
+      and (b.contract_ends_at is distinct from v_end
+           or b.contract_ends_source is distinct from case when v_end is null then null else 'stripe' end);
+end;
+$$;
+
+revoke all on function public.district_billing_rederive (uuid) from public;
+revoke all on function public.district_billing_rederive (uuid) from anon;
+revoke all on function public.district_billing_rederive (uuid) from authenticated;
+
+-- A Stripe Invoicing subscription written for the owner: the record links to it
+-- if it links to nothing yet, or if it is live and the linked one is not (a
+-- renewal on a new subscription). An override, when there is one, decides the
+-- link instead (studio_seat_overrides_reconcile). Then the contract end is
+-- derived again.
+create or replace function public.district_billing_follow (p_studio uuid, s public.subscriptions) returns void
+language plpgsql security definer
+set search_path = public as $$
 begin
     if s.collection_method is distinct from 'send_invoice' then
         return;
@@ -10787,45 +10856,26 @@ begin
 
     perform set_config('cleffy.district_billing_actor', 'stripe', true);
 
-    -- Linked to this subscription unless the studio's override (or an earlier
-    -- link) names a different one.
     insert into public.district_billing (studio_id, stripe_subscription_id, updated_by)
     values (p_studio, s.stripe_subscription_id, 'stripe')
     on conflict (studio_id) do update
     set stripe_subscription_id = excluded.stripe_subscription_id,
         updated_at = now()
-    where district_billing.stripe_subscription_id is null
-      and not exists (
-          select 1 from public.studio_seat_overrides o
-          where o.studio_id = p_studio
-            and o.stripe_subscription_id <> excluded.stripe_subscription_id
+    where district_billing.stripe_subscription_id is distinct from excluded.stripe_subscription_id
+      and not exists (select 1 from public.studio_seat_overrides o where o.studio_id = p_studio)
+      and (
+          district_billing.stripe_subscription_id is null
+          or (
+              public.subscription_is_live (s)
+              and not exists (
+                  select 1 from public.subscriptions l
+                  where l.stripe_subscription_id = district_billing.stripe_subscription_id
+                    and public.subscription_is_live (l)
+              )
+          )
       );
 
-    select b.contract_ends_at, b.contract_ends_source, b.stripe_subscription_id
-    into v_current
-    from public.district_billing b
-    where b.studio_id = p_studio;
-
-    if v_current.stripe_subscription_id = s.stripe_subscription_id
-        and v_current.contract_ends_source is distinct from 'admin' then
-        v_end := case
-            when s.status in ('canceled', 'incomplete_expired') then
-                coalesce(
-                    s.ended_at,
-                    case when v_current.contract_ends_source = 'stripe' then v_current.contract_ends_at end,
-                    s.last_event_created_at,
-                    now()
-                )
-        end;
-
-        update public.district_billing b
-        set contract_ends_at = v_end,
-            contract_ends_source = case when v_end is null then null else 'stripe' end,
-            updated_by = 'stripe',
-            updated_at = now()
-        where b.studio_id = p_studio
-          and b.contract_ends_at is distinct from v_end;
-    end if;
+    perform public.district_billing_rederive (p_studio);
 
     perform set_config('cleffy.district_billing_actor', '', true);
 end;
@@ -11008,7 +11058,6 @@ create or replace function public.admin_set_district_contract_end (
 set search_path = public as $$
 declare
     v_row public.district_billing;
-    v_sub public.subscriptions;
 begin
     if auth.uid() is not null then
         raise exception 'district billing is admin-only' using errcode = '42501';
@@ -11030,13 +11079,9 @@ begin
         set contract_ends_at = null, contract_ends_source = null, updated_by = trim(p_actor), updated_at = now()
         where b.studio_id = p_studio;
 
-        -- Re-derive from the subscription as it stands, the way its webhook
-        -- writes do.
-        select * into v_sub from public.subscriptions s where s.stripe_subscription_id = v_row.stripe_subscription_id;
-        if found then
-            perform public.district_billing_follow (p_studio, v_sub);
-            perform set_config('cleffy.district_billing_actor', trim(p_actor), true);
-        end if;
+        -- Re-derive from the subscriptions as they stand, the way their
+        -- webhook writes do.
+        perform public.district_billing_rederive (p_studio);
     else
         update public.district_billing b
         set contract_ends_at = p_contract_ends_at,

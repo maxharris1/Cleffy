@@ -144,6 +144,12 @@ export notice first. **Null means never purged.**
   today counts from today, and one cancelled long after its last recorded
   period does not count from that period. A redelivered cancellation never
   moves it.
+- **A paying district is never purgeable.** While the owner has any live
+  Stripe Invoicing Academy subscription, the Stripe-derived end is null. So a
+  district that renews on a new subscription clears its old end the moment
+  the new one is active, before anyone moves the seat override. Moving the
+  override (or the record) to the new subscription derives the end again from
+  it. A cleared or moved end also cancels any retention cycle under way (#64).
 - An admin can pin it from the contract, which Stripe writes then leave alone:
 
 ```sql

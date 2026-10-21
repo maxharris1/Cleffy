@@ -180,13 +180,14 @@ grant execute on function pg_temp.archived () to public;
 insert into auth.users (id, aud, role, email)
 select ('d1600000-0000-4000-8000-0000000000' || suffix)::uuid, 'authenticated', 'authenticated',
        'd16-' || suffix || '@example.invalid'
-from unnest(array['a1', 'a2', 'a3', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as suffix;
+from unnest(array['a1', 'a2', 'a3', 'a4', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as suffix;
 
 insert into public.studios (id, owner_id, name)
 values
     ('d1600000-0000-4000-8000-00000000c001', 'd1600000-0000-4000-8000-0000000000a1', 'District'),
     ('d1600000-0000-4000-8000-00000000c002', 'd1600000-0000-4000-8000-0000000000a2', 'Card academy'),
-    ('d1600000-0000-4000-8000-00000000c003', 'd1600000-0000-4000-8000-0000000000a3', 'Late district');
+    ('d1600000-0000-4000-8000-00000000c003', 'd1600000-0000-4000-8000-0000000000a3', 'Late district'),
+    ('d1600000-0000-4000-8000-00000000c004', 'd1600000-0000-4000-8000-0000000000a4', 'Renewing district');
 
 select pg_temp.act_as ('service_role');
 
@@ -757,6 +758,154 @@ select pg_temp.holds (
     'and Stripe''s own ended_at, once it arrives, is what stands -- never the period end: checked after the write',
     $q$select contract_ends_at = now() - interval '32 minutes'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c003'$q$
+);
+
+-- ===========================================================================
+-- A renewal on a new subscription: a paying district is never purgeable
+-- ===========================================================================
+-- Codex round-2 review of #61, major 2. The retention purge (#64) selects a
+-- district once contract_ends_at is set and its first step (the export notice,
+-- 16 days on) is due; "selected" below is that, a year from now, so it covers
+-- every step.
+create function pg_temp.purgeable (p_studio uuid) returns bigint language sql as $$
+    select count(*) from public.district_billing b
+    where b.studio_id = p_studio
+      and b.contract_ends_at is not null
+      and b.contract_ends_at + interval '16 days' <= now() + interval '1 year';
+$$;
+
+grant execute on function pg_temp.purgeable (uuid) to public;
+
+-- Without an override: the late district (its subscription ended above) signs
+-- again on a new one.
+select pg_temp.holds (
+    'the late district''s ended contract is purgeable',
+    $q$select pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c003') = 1$q$
+);
+
+select pg_temp.holds (
+    'it signs again on a new subscription',
+    $q$select pg_temp.webhook_write ('sub_d16_late_renewal', 'd1600000-0000-4000-8000-0000000000a3', 'academy',
+           'active', now() + interval '1 year', 'send_invoice', now() - interval '29 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'the record follows the live renewal and the contract end is gone: retention selects nothing',
+    $q$select b.stripe_subscription_id = 'sub_d16_late_renewal' and b.contract_ends_at is null
+          and b.contract_ends_source is null
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c003') = 0
+       from public.district_billing b where b.studio_id = 'd1600000-0000-4000-8000-00000000c003'$q$
+);
+
+-- With an override (the Codex scenario): subscription A ends, the district buys
+-- B, the admin moves the override to B.
+select pg_temp.holds (
+    'district A is recorded',
+    $q$select pg_temp.webhook_write ('sub_d16_a', 'd1600000-0000-4000-8000-0000000000a4', 'academy',
+           'active', now() + interval '1 month', 'send_invoice', now() - interval '28 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'with a 10-seat override on A',
+    $q$select (public.admin_set_studio_seat_override (
+           'd1600000-0000-4000-8000-00000000c004', 10, 'sub_d16_a', 'test', 'Contract A'
+       ) ->> 'effective_seat_limit')::int = 10$q$
+);
+
+select pg_temp.holds (
+    'A ends',
+    $q$select pg_temp.webhook_write ('sub_d16_a', 'd1600000-0000-4000-8000-0000000000a4', 'free',
+           'canceled', now() + interval '1 month', 'send_invoice', now() - interval '27 minutes', false,
+           now() - interval '27 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'and A''s end is the contract end',
+    $q$select contract_ends_at = now() - interval '27 minutes'
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c004') = 1
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
+);
+
+select pg_temp.holds (
+    'B is started but not yet paid (incomplete)',
+    $q$select pg_temp.webhook_write ('sub_d16_b', 'd1600000-0000-4000-8000-0000000000a4', 'free',
+           'incomplete', now() + interval '1 year', 'send_invoice', now() - interval '26 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'which pays for nothing yet, so A''s end stands',
+    $q$select contract_ends_at = now() - interval '27 minutes' and stripe_subscription_id = 'sub_d16_a'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
+);
+
+select pg_temp.holds (
+    'B goes active, before anyone touches the override',
+    $q$select pg_temp.webhook_write ('sub_d16_b', 'd1600000-0000-4000-8000-0000000000a4', 'academy',
+           'active', now() + interval '1 year', 'send_invoice', now() - interval '25 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'the district pays, so it is not purgeable -- even with the override still naming A',
+    $q$select contract_ends_at is null and contract_ends_source is null and stripe_subscription_id = 'sub_d16_a'
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c004') = 0
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
+);
+
+select pg_temp.holds (
+    'the admin moves the override to B',
+    $q$select (public.admin_set_studio_seat_override (
+           'd1600000-0000-4000-8000-00000000c004', 10, 'sub_d16_b', 'test', 'Contract B'
+       ) ->> 'effective_seat_limit')::int = 10$q$
+);
+
+select pg_temp.holds (
+    'the record follows B, still with no contract end: retention selects nothing',
+    $q$select stripe_subscription_id = 'sub_d16_b' and contract_ends_at is null
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c004') = 0
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
+);
+
+select pg_temp.holds (
+    'a late redelivery of A''s cancellation changes nothing',
+    $q$select pg_temp.webhook_write ('sub_d16_a', 'd1600000-0000-4000-8000-0000000000a4', 'free',
+           'canceled', now() + interval '1 month', 'send_invoice', now() - interval '24 minutes', false,
+           now() - interval '27 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'still nothing to purge',
+    $q$select pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c004') = 0$q$
+);
+
+select pg_temp.holds (
+    'when B ends in its turn',
+    $q$select pg_temp.webhook_write ('sub_d16_b', 'd1600000-0000-4000-8000-0000000000a4', 'free',
+           'canceled', now() + interval '1 year', 'send_invoice', now() - interval '23 minutes', false,
+           now() - interval '23 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'the contract end is B''s own end, not A''s',
+    $q$select contract_ends_at = now() - interval '23 minutes' and contract_ends_source = 'stripe'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
+);
+
+select pg_temp.holds (
+    'an admin''s pin is the contract''s date: a renewal leaves it to the admin',
+    $q$select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c004',
+           now() + interval '2 years', 'test', 'Contract C term') ->> 'contract_ends_source' = 'admin'$q$
+);
+
+select pg_temp.holds (
+    'contract C is signed',
+    $q$select pg_temp.webhook_write ('sub_d16_c', 'd1600000-0000-4000-8000-0000000000a4', 'academy',
+           'active', now() + interval '1 year', 'send_invoice', now() - interval '22 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'and the pinned date stands',
+    $q$select contract_ends_at = now() + interval '2 years' and contract_ends_source = 'admin'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
 );
 
 -- ===========================================================================

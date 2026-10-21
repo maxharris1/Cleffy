@@ -157,7 +157,11 @@ Stripe's actual end only (null while a cancellation is merely scheduled or
 the subscription is resumed or past due; on cancellation Stripe's `ended_at`
 -- not the scheduled date of an earlier schedule, and not a billing period that
 ended months before -- or, from a webhook that omits it, the event that ended
-it; never moved by a redelivery; untouched by an unrelated card subscription) until an admin pins it (a date, or null for never),
+it; never moved by a redelivery; untouched by an unrelated card subscription), and is null -- so the
+retention purge selects nothing -- as soon as the district pays on a
+replacement subscription, with or without the override moved to it, while a
+replacement not yet paid leaves the old end, and the replacement's own end
+counts once it ends, until an admin pins it (a date, or null for never),
 and an admin can hand it back to Stripe; every billing-record change is logged
 with its actor; and no client role reads the billing record or its log, calls
 the admin or reconcile functions, or writes `kept_active`. It reports
