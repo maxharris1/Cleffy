@@ -4,8 +4,9 @@
 -- 20261020180500_district_seat_cap_and_grace.sql,
 -- 20261020180600_read_only_seats_enforced.sql,
 -- 20261020180700_read_only_seats_storage.sql,
--- 20261020180800_read_only_seats_live_ink.sql and
--- 20261020180900_district_paying_status.sql, in order, TWICE on top of a
+-- 20261020180800_read_only_seats_live_ink.sql,
+-- 20261020180900_district_paying_status.sql and
+-- 20261020181000_district_contract_end_clamp.sql, in order, TWICE on top of a
 -- database that already has them, inside one transaction ending in ROLLBACK,
 -- then checks that the second run changed nothing it should not: every table,
 -- column, index, trigger, constraint, policy and cron job exists once, the
@@ -95,6 +96,7 @@ select
 \ir ../../supabase/migrations/20261020180700_read_only_seats_storage.sql
 \ir ../../supabase/migrations/20261020180800_read_only_seats_live_ink.sql
 \ir ../../supabase/migrations/20261020180900_district_paying_status.sql
+\ir ../../supabase/migrations/20261020181000_district_contract_end_clamp.sql
 
 \ir ../../supabase/migrations/20261020180400_district_seat_overrides.sql
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
@@ -102,6 +104,7 @@ select
 \ir ../../supabase/migrations/20261020180700_read_only_seats_storage.sql
 \ir ../../supabase/migrations/20261020180800_read_only_seats_live_ink.sql
 \ir ../../supabase/migrations/20261020180900_district_paying_status.sql
+\ir ../../supabase/migrations/20261020181000_district_contract_end_clamp.sql
 
 reset role;
 
@@ -132,13 +135,14 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'every added column is there, once',
-    $q$select count(*) = 5
+    $q$select count(*) = 7
        from information_schema.columns
        where table_schema = 'public'
          and (table_name, column_name) in (
              ('subscriptions', 'collection_method'), ('subscriptions', 'ended_at'),
              ('subscriptions', 'past_due_since'), ('studio_members', 'kept_active'),
-             ('district_billing', 'contract_ends_at')
+             ('district_billing', 'contract_ends_at'), ('district_billing', 'contract_end_reported_at'),
+             ('district_billing', 'contract_end_learned_at')
          )$q$
 );
 
@@ -228,6 +232,13 @@ select pg_temp.holds (
     'district_billing_rederive is this round''s (no invented date)',
     $q$select pg_get_functiondef('public.district_billing_rederive(uuid)'::regprocedure) like '%v_paying%'
           and pg_get_functiondef('public.district_billing_rederive(uuid)'::regprocedure) not like '%last_event_created_at%'$q$
+);
+
+select pg_temp.holds (
+    'district_billing_rederive and admin_set_district_contract_end are 20261020181000''s (clamped to learned)',
+    $q$select pg_get_functiondef('public.district_billing_rederive(uuid)'::regprocedure) like '%greatest(v_end, v_learned)%'
+          and pg_get_functiondef('public.admin_set_district_contract_end(uuid, timestamptz, text, text, boolean)'::regprocedure)
+              like '%greatest(p_contract_ends_at, v_learned)%'$q$
 );
 
 -- ===========================================================================

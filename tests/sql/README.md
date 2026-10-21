@@ -176,7 +176,14 @@ going past due (or an admin's per-district extension, which reaches a card
 Academy too) pay -- no contract end, no purge, a past admin pin cleared and
 logged -- while unpaid (even inside the 30 days and recorded with its tier) and
 past_due past grace do not, and the hourly sweep gives a district that stopped
-paying only by the clock its Stripe end back; every billing-record change is
+paying only by the clock its Stripe end back; every stored contract end is no
+earlier than when Cleffy learned of it (`20261020181000_district_contract_end_clamp.sql`,
+decision 22): a cancellation delivered late with a Stripe date months old and
+an admin date already past are both stored as the time they were learned,
+Stripe's or the admin's own date kept beside it, so the 14-day notice and the
+30-day window are whole, and a replay, a redelivery, the hourly sweep or an
+admin retry of the same date keeps the learned-at time (neither later nor the
+end earlier) while a different date is a new end; every billing-record change is
 logged with its actor; and no client role reads the billing record or its log, calls
 the admin or reconcile functions, or writes `kept_active`. It reports
 `failures | total` on its last line.
@@ -203,7 +210,7 @@ can ask about another user's seat. It reports `failures | total` on its last
 line.
 
 `district_migrations_rerunnable.sql` proves the district migrations
-(`20261020180400` through `20261020180900`) are rerunnable whole,
+(`20261020180400` through `20261020181000`) are rerunnable whole,
 not only the canonical block: it applies all three, in order, twice on top of a
 database that already has them (psql `\ir`, so psql only, never the MCP), then
 checks every trigger, policy, constraint and cron job exists once, every added

@@ -180,7 +180,7 @@ grant execute on function pg_temp.archived () to public;
 insert into auth.users (id, aud, role, email)
 select ('d1600000-0000-4000-8000-0000000000' || suffix)::uuid, 'authenticated', 'authenticated',
        'd16-' || suffix || '@example.invalid'
-from unnest(array['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as suffix;
+from unnest(array['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 'a9', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as suffix;
 
 insert into public.studios (id, owner_id, name)
 values
@@ -191,7 +191,8 @@ values
     ('d1600000-0000-4000-8000-00000000c005', 'd1600000-0000-4000-8000-0000000000a5', 'Early district'),
     ('d1600000-0000-4000-8000-00000000c006', 'd1600000-0000-4000-8000-0000000000a6', 'Early district, ended'),
     ('d1600000-0000-4000-8000-00000000c007', 'd1600000-0000-4000-8000-0000000000a7', 'Card-paid district'),
-    ('d1600000-0000-4000-8000-00000000c008', 'd1600000-0000-4000-8000-0000000000a8', 'Invoiced district');
+    ('d1600000-0000-4000-8000-00000000c008', 'd1600000-0000-4000-8000-0000000000a8', 'Invoiced district'),
+    ('d1600000-0000-4000-8000-00000000c009', 'd1600000-0000-4000-8000-0000000000a9', 'Late-cancelled district');
 
 select pg_temp.act_as ('service_role');
 
@@ -606,8 +607,8 @@ select pg_temp.holds (
 );
 
 select pg_temp.holds (
-    'contract_ends_at is the day it actually ended, not the scheduled date nor the period end',
-    $q$select contract_ends_at = now() - interval '38 minutes' and contract_ends_source = 'stripe'
+    'the reported end is the day it actually ended, not the scheduled date nor the period end; stored no earlier than learned',
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '38 minutes' and contract_ends_source = 'stripe'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c001'$q$
 );
 
@@ -655,7 +656,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'and the district''s own Stripe end comes back: nobody pays now',
-    $q$select contract_ends_at = now() - interval '38 minutes' and contract_ends_source = 'stripe'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '38 minutes' and contract_ends_source = 'stripe'
           and stripe_subscription_id = 'sub_d16_district'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c001'$q$
 );
@@ -668,7 +669,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'a card subscription that is not Academy (Teacher) is not the district paying: checked after the write',
-    $q$select contract_ends_at = now() - interval '38 minutes'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '38 minutes'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c001'$q$
 );
 
@@ -705,7 +706,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'a redelivery of the cancellation does not move the contract end: checked after the write',
-    $q$select contract_ends_at = now() - interval '38 minutes' from public.district_billing
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '38 minutes' from public.district_billing
        where studio_id = 'd1600000-0000-4000-8000-00000000c001'$q$
 );
 
@@ -717,7 +718,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'nor does a later event that omits ended_at (an older webhook): the stored end stands: checked after the write',
-    $q$select contract_ends_at = now() - interval '38 minutes' from public.district_billing
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '38 minutes' from public.district_billing
        where studio_id = 'd1600000-0000-4000-8000-00000000c001'$q$
 );
 
@@ -779,14 +780,14 @@ select pg_temp.holds (
 -- Codex round-3 review of #61: without ended_at the only other date Stripe gave
 -- is current_period_end. The event's time is not Stripe's end and is never used.
 select pg_temp.holds (
-    'is cancelled now, by a webhook that does not send ended_at: Stripe''s period end counts, not the event',
+    'is cancelled now, by a webhook that does not send ended_at: Stripe''s period end is reported, not the event',
     $q$select pg_temp.webhook_write ('sub_d16_late', 'd1600000-0000-4000-8000-0000000000a3', 'free',
            'canceled', now() - interval '90 days', 'send_invoice', now() - interval '31 minutes') = 'written'$q$
 );
 
 select pg_temp.holds (
-    'is cancelled now, by a webhook that does not send ended_at: Stripe''s period end counts, not the event: checked after the write',
-    $q$select contract_ends_at = now() - interval '90 days' and contract_ends_source = 'stripe'
+    'is cancelled now, by a webhook that does not send ended_at: Stripe''s period end is reported, not the event, and clamped to when Cleffy learned of it (decision 22): checked after the write',
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '90 days' and contract_ends_source = 'stripe'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c003'$q$
 );
 
@@ -799,7 +800,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'and Stripe''s own ended_at, once it arrives, is what stands -- never the period end: checked after the write',
-    $q$select contract_ends_at = now() - interval '32 minutes'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '32 minutes'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c003'$q$
 );
 
@@ -864,7 +865,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'the new webhook then delivers Stripe''s ended_at, and that is the end: checked after the write',
-    $q$select contract_ends_at = now() - interval '33 minutes' and contract_ends_source = 'stripe'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '33 minutes' and contract_ends_source = 'stripe'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c005'$q$
 );
 
@@ -877,7 +878,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'a district already holding a Stripe end: checked after the write',
-    $q$select contract_ends_at = now() - interval '40 days'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '40 days'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c006'$q$
 );
 
@@ -901,7 +902,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'when a later old-webhook write has no Stripe date, the existing end is kept, not replaced by the event''s time: checked after the write',
-    $q$select contract_ends_at = now() - interval '40 days' and contract_ends_source = 'stripe'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '40 days' and contract_ends_source = 'stripe'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c006'$q$
 );
 
@@ -966,7 +967,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'and A''s end is the contract end',
-    $q$select contract_ends_at = now() - interval '27 minutes'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '27 minutes'
           and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c004') = 1
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
 );
@@ -979,7 +980,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'which pays for nothing yet, so A''s end stands',
-    $q$select contract_ends_at = now() - interval '27 minutes' and stripe_subscription_id = 'sub_d16_a'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '27 minutes' and stripe_subscription_id = 'sub_d16_a'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
 );
 
@@ -1031,7 +1032,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'the contract end is B''s own end, not A''s',
-    $q$select contract_ends_at = now() - interval '23 minutes' and contract_ends_source = 'stripe'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '23 minutes' and contract_ends_source = 'stripe'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c004'$q$
 );
 
@@ -1076,7 +1077,7 @@ select pg_temp.holds (
     $q$select exists (
            select 1 from public.district_billing_log l
            where l.studio_id = 'd1600000-0000-4000-8000-00000000c003'
-             and l.old_contract_ends_at = now() - interval '10 days'
+             and l.old_contract_ends_at = now()
              and l.new_contract_ends_at is null and l.new_contract_ends_source is null
              and l.reason like 'admin pin % had passed while the owner pays on a live subscription: cleared'
        )$q$
@@ -1134,7 +1135,8 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'a past pin for a district that does not pay stands: the contract really ended',
-    $q$select r ->> 'contract_ends_source' = 'admin' and (r ->> 'contract_ends_at')::timestamptz = now() - interval '10 days'
+    $q$select r ->> 'contract_ends_source' = 'admin' and (r ->> 'contract_ends_at')::timestamptz = now()
+          and (r ->> 'contract_end_reported_at')::timestamptz = now() - interval '10 days'
        from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c006',
              now() - interval '10 days', 'test', 'Contract #6 term') as r) x$q$
 );
@@ -1146,7 +1148,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'and the sweep leaves it: checked after the sweep',
-    $q$select contract_ends_at = now() - interval '10 days' and contract_ends_source = 'admin'
+    $q$select contract_ends_at = now() and contract_end_reported_at = now() - interval '10 days' and contract_ends_source = 'admin'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c006'$q$
 );
 
@@ -1407,6 +1409,171 @@ select pg_temp.holds (
     $q$select contract_ends_source = 'admin' and contract_ends_at is not null
           and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c008') = 1
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c008'$q$
+);
+
+select pg_temp.act_as_server ();
+
+-- ===========================================================================
+-- A contract end is never earlier than when Cleffy learned of it (decision 22)
+-- ===========================================================================
+-- Codex round-4 review of #61, new major 2 (migration 20261020181000). A late
+-- cancellation carrying an old Stripe date, or an admin date already past,
+-- would start #64's retention clock in the past -- possibly beyond its notice
+-- and its window. Every end-setting path now stores greatest(the source's
+-- date, when Cleffy learned of it), and a retry, replay or re-derivation of the
+-- same date keeps the learned-at time it has. #64 sends the export notice 16
+-- days after the end and purges 30 days after it (14 days after the notice at
+-- the earliest).
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'late district: its contract is recorded, the period long past',
+    $q$select pg_temp.webhook_write ('sub_d16_late9', 'd1600000-0000-4000-8000-0000000000a9', 'academy',
+           'active', now() - interval '90 days', 'send_invoice', now() - interval '14 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'a cancellation Stripe delivers late: ended 60 days ago, period ended 90 days ago',
+    $q$select pg_temp.webhook_write ('sub_d16_late9', 'd1600000-0000-4000-8000-0000000000a9', 'free',
+           'canceled', now() - interval '90 days', 'send_invoice', now() - interval '13 minutes', false,
+           now() - interval '60 days') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'the late cancellation is clamped to when Cleffy learned of it: Stripe''s date kept beside it',
+    $q$select contract_ends_at = now() and contract_end_learned_at = now() and contract_ends_source = 'stripe'
+          and contract_end_reported_at = now() - interval '60 days'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c009'$q$
+);
+
+select pg_temp.holds (
+    'the retention clock is not already run: the 14-day notice and the 30-day window are whole',
+    $q$select contract_ends_at >= now()
+          and contract_ends_at + interval '16 days' > now() + interval '15 days'
+          and contract_ends_at + interval '30 days' >= now() + interval '30 days'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c009'$q$
+);
+
+select pg_temp.holds (
+    'and the clamp is logged with its reason',
+    $q$select exists (
+           select 1 from public.district_billing_log l
+           where l.studio_id = 'd1600000-0000-4000-8000-00000000c009'
+             and l.new_contract_ends_at = now()
+             and l.reason like 'stripe end % predates when Cleffy learned of it (%): clamped'
+       )$q$
+);
+
+-- Time passes: the end was learned p_ago before now(). Stand-in, every trigger
+-- off. Dynamic and caught, so that against a database without the columns
+-- (before 20261020181000) the checks below fail rather than abort the run.
+create function pg_temp.learned_earlier (p_studio uuid, p_ago interval) returns void language plpgsql as $$
+begin
+    set local session_replication_role = replica;
+    begin
+        execute 'update public.district_billing set contract_end_learned_at = now() - $1, contract_ends_at = now() - $1
+                 where studio_id = $2' using p_ago, p_studio;
+    exception when undefined_column then
+        null;
+    end;
+    set local session_replication_role = origin;
+end;
+$$;
+
+select pg_temp.act_as_server ();
+
+select pg_temp.learned_earlier ('d1600000-0000-4000-8000-00000000c009', interval '2 hours');
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'the cancellation is redelivered (a replay)',
+    $q$select pg_temp.webhook_write ('sub_d16_late9', 'd1600000-0000-4000-8000-0000000000a9', 'free',
+           'canceled', now() - interval '90 days', 'send_invoice', now() - interval '12 minutes', false,
+           now() - interval '60 days') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'a replay keeps the clamp: the learned-at time does not move later, the end does not move at all',
+    $q$select contract_ends_at = now() - interval '2 hours' and contract_end_learned_at = now() - interval '2 hours'
+          and contract_end_reported_at = now() - interval '60 days'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c009'$q$
+);
+
+select pg_temp.holds (
+    'the hourly sweep re-derives every district',
+    $q$select public.reconcile_district_seats () >= 0$q$
+);
+
+select pg_temp.holds (
+    'a re-derivation keeps the clamp too',
+    $q$select contract_ends_at = now() - interval '2 hours' and contract_end_learned_at = now() - interval '2 hours'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c009'$q$
+);
+
+select pg_temp.holds (
+    'an admin date already past, for a district that does not pay, is clamped to when it was entered',
+    $q$select r ->> 'contract_ends_source' = 'admin'
+          and (r ->> 'contract_ends_at')::timestamptz = now()
+          and (r ->> 'contract_end_learned_at')::timestamptz = now()
+          and (r ->> 'contract_end_reported_at')::timestamptz = now() - interval '45 days'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009',
+             now() - interval '45 days', 'test', 'Contract #9 term (entered late)') as r) x$q$
+);
+
+select pg_temp.holds (
+    'the admin date''s retention clock is not already run either',
+    $q$select contract_ends_at + interval '16 days' > now() + interval '15 days'
+          and contract_ends_at + interval '30 days' >= now() + interval '30 days'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c009'$q$
+);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.learned_earlier ('d1600000-0000-4000-8000-00000000c009', interval '3 hours');
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'the admin enters the same date again (a retry): the first learned-at time stands',
+    $q$select (r ->> 'contract_ends_at')::timestamptz = now() - interval '3 hours'
+          and (r ->> 'contract_end_learned_at')::timestamptz = now() - interval '3 hours'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009',
+             now() - interval '45 days', 'test', 'Contract #9 term (retry)') as r) x$q$
+);
+
+select pg_temp.holds (
+    'and the sweep leaves the clamped pin where it is',
+    $q$select public.reconcile_district_seats () >= 0$q$
+);
+
+select pg_temp.holds (
+    'and the sweep leaves the clamped pin where it is: checked after the sweep',
+    $q$select contract_ends_at = now() - interval '3 hours' and contract_ends_source = 'admin'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c009'$q$
+);
+
+select pg_temp.holds (
+    'a different admin date is a new end, learned now',
+    $q$select (r ->> 'contract_ends_at')::timestamptz = now()
+          and (r ->> 'contract_end_learned_at')::timestamptz = now()
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009',
+             now() - interval '44 days', 'test', 'Contract #9 term (corrected)') as r) x$q$
+);
+
+select pg_temp.holds (
+    'an admin date in the future is stored as given',
+    $q$select (r ->> 'contract_ends_at')::timestamptz = now() + interval '1 year'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009',
+             now() + interval '1 year', 'test', 'Contract #9 renewed term') as r) x$q$
+);
+
+select pg_temp.holds (
+    'handing the date back to Stripe re-derives the clamped Stripe end, learned now',
+    $q$select (r ->> 'contract_ends_at')::timestamptz = now() and r ->> 'contract_ends_source' = 'stripe'
+          and (r ->> 'contract_end_reported_at')::timestamptz = now() - interval '60 days'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009', null, 'test',
+             'Back to Stripe', true) as r) x$q$
 );
 
 select pg_temp.act_as_server ();

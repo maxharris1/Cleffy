@@ -169,6 +169,16 @@ export notice first. **Null means never purged.**
   the record keeps what it had (null included) and Postgres logs a warning
   naming the studio, never the event's time or `now()`. A redelivered
   cancellation never moves it.
+- **Never earlier than when Cleffy learned of it** (decision 22; migration
+  `20261020181000_district_contract_end_clamp.sql`). Every path that sets the
+  end -- Stripe's `ended_at` or `current_period_end`, and an admin's date --
+  stores `greatest(that date, contract_end_learned_at)`, where
+  `contract_end_learned_at` is when the event was processed or the admin
+  entered it, and keeps the source's own date in `contract_end_reported_at`.
+  A cancellation Stripe delivers late, or an admin date already past, so
+  still gets the full 14-day notice and 30-day window. A redelivery, a replay,
+  the hourly sweep or an admin retry of the same date keeps the learned-at
+  time it has; a different date is a new end, learned then.
 - **A paying district is never purgeable.** While the owner has any live
   Academy subscription, card-paid or Stripe Invoicing, the Stripe-derived end
   is null. A district moved to ordinary card-paid Academy is still paying, so
@@ -190,7 +200,9 @@ select public.admin_set_district_contract_end('<studio id>', '2027-06-30T00:00:0
 -- Hand it back to Stripe's dates:
 select public.admin_set_district_contract_end('<studio id>', null, 'Max', 'Follow Stripe', p_automatic => true);
 -- Check it:
-select contract_ends_at, contract_ends_source, grace_extended_until from public.district_billing
+select contract_ends_at, contract_ends_source, contract_end_reported_at, contract_end_learned_at,
+       grace_extended_until
+from public.district_billing
 where studio_id = '<studio id>';
 ```
 
