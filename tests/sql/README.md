@@ -145,9 +145,9 @@ everything created and unlimited export; their scores are archived as
 work, and uploads, un-archiving and new invites are refused), with no score or
 seat deleted; re-setting the override, an admin's grace extension and the
 district paying each restore every seat and every score at once; inside 30
-days past due (`past_due` or `unpaid`, clock from `past_due_since`, which a
-later delivery does not restart) the district keeps full access, its owner
-included, while a card subscription past due gets none; the hourly
+days past due (clock from `past_due_since`, which a later delivery does not
+restart) the district keeps full access, its owner included, while a card
+Teacher plan past due gets none; the hourly
 `reconcile_district_seats` catches a grace period that only the clock ended;
 `studio_seat_states` agrees with `studio_seat_is_active`; only the owner picks
 seats (never more than the limit leaves room for, never a non-member) or reads
@@ -169,8 +169,15 @@ counts once it ends, until an admin pins it (a date, or null for never) --
 a pinned date already past while the owner pays is cleared and logged, when
 pinned and by the hourly sweep, while a future one and one for a district
 that does not pay stand --
-and an admin can hand it back to Stripe; every billing-record change is logged
-with its actor; and no client role reads the billing record or its log, calls
+and an admin can hand it back to Stripe; one paying status set for card and
+Stripe Invoicing Academy billing (`20261020180900_district_paying_status.sql`,
+decisions 21 and 25): active, trialing and past_due inside 30 days of first
+going past due (or an admin's per-district extension, which reaches a card
+Academy too) pay -- no contract end, no purge, a past admin pin cleared and
+logged -- while unpaid (even inside the 30 days and recorded with its tier) and
+past_due past grace do not, and the hourly sweep gives a district that stopped
+paying only by the clock its Stripe end back; every billing-record change is
+logged with its actor; and no client role reads the billing record or its log, calls
 the admin or reconcile functions, or writes `kept_active`. It reports
 `failures | total` on its last line.
 `district_read_only_seats.sql` proves
@@ -195,8 +202,8 @@ student with Edit keep writing; paying again lifts it immediately; and nobody
 can ask about another user's seat. It reports `failures | total` on its last
 line.
 
-`district_migrations_rerunnable.sql` proves the three district migrations
-(`20261020180400`, `20261020180500`, `20261020180600`) are rerunnable whole,
+`district_migrations_rerunnable.sql` proves the district migrations
+(`20261020180400` through `20261020180900`) are rerunnable whole,
 not only the canonical block: it applies all three, in order, twice on top of a
 database that already has them (psql `\ir`, so psql only, never the MCP), then
 checks every trigger, policy, constraint and cron job exists once, every added

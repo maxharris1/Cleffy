@@ -115,7 +115,7 @@ describe('resolveEntitlements enforces the seat cap', () => {
     });
 });
 
-describe('a Stripe Invoicing subscription past due keeps full access through its grace period', () => {
+describe('an Academy subscription past due keeps full access through its grace period, card or invoiced', () => {
     const pastDue = (sinceDays: number, overrides: Partial<SubscriptionLike> = {}) =>
         academy({ status: 'past_due', past_due_since: iso(NOW - sinceDays * DAY), ...overrides });
 
@@ -127,8 +127,17 @@ describe('a Stripe Invoicing subscription past due keeps full access through its
         expect(teacher([pastDue(31)]).tier).toBe('free');
     });
 
-    it('unpaid counts as past due', () => {
-        expect(teacher([pastDue(10, { status: 'unpaid' })]).tier).toBe('academy');
+    it('unpaid is not paying, even inside the 30 days (decision 25)', () => {
+        expect(teacher([pastDue(10, { status: 'unpaid' })]).tier).toBe('free');
+        expect(teacher([pastDue(10, { status: 'unpaid', collection_method: 'charge_automatically' })]).tier).toBe(
+            'free',
+        );
+    });
+
+    it('trialing pays', () => {
+        expect(teacher([academy({ status: 'trialing', collection_method: 'charge_automatically' })]).tier).toBe(
+            'academy',
+        );
     });
 
     it('until an admin’s later extension', () => {
@@ -145,8 +154,26 @@ describe('a Stripe Invoicing subscription past due keeps full access through its
         expect(ent.limits).toEqual(TIER_LIMITS.academy);
     });
 
-    it('but a card subscription past due gets none', () => {
-        expect(teacher([pastDue(1, { collection_method: 'charge_automatically' })]).tier).toBe('free');
+    it('a card-paid Academy past due gets the same grace (decisions 21 and 25)', () => {
+        expect(teacher([pastDue(29, { collection_method: 'charge_automatically' })]).tier).toBe('academy');
+        expect(teacher([pastDue(31, { collection_method: 'charge_automatically' })]).tier).toBe('free');
+        expect(
+            teacher([pastDue(45, { collection_method: 'charge_automatically', grace_extended_until: iso(NOW + DAY) })])
+                .tier,
+        ).toBe('academy');
+    });
+
+    it('but a card Teacher plan past due gets none', () => {
+        const ent = resolveEntitlements(
+            {
+                userId: 'owner-1',
+                subscriptions: [pastDue(1, { tier: 'teacher', collection_method: 'charge_automatically' })],
+                studioOwnerIds: [],
+                ownerSubscriptions: [],
+            },
+            NOW,
+        );
+        expect(ent.tier).toBe('free');
     });
 });
 
@@ -154,6 +181,7 @@ const MIGRATIONS_DIR = resolve(process.cwd(), 'supabase/migrations');
 const MIGRATION = '20261020180500_district_seat_cap_and_grace.sql';
 const read = (...segments: string[]): string => readFileSync(resolve(process.cwd(), ...segments), 'utf8');
 const SQL = read('supabase/migrations', MIGRATION);
+const PAYING_MIGRATION = '20261020180900_district_paying_status.sql';
 
 const latestDefining = (fn: string): string => {
     const pattern = new RegExp(`create\\s+or\\s+replace\\s+function\\s+public\\.${fn}\\s*\\(`, 'i');
@@ -189,8 +217,22 @@ describe('the seat-cap migration', () => {
         expect(def).toMatch(/'seat_read_only',\s*v_read_only/i);
     });
 
+    // Decisions 21 and 25 (Codex round-4 review of #61, new major 1).
+    it('pays on one status set, card and invoice alike: active, trialing, past_due inside grace; never unpaid', () => {
+        const latest = latestDefining('subscription_is_live');
+        expect(latest).toBe(PAYING_MIGRATION);
+        const def = definition(read('supabase/migrations', latest), 'subscription_is_live');
+        expect(def).toMatch(/s\.status in \('active', 'trialing'\)/);
+        expect(def).toMatch(
+            /s\.status = 'past_due'\s*and \(s\.tier = 'academy' or s\.collection_method = 'send_invoice'\)/,
+        );
+        expect(def).not.toMatch(/unpaid/);
+    });
+
     it('counts the grace period the TypeScript specification does', () => {
-        const def = definition(SQL, 'district_grace_ends_at');
+        const latest = latestDefining('district_grace_ends_at');
+        expect(latest).toBe(PAYING_MIGRATION);
+        const def = definition(read('supabase/migrations', latest), 'district_grace_ends_at');
         expect(def).toContain(`p_past_due_since + interval '${DISTRICT_INVOICE_GRACE_DAYS} days'`);
         expect(def).toMatch(/max\(b\.grace_extended_until\)/i);
     });

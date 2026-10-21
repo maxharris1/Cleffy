@@ -11,8 +11,8 @@ to the district's subscription. Schema and reasoning:
 
 - The override counts only while the subscription it names is the studio
   owner's own, `send_invoice`, Academy, in an entitling Stripe account, and
-  **live**: `active` or `trialing` inside its period, or `past_due`/`unpaid`
-  inside its **invoice grace period** (below). Cancelled, ended or past grace
+  **live**: `active` or `trialing` inside its period, or `past_due` inside its
+  **grace period** (below; `unpaid` is not live). Cancelled, ended or past grace
   puts the studio back on 5; a payment or renewal brings the override back. No
   one has to re-set it.
 - The Stripe webhook never writes the override. It only records the
@@ -113,23 +113,30 @@ to the district's subscription. Schema and reasoning:
     the webhook has not recorded yet, one belonging to someone else, a
     card-paid one, or one that does not resolve to Academy.
 
-## Past-due invoices: 30 days of grace
+## Past due: 30 days of grace
 
-A `send_invoice` subscription that goes `past_due` or `unpaid` keeps **full
-access, override included, for 30 days** from when it went past due
+An Academy subscription -- card-paid or Stripe Invoicing alike -- or any
+`send_invoice` subscription that goes `past_due` keeps **full access, override
+included, for 30 days** from when it went past due
 (`subscriptions.past_due_since`, stamped on the first past-due write; Stripe
-marks an invoiced subscription past due at the invoice's due date). After that,
-the read-only rules above apply. Card subscriptions get no grace and behave as
-before.
+marks an invoiced subscription past due at the invoice's due date), or until an
+admin's later extension. While it does, the district counts as paying: its
+contract end is null (never purged) and a past admin pin is cleared. After
+that, the read-only rules above apply (seats past 5 read-only, nothing
+deleted), and the hourly sweep gives the district its Stripe contract end
+back. `unpaid`, `canceled` and `incomplete_expired` are not paying, inside 30
+days or not. A card Personal or Teacher plan past due gets no grace, as before
+(migration `20261020180900_district_paying_status.sql`; launch-compliance
+decisions 21 and 25).
 
 **Stripe Invoicing reminders** (Dashboard → Settings → Billing → Subscriptions
 and emails → _Manage invoices sent to customers_; test mode first, then live):
 
 - Send reminders **on the due date**, **7 days after** and **21 days after**.
 - _If an invoice remains unpaid after its due date_: **leave the subscription
-  past due**, or cancel it no sooner than 30 days plus the longest extension you
-  expect to grant. Cancelling inside the grace period cuts the grace short,
-  because a cancelled subscription is not live.
+  past due**, or cancel it (or mark it unpaid) no sooner than 30 days plus the
+  longest extension you expect to grant. Cancelling or marking it unpaid inside
+  the grace period cuts the grace short, because neither is paying.
 
 **Extending grace for one district** (per studio):
 

@@ -113,8 +113,9 @@ export const STUDENT_LIMITS: EntitlementLimits = {
 export const READ_ONLY_SEAT_LIMITS: EntitlementLimits = STUDENT_LIMITS;
 
 /**
- * Full access for a send_invoice (Stripe Invoicing) subscription this many days
- * after it went past due, unless an admin extended it. Drift-guarded against
+ * Full access for an Academy (card or Stripe Invoicing) or any send_invoice
+ * subscription this many days after it went past due, unless an admin extended
+ * it. Drift-guarded against
  * district_grace_ends_at() by tests/billing/districtSeats.test.ts.
  */
 export const DISTRICT_INVOICE_GRACE_DAYS = 30;
@@ -328,9 +329,13 @@ export interface EntitlementInput {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** subscription_is_live()'s second branch: Stripe Invoicing, past due, inside its grace. */
-const isInInvoiceGrace = (sub: SubscriptionLike, nowMs: number): boolean => {
-    if (sub.collection_method !== 'send_invoice' || (sub.status !== 'past_due' && sub.status !== 'unpaid')) {
+/**
+ * subscription_is_live()'s second branch (migration 20261020180900): past due,
+ * inside its grace, on an Academy plan (card or Stripe Invoicing) or on any
+ * Stripe Invoicing plan. `unpaid` is not paying.
+ */
+const isInPastDueGrace = (sub: SubscriptionLike, nowMs: number): boolean => {
+    if (sub.status !== 'past_due' || (sub.tier !== 'academy' && sub.collection_method !== 'send_invoice')) {
         return false;
     }
     const since = sub.past_due_since ? Date.parse(sub.past_due_since) : Number.NaN;
@@ -343,7 +348,7 @@ const isInInvoiceGrace = (sub: SubscriptionLike, nowMs: number): boolean => {
 };
 
 const isLive = (sub: SubscriptionLike, nowMs: number): boolean => {
-    if (isInInvoiceGrace(sub, nowMs)) {
+    if (isInPastDueGrace(sub, nowMs)) {
         return true;
     }
     if (!isEntitlingStatus(sub.status)) {
@@ -363,7 +368,7 @@ const TIER_RANK: Record<BillingTier, number> = { free: 0, personal: 1, teacher: 
  * (highest tier wins), then an ACTIVE seat in a studio whose owner holds a live
  * Academy subscription (the studios tables keep their v1 names), then a seat
  * past its studio's limit (read-only: free tier, READ_ONLY_SEAT_LIMITS), then
- * free. "Live" includes a send_invoice subscription inside its grace period. Founding
+ * free. "Live" includes a past-due Academy or send_invoice subscription inside its grace period. Founding
  * Teacher needs no branch — the webhook stores tier 'teacher' for that price, so
  * a founding subscription is a teacher subscription.
  */

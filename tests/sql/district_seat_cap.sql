@@ -180,7 +180,7 @@ grant execute on function pg_temp.archived () to public;
 insert into auth.users (id, aud, role, email)
 select ('d1600000-0000-4000-8000-0000000000' || suffix)::uuid, 'authenticated', 'authenticated',
        'd16-' || suffix || '@example.invalid'
-from unnest(array['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as suffix;
+from unnest(array['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as suffix;
 
 insert into public.studios (id, owner_id, name)
 values
@@ -189,7 +189,9 @@ values
     ('d1600000-0000-4000-8000-00000000c003', 'd1600000-0000-4000-8000-0000000000a3', 'Late district'),
     ('d1600000-0000-4000-8000-00000000c004', 'd1600000-0000-4000-8000-0000000000a4', 'Renewing district'),
     ('d1600000-0000-4000-8000-00000000c005', 'd1600000-0000-4000-8000-0000000000a5', 'Early district'),
-    ('d1600000-0000-4000-8000-00000000c006', 'd1600000-0000-4000-8000-0000000000a6', 'Early district, ended');
+    ('d1600000-0000-4000-8000-00000000c006', 'd1600000-0000-4000-8000-0000000000a6', 'Early district, ended'),
+    ('d1600000-0000-4000-8000-00000000c007', 'd1600000-0000-4000-8000-0000000000a7', 'Card-paid district'),
+    ('d1600000-0000-4000-8000-00000000c008', 'd1600000-0000-4000-8000-0000000000a8', 'Invoiced district');
 
 select pg_temp.act_as ('service_role');
 
@@ -460,7 +462,7 @@ select pg_temp.holds (
 select pg_temp.holds (
     'a later past-due delivery does not restart the clock',
     $q$select pg_temp.webhook_write ('sub_d16_district', 'd1600000-0000-4000-8000-0000000000a1', 'academy',
-           'unpaid', now() + interval '1 year', 'send_invoice', now() - interval '49 minutes') = 'written'$q$
+           'past_due', now() + interval '1 year', 'send_invoice', now() - interval '49 minutes') = 'written'$q$
 );
 
 -- The clock, moved: the invoice went past due 29 days ago, then 31.
@@ -541,11 +543,13 @@ select pg_temp.holds (
                where stripe_subscription_id = 'sub_d16_district')$q$
 );
 
--- A card subscription gets no grace: past due is free limits, as before.
+-- A card Personal or Teacher plan gets no grace: the webhook records it as tier
+-- free when it goes past due, and past due is free limits, as before. (A card
+-- ACADEMY past due keeps its grace: decisions 21 and 25, checked further down.)
 select pg_temp.act_as ('service_role');
 
 select pg_temp.holds (
-    'a card Academy goes past due',
+    'a card Teacher plan goes past due (recorded free)',
     $q$select pg_temp.webhook_write ('sub_d16_card', 'd1600000-0000-4000-8000-0000000000a2', 'free',
            'past_due', now() + interval '1 month', 'charge_automatically', now() - interval '45 minutes') = 'written'$q$
 );
@@ -1145,6 +1149,267 @@ select pg_temp.holds (
     $q$select contract_ends_at = now() - interval '10 days' and contract_ends_source = 'admin'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c006'$q$
 );
+
+-- ===========================================================================
+-- Who pays: one status set for card and Stripe Invoicing (decisions 21, 25)
+-- ===========================================================================
+-- Codex round-4 review of #61, new major 1 (migration 20261020180900). active,
+-- trialing, and past_due inside 30 days of when past_due was first recorded (or
+-- an admin's later extension) pay, card-paid or invoiced alike; unpaid,
+-- canceled and incomplete_expired do not. A paying district is never purged
+-- and a past admin pin is cleared (decision 8); after grace, the lapse rules.
+select pg_temp.act_as ('service_role');
+
+-- c007: a district whose Stripe Invoicing contract ended, now on card Academy.
+select pg_temp.holds (
+    'card-paid district: its invoiced contract is recorded',
+    $q$select pg_temp.webhook_write ('sub_d16_inv7', 'd1600000-0000-4000-8000-0000000000a7', 'academy',
+           'active', now() + interval '1 month', 'send_invoice', now() - interval '20 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'card-paid district: the invoiced contract ends',
+    $q$select pg_temp.webhook_write ('sub_d16_inv7', 'd1600000-0000-4000-8000-0000000000a7', 'free',
+           'canceled', now() + interval '1 month', 'send_invoice', now() - interval '19 minutes', false,
+           now() - interval '19 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'card-paid district: with nobody paying, the contract end is set and retention would select it',
+    $q$select contract_ends_at is not null and contract_ends_source = 'stripe'
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c007') = 1
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c007'$q$
+);
+
+select pg_temp.holds (
+    'card-paid district: the owner buys ordinary card Academy',
+    $q$select pg_temp.webhook_write ('sub_d16_card7', 'd1600000-0000-4000-8000-0000000000a7', 'academy',
+           'active', now() + interval '1 month', 'charge_automatically', now() - interval '18 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'card-paid district: paying, so no contract end',
+    $q$select contract_ends_at is null and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c007') = 0
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c007'$q$
+);
+
+select pg_temp.holds (
+    'card-paid district: the card fails and the Academy goes past due (the webhook keeps tier academy)',
+    $q$select pg_temp.webhook_write ('sub_d16_card7', 'd1600000-0000-4000-8000-0000000000a7', 'academy',
+           'past_due', now() + interval '1 month', 'charge_automatically', now() - interval '17 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'card past_due inside grace is paying: the owner keeps Academy',
+    $q$select e ->> 'tier' = 'academy' and e ->> 'source' = 'subscription' and e ->> 'status' = 'past_due'
+       from (select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a7') as e) r$q$
+);
+
+select pg_temp.holds (
+    'card past_due inside grace is paying: no contract end, so no purge, and the ended invoice link stays',
+    $q$select contract_ends_at is null and contract_ends_source is null
+          and stripe_subscription_id = 'sub_d16_inv7'
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c007') = 0
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c007'$q$
+);
+
+select pg_temp.holds (
+    'card past_due inside grace: an admin pin already past is cleared at once',
+    $q$select (r ->> 'contract_ends_at') is null and (r ->> 'contract_ends_source') is null
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c007',
+             now() - interval '5 days', 'test', 'Contract #7 term, old') as r) x$q$
+);
+
+select pg_temp.holds (
+    'card past_due inside grace: and the clearing is logged with its reason',
+    $q$select exists (
+           select 1 from public.district_billing_log l
+           where l.studio_id = 'd1600000-0000-4000-8000-00000000c007'
+             and l.old_contract_ends_at is not null and l.old_contract_ends_at <= now()
+             and l.new_contract_ends_at is null and l.new_contract_ends_source is null
+             and l.reason like 'admin pin % had passed while the owner pays on a live subscription: cleared'
+       )$q$
+);
+
+-- The clock, moved past grace with every trigger off: no event marks it.
+select pg_temp.act_as_server ();
+
+set local session_replication_role = replica;
+
+update public.subscriptions set past_due_since = now() - interval '31 days'
+where stripe_subscription_id = 'sub_d16_card7';
+
+set local session_replication_role = origin;
+
+select pg_temp.holds (
+    'card past_due past grace is not paying: the owner is on free limits at once',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a7') ->> 'tier' = 'free'$q$
+);
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'card past_due past grace: the hourly sweep runs',
+    $q$select public.reconcile_district_seats () >= 0$q$
+);
+
+select pg_temp.holds (
+    'card past_due past grace is not paying: the sweep brings the Stripe end back, retention selects it',
+    $q$select contract_ends_at is not null and contract_ends_source = 'stripe'
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c007') = 1
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c007'$q$
+);
+
+select pg_temp.holds (
+    'card past_due: an admin''s per-district extension reaches the card Academy too',
+    $q$select (public.admin_extend_district_grace ('d1600000-0000-4000-8000-00000000c007',
+           now() + interval '7 days', 'test', 'Card update promised') ->> 'grace_ends_at')::timestamptz
+           = now() + interval '7 days'$q$
+);
+
+select pg_temp.holds (
+    'card past_due inside the extension is paying again: Academy, no contract end',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a7') ->> 'tier' = 'academy'
+          and (select contract_ends_at is null from public.district_billing
+               where studio_id = 'd1600000-0000-4000-8000-00000000c007')$q$
+);
+
+select pg_temp.holds (
+    'card past_due: the extension is withdrawn',
+    $q$select public.admin_extend_district_grace ('d1600000-0000-4000-8000-00000000c007', null, 'test') ? 'grace_ends_at'$q$
+);
+
+select pg_temp.holds (
+    'card past_due: the extension withdrawn, not paying again',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a7') ->> 'tier' = 'free'
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c007') = 1$q$
+);
+
+select pg_temp.holds (
+    'card Academy goes unpaid (recorded free)',
+    $q$select pg_temp.webhook_write ('sub_d16_card7', 'd1600000-0000-4000-8000-0000000000a7', 'free',
+           'unpaid', now() + interval '1 month', 'charge_automatically', now() - interval '16 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'card unpaid is not paying: free limits, and the Stripe end stands',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a7') ->> 'tier' = 'free'
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c007') = 1$q$
+);
+
+select pg_temp.holds (
+    'the owner starts a card Academy trial',
+    $q$select pg_temp.webhook_write ('sub_d16_card7_trial', 'd1600000-0000-4000-8000-0000000000a7', 'academy',
+           'trialing', now() + interval '14 days', 'charge_automatically', now() - interval '15 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'card trialing is paying: Academy, no contract end, no purge',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a7') ->> 'tier' = 'academy'
+          and (select contract_ends_at is null from public.district_billing
+               where studio_id = 'd1600000-0000-4000-8000-00000000c007')
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c007') = 0$q$
+);
+
+-- c008: the same set on Stripe Invoicing.
+select pg_temp.holds (
+    'invoiced district: its contract starts on a trial',
+    $q$select pg_temp.webhook_write ('sub_d16_inv8', 'd1600000-0000-4000-8000-0000000000a8', 'academy',
+           'trialing', now() + interval '1 month', 'send_invoice', now() - interval '20 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'invoice trialing is paying: Academy, and an admin pin already past is cleared',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a8') ->> 'tier' = 'academy'
+          and (r ->> 'contract_ends_at') is null and (r ->> 'contract_ends_source') is null
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c008',
+             now() - interval '5 days', 'test', 'Contract #8 term, old') as r) x$q$
+);
+
+select pg_temp.holds (
+    'invoiced district: the invoice goes past due',
+    $q$select pg_temp.webhook_write ('sub_d16_inv8', 'd1600000-0000-4000-8000-0000000000a8', 'academy',
+           'past_due', now() + interval '1 month', 'send_invoice', now() - interval '19 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'invoice past_due inside grace is paying: Academy, an admin pin already past is cleared, no purge',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a8') ->> 'tier' = 'academy'
+          and (r ->> 'contract_ends_at') is null and (r ->> 'contract_ends_source') is null
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c008') = 0
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c008',
+             now() - interval '4 days', 'test', 'Contract #8 term, old again') as r) x$q$
+);
+
+-- Even recorded with its tier (as the webhook before 20261020180900 did),
+-- unpaid is not paying: the predicate itself refuses the status.
+select pg_temp.holds (
+    'invoiced district: the invoice goes unpaid (well inside 30 days of past due)',
+    $q$select pg_temp.webhook_write ('sub_d16_inv8', 'd1600000-0000-4000-8000-0000000000a8', 'academy',
+           'unpaid', now() + interval '1 month', 'send_invoice', now() - interval '18 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'invoice unpaid is not paying: free limits, the override would not count, and a past admin pin stands',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a8') ->> 'tier' = 'free'
+          and not public.subscription_is_live (s)
+          and r ->> 'contract_ends_source' = 'admin' and (r ->> 'contract_ends_at') is not null
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c008') = 1
+       from public.subscriptions s,
+            (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c008',
+             now() - interval '3 days', 'test', 'Contract #8 ended') as r) x
+       where s.stripe_subscription_id = 'sub_d16_inv8'$q$
+);
+
+select pg_temp.holds (
+    'invoiced district: back to past due, still inside 30 days of when it first went past due',
+    $q$select pg_temp.webhook_write ('sub_d16_inv8', 'd1600000-0000-4000-8000-0000000000a8', 'academy',
+           'past_due', now() + interval '1 month', 'send_invoice', now() - interval '17 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'invoice past_due inside grace pays again: Academy, and the past pin is cleared on that write',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a8') ->> 'tier' = 'academy'
+          and (select contract_ends_at is null from public.district_billing
+               where studio_id = 'd1600000-0000-4000-8000-00000000c008')$q$
+);
+
+select pg_temp.act_as_server ();
+
+set local session_replication_role = replica;
+
+update public.subscriptions set past_due_since = now() - interval '31 days'
+where stripe_subscription_id = 'sub_d16_inv8';
+
+set local session_replication_role = origin;
+
+select pg_temp.holds (
+    'invoice past_due past grace is not paying: free limits',
+    $q$select public.resolve_entitlements ('d1600000-0000-4000-8000-0000000000a8') ->> 'tier' = 'free'$q$
+);
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'invoice past_due past grace: an admin pin already past now stands',
+    $q$select r ->> 'contract_ends_source' = 'admin' and (r ->> 'contract_ends_at') is not null
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c008',
+             now() - interval '2 days', 'test', 'Contract #8 ended, after grace') as r) x$q$
+);
+
+select pg_temp.holds (
+    'invoice past_due past grace: the hourly sweep runs',
+    $q$select public.reconcile_district_seats () >= 0$q$
+);
+
+select pg_temp.holds (
+    'invoice past_due past grace: and leaves the past pin standing',
+    $q$select contract_ends_source = 'admin' and contract_ends_at is not null
+          and pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c008') = 1
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c008'$q$
+);
+
+select pg_temp.act_as_server ();
 
 -- ===========================================================================
 -- Nobody but the admin reaches any of it

@@ -732,6 +732,43 @@ describe('stripe event handling', () => {
         expect(store.archived).toEqual([]);
     });
 
+    // Decisions 21 and 25 (Codex round-4 review of #61, new major 1): a
+    // card-paid Academy past due is inside the same 30-day grace as Stripe
+    // Invoicing, so its row keeps naming Academy (subscription_is_live() in
+    // 20261020180900 decides how long it pays). A card Teacher plan does not.
+    it('keeps a card-paid Academy past due on Academy, and records it free once unpaid', async () => {
+        const academy = { items: { data: [{ price: { id: 'price_academy_monthly' } }] } };
+        await deliver(
+            store,
+            subscriptionEvent('evt_pd_academy', 'customer.subscription.updated', { status: 'past_due', ...academy }),
+        );
+        expect(store.subscriptions.get('sub_1')).toMatchObject({
+            status: 'past_due',
+            tier: 'academy',
+            collection_method: null,
+        });
+        expect(store.archived).toEqual([]);
+
+        await deliver(
+            store,
+            subscriptionEvent(
+                'evt_unpaid_academy',
+                'customer.subscription.updated',
+                { status: 'unpaid', ...academy },
+                EVENT_CREATED + 60,
+            ),
+        );
+        expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'unpaid', tier: 'free' });
+    });
+
+    it('records a card Teacher plan past due as free, as before', async () => {
+        await deliver(
+            store,
+            subscriptionEvent('evt_pd_teacher', 'customer.subscription.updated', { status: 'past_due' }),
+        );
+        expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'past_due', tier: 'free' });
+    });
+
     it('records a failed invoice against the current Stripe state', async () => {
         store.remote.set('sub_1', {
             id: 'sub_1',
@@ -1655,13 +1692,30 @@ describe('subscription row mapping', () => {
         const row = subscriptionRowFrom(
             {
                 id: 'sub_x',
-                status: 'past_due',
+                status: 'unpaid',
                 items: { data: [{ price: { id: 'price_academy_annual' } }] },
             },
             'teacher-1',
             PRICE_TIERS,
         );
         expect(row.tier).toBe('free');
+    });
+
+    // Decisions 21 and 25: past due is inside grace for a card-paid Academy, as
+    // for Stripe Invoicing; subscription_is_live() bounds it to 30 days.
+    it('stores Academy for a card-paid Academy past due, and free for a card Teacher plan past due', () => {
+        const academy = subscriptionRowFrom(
+            { id: 'sub_x', status: 'past_due', items: { data: [{ price: { id: 'price_academy_annual' } }] } },
+            'teacher-1',
+            PRICE_TIERS,
+        );
+        expect(academy.tier).toBe('academy');
+        const teacher = subscriptionRowFrom(
+            { id: 'sub_x', status: 'past_due', items: { data: [{ price: { id: 'price_teacher_annual' } }] } },
+            'teacher-1',
+            PRICE_TIERS,
+        );
+        expect(teacher.tier).toBe('free');
     });
 
     it('reads current_period_end from the subscription item when it is not on the subscription', () => {

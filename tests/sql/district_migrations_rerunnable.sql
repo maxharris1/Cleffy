@@ -3,8 +3,9 @@
 -- 20261020180400_district_seat_overrides.sql,
 -- 20261020180500_district_seat_cap_and_grace.sql,
 -- 20261020180600_read_only_seats_enforced.sql,
--- 20261020180700_read_only_seats_storage.sql and
--- 20261020180800_read_only_seats_live_ink.sql, in order, TWICE on top of a
+-- 20261020180700_read_only_seats_storage.sql,
+-- 20261020180800_read_only_seats_live_ink.sql and
+-- 20261020180900_district_paying_status.sql, in order, TWICE on top of a
 -- database that already has them, inside one transaction ending in ROLLBACK,
 -- then checks that the second run changed nothing it should not: every table,
 -- column, index, trigger, constraint, policy and cron job exists once, the
@@ -93,12 +94,14 @@ select
 \ir ../../supabase/migrations/20261020180600_read_only_seats_enforced.sql
 \ir ../../supabase/migrations/20261020180700_read_only_seats_storage.sql
 \ir ../../supabase/migrations/20261020180800_read_only_seats_live_ink.sql
+\ir ../../supabase/migrations/20261020180900_district_paying_status.sql
 
 \ir ../../supabase/migrations/20261020180400_district_seat_overrides.sql
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
 \ir ../../supabase/migrations/20261020180600_read_only_seats_enforced.sql
 \ir ../../supabase/migrations/20261020180700_read_only_seats_storage.sql
 \ir ../../supabase/migrations/20261020180800_read_only_seats_live_ink.sql
+\ir ../../supabase/migrations/20261020180900_district_paying_status.sql
 
 reset role;
 
@@ -211,6 +214,14 @@ select pg_temp.holds (
     'seat_read_only_since is there once, with RLS on and nothing for clients',
     $q$select c.relrowsecurity and not has_table_privilege('authenticated', 'public.seat_read_only_since', 'select')
        from pg_class c where c.oid = 'public.seat_read_only_since'::regclass$q$
+);
+
+select pg_temp.holds (
+    'subscription_is_live and the sweep are 20261020180900''s (card past-due grace, unpaid not paying)',
+    $q$select pg_get_functiondef('public.subscription_is_live(public.subscriptions)'::regprocedure) like '%s.tier = ''academy'' or s.collection_method = ''send_invoice''%'
+          and pg_get_functiondef('public.subscription_is_live(public.subscriptions)'::regprocedure) not like '%unpaid%'
+          and pg_get_functiondef('public.reconcile_district_seats()'::regprocedure) not like '%contract_ends_source = ''admin''%'
+          and pg_get_functiondef('public.admin_extend_district_grace(uuid, timestamptz, text, text)'::regprocedure) like '%district_billing_rederive%'$q$
 );
 
 select pg_temp.holds (

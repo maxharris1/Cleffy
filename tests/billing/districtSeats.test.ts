@@ -79,28 +79,50 @@ describe('the webhook maps a district contract', () => {
         expect(subscriptionRowFrom(sub, 'owner-1', PRICE_TIERS).tier).toBe('free');
     });
 
-    it('to Academy while past due or unpaid, so the invoice grace period has a plan to honour', () => {
-        for (const status of ['past_due', 'unpaid']) {
-            const row = subscriptionRowFrom(districtSubscription({ status }), 'owner-1', PRICE_TIERS);
-            expect(row.tier, status).toBe('academy');
-            expect(row.collection_method).toBe('send_invoice');
-        }
+    it('to Academy while past due, so the grace period has a plan to honour', () => {
+        const row = subscriptionRowFrom(districtSubscription({ status: 'past_due' }), 'owner-1', PRICE_TIERS);
+        expect(row.tier).toBe('academy');
+        expect(row.collection_method).toBe('send_invoice');
     });
 
-    it('to free once it has ended, whatever the collection method', () => {
-        for (const status of ['canceled', 'incomplete_expired', 'incomplete']) {
+    it('to free once it has ended or gone unpaid (decision 25: unpaid is not paying), whatever the collection method', () => {
+        for (const status of ['unpaid', 'canceled', 'incomplete_expired', 'incomplete']) {
             expect(subscriptionRowFrom(districtSubscription({ status }), 'owner-1', PRICE_TIERS).tier, status).toBe(
                 'free',
             );
         }
     });
 
-    it('to free while a card subscription is past due: card plans get no invoice grace', () => {
+    // Decisions 21 and 25 (Codex round-4 review of #61, new major 1): past-due
+    // grace is the same for card and Stripe Invoicing Academy billing, so a
+    // card-paid Academy past due keeps naming Academy -- subscription_is_live()
+    // decides how long it pays (30 days from when past_due was first recorded).
+    it('to Academy while a card-paid Academy is past due: the same grace as Stripe Invoicing', () => {
         const card = districtSubscription({
             status: 'past_due',
             collection_method: 'charge_automatically',
             metadata: { user_id: 'owner-1' },
             items: { data: [{ price: { id: 'price_academy_monthly' } }] },
+        });
+        expect(subscriptionRowFrom(card, 'owner-1', PRICE_TIERS).tier).toBe('academy');
+    });
+
+    it('to free once that card-paid Academy goes unpaid', () => {
+        const card = districtSubscription({
+            status: 'unpaid',
+            collection_method: 'charge_automatically',
+            metadata: { user_id: 'owner-1' },
+            items: { data: [{ price: { id: 'price_academy_monthly' } }] },
+        });
+        expect(subscriptionRowFrom(card, 'owner-1', PRICE_TIERS).tier).toBe('free');
+    });
+
+    it('to free while a card Teacher plan is past due: only Academy and Stripe Invoicing get grace', () => {
+        const card = districtSubscription({
+            status: 'past_due',
+            collection_method: 'charge_automatically',
+            metadata: { user_id: 'owner-1' },
+            items: { data: [{ price: { id: 'price_teacher_annual' } }] },
         });
         expect(subscriptionRowFrom(card, 'owner-1', PRICE_TIERS).tier).toBe('free');
     });
@@ -377,14 +399,16 @@ describe('the district-seats migration', () => {
         expect(def).toMatch(/public\.subscription_is_live\s*\(s\)/i);
 
         // Live: the mode filter, active or trialing inside the period -- or
-        // Stripe Invoicing past due inside its grace.
+        // past due inside its grace, for Academy (card or Stripe Invoicing) and
+        // any Stripe Invoicing plan; never unpaid (decisions 21 and 25).
         const live = definition(latestDefining('subscription_is_live').sql, 'subscription_is_live');
         expect(live).toMatch(/s\.mode\s*=\s*any\s*\(public\.entitling_billing_modes\s*\(\)\)/i);
         expect(live).toMatch(/s\.status\s+in\s*\('active',\s*'trialing'\)/i);
         expect(live).toMatch(/current_period_end\s+is\s+null\s+or\s+s\.current_period_end\s*>\s*now\(\)/i);
         expect(live).toMatch(
-            /s\.collection_method\s*=\s*'send_invoice'\s+and\s+s\.status\s+in\s*\('past_due',\s*'unpaid'\)/i,
+            /s\.status\s*=\s*'past_due'\s+and\s+\(s\.tier\s*=\s*'academy'\s+or\s+s\.collection_method\s*=\s*'send_invoice'\)/i,
         );
+        expect(live).not.toMatch(/'unpaid'/i);
     });
 
     it.each(['admin_set_studio_seat_override', 'admin_clear_studio_seat_override', 'studio_effective_seat_limit'])(

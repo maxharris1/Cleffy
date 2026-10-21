@@ -36,16 +36,16 @@ export const shouldArchiveOnStatus = (status: string): boolean => ARCHIVING_STAT
 export const isTerminalStatus = (status: string): boolean => TERMINAL_STATUSES.includes(status);
 
 /**
- * Past due, but on Stripe Invoicing: a district paying on PO terms keeps full
- * access for a grace period after the due date (subscription_is_live() in
- * migration 20261020180500_district_seat_cap_and_grace.sql decides how long),
- * so its row has to keep naming the plan it pays for. A card subscription in
- * these statuses still records free, as before.
+ * Past due, inside its grace period, still pays (launch-compliance decisions 21
+ * and 25): an Academy subscription, card-paid or Stripe Invoicing, and any
+ * Stripe Invoicing subscription, keeps full access for 30 days after it first
+ * went past due, or until an admin's later extension -- subscription_is_live()
+ * in migration 20261020180900_district_paying_status.sql decides how long -- so
+ * its row has to keep naming the plan it pays for. `unpaid` is not paying and
+ * records free, and so does a card Personal or Teacher plan past due, as before.
  */
-const INVOICE_GRACE_STATUSES = ['past_due', 'unpaid'];
-
-const keepsTierWhilePastDue = (sub: StripeSubscriptionLike): boolean =>
-    collectionMethodOf(sub) === 'send_invoice' && INVOICE_GRACE_STATUSES.includes(sub.status);
+const keepsTierWhilePastDue = (sub: StripeSubscriptionLike, priceTiers: Record<string, BillingTier>): boolean =>
+    sub.status === 'past_due' && (collectionMethodOf(sub) === 'send_invoice' || tierOf(sub, priceTiers) === 'academy');
 
 /**
  * Whether the buyer already holds a subscription that Checkout would put a
@@ -537,7 +537,8 @@ export const subscriptionRowFrom = (
     return {
         stripe_subscription_id: sub.id,
         user_id: userId,
-        tier: isEntitlingStatus(sub.status) || keepsTierWhilePastDue(sub) ? tierOf(sub, priceTiers) : 'free',
+        tier:
+            isEntitlingStatus(sub.status) || keepsTierWhilePastDue(sub, priceTiers) ? tierOf(sub, priceTiers) : 'free',
         status: sub.status,
         price_id: priceId,
         current_period_end: ending.periodEnd,
