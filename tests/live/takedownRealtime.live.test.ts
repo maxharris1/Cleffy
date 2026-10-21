@@ -3,7 +3,13 @@ import { createClient, type RealtimeChannel, type SupabaseClient } from '@supaba
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { TypedSupabaseClient } from '@/lib/supabase';
-import { DocRealtimeChannel, docDbTopic, docTopic, fetchRealtimeTopicEpoch } from '@/sync/realtimeChannel';
+import {
+    DocRealtimeChannel,
+    docDbTopic,
+    docTopic,
+    fetchRealtimeTopicEpoch,
+    type TopicEpochRead,
+} from '@/sync/realtimeChannel';
 import { INK_PROGRESS_EVENT, type InkProgressMsg } from '@/sync/wire';
 import type { AnnotationRow } from '@/types/database';
 
@@ -14,6 +20,11 @@ import type { AnnotationRow } from '@/types/database';
  * takedown, while the owner's other device keeps receiving every committed
  * mark, more than the pull's 50-seq overlap included; after the lift the
  * collaborator hears the owner again, on the new topic.
+ *
+ * And when the owner's generation read fails after the takedown (forced on
+ * the client; the server is real), the owner keeps its ink off the old topic,
+ * even after the adversary updates its presence there, until a retry
+ * succeeds; the collaborator's own app, told no, leaves both topics at once.
  *
  * Local stack only (`npm run cloud:up`); skipped unless pointed at it:
  *
@@ -57,9 +68,21 @@ const signedIn = async (admin: SupabaseClient, email: string): Promise<{ client:
     return { client, id: data.user.id };
 };
 
-/** The owner's device: the app's own channel class, as PdfViewport wires it. */
-const ownerDevice = (client: SupabaseClient, docId: string, userId: string, name: string) => {
+/**
+ * A member's device: the app's own channel class, as PdfViewport wires it.
+ * `failEpochReads` makes its generation reads fail (a dropped request) while
+ * it returns true; the Realtime server is still the real one.
+ */
+const ownerDevice = (
+    client: SupabaseClient,
+    docId: string,
+    userId: string,
+    name: string,
+    failEpochReads: () => boolean = () => false,
+) => {
     const rows: AnnotationRow[] = [];
+    const epochReads: Array<TopicEpochRead['status']> = [];
+    let membershipChecks = 0;
     const supabase = client as unknown as TypedSupabaseClient;
     const channel = new DocRealtimeChannel({
         supabase,
@@ -70,10 +93,19 @@ const ownerDevice = (client: SupabaseClient, docId: string, userId: string, name
         onPeers: () => undefined,
         onReconnect: () => undefined,
         onResync: () => undefined,
-        fetchTopicEpoch: () => fetchRealtimeTopicEpoch(supabase, docId),
+        onMembershipChanged: () => {
+            membershipChecks += 1;
+        },
+        fetchTopicEpoch: async () => {
+            const read: TopicEpochRead = failEpochReads()
+                ? { status: 'failed' }
+                : await fetchRealtimeTopicEpoch(supabase, docId);
+            epochReads.push(read.status);
+            return read;
+        },
     });
     channel.start();
-    return { channel, rows };
+    return { channel, rows, epochReads, membershipChecks: () => membershipChecks };
 };
 
 const joinedTopics = (client: SupabaseClient): string[] =>
@@ -99,6 +131,8 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
     let collaborator: SupabaseClient;
     let collaboratorId = '';
     let moderatorId = '';
+    const extraDocIds: string[] = [];
+    const extraClients: SupabaseClient[] = [];
 
     beforeAll(async () => {
         admin = createClient(URL, SERVICE, { auth: { persistSession: false, autoRefreshToken: false } });
@@ -137,8 +171,11 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
         await owner?.removeAllChannels();
         await ownerB?.removeAllChannels();
         await collaborator?.removeAllChannels();
-        if (docId) {
-            await admin.from('documents').delete().eq('id', docId);
+        for (const client of extraClients) {
+            await client.removeAllChannels();
+        }
+        for (const id of [docId, ...extraDocIds].filter(Boolean)) {
+            await admin.from('documents').delete().eq('id', id);
         }
         for (const id of userIds) {
             await admin.auth.admin.deleteUser(id);
@@ -236,7 +273,9 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
         await waitFor('the collaborator join on generation 1 to be refused', () => refused === 'CHANNEL_ERROR');
         // realtime-js hands back a topic's existing channel, refused or not.
         await collaborator.removeChannel(sneak);
-        expect(await fetchRealtimeTopicEpoch(collaborator as unknown as TypedSupabaseClient, docId)).toBeNull();
+        expect(await fetchRealtimeTopicEpoch(collaborator as unknown as TypedSupabaseClient, docId)).toEqual({
+            status: 'denied',
+        });
 
         // More marks than the pull's 50-seq overlap while restricted: owner B
         // receives every one live, so it never has a gap to skip.
@@ -273,7 +312,10 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
             p_moderator: moderatorId,
         });
         expect(liftError).toBeNull();
-        expect(await fetchRealtimeTopicEpoch(collaborator as unknown as TypedSupabaseClient, docId)).toBe(1);
+        expect(await fetchRealtimeTopicEpoch(collaborator as unknown as TypedSupabaseClient, docId)).toEqual({
+            status: 'epoch',
+            epoch: 1,
+        });
         const rejoined: InkProgressMsg[] = [];
         let rejoinStatus = '';
         const again = collaborator.channel(docTopic(docId, 1), {
@@ -303,4 +345,131 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
         a.channel.stop();
         b.channel.stop();
     }, 90_000);
+
+    it('a failing generation read keeps the owner’s ink off the old topic; a denial closes the collaborator’s channels', async () => {
+        // A score of its own, at generation 0.
+        const scoreId = crypto.randomUUID();
+        extraDocIds.push(scoreId);
+        const { error: docError } = await admin
+            .from('documents')
+            .insert({
+                id: scoreId,
+                owner_id: ownerId,
+                title: 'Live epoch hold',
+                storage_path: `${scoreId}/original.pdf`,
+            });
+        expect(docError).toBeNull();
+        const { error: memberError } = await admin
+            .from('document_members')
+            .insert({ document_id: scoreId, user_id: collaboratorId, role: 'editor' });
+        expect(memberError).toBeNull();
+
+        // The adversary, on its own socket: on doc:{id} before the takedown,
+        // present, deaf to every hint, and free to update its presence.
+        const adversary = createClient(URL, ANON, { auth: { persistSession: false, autoRefreshToken: false } });
+        const { data: adv } = await adversary.auth.signInWithPassword({
+            email: `collab-${tag}@takedown.test`,
+            password: PASSWORD,
+        });
+        await adversary.realtime.setAuth(adv.session!.access_token);
+        extraClients.push(adversary);
+        const heard: InkProgressMsg[] = [];
+        let advStatus = '';
+        const advLive: RealtimeChannel = adversary.channel(docTopic(scoreId), {
+            config: { private: true, broadcast: { self: false }, presence: { key: `${collaboratorId}-adv` } },
+        });
+        const advPresence = (page: number) =>
+            advLive.track({ userId: collaboratorId, name: 'Adversary', color: '#000', page, isAnonymous: false });
+        advLive.on('broadcast', { event: INK_PROGRESS_EVENT }, ({ payload }) => heard.push(payload as InkProgressMsg));
+        advLive.subscribe((status) => {
+            advStatus = status;
+            if (status === 'SUBSCRIBED') {
+                void advPresence(0);
+            }
+        });
+
+        // The collaborator's app, on another socket: it follows the hints.
+        const collabApp = createClient(URL, ANON, { auth: { persistSession: false, autoRefreshToken: false } });
+        const { data: app } = await collabApp.auth.signInWithPassword({
+            email: `collab-${tag}@takedown.test`,
+            password: PASSWORD,
+        });
+        await collabApp.realtime.setAuth(app.session!.access_token);
+        extraClients.push(collabApp);
+        const collab = ownerDevice(collabApp, scoreId, collaboratorId, 'Collaborator');
+
+        // The owner, whose generation reads fail on demand.
+        let failing = false;
+        const a = ownerDevice(owner, scoreId, ownerId, 'Owner A', () => failing);
+        const scoreTopics = (client: SupabaseClient) => joinedTopics(client).filter((topic) => topic.includes(scoreId));
+        await waitFor(
+            'everyone to join generation 0',
+            () => advStatus === 'SUBSCRIBED' && scoreTopics(owner).length === 2,
+        );
+        await waitFor('the collaborator app to join generation 0', () => scoreTopics(collabApp).length === 2);
+        await sleep(1500);
+        stroke(a, 'before');
+        await waitFor('the adversary to hear the owner before the takedown', () =>
+            heard.some((m) => m.strokeId === 'before'),
+        );
+
+        // The owner's reads start failing, then the takedown.
+        failing = true;
+        const readsBefore = a.epochReads.length;
+        const { error: takedownError } = await admin.rpc('apply_content_takedown', {
+            p_document: scoreId,
+            p_action: 'restrict',
+            p_ground: 'copyright',
+            p_legal_basis: '17 U.S.C. 512',
+            p_facts: 'Live epoch-hold test',
+            p_report: null,
+            p_moderator: moderatorId,
+        });
+        expect(takedownError).toBeNull();
+
+        // The read failed, and a retry failed too: the owner is still on the
+        // old topics, where the adversary sits.
+        await waitFor('two failed reads on the owner', () => a.epochReads.slice(readsBefore).length >= 2, 20_000);
+        expect(a.epochReads.slice(readsBefore).every((status) => status === 'failed')).toBe(true);
+        expect(scoreTopics(owner)).toEqual(expect.arrayContaining([docTopic(scoreId), docDbTopic(scoreId)]));
+
+        // The adversary updates its presence (b8adc513 let that restore the
+        // owner's audience), and the owner draws.
+        await advPresence(1);
+        await sleep(1500);
+        const heardBefore = heard.length;
+        for (let i = 0; i < 5; i++) {
+            stroke(a, `held-${i}`);
+            await sleep(120);
+        }
+        await sleep(1500);
+        expect(heard.slice(heardBefore)).toEqual([]);
+
+        // The collaborator's app was told no: it left both topics at once and
+        // asked the app to re-check (the restricted state).
+        await waitFor('the collaborator app to leave both topics', () => scoreTopics(collabApp).length === 0);
+        expect(collab.epochReads).toContain('denied');
+        expect(collab.membershipChecks()).toBeGreaterThan(0);
+
+        // The owner's reads work again: the next retry moves it to generation 1.
+        failing = false;
+        await waitFor(
+            'the owner to move to generation 1',
+            () => {
+                const topics = scoreTopics(owner);
+                return topics.includes(docTopic(scoreId, 1)) && topics.includes(docDbTopic(scoreId, 1));
+            },
+            40_000,
+        );
+        await sleep(1500);
+        for (let i = 0; i < 3; i++) {
+            stroke(a, `moved-${i}`);
+            await sleep(120);
+        }
+        await sleep(1500);
+        expect(heard.slice(heardBefore)).toEqual([]);
+
+        a.channel.stop();
+        collab.channel.stop();
+    }, 120_000);
 });
