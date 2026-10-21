@@ -215,3 +215,39 @@ describe('a seat change reaches live ink that is already flowing', () => {
         expect(LIVE).not.toMatch(/grant [^;]* to (anon|authenticated)/);
     });
 });
+
+/**
+ * Grace that runs out on the clock alone stops live ink at the deadline itself
+ * (migration 20261020181100_read_only_seats_grace_deadline.sql; decision 26,
+ * Codex round-4 review of #61, D2 partial). Realtime keeps a broadcast answer
+ * until the token changes, so the answer is refused whenever the district's
+ * grace ends before the token does. tests/sql/district_read_only_seats.sql and
+ * tests/live/readOnlySeatGraceDeadline.live.test.ts prove it; CI holds the shape.
+ */
+describe('live ink cannot outlive a grace deadline', () => {
+    const GRACE = read('supabase/migrations', '20261020181100_read_only_seats_grace_deadline.sql');
+
+    it('is a restrictive broadcast policy on doc:{id}, presence untouched', () => {
+        expect(GRACE).toMatch(
+            /create policy doc_topic_seat_grace_broadcast on realtime\.messages as restrictive for insert to authenticated/,
+        );
+        expect(GRACE).toMatch(/realtime\.messages\.extension is distinct from 'broadcast'/);
+        expect(GRACE).toMatch(/realtime\.topic \(\) not like 'doc:%'/);
+        expect(GRACE).toMatch(/or not \(select public\.caller_seat_grace_ends_before_token \(\)\)/);
+    });
+
+    it('compares the stored grace deadline with the token Realtime is authorizing (no exp: never expires)', () => {
+        expect(GRACE).toMatch(
+            /public\.seat_grace_deadline \(auth\.uid\(\)\)\s*<= coalesce\(to_timestamp\(nullif\(auth\.jwt \(\) ->> 'exp', ''\)::double precision\), 'infinity'::timestamptz\)/,
+        );
+        expect(GRACE).toMatch(/min\(public\.district_grace_ends_at \(s\.stripe_subscription_id, s\.past_due_since\)\)/);
+        expect(GRACE).toMatch(/and public\.subscription_is_live \(s\)/);
+    });
+
+    it('keeps the deadline lookup from every client role', () => {
+        for (const role of ['public', 'anon', 'authenticated']) {
+            expect(GRACE).toContain(`revoke all on function public.seat_grace_deadline (uuid) from ${role};`);
+        }
+        expect(GRACE).not.toMatch(/grant [^;]* public\.seat_grace_deadline [^;]* to (anon|authenticated)/);
+    });
+});

@@ -204,13 +204,20 @@ seat as read-only, sends the membership hint on the live topic of every score
 it can write on and rotates those scores' topics through PR #63's
 `rotate_document_realtime` (a stand-in records the calls when #63 is absent),
 once -- a second sweep changes nothing, and paying clears the record and hints
-again without rotating; no client reads the record or sends the hint; an active seat and a roster
+again without rotating; a grace period that runs out on the clock alone
+(`20261020181100_read_only_seats_grace_deadline.sql`, decision 26) shuts live
+ink at the deadline itself: before it the seat still marks and writes its PDF,
+but a broadcast authorized with a token that outlives the deadline (or has no
+exp) is refused, since Realtime would keep that answer past it, while one whose
+token expires first is not and a roster student is untouched; past it, with no
+sweep (nothing recorded, nothing archived), live ink and the Storage write are
+refused; no client reads the record or sends the hint; an active seat and a roster
 student with Edit keep writing; paying again lifts it immediately; and nobody
 can ask about another user's seat. It reports `failures | total` on its last
 line.
 
 `district_migrations_rerunnable.sql` proves the district migrations
-(`20261020180400` through `20261020181000`) are rerunnable whole,
+(`20261020180400` through `20261020181100`) are rerunnable whole,
 not only the canonical block: it applies all three, in order, twice on top of a
 database that already has them (psql `\ir`, so psql only, never the MCP), then
 checks every trigger, policy, constraint and cron job exists once, every added

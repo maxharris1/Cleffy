@@ -735,6 +735,176 @@ select pg_temp.allowed (
 );
 
 -- ===========================================================================
+-- Grace ends on the clock: live ink stops at the deadline itself (decision 26)
+-- ===========================================================================
+-- Codex round-4 review of #61, D2 partial (migration 20261020181100). Realtime
+-- asks the broadcast policy when a channel joins and again when the client
+-- hands it a new token, and keeps the answer until then (the token's exp at
+-- the latest: Realtime closes the channel when it expires). So a join answered
+-- while grace still ran kept live ink past the deadline until the hourly sweep
+-- rotated the topic. Now a seat whose district's grace ends before the token
+-- does is refused broadcast at the join: no permission Realtime holds can
+-- outlive the deadline. Marks, storage and presence are asked per request and
+-- stay open until the deadline itself; after it, with no sweep, all are shut.
+create function pg_temp.act_as_user_until (p_user uuid, p_exp timestamptz) returns void language plpgsql as $$
+begin
+    perform set_config('role', 'authenticated', true);
+    perform set_config(
+        'request.jwt.claims',
+        jsonb_build_object('role', 'authenticated', 'sub', p_user, 'is_anonymous', false,
+                           'exp', extract(epoch from p_exp)::bigint)::text,
+        true
+    );
+end;
+$$;
+
+create function pg_temp.act_as_student_until (p_user uuid, p_exp timestamptz) returns void language plpgsql as $$
+begin
+    perform set_config('role', 'authenticated', true);
+    perform set_config(
+        'request.jwt.claims',
+        jsonb_build_object(
+            'role', 'authenticated', 'sub', p_user, 'is_anonymous', false,
+            'app_metadata', jsonb_build_object('user_type', 'student'),
+            'iat', extract(epoch from now())::bigint + 60,
+            'exp', extract(epoch from p_exp)::bigint
+        )::text,
+        true
+    );
+end;
+$$;
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'the district''s invoice goes past due again',
+    $q$select pg_temp.webhook_write ('sub_d17_district', 'd1700000-0000-4000-8000-0000000000a1', 'academy',
+           'past_due', now() + interval '1 year', 'send_invoice', now() - interval '40 minutes') = 'written'$q$
+);
+
+-- The clock, moved: grace ends 20 minutes from now. Every trigger off.
+select pg_temp.act_as_server ();
+
+set local session_replication_role = replica;
+
+update public.subscriptions set past_due_since = now() - interval '30 days' + interval '20 minutes'
+where stripe_subscription_id = 'sub_d17_district';
+
+set local session_replication_role = origin;
+
+select pg_temp.act_as_user_until ('d1700000-0000-4000-8000-0000000000b6', now() + interval '1 hour');
+
+select pg_temp.holds (
+    'twenty minutes before the deadline b6 is still a full seat',
+    $q$select not public.caller_seat_read_only ()$q$
+);
+
+select pg_temp.allowed (
+    'and marks the shared score',
+    $q$insert into public.annotations (id, document_id, page, kind, color, payload, created_by)
+       values ('d1700000-0000-4000-8000-000000000a69', 'd1700000-0000-4000-8000-0000000000d1', 0, 'stroke',
+               '#2563eb', '{"pts":[0.3,0.3,0.5],"w":0.005}', 'd1700000-0000-4000-8000-0000000000b6')$q$
+);
+
+select pg_temp.allowed (
+    'and writes their own PDF',
+    $q$insert into storage.objects (bucket_id, name, owner, metadata)
+       values ('scores', 'd1700000-0000-4000-8000-0000000000d6/original.pdf',
+               'd1700000-0000-4000-8000-0000000000b6', '{"size": 5}')
+       on conflict (bucket_id, name collate "C") where archived_at is null do update set metadata = excluded.metadata$q$
+);
+
+select pg_temp.on_topic ('doc:d1700000-0000-4000-8000-0000000000d1');
+
+select pg_temp.refused (
+    'but a live-ink join whose token outlives the deadline is refused broadcast: it could not be stopped at the deadline',
+    $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
+       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+               (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$,
+    '42501'
+);
+
+select pg_temp.allowed (
+    'that join still appears in presence',
+    $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
+       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'presence', 'presence', '{}', true,
+               (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$
+);
+
+select pg_temp.act_as_user_until ('d1700000-0000-4000-8000-0000000000b6', now() + interval '10 minutes');
+
+select pg_temp.allowed (
+    'a join whose token expires before the deadline keeps live ink',
+    $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
+       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+               (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$
+);
+
+select pg_temp.act_as_user ('d1700000-0000-4000-8000-0000000000b6');
+
+select pg_temp.refused (
+    'a token without exp is treated as never expiring: refused',
+    $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
+       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+               (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$,
+    '42501'
+);
+
+select pg_temp.act_as_student_until ('d1700000-0000-4000-8000-0000000000e1', now() + interval '1 hour');
+
+select pg_temp.allowed (
+    'b1''s roster student (no seat) keeps live ink on the shared score',
+    $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
+       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+               (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$
+);
+
+-- The deadline passes on the clock alone: no webhook, no sweep.
+select pg_temp.act_as_server ();
+
+set local session_replication_role = replica;
+
+update public.subscriptions set past_due_since = now() - interval '30 days' - interval '1 second'
+where stripe_subscription_id = 'sub_d17_district';
+
+set local session_replication_role = origin;
+
+select pg_temp.holds (
+    'past the deadline nothing has run: b6 is not on file as read-only and their score is not archived',
+    $q$select not exists (select 1 from public.seat_read_only_since
+                          where user_id = 'd1700000-0000-4000-8000-0000000000b6')
+          and not public.document_is_archived ('d1700000-0000-4000-8000-0000000000d6')$q$
+);
+
+select pg_temp.act_as_user_until ('d1700000-0000-4000-8000-0000000000b6', now() + interval '10 minutes');
+
+select pg_temp.holds (
+    'yet b6 is read-only from the deadline itself',
+    $q$select public.caller_seat_read_only ()$q$
+);
+
+select pg_temp.on_topic ('doc:d1700000-0000-4000-8000-0000000000d1');
+
+select pg_temp.refused (
+    'past the deadline, with no sweep, live ink is refused',
+    $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
+       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+               (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'past the deadline, with no sweep, the storage write is refused',
+    $q$insert into storage.objects (bucket_id, name, owner, metadata)
+       values ('scores', 'd1700000-0000-4000-8000-0000000000d6/original.pdf',
+               'd1700000-0000-4000-8000-0000000000b6', '{"size": 6}')
+       on conflict (bucket_id, name collate "C") where archived_at is null do update set metadata = excluded.metadata$q$,
+    '42501'
+);
+
+select pg_temp.act_as_user ('d1700000-0000-4000-8000-0000000000b6');
+
+-- ===========================================================================
 -- Nobody asks about anyone else
 -- ===========================================================================
 select pg_temp.refused (

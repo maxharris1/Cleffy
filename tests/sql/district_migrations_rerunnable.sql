@@ -5,8 +5,9 @@
 -- 20261020180600_read_only_seats_enforced.sql,
 -- 20261020180700_read_only_seats_storage.sql,
 -- 20261020180800_read_only_seats_live_ink.sql,
--- 20261020180900_district_paying_status.sql and
--- 20261020181000_district_contract_end_clamp.sql, in order, TWICE on top of a
+-- 20261020180900_district_paying_status.sql,
+-- 20261020181000_district_contract_end_clamp.sql and
+-- 20261020181100_read_only_seats_grace_deadline.sql, in order, TWICE on top of a
 -- database that already has them, inside one transaction ending in ROLLBACK,
 -- then checks that the second run changed nothing it should not: every table,
 -- column, index, trigger, constraint, policy and cron job exists once, the
@@ -97,6 +98,7 @@ select
 \ir ../../supabase/migrations/20261020180800_read_only_seats_live_ink.sql
 \ir ../../supabase/migrations/20261020180900_district_paying_status.sql
 \ir ../../supabase/migrations/20261020181000_district_contract_end_clamp.sql
+\ir ../../supabase/migrations/20261020181100_read_only_seats_grace_deadline.sql
 
 \ir ../../supabase/migrations/20261020180400_district_seat_overrides.sql
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
@@ -105,6 +107,7 @@ select
 \ir ../../supabase/migrations/20261020180800_read_only_seats_live_ink.sql
 \ir ../../supabase/migrations/20261020180900_district_paying_status.sql
 \ir ../../supabase/migrations/20261020181000_district_contract_end_clamp.sql
+\ir ../../supabase/migrations/20261020181100_read_only_seats_grace_deadline.sql
 
 reset role;
 
@@ -176,13 +179,13 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'each read-only seat policy exists once',
-    $q$select count(*) = 8
+    $q$select count(*) = 9
        from pg_policies
        where policyname in (
            'annotations_seat_read_only_insert', 'annotations_seat_read_only_update',
            'annotation_snapshots_seat_read_only_insert', 'doc_topic_seat_read_only_broadcast',
            'share_links_seat_read_only_insert', 'scores_seat_read_only_insert', 'scores_seat_read_only_update',
-           'scores_seat_read_only_delete'
+           'scores_seat_read_only_delete', 'doc_topic_seat_grace_broadcast'
        )$q$
 );
 

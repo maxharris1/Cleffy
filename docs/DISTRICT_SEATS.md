@@ -59,6 +59,16 @@ to the district's subscription. Schema and reasoning:
   topic rotation is deployed, those scores are also moved to fresh realtime
   topics, which cuts such an app off at once. `public.seat_read_only_since`
   records who is read-only.
+- **A grace period the clock ends stops live ink at the deadline itself**
+  (decision 26; migration `20261020181100_read_only_seats_grace_deadline.sql`).
+  Realtime keeps a channel's send answer until the token changes, so a
+  district member whose seat rests on a past-due subscription is refused
+  live-ink broadcasts whenever the grace ends before the token being
+  authorized expires: no answer Realtime holds can outlive the deadline. In
+  practice the district loses live ink (not marks, which still save and sync)
+  for the last token lifetime, at most an hour, of its grace; paying ends it at
+  the next token refresh. Marks, uploads and every other write are checked per
+  request against the clock and stop at the deadline itself, with no sweep.
 - Every set, change and clear (including a hand-run SQL statement, and the
   cascade when a studio or its owner is deleted) is logged in
   `public.studio_seat_override_log`.
