@@ -45,6 +45,13 @@
 -- tests/sql/cancel_link_tombstone_race.sql proves it with two sessions racing
 -- a third.
 --
+-- And whether a saved link still works is the database's call too (the
+-- round-5 major 2, still open): read_cancel_link_token, below, answers for a
+-- link only while it is unused and unexpired on clock_timestamp(), and the
+-- cancel page acts on that alone -- the edge function's clock no longer
+-- decides that a link has expired, nor (cancelFlow.ts) refuses a send.
+-- tests/sql/cancel_link_read_db_clock.sql proves the read.
+--
 -- Safe to re-run: every function is CREATE OR REPLACE, every trigger is
 -- dropped before it is made, the index is IF NOT EXISTS (and the one it
 -- replaces dropped IF EXISTS), the de-duplication changes nothing once there
@@ -344,3 +351,29 @@ $$;
 
 revoke all on function public.billing_mail_outbox_tick () from public, anon, authenticated;
 grant execute on function public.billing_mail_outbox_tick () to service_role;
+
+-- ---------------------------------------------------------------------------
+-- read_cancel_link_token: whether a link still works, on the database's clock
+-- ---------------------------------------------------------------------------
+-- (Codex round 6 on #62, the round-5 major 2 still open; decisions 30 and
+-- 34.) The cancel page read the token's row and compared its expiry with the
+-- edge function's clock: ahead, it turned away a link the database holds
+-- good; behind, it opened one that had run out. Now the database answers
+-- only for a link that is unused and unexpired on clock_timestamp() --
+-- {"user_id", "mode"} -- and null for anything else, and billing-cancel acts
+-- on that answer alone. The service role only, like the table.
+create or replace function public.read_cancel_link_token (p_hash text)
+returns jsonb
+language sql
+volatile
+set search_path = ''
+as $$
+    select jsonb_build_object('user_id', t.user_id, 'mode', t.mode)
+    from public.billing_cancel_tokens t
+    where t.token_hash = p_hash
+      and t.used_at is null
+      and t.expires_at > pg_catalog.clock_timestamp()
+$$;
+
+revoke all on function public.read_cancel_link_token (text) from public, anon, authenticated;
+grant execute on function public.read_cancel_link_token (text) to service_role;

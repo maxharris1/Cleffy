@@ -70,18 +70,22 @@ Deno.serve((req) =>
             }
             return data?.created_at ? Date.parse(data.created_at) : null;
         },
+        // Used or expired is the database's answer, on its own clock
+        // (read_cancel_link_token, migration 20261020160600): it answers only
+        // for a link that is neither.
         readToken: async (hash) => {
-            const { data, error } = await admin()
-                .from('billing_cancel_tokens')
-                .select('user_id, mode, expires_at, used_at')
-                .eq('token_hash', hash)
-                .maybeSingle();
+            const { data, error } = await admin().rpc('read_cancel_link_token', { p_hash: hash });
             if (error) {
                 throw new Error(`could not read the cancel link: ${error.message}`);
             }
-            return data
-                ? { userId: data.user_id, mode: data.mode, expiresAt: data.expires_at, usedAt: data.used_at }
-                : null;
+            if (data === null) {
+                return null;
+            }
+            const { user_id: userId, mode } = data as { user_id?: unknown; mode?: unknown };
+            if (typeof userId !== 'string' || (mode !== 'live' && mode !== 'test')) {
+                throw new Error(`read_cancel_link_token answered ${JSON.stringify(data)}`);
+            }
+            return { userId, mode };
         },
         consumeToken: async (hash, nowIso) => {
             const { data, error } = await admin()

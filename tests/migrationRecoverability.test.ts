@@ -473,7 +473,11 @@ describe('20261020160600_cancel_link_serialized_history — replays cleanly', ()
         for (const trigger of text.matchAll(/create\s+trigger\s+([a-z_]+)\s+[\s\S]*?\son\s+(public\.[a-z_]+)/gi)) {
             expect(text).toContain(`drop trigger if exists ${trigger[1]} on ${trigger[2]}`);
         }
-        for (const fn of ['save_cancel_link_token_v2 (uuid, uuid, text, uuid)', 'billing_mail_outbox_tick ()']) {
+        for (const fn of [
+            'save_cancel_link_token_v2 (uuid, uuid, text, uuid)',
+            'billing_mail_outbox_tick ()',
+            'read_cancel_link_token (text)',
+        ]) {
             expect(text).toContain(`grant execute on function public.${fn} to service_role`);
         }
     });

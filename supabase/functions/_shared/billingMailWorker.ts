@@ -104,7 +104,6 @@ const cancelLinkDeps = (): CancelLinkDeps => ({
     sendEmail: sendBillingEmail,
     idempotencyKey: resendIdempotencyKey,
     terms: billingTerms,
-    now: () => Date.now(),
     logError: (code, err) => logError('billing-cancel', err, { code }),
 });
 

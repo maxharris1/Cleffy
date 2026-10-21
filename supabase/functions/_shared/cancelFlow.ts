@@ -51,10 +51,12 @@ export const CANCEL_LINK_TTL_MS = 60 * 60_000;
 
 /**
  * The least of a link's hour that must be left, on the DATABASE's clock, for
- * it to be sent (Codex round 5 on #62, decision 30): save_cancel_link_token_v2
- * (migrations 20261020160400 and 20261020160500) refuses below it and answers how many seconds
- * are left, and the send is decided on that answer, never on this function's
- * own clock -- which may be behind. What it leaves covers the send itself.
+ * it to be sent (Codex round 5 on #62, decisions 30 and 34):
+ * save_cancel_link_token_v2 (migrations 20261020160400 to 20261020160600)
+ * refuses below it and answers how many seconds are left, and the send is
+ * decided on that answer alone. This module has no clock of its own for a
+ * link's expiry -- ahead or behind, the edge function's would get it wrong
+ * either way (Codex round 6). What the margin leaves covers the send itself.
  */
 export const CANCEL_LINK_SEND_MARGIN_S = 120;
 
@@ -105,11 +107,13 @@ export interface LiveSubscription {
     endsAt: string | null;
 }
 
-export interface StoredCancelToken {
+/**
+ * A link the database says can still be used: unused, and unexpired on its
+ * own clock (read_cancel_link_token, migration 20261020160600).
+ */
+export interface LiveCancelToken {
     userId: string;
     mode: StripeMode;
-    expiresAt: string;
-    usedAt: string | null;
 }
 
 type Gate = { ok: true } | { ok: false; retryAfterSec: number };
@@ -200,7 +204,6 @@ export interface CancelLinkDeps {
     sendEmail: SendEmail;
     idempotencyKey: IdempotencyKey;
     terms: Pick<typeof BillingTerms, 'cancelLinkEmail' | 'BILLING_PATHS'>;
-    now: () => number;
     logError: (code: string, err: unknown) => void;
 }
 
@@ -221,7 +224,12 @@ export interface CancelDeps {
     cancellableSubscription: (userId: string, mode: StripeMode) => Promise<CancellableSubscription | null>;
     /** Earliest subscription this account ever started in this mode (ms), for the refund window. */
     firstPurchaseAt: (userId: string, mode: StripeMode) => Promise<number | null>;
-    readToken: (hash: string) => Promise<StoredCancelToken | null>;
+    /**
+     * The token's account and mode if the DATABASE says it can still be used
+     * -- unused, and unexpired on its clock -- else null. Its expiry is never
+     * compared with this function's clock.
+     */
+    readToken: (hash: string) => Promise<LiveCancelToken | null>;
     /** Marks the token used if it still is not; false when another request got there first. */
     consumeToken: (hash: string, nowIso: string) => Promise<boolean>;
     /** Stripe's own copy of the subscription; null when Stripe has no such subscription. */
@@ -311,10 +319,10 @@ const SPENT: Delivery = { outcome: 'expired', reason: 'cancel link already spent
  *               (Codex round 3, new major on #62) and the retry carries the
  *               same Idempotency-Key and the same link, so it is not a second
  *               email;
- *  * `expired` -- the link's hour, counted from when it was asked for, ran out
- *               before it could go (Codex round 4 on #62), or the database
- *               says less than CANCEL_LINK_SEND_MARGIN_S of it is left, or the
- *               link was spent and deleted before (Codex round 5): nothing is
+ *  * `expired` -- the database says less than CANCEL_LINK_SEND_MARGIN_S of the
+ *               link's hour, counted from when it was asked for, is left
+ *               (Codex rounds 4-6 on #62), or the link was spent and deleted
+ *               before (round 5), or the row has no expiry at all: nothing is
  *               sent, the row is settled for good, and what earlier attempts
  *               reserved stays reserved -- one of them may have reached
  *               Resend, and a reservation is only handed back when nothing
@@ -330,13 +338,12 @@ export const deliverCancelLink = async (
     rowId: string,
     lease: CancelLinkLease,
 ): Promise<Delivery> => {
-    // Before anything is counted or looked up: an expired link is never
-    // emailed, and its row is never tried again. A row without an expiry is
-    // one nobody can say is still good, so it is treated the same. This
-    // clock may only ever refuse early; whether the link is sent is the
-    // database's answer below.
+    // A row without an expiry is one nobody can say is still good: never
+    // emailed, never tried again. Whether a row WITH one is still good is not
+    // decided here -- this function's clock may be ahead or behind (Codex
+    // round 6 on #62) -- but by the database, on its clock, below.
     const expiresAtMs = Date.parse(lease.linkExpiresAt ?? '');
-    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= deps.now()) {
+    if (!Number.isFinite(expiresAtMs)) {
         return EXPIRED;
     }
     const secret = deps.secret();
@@ -431,10 +438,11 @@ export const deliverCancelLink = async (
     if (saved.answer === 'spent') {
         return SPENT;
     }
-    // The final send decision: the database's count of the seconds left,
-    // read on its clock once it held the row (Codex round 5 on #62). This
-    // function's clock is not consulted -- behind, it would send a link the
-    // database has already called expired.
+    // The send decision: the database's count of the seconds left, read on
+    // its clock as the save's last step, after everything it waited for
+    // (Codex rounds 5 and 6 on #62). This function's clock is not consulted
+    // -- behind, it would send a link the database has already called
+    // expired; ahead, it would refuse one the database holds good.
     if (saved.answer !== 'saved' || saved.remainingSeconds < CANCEL_LINK_SEND_MARGIN_S) {
         return EXPIRED;
     }
@@ -467,18 +475,20 @@ export const deliverCancelLink = async (
     return { outcome: 'retry', reason: `resend unknown: ${sent.reason}`, uncertain: true };
 };
 
-/** The token's row, if it can still be used. */
+/** The token's account, if the database says it can still be used. */
 const liveToken = async (
     deps: CancelDeps,
     token: unknown,
-): Promise<{ hash: string; row: StoredCancelToken } | null | 'error'> => {
+): Promise<{ hash: string; row: LiveCancelToken } | null | 'error'> => {
     if (typeof token !== 'string' || token.length < 16 || token.length > 200) {
         return null;
     }
     try {
         const hash = await deps.sha256Hex(token);
+        // Used or expired is the database's answer, on its clock (Codex round
+        // 6 on #62): it answers only for a link that is neither.
         const row = await deps.readToken(hash);
-        if (!row || row.usedAt !== null || Date.parse(row.expiresAt) <= deps.now()) {
+        if (!row) {
             return null;
         }
         return { hash, row };
@@ -490,7 +500,7 @@ const liveToken = async (
 
 interface Resolved {
     hash: string;
-    row: StoredCancelToken;
+    row: LiveCancelToken;
     email: string | null;
     subscription: CancellableSubscription | null;
     firstPurchaseAt: number | null;

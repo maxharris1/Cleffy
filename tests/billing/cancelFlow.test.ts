@@ -18,7 +18,6 @@ import {
     type CancelLinkRequest,
     type CancellableSubscription,
     type LiveSubscription,
-    type StoredCancelToken,
 } from '../../supabase/functions/_shared/cancelFlow';
 import { resendIdempotencyKey, sendViaResend } from '../../supabase/functions/_shared/resendDelivery';
 import { liveSubscriptionOf } from '../../supabase/functions/_shared/stripeEvents';
@@ -46,6 +45,14 @@ const post = (body: unknown) =>
     });
 
 const sha256Hex = async (value: string) => createHash('sha256').update(value).digest('hex');
+
+/** billing_cancel_tokens, modelled: a link's stored row. */
+interface StoredToken {
+    userId: string;
+    mode: StripeMode;
+    expiresAt: string;
+    usedAt: string | null;
+}
 
 const harness = (
     options: {
@@ -78,9 +85,16 @@ const harness = (
          * link on its own clock (Codex round 5 on #62).
          */
         dbAheadMs?: number;
+        /**
+         * How far the edge function's clock runs ahead of the one the test
+         * moves (negative: behind) -- the database's, when dbAheadMs is 0.
+         * Neither the send nor the link's expiry is decided on it (Codex
+         * round 6 on #62); skewEdge moves it on its own.
+         */
+        edgeAheadMs?: number;
     } = {},
 ) => {
-    const tokens = new Map<string, StoredCancelToken>();
+    const tokens = new Map<string, StoredToken>();
     const sent: Array<{ to: string; subject: string; text: string; replyTo?: string; idempotencyKey: string }> = [];
     const limiter = new Map<string, number>();
     const refunded: string[] = [];
@@ -93,7 +107,9 @@ const harness = (
     const outbox = new Map<string, { mode: StripeMode; claimToken: string; linkExpiresAt: string }>();
     let rows = 0;
     let claims = 0;
-    const clock = { now: NOW };
+    const clock = { now: NOW, edgeAheadMs: options.edgeAheadMs ?? 0 };
+    const edgeNow = () => clock.now + clock.edgeAheadMs;
+    const dbNow = () => clock.now + (options.dbAheadMs ?? 0);
     const deliveries: Delivery[] = [];
     const subscription: CancellableSubscription | null =
         options.subscription === undefined
@@ -189,7 +205,12 @@ const harness = (
         emailOfUser: async () => EMAIL,
         cancellableSubscription,
         firstPurchaseAt: async () => (options.firstPurchaseAt === undefined ? NOW - 3 * DAY : options.firstPurchaseAt),
-        readToken: async (hash) => tokens.get(hash) ?? null,
+        // read_cancel_link_token, modelled: the database answers only for a
+        // link that is unused and unexpired on ITS clock.
+        readToken: async (hash) => {
+            const row = tokens.get(hash);
+            return row && row.usedAt === null && Date.parse(row.expiresAt) > dbNow() ? row : null;
+        },
         consumeToken: async (hash, nowIso) => {
             const row = tokens.get(hash);
             if (!row || row.usedAt !== null) {
@@ -221,7 +242,7 @@ const harness = (
         idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
         planNameForPrice: (priceId) => (priceId === 'price_teacher_monthly' ? 'Teacher' : null),
-        now: () => clock.now,
+        now: edgeNow,
         logError: (code) => errors.push(code),
     };
     const linkDeps: CancelLinkDeps = {
@@ -251,7 +272,7 @@ const harness = (
             if (!row || row.claimToken !== claimToken) {
                 return { answer: 'not_held', remainingSeconds: 0 };
             }
-            const left = Math.floor((Date.parse(row.linkExpiresAt) - (clock.now + (options.dbAheadMs ?? 0))) / 1000);
+            const left = Math.floor((Date.parse(row.linkExpiresAt) - dbNow()) / 1000);
             if (left < CANCEL_LINK_SEND_MARGIN_S) {
                 return { answer: 'expired', remainingSeconds: Math.max(0, left) };
             }
@@ -263,9 +284,12 @@ const harness = (
         sendEmail,
         idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
-        now: () => clock.now,
         logError: (code) => errors.push(code),
     };
+    // deliverCancelLink reads no clock of its own (Codex round 6 on #62). The
+    // edge clock is handed in all the same, under the name it once read, so
+    // a change that consults it again meets edgeAheadMs and skewEdge.
+    Object.assign(linkDeps, { now: edgeNow });
     /**
      * The outbox worker, after the response: delivers everything queued, and
      * keeps what it is told to retry, as settle_billing_mail does.
@@ -299,7 +323,26 @@ const harness = (
     const later = (ms: number) => {
         clock.now += ms;
     };
-    return { deps, linkDeps, tokens, sent, refunded, errors, trace, queue, outbox, flush, newHour, later, deliveries };
+    /** The edge function's clock alone jumping, the database's staying put. */
+    const skewEdge = (ms: number) => {
+        clock.edgeAheadMs += ms;
+    };
+    return {
+        deps,
+        linkDeps,
+        tokens,
+        sent,
+        refunded,
+        errors,
+        trace,
+        queue,
+        outbox,
+        flush,
+        newHour,
+        later,
+        skewEdge,
+        deliveries,
+    };
 };
 
 const body = async (response: Response) => (await response.json()) as Record<string, unknown>;
@@ -515,6 +558,22 @@ describe('billing-cancel: asking for a link', () => {
                 // Refused after the budget was counted: it stays counted, as for
                 // any refusal an earlier attempt's unknown outcome may lie behind.
                 expect(h.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+            });
+
+            it('the edge clock running ahead at entry does not refuse a link the database says is good (Codex round 6 on #62)', async () => {
+                // By the edge function's clock the link expired an hour ago;
+                // the database, whose clock decides, gives it its whole hour.
+                const h = harness({ edgeAheadMs: 2 * CANCEL_LINK_TTL_MS });
+                await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+                expect(await h.flush()).toEqual([{ outcome: 'sent' }]);
+                expect(h.sent).toHaveLength(1);
+                expect(h.errors).toEqual([]);
+                const token = tokenFrom(h.sent[0]?.text ?? '');
+                // Good for the hour the database fixed, and the email says so.
+                expect(h.tokens.get(await sha256Hex(token))?.expiresAt).toBe(
+                    new Date(NOW + CANCEL_LINK_TTL_MS).toISOString(),
+                );
+                expect(h.sent[0]?.text).toContain(`until ${billingTerms.formatUtc(NOW + CANCEL_LINK_TTL_MS)}`);
             });
 
             it("sends on the database's count of the seconds left, not the edge function's", async () => {
@@ -791,6 +850,30 @@ describe('billing-cancel: using the link', () => {
         expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
     });
 
+    describe("whether the link has expired is the database's call, on its clock (Codex round 6 on #62)", () => {
+        it('a link the database holds good opens and cancels however far ahead the edge clock runs', async () => {
+            const h = await linked();
+            h.skewEdge(2 * CANCEL_LINK_TTL_MS);
+
+            expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(200);
+            const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+            expect(await body(response)).toMatchObject({ cancelled: true });
+            expect(h.deps.cancelAtPeriodEnd).toHaveBeenCalledWith('sub_1', 'live');
+            expect(h.tokens.get(await sha256Hex(h.token))?.usedAt).not.toBeNull();
+        });
+
+        it('a link past its expiry on the database is refused however far behind the edge clock runs', async () => {
+            const h = await linked();
+            h.later(CANCEL_LINK_TTL_MS + 1000);
+            // By the edge function's clock the link was asked for a moment ago.
+            h.skewEdge(-CANCEL_LINK_TTL_MS);
+
+            expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(404);
+            expect((await handleCancel(post({ action: 'cancel', token: h.token }), h.deps)).status).toBe(404);
+            expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+        });
+    });
+
     it('does not call Stripe again for a subscription Stripe says is already set to cancel', async () => {
         const h = await linked({
             subscription: {
@@ -947,10 +1030,37 @@ describe('billing-cancel/index.ts is wiring only', () => {
         expect(CANCEL_LINK_SEND_MARGIN_S).toBe(120);
         expect(migration).toContain("v_expires - clock_timestamp() < interval '120 seconds'");
         const flow = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/cancelFlow.ts'), 'utf8');
-        // The one comparison against the edge clock left is the early refusal,
-        // before anything is counted; the send itself waits on the database.
-        expect(flow.match(/<= deps\.now\(\)/g)).toHaveLength(2);
         expect(flow).toContain('saved.remainingSeconds < CANCEL_LINK_SEND_MARGIN_S');
+    });
+
+    it('decides no expiry on the edge clock, anywhere in the flow (Codex round 6 on #62, decision 34)', () => {
+        const flow = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/cancelFlow.ts'), 'utf8');
+        const code = flow.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+        // No comparison with the edge clock, either way round, and no clock of
+        // its own: the send goes on the database's seconds left, and a link's
+        // expiry is read_cancel_link_token's answer.
+        expect(code).not.toMatch(/[<>]=?\s*deps\.now\(\)/);
+        expect(code).not.toMatch(/deps\.now\(\)\s*[<>]=?/);
+        expect(code).not.toMatch(/Date\.now\(\)/);
+        expect(code).not.toMatch(/expiresAt\b/);
+        // deliverCancelLink is given no clock at all.
+        const deliver = code.slice(code.indexOf('export const deliverCancelLink'), code.indexOf('const liveToken'));
+        expect(deliver).not.toMatch(/\bnow\b/);
+        const linkDepsType = code.slice(
+            code.indexOf('export interface CancelLinkDeps'),
+            code.indexOf('export interface CancelDeps'),
+        );
+        expect(linkDepsType).not.toMatch(/\bnow\s*:/);
+        // The token is read through the database's own expiry check.
+        expect(source).toContain("rpc('read_cancel_link_token', { p_hash: hash })");
+        expect(source).not.toContain('expires_at');
+        const migration = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20261020160600_cancel_link_serialized_history.sql'),
+            'utf8',
+        );
+        expect(migration).toMatch(
+            /function public\.read_cancel_link_token[\s\S]*?t\.used_at is null\s+and t\.expires_at > pg_catalog\.clock_timestamp\(\)/,
+        );
     });
 
     it("reads the subscription back from Stripe rather than trusting the mirror's copy", () => {

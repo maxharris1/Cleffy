@@ -239,14 +239,35 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         sendEmail: sendBillingEmail,
         idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
-        now: () => Date.now(),
         logError: () => undefined,
     });
 
-    /** Whether the link would open the cancel page: cancelFlow.ts liveToken's test, on the stored row. */
+    /**
+     * Whether the link would open the cancel page: billing-cancel readToken's
+     * question, answered by the database on its own clock (Codex round 6 on #62).
+     */
     const linkWorks = async (hash: string) => {
-        const token = await tokenRow(hash);
-        return token !== null && token.used_at === null && Date.parse(token.expires_at) > Date.now();
+        const { data, error } = await db.rpc('read_cancel_link_token', { p_hash: hash });
+        ok({ error }, 'read the link');
+        return data !== null;
+    };
+
+    /**
+     * The database's clock passing the link's hour: the request's expiry, and
+     * the saved link's if there is one, brought forward to a minute ago (the
+     * one way either may move). Faking the edge function's clock does nothing
+     * any more -- neither the send nor the link's expiry is decided on it.
+     */
+    const expireOnDbClock = async (rowId: string, hash: string) => {
+        const past = new Date(Date.now() - 60_000).toISOString();
+        ok(
+            await db.from('billing_mail_outbox').update({ link_expires_at: past }).eq('id', rowId),
+            'expire the request',
+        );
+        ok(
+            await db.from('billing_cancel_tokens').update({ expires_at: past }).eq('token_hash', hash),
+            'expire the link',
+        );
     };
 
     const hashOf = async (rowId: string) => sha256(await store.cancelLinkToken('cancel-link-store-test-secret', rowId));
@@ -306,9 +327,9 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         expect(resend.delivered).toHaveLength(1);
         expect(await linkWorks(hash)).toBe(true);
 
-        // The worker comes round to it an hour and a minute after it was asked for.
-        vi.useFakeTimers({ toFake: ['Date'] });
-        vi.setSystemTime(createdAt + HOUR + 60_000);
+        // The worker comes round to it after its hour is over, on the
+        // database's clock.
+        await expireOnDbClock(rowId, hash);
         await makeDue(rowId);
         await drainBillingMailNow();
         expect(resend.requests).toHaveLength(1);
@@ -322,7 +343,7 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         await makeDue(rowId);
         await drainBillingMailNow();
         expect(resend.requests).toHaveLength(1);
-        expect(Date.parse(String((await tokenRow(hash))?.expires_at))).toBe(createdAt + HOUR);
+        expect(Date.parse(String((await tokenRow(hash))?.expires_at))).toBeLessThanOrEqual(createdAt + HOUR);
         expect(await linkWorks(hash)).toBe(false);
     });
 
@@ -354,20 +375,17 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         expect(await spend(hash, new Date().toISOString())).toBe(1);
         expect(await linkWorks(hash)).toBe(false);
 
-        // The row's next turn comes more than a day after the link expired.
-        vi.useFakeTimers({ toFake: ['Date'] });
-        vi.setSystemTime(createdAt + 26 * HOUR);
+        // The row's next turn comes after the link expired, on the
+        // database's clock.
+        await expireOnDbClock(rowId, hash);
         await makeDue(rowId);
         await drainBillingMailNow();
+        expect(resend.requests).toHaveLength(1);
         expect(await linkWorks(hash)).toBe(false);
 
-        // The cleanup runs, with the token expired by the database's clock too.
-        vi.useRealTimers();
-        await db
-            .from('billing_cancel_tokens')
-            .update({ expires_at: new Date(Date.now() - 60_000).toISOString() })
-            .eq('token_hash', hash);
+        // The cleanup runs.
         ok(await db.rpc('billing_mail_outbox_tick'), 'tick');
+        expect(await tokenRow(hash)).toBeNull();
 
         // And the row is retried.
         vi.useFakeTimers({ toFake: ['Date'] });
@@ -531,5 +549,35 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         expect(refused.remainingSeconds).toBeLessThan(120);
         expect(await tokenRow(lateHash)).toBeNull();
         expect(await outboxRow(late.rowId)).toMatchObject({ status: 'expired', last_error: 'expired before delivery' });
+    });
+
+    it('sends, and the link opens, on the database clock alone: an edge clock two hours ahead changes nothing (Codex round 6 on #62)', async () => {
+        const { rowId } = await subscriber();
+        const hash = await hashOf(rowId);
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(Date.now() + 2 * HOUR);
+
+        await drainBillingMailNow();
+        expect(resend.delivered).toHaveLength(1);
+        expect(await outboxRow(rowId)).toBeNull();
+        expect(await linkWorks(hash)).toBe(true);
+
+        // Its expiry passing on the database's clock is what ends it -- and a
+        // used link is refused whatever its expiry.
+        vi.useRealTimers();
+        ok(
+            await db
+                .from('billing_cancel_tokens')
+                .update({ expires_at: new Date(Date.now() - 1000).toISOString() })
+                .eq('token_hash', hash),
+            'expire the link',
+        );
+        expect(await linkWorks(hash)).toBe(false);
+        const other = await subscriber();
+        await drainBillingMailNow();
+        const otherHash = await hashOf(other.rowId);
+        expect(await linkWorks(otherHash)).toBe(true);
+        expect(await spend(otherHash, new Date().toISOString())).toBe(1);
+        expect(await linkWorks(otherHash)).toBe(false);
     });
 });
