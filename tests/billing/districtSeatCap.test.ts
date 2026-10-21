@@ -227,7 +227,10 @@ describe('the seat-cap migration', () => {
         for (const table of ['district_billing', 'district_billing_log']) {
             expect(SQL).toMatch(new RegExp(`alter table public\\.${table} enable row level security;`, 'i'));
             for (const role of ['public', 'anon', 'authenticated']) {
-                expect(SQL).toMatch(new RegExp(`revoke all on table public\\.${table} from ${role};`, 'i'));
+                // district_billing's canonical block revokes them in one statement.
+                expect(SQL).toMatch(
+                    new RegExp(`revoke all on table public\\.${table} from (?:[a-z_]+, )*${role}(?:, [a-z_]+)*;`, 'i'),
+                );
             }
             expect(SQL).not.toMatch(new RegExp(`grant [^;]+ on table public\\.${table} to (anon|authenticated)`, 'i'));
             expect(SQL).not.toMatch(new RegExp(`create policy [^;]+ on public\\.${table}`, 'i'));

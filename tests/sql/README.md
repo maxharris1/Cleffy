@@ -179,6 +179,18 @@ student with Edit keep writing; paying again lifts it immediately; and nobody
 can ask about another user's seat. It reports `failures | total` on its last
 line.
 
+`district_billing_canonical.sql` proves the canonical `public.district_billing`
+definition (the marked block in
+`supabase/migrations/20261020180500_district_seat_cap_and_grace.sql`, copied
+byte for byte into PR #64's `20261021120700_district_retention.sql`;
+`tests/billing/districtBillingCanonical.test.ts` holds the copies equal) is
+rerunnable on its own: with the table removed inside the transaction, the block
+alone builds it, and running it again leaves the same columns, constraints
+(each once, by name), indexes, RLS and grants (the service role's SELECT, and
+nothing for any client role); the source/date constraints refuse an unknown
+source, a Stripe source with no date and a date with no source, while an
+admin may pin null. It reports `failures | total` on its last line.
+
 `edge_rate_limit_refund.sql` proves
 `supabase/migrations/20261011120101_refund_edge_rate_limit.sql`: a refund hands
 back one use of a bucket inside its window (never below zero, never into the
