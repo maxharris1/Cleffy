@@ -677,9 +677,28 @@ export type Database = {
                 Args: Record<string, never>;
                 Returns: boolean;
             };
-            // Moderators only (42501 otherwise); parsed in moderationApi.ts.
-            moderation_queue: {
-                Args: Record<string, never>;
+            // Moderators only (42501 otherwise), a page at a time; parsed in
+            // moderationApi.ts.
+            moderation_reports: {
+                Args: {
+                    p_status?: 'open' | 'decided' | 'all';
+                    p_after_created_at?: string;
+                    p_after_id?: string;
+                    p_limit?: number;
+                };
+                Returns: unknown;
+            };
+            moderation_takedowns: {
+                Args: {
+                    p_state?: 'active' | 'lifted' | 'all';
+                    p_after_created_at?: string;
+                    p_after_id?: string;
+                    p_limit?: number;
+                };
+                Returns: unknown;
+            };
+            moderation_log: {
+                Args: { p_before_id?: number; p_limit?: number };
                 Returns: unknown;
             };
             // Storage-policy helper: the caller owned this deleted score's folder

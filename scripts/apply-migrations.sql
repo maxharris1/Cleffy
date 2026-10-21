@@ -9722,7 +9722,8 @@ grant execute on function public.library_documents (text, timestamptz, text, uui
 --
 -- Every write goes through the service role, from those two functions. The
 -- browser can only ask whether it is a moderator (is_content_moderator) and,
--- if it is, read the queue (moderation_queue). Moderators are granted by hand:
+-- if it is, read the reports, takedowns and log a page at a time
+-- (moderation_reports, moderation_takedowns, moderation_log). Moderators are granted by hand:
 --
 --     insert into public.content_moderators (user_id, note) values ('<uuid>', 'Max');
 --
@@ -10061,61 +10062,261 @@ revoke all on function public.reject_content_report (uuid, text, uuid) from auth
 grant execute on function public.reject_content_report (uuid, text, uuid) to service_role;
 
 -- ---------------------------------------------------------------------------
--- The moderator's read: the queue, the takedowns with each uploader's strike
--- count, and the notice log. Refuses everyone else.
+-- The moderator's read: reports, takedowns (with each uploader's strike
+-- count) and the notice log, each a page at a time. Refuses everyone else.
 -- ---------------------------------------------------------------------------
+-- Keyset pagination, never a fixed cap: a list that stopped at its newest 200
+-- rows would let an older open report, or an older live takedown and its lift
+-- control, drop out of reach as newer ones arrive. Each call answers
+-- {rows, total, next}: `next` is the cursor for the following page (null on
+-- the last) and `total` counts the whole filtered set, so the page can say how
+-- many are waiting. The filters are the ones a moderator works from: open
+-- reports (oldest first, the queue order) or decided ones, live takedowns or
+-- lifted ones.
 
-create or replace function public.moderation_queue () returns jsonb language plpgsql stable security definer
+-- An earlier draft of this migration had one capped moderation_queue(); no
+-- client calls it any more.
+drop function if exists public.moderation_queue ();
+
+create index if not exists content_reports_status_created_idx on public.content_reports (status, created_at, id);
+create index if not exists content_takedowns_created_idx on public.content_takedowns (created_at desc, id desc);
+
+create or replace function public.moderation_reports (
+    p_status text default 'open',
+    p_after_created_at timestamptz default null,
+    p_after_id uuid default null,
+    p_limit integer default 25
+) returns jsonb language plpgsql stable security definer
 set search_path = public as $$
+declare
+    v_limit int := least(greatest(coalesce(p_limit, 25), 1), 100);
+    v_open boolean;
+    v_rows jsonb;
+    v_count int;
+    v_total int;
+begin
+    if not public.is_content_moderator () then
+        raise exception 'not a moderator' using errcode = '42501';
+    end if;
+    if p_status not in ('open', 'decided', 'all') then
+        raise exception 'unknown report filter: %', p_status using errcode = '22023';
+    end if;
+    if (p_after_created_at is null) <> (p_after_id is null) then
+        raise exception 'report cursor is incomplete' using errcode = '22023';
+    end if;
+    -- Open reports read oldest first, so the one waiting longest is on top;
+    -- the rest newest first.
+    v_open := p_status = 'open';
+
+    with filtered as (
+        select cr.*
+        from public.content_reports cr
+        where (p_status = 'all'
+               or (p_status = 'open' and cr.status = 'received')
+               or (p_status = 'decided' and cr.status <> 'received'))
+    ),
+    page as (
+        select f.*,
+               row_number() over (
+                   order by
+                       case when v_open then f.created_at end asc,
+                       case when v_open then f.id end asc,
+                       case when not v_open then f.created_at end desc,
+                       case when not v_open then f.id end desc
+               ) as rn
+        from filtered f
+        where p_after_id is null
+           or (v_open and (f.created_at, f.id) > (p_after_created_at, p_after_id))
+           or (not v_open and (f.created_at, f.id) < (p_after_created_at, p_after_id))
+    ),
+    limited as (
+        select * from page where rn <= v_limit + 1
+    )
+    select
+        coalesce((
+            select jsonb_agg(
+                jsonb_build_object(
+                    'id', l.id,
+                    'reference', l.reference,
+                    'created_at', l.created_at,
+                    'kind', l.kind,
+                    'category', l.category,
+                    'content_url', l.content_url,
+                    'document_id', l.document_id,
+                    'document_title', (select d.title from public.documents d where d.id = l.document_id),
+                    'work_description', l.work_description,
+                    'explanation', l.explanation,
+                    'reporter_name', l.reporter_name,
+                    'reporter_email', l.reporter_email,
+                    -- The complete notice as submitted, attestations included.
+                    'reporter_address', l.reporter_address,
+                    'reporter_phone', l.reporter_phone,
+                    'on_behalf_of', l.on_behalf_of,
+                    'reporter_user_id', l.reporter_user_id,
+                    'good_faith', l.good_faith,
+                    'perjury_statement', l.perjury_statement,
+                    'signature', l.signature,
+                    'status', l.status,
+                    'decided_at', l.decided_at,
+                    'decision_note', l.decision_note,
+                    'acknowledged_at', l.acknowledged_at,
+                    'active_takedown_id', (
+                        select t.id from public.content_takedowns t
+                        where t.document_id = l.document_id and t.lifted_at is null
+                    )
+                )
+                order by l.rn
+            )
+            from limited l
+            where l.rn <= v_limit
+        ), '[]'::jsonb),
+        (select count(*)::int from limited)
+    into v_rows, v_count;
+
+    select count(*)::int into v_total
+    from public.content_reports cr
+    where (p_status = 'all'
+           or (p_status = 'open' and cr.status = 'received')
+           or (p_status = 'decided' and cr.status <> 'received'));
+
+    -- The cursor is the last row served; there is none after the last page.
+    return jsonb_build_object(
+        'rows', v_rows,
+        'total', v_total,
+        'next', case when v_count > v_limit
+                     then jsonb_build_object('created_at', v_rows -> (v_limit - 1) -> 'created_at',
+                                             'id', v_rows -> (v_limit - 1) -> 'id')
+                end
+    );
+end;
+$$;
+
+create or replace function public.moderation_takedowns (
+    p_state text default 'active',
+    p_after_created_at timestamptz default null,
+    p_after_id uuid default null,
+    p_limit integer default 25
+) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_limit int := least(greatest(coalesce(p_limit, 25), 1), 100);
+    v_rows jsonb;
+    v_count int;
+    v_total int;
+begin
+    if not public.is_content_moderator () then
+        raise exception 'not a moderator' using errcode = '42501';
+    end if;
+    if p_state not in ('active', 'lifted', 'all') then
+        raise exception 'unknown takedown filter: %', p_state using errcode = '22023';
+    end if;
+    if (p_after_created_at is null) <> (p_after_id is null) then
+        raise exception 'takedown cursor is incomplete' using errcode = '22023';
+    end if;
+
+    with limited as (
+        select ct.*, row_number() over (order by ct.created_at desc, ct.id desc) as rn
+        from public.content_takedowns ct
+        where (p_state = 'all'
+               or (p_state = 'active' and ct.lifted_at is null)
+               or (p_state = 'lifted' and ct.lifted_at is not null))
+          and (p_after_id is null or (ct.created_at, ct.id) < (p_after_created_at, p_after_id))
+        order by ct.created_at desc, ct.id desc
+        limit v_limit + 1
+    )
+    select
+        coalesce((
+            select jsonb_agg(
+                jsonb_build_object(
+                    'id', l.id,
+                    'document_id', l.document_id,
+                    'document_title', l.document_title,
+                    'report_id', l.report_id,
+                    'uploader_id', l.uploader_id,
+                    'action', l.action,
+                    'ground', l.ground,
+                    'legal_basis', l.legal_basis,
+                    'facts', l.facts,
+                    'created_at', l.created_at,
+                    'lifted_at', l.lifted_at,
+                    'lift_reason', l.lift_reason,
+                    'uploader_active_strikes', case when l.uploader_id is null then 0
+                                                    else public.active_content_strikes (l.uploader_id) end
+                )
+                order by l.rn
+            )
+            from limited l
+            where l.rn <= v_limit
+        ), '[]'::jsonb),
+        (select count(*)::int from limited)
+    into v_rows, v_count;
+
+    select count(*)::int into v_total
+    from public.content_takedowns ct
+    where (p_state = 'all'
+           or (p_state = 'active' and ct.lifted_at is null)
+           or (p_state = 'lifted' and ct.lifted_at is not null));
+
+    -- The cursor is the last row served; there is none after the last page.
+    return jsonb_build_object(
+        'rows', v_rows,
+        'total', v_total,
+        'next', case when v_count > v_limit
+                     then jsonb_build_object('created_at', v_rows -> (v_limit - 1) -> 'created_at',
+                                             'id', v_rows -> (v_limit - 1) -> 'id')
+                end
+    );
+end;
+$$;
+
+-- The log, newest first. Its identity id grows with every insert, so it is
+-- the whole cursor.
+create or replace function public.moderation_log (p_before_id bigint default null, p_limit integer default 50) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_limit int := least(greatest(coalesce(p_limit, 50), 1), 200);
+    v_rows jsonb;
+    v_count int;
 begin
     if not public.is_content_moderator () then
         raise exception 'not a moderator' using errcode = '42501';
     end if;
 
+    with limited as (
+        select nl.id, nl.created_at, nl.report_id, nl.takedown_id, nl.event, nl.recipient, nl.delivery,
+               row_number() over (order by nl.id desc) as rn
+        from public.content_notice_log nl
+        where p_before_id is null or nl.id < p_before_id
+        order by nl.id desc
+        limit v_limit + 1
+    )
+    select
+        coalesce((
+            select jsonb_agg(to_jsonb(l) - 'rn' order by l.rn) from limited l where l.rn <= v_limit
+        ), '[]'::jsonb),
+        (select count(*)::int from limited)
+    into v_rows, v_count;
+
     return jsonb_build_object(
-        'reports', coalesce((
-            select jsonb_agg(to_jsonb(r) order by r.created_at desc)
-            from (
-                select cr.id, cr.reference, cr.created_at, cr.kind, cr.category, cr.content_url,
-                       cr.document_id, d.title as document_title, cr.work_description, cr.explanation,
-                       cr.reporter_name, cr.reporter_email, cr.on_behalf_of, cr.status,
-                       cr.decided_at, cr.decision_note, cr.acknowledged_at,
-                       (select t.id from public.content_takedowns t
-                        where t.document_id = cr.document_id and t.lifted_at is null) as active_takedown_id
-                from public.content_reports cr
-                left join public.documents d on d.id = cr.document_id
-                order by cr.created_at desc
-                limit 200
-            ) r
-        ), '[]'::jsonb),
-        'takedowns', coalesce((
-            select jsonb_agg(to_jsonb(t) order by t.created_at desc)
-            from (
-                select ct.id, ct.document_id, ct.document_title, ct.report_id, ct.uploader_id, ct.action,
-                       ct.ground, ct.legal_basis, ct.facts, ct.created_at, ct.lifted_at, ct.lift_reason,
-                       case when ct.uploader_id is null then 0
-                            else public.active_content_strikes (ct.uploader_id) end as uploader_active_strikes
-                from public.content_takedowns ct
-                order by ct.created_at desc
-                limit 200
-            ) t
-        ), '[]'::jsonb),
-        'log', coalesce((
-            select jsonb_agg(to_jsonb(l) order by l.created_at desc, l.id desc)
-            from (
-                select nl.id, nl.created_at, nl.report_id, nl.takedown_id, nl.event, nl.recipient, nl.delivery
-                from public.content_notice_log nl
-                order by nl.created_at desc, nl.id desc
-                limit 300
-            ) l
-        ), '[]'::jsonb)
+        'rows', v_rows,
+        'next', case when v_count > v_limit
+                     then jsonb_build_object('id', (v_rows -> (v_limit - 1) ->> 'id')::bigint)
+                end
     );
 end;
 $$;
 
-revoke all on function public.moderation_queue () from public;
-revoke all on function public.moderation_queue () from anon;
-grant execute on function public.moderation_queue () to authenticated;
+revoke all on function public.moderation_reports (text, timestamptz, uuid, integer) from public;
+revoke all on function public.moderation_reports (text, timestamptz, uuid, integer) from anon;
+grant execute on function public.moderation_reports (text, timestamptz, uuid, integer) to authenticated;
+
+revoke all on function public.moderation_takedowns (text, timestamptz, uuid, integer) from public;
+revoke all on function public.moderation_takedowns (text, timestamptz, uuid, integer) from anon;
+grant execute on function public.moderation_takedowns (text, timestamptz, uuid, integer) to authenticated;
+
+revoke all on function public.moderation_log (bigint, integer) from public;
+revoke all on function public.moderation_log (bigint, integer) from anon;
+grant execute on function public.moderation_log (bigint, integer) to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Enforcement

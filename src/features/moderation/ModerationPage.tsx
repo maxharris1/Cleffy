@@ -3,15 +3,19 @@ import { Link } from 'react-router';
 
 import {
     ILLEGAL_CATEGORY_LABELS,
-    fetchModerationQueue,
+    fetchNoticeLogPage,
+    fetchReportsPage,
+    fetchTakedownsPage,
     isContentModerator,
     moderate,
     type ContentReportRow,
+    type LogCursor,
     type ModerationAction,
-    type ModerationQueue,
     type TakedownRow,
+    type TimeCursor,
 } from '@/features/moderation/moderationApi';
 import { REPEAT_INFRINGER_STRIKES } from '@/features/moderation/moderationRules';
+import { usePagedList, type PagedList } from '@/features/moderation/usePagedList';
 import { Button } from '@/ui/Button';
 import { fieldClassName, fieldLabelClassName, linkClassName } from '@/ui/classNames';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -30,6 +34,24 @@ const categoryLabel = (row: ContentReportRow): string =>
     row.kind === 'copyright'
         ? 'Copyright'
         : (ILLEGAL_CATEGORY_LABELS[row.category as keyof typeof ILLEGAL_CATEGORY_LABELS] ?? row.category);
+
+// Stable references, so each list's hook keeps one fetcher.
+const fetchOpenReports = (after: TimeCursor | null) => fetchReportsPage('open', after);
+const fetchDecidedReports = (after: TimeCursor | null) => fetchReportsPage('decided', after);
+const fetchLiveTakedowns = (after: TimeCursor | null) => fetchTakedownsPage('active', after);
+const fetchLiftedTakedowns = (after: TimeCursor | null) => fetchTakedownsPage('lifted', after);
+const fetchLog = (after: LogCursor | null) => fetchNoticeLogPage(after);
+
+/** "Show more" under a list that has another page. */
+const MoreButton = ({ list, label }: { list: PagedList<unknown>; label: string }) =>
+    list.hasMore ? (
+        <Button size="sm" variant="ghost" className="mt-3" disabled={list.loading} onClick={() => void list.more()}>
+            {list.loading ? 'Loading…' : label}
+        </Button>
+    ) : null;
+
+/** A list's heading count: the server's total when it has one. */
+const countOf = (list: PagedList<unknown>): number => list.total ?? list.rows.length;
 
 const GROUND_DEFAULTS = {
     copyright: '17 U.S.C. §512(c) (DMCA); EU Directive 2001/29/EC',
@@ -122,8 +144,11 @@ const ReasonForm = ({
  */
 export const ModerationPage = () => {
     const [allowed, setAllowed] = useState<boolean | null>(null);
-    const [queue, setQueue] = useState<ModerationQueue | null>(null);
-    const [loadError, setLoadError] = useState<string | null>(null);
+    const openReports = usePagedList(fetchOpenReports, 'reports');
+    const decidedReports = usePagedList(fetchDecidedReports, 'reports');
+    const liveTakedowns = usePagedList(fetchLiveTakedowns, 'takedowns');
+    const pastTakedowns = usePagedList(fetchLiftedTakedowns, 'takedowns');
+    const noticeLog = usePagedList(fetchLog, 'notice log');
     const [draft, setDraft] = useState<TakedownDraft>(emptyDraft);
     const [confirming, setConfirming] = useState(false);
     const [busy, setBusy] = useState(false);
@@ -132,14 +157,17 @@ export const ModerationPage = () => {
     const [rejecting, setRejecting] = useState<string | null>(null);
     const [lifting, setLifting] = useState<string | null>(null);
 
+    const reloadOpen = openReports.reload;
+    const reloadDecided = decidedReports.reload;
+    const reloadLive = liveTakedowns.reload;
+    const reloadPast = pastTakedowns.reload;
+    const reloadLog = noticeLog.reload;
+    // Every list back to its first page: an action moves rows between them.
     const load = useCallback(async () => {
-        try {
-            setQueue(await fetchModerationQueue());
-            setLoadError(null);
-        } catch (err) {
-            setLoadError(err instanceof Error ? err.message : 'Could not load the reports.');
-        }
-    }, []);
+        await Promise.all([reloadOpen(), reloadDecided(), reloadLive(), reloadPast(), reloadLog()]);
+    }, [reloadOpen, reloadDecided, reloadLive, reloadPast, reloadLog]);
+    const loadError =
+        openReports.error ?? liveTakedowns.error ?? decidedReports.error ?? pastTakedowns.error ?? noticeLog.error;
 
     useEffect(() => {
         let current = true;
@@ -187,11 +215,6 @@ export const ModerationPage = () => {
             </div>
         );
     }
-
-    const openReports = queue?.reports.filter((row) => row.status === 'received') ?? [];
-    const decidedReports = queue?.reports.filter((row) => row.status !== 'received') ?? [];
-    const liveTakedowns = queue?.takedowns.filter((row) => !row.lifted_at) ?? [];
-    const pastTakedowns = queue?.takedowns.filter((row) => row.lifted_at) ?? [];
 
     const startTakedown = (row: ContentReportRow) => {
         const ground: Ground = row.kind === 'copyright' ? 'copyright' : 'illegal';
@@ -275,6 +298,31 @@ export const ModerationPage = () => {
             <p className="mt-1 whitespace-pre-wrap text-sm text-stone-700 [overflow-wrap:anywhere]">
                 {row.explanation}
             </p>
+            <details className="mt-2 text-sm text-stone-700">
+                <summary className="cursor-pointer text-xs font-medium text-stone-600">
+                    Full notice as submitted
+                </summary>
+                <dl className="mt-1 grid gap-x-3 gap-y-0.5 text-xs sm:grid-cols-[auto_1fr] [overflow-wrap:anywhere]">
+                    <dt className="text-stone-500">Name</dt>
+                    <dd>{row.reporter_name}</dd>
+                    <dt className="text-stone-500">Email</dt>
+                    <dd>{row.reporter_email}</dd>
+                    <dt className="text-stone-500">Address</dt>
+                    <dd>{row.reporter_address ?? '—'}</dd>
+                    <dt className="text-stone-500">Phone</dt>
+                    <dd>{row.reporter_phone ?? '—'}</dd>
+                    <dt className="text-stone-500">On behalf of</dt>
+                    <dd>{row.on_behalf_of ?? '—'}</dd>
+                    <dt className="text-stone-500">Signed in</dt>
+                    <dd>{row.reporter_user_id ? 'yes' : 'no'}</dd>
+                    <dt className="text-stone-500">Good faith</dt>
+                    <dd>{row.good_faith ? 'confirmed' : 'not confirmed'}</dd>
+                    <dt className="text-stone-500">Under penalty of perjury</dt>
+                    <dd>{row.perjury_statement ? 'confirmed' : 'not confirmed'}</dd>
+                    <dt className="text-stone-500">Signature</dt>
+                    <dd>{row.signature}</dd>
+                </dl>
+            </details>
             {row.decision_note ? <p className="mt-1 text-sm text-stone-500">Decision: {row.decision_note}</p> : null}
             {row.status === 'received' ? (
                 rejecting === row.id ? (
@@ -377,13 +425,16 @@ export const ModerationPage = () => {
 
             <section className={SECTION} aria-labelledby="open-reports">
                 <h2 id="open-reports" className={SECTION_HEADING}>
-                    Open reports ({openReports.length})
+                    Open reports ({countOf(openReports)})
                 </h2>
-                {openReports.length === 0 ? (
-                    <p className="mt-2 text-sm text-stone-600">Nothing waiting.</p>
+                {openReports.rows.length === 0 ? (
+                    <p className="mt-2 text-sm text-stone-600">
+                        {openReports.loading ? 'Loading…' : 'Nothing waiting.'}
+                    </p>
                 ) : (
-                    <ul>{openReports.map(reportCard)}</ul>
+                    <ul>{openReports.rows.map(reportCard)}</ul>
                 )}
+                <MoreButton list={openReports} label="Show more open reports" />
             </section>
 
             <section id="takedown-form" className={`${SECTION} scroll-mt-36`} aria-labelledby="takedown-heading">
@@ -405,7 +456,9 @@ export const ModerationPage = () => {
                         {draft.reportId ? (
                             <p className={`mt-1 ${META}`}>
                                 For report{' '}
-                                {queue?.reports.find((row) => row.id === draft.reportId)?.reference ?? draft.reportId} ·{' '}
+                                {[...openReports.rows, ...decidedReports.rows].find((row) => row.id === draft.reportId)
+                                    ?.reference ?? draft.reportId}{' '}
+                                ·{' '}
                                 <button
                                     type="button"
                                     className={linkClassName}
@@ -496,24 +549,33 @@ export const ModerationPage = () => {
 
             <section className={SECTION} aria-labelledby="live-takedowns">
                 <h2 id="live-takedowns" className={SECTION_HEADING}>
-                    Live takedowns ({liveTakedowns.length})
+                    Live takedowns ({countOf(liveTakedowns)})
                 </h2>
-                {liveTakedowns.length === 0 ? (
-                    <p className="mt-2 text-sm text-stone-600">None.</p>
+                {liveTakedowns.rows.length === 0 ? (
+                    <p className="mt-2 text-sm text-stone-600">{liveTakedowns.loading ? 'Loading…' : 'None.'}</p>
                 ) : (
-                    <ul>{liveTakedowns.map(takedownCard)}</ul>
+                    <ul>{liveTakedowns.rows.map(takedownCard)}</ul>
                 )}
+                <MoreButton list={liveTakedowns} label="Show more live takedowns" />
             </section>
 
-            {decidedReports.length > 0 || pastTakedowns.length > 0 ? (
-                <section className={SECTION} aria-labelledby="history">
-                    <h2 id="history" className={SECTION_HEADING}>
-                        Decided
+            {decidedReports.rows.length > 0 ? (
+                <section className={SECTION} aria-labelledby="decided-reports">
+                    <h2 id="decided-reports" className={SECTION_HEADING}>
+                        Decided reports ({countOf(decidedReports)})
                     </h2>
-                    <ul>
-                        {decidedReports.map(reportCard)}
-                        {pastTakedowns.map(takedownCard)}
-                    </ul>
+                    <ul>{decidedReports.rows.map(reportCard)}</ul>
+                    <MoreButton list={decidedReports} label="Show more decided reports" />
+                </section>
+            ) : null}
+
+            {pastTakedowns.rows.length > 0 ? (
+                <section className={SECTION} aria-labelledby="lifted-takedowns">
+                    <h2 id="lifted-takedowns" className={SECTION_HEADING}>
+                        Lifted takedowns ({countOf(pastTakedowns)})
+                    </h2>
+                    <ul>{pastTakedowns.rows.map(takedownCard)}</ul>
+                    <MoreButton list={pastTakedowns} label="Show more lifted takedowns" />
                 </section>
             ) : null}
 
@@ -521,11 +583,11 @@ export const ModerationPage = () => {
                 <h2 id="notice-log" className={SECTION_HEADING}>
                     Notice log
                 </h2>
-                {(queue?.log.length ?? 0) === 0 ? (
+                {noticeLog.rows.length === 0 ? (
                     <p className="mt-2 text-sm text-stone-600">Nothing logged yet.</p>
                 ) : (
                     <ol className="mt-3 space-y-1 text-xs text-stone-600">
-                        {queue?.log.map((entry) => (
+                        {noticeLog.rows.map((entry) => (
                             <li key={entry.id} className="[overflow-wrap:anywhere]">
                                 <span className="text-stone-500">{when(entry.created_at)}</span> ·{' '}
                                 {entry.event.replace(/_/g, ' ')}
@@ -535,6 +597,7 @@ export const ModerationPage = () => {
                         ))}
                     </ol>
                 )}
+                <MoreButton list={noticeLog} label="Show older entries" />
             </section>
 
             {confirming ? (

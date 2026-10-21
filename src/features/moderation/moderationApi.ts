@@ -123,7 +123,14 @@ const reportRow = z.object({
     explanation: z.string(),
     reporter_name: z.string(),
     reporter_email: z.string(),
+    // The rest of the notice as submitted, so a moderator can check it is complete.
+    reporter_address: z.string().nullable(),
+    reporter_phone: z.string().nullable(),
     on_behalf_of: z.string().nullable(),
+    reporter_user_id: z.string().nullable(),
+    good_faith: z.boolean(),
+    perjury_statement: z.boolean(),
+    signature: z.string(),
     status: z.enum(['received', 'actioned', 'rejected']),
     decided_at: z.string().nullable(),
     decision_note: z.string().nullable(),
@@ -157,23 +164,85 @@ const logRow = z.object({
     delivery: z.string().nullable(),
 });
 
-const queueSchema = z.object({
-    reports: z.array(reportRow),
-    takedowns: z.array(takedownRow),
-    log: z.array(logRow),
-});
-
-export type ModerationQueue = z.infer<typeof queueSchema>;
 export type ContentReportRow = z.infer<typeof reportRow>;
 export type TakedownRow = z.infer<typeof takedownRow>;
+export type NoticeLogRow = z.infer<typeof logRow>;
 
-/** The queue, the takedowns and the notice log (moderation_queue, which refuses non-moderators). */
-export const fetchModerationQueue = async (): Promise<ModerationQueue> => {
-    const { data, error } = await getSupabase().rpc('moderation_queue');
+/** Where the next page starts: the last row of this one. */
+const timeCursor = z.object({ created_at: z.string(), id: z.string() });
+export type TimeCursor = z.infer<typeof timeCursor>;
+const logCursor = z.object({ id: z.number() });
+export type LogCursor = z.infer<typeof logCursor>;
+
+/** One page of a moderation list; `next` is null on the last page. */
+export interface Page<Row, Cursor> {
+    rows: Row[];
+    next: Cursor | null;
+    /** How many rows the whole filtered list holds, where the server counts them. */
+    total: number | null;
+}
+
+const pageSchema = <Row extends z.ZodTypeAny, Cursor extends z.ZodTypeAny>(row: Row, cursor: Cursor) =>
+    z.object({
+        rows: z.array(row),
+        next: cursor.nullable(),
+        total: z.number().optional(),
+    });
+
+export type ReportFilter = 'open' | 'decided';
+export type TakedownFilter = 'active' | 'lifted';
+
+/** How many rows a page asks for. */
+export const MODERATION_PAGE_SIZE = 25;
+
+const readFailure = (error: { code?: string }, what: string): Error =>
+    new Error(error.code === '42501' ? 'Moderators only.' : `Could not load the ${what}.`);
+
+/** Reports, a page at a time: open ones oldest first (the queue), decided ones newest first. */
+export const fetchReportsPage = async (
+    filter: ReportFilter,
+    after: TimeCursor | null = null,
+): Promise<Page<ContentReportRow, TimeCursor>> => {
+    const { data, error } = await getSupabase().rpc('moderation_reports', {
+        p_status: filter,
+        ...(after ? { p_after_created_at: after.created_at, p_after_id: after.id } : {}),
+        p_limit: MODERATION_PAGE_SIZE,
+    });
     if (error) {
-        throw new Error(error.code === '42501' ? 'Moderators only.' : 'Could not load the reports.');
+        throw readFailure(error, 'reports');
     }
-    return queueSchema.parse(data);
+    const page = pageSchema(reportRow, timeCursor).parse(data);
+    return { rows: page.rows, next: page.next, total: page.total ?? null };
+};
+
+/** Takedowns, newest first: the live ones (each with its lift control) or the lifted ones. */
+export const fetchTakedownsPage = async (
+    filter: TakedownFilter,
+    after: TimeCursor | null = null,
+): Promise<Page<TakedownRow, TimeCursor>> => {
+    const { data, error } = await getSupabase().rpc('moderation_takedowns', {
+        p_state: filter,
+        ...(after ? { p_after_created_at: after.created_at, p_after_id: after.id } : {}),
+        p_limit: MODERATION_PAGE_SIZE,
+    });
+    if (error) {
+        throw readFailure(error, 'takedowns');
+    }
+    const page = pageSchema(takedownRow, timeCursor).parse(data);
+    return { rows: page.rows, next: page.next, total: page.total ?? null };
+};
+
+/** The notice log, newest first. */
+export const fetchNoticeLogPage = async (after: LogCursor | null = null): Promise<Page<NoticeLogRow, LogCursor>> => {
+    const { data, error } = await getSupabase().rpc('moderation_log', {
+        ...(after ? { p_before_id: after.id } : {}),
+        p_limit: MODERATION_PAGE_SIZE * 2,
+    });
+    if (error) {
+        throw readFailure(error, 'notice log');
+    }
+    const page = pageSchema(logRow, logCursor).parse(data);
+    return { rows: page.rows, next: page.next, total: null };
 };
 
 export type ModerationAction =
