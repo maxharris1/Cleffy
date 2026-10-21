@@ -26,7 +26,7 @@
  * the two index.ts files are only the wiring.
  */
 
-import type { MailSendOutcome } from './mailDelivery.ts';
+import type { ResendResult } from './resendDelivery.ts';
 
 // ---------------------------------------------------------------------------
 // The rules
@@ -554,17 +554,18 @@ export interface CommonDeps {
     clientKey: (req: Request) => string;
     checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
     /**
-     * Mail through Resend (`_shared/mailDelivery.ts`): 'sent', 'rejected' (a
-     * definite refusal), 'unknown' (a timeout, network error or 5xx: it may
-     * have gone out) or 'unconfigured' (no key, so no request). The
-     * idempotency key is the outbox row's, the same on every attempt, so a
-     * retry after an unknown outcome cannot deliver the notice twice.
+     * Mail through Resend (`_shared/resendDelivery.ts`, shared with #62):
+     * `sent`, `rejected` (certainly not sent: refused, or no key so no
+     * request) or `unknown` (a timeout, network error, 5xx, 408 or 409: it may
+     * have gone out). The idempotency key is the outbox row's, the same on
+     * every attempt, so a retry after an unknown outcome cannot deliver the
+     * notice twice.
      */
     sendEmail: (
         to: string,
         message: MailMessage,
         options: { bcc?: string; idempotencyKey: string },
-    ) => Promise<MailSendOutcome>;
+    ) => Promise<ResendResult>;
     /** Hand back one use of a checkRateLimit bucket (refund_edge_rate_limit); best effort. */
     refundRateLimit: (key: string) => Promise<void>;
     /** Each sender's mail budget. */
@@ -578,24 +579,31 @@ export interface CommonDeps {
     now: () => number;
 }
 
-/** The outbox table a notice's Idempotency-Key is derived from (outboxIdempotencyKey). */
-export const CONTENT_NOTICE_OUTBOX = 'content_notice_outbox';
-
-/** A notice's Idempotency-Key: its outbox row, never the attempt. Same as mailDelivery's outboxIdempotencyKey. */
-export const contentNoticeIdempotencyKey = (noticeId: string): string => `${CONTENT_NOTICE_OUTBOX}/${noticeId}`;
+/** The outbox name in a notice's Idempotency-Key (content_notice_outbox). */
+export const CONTENT_NOTICE_OUTBOX = 'content-notice-outbox';
 
 /**
- * Whether a send's budget reservation goes back: only when no mail can have
- * gone out (a definite rejection, or no key so no request). An unknown outcome
- * keeps it. Same as mailDelivery's refundsMailBudget, which
- * tests/moderation/contentReports.test.ts holds this to.
+ * A notice's Idempotency-Key: its outbox row, never the attempt.
+ * resendDelivery's resendIdempotencyKey(CONTENT_NOTICE_OUTBOX, id), written
+ * out because this file takes no runtime imports;
+ * tests/moderation/contentReports.test.ts holds the two together.
  */
-export const refundsNoticeBudget = (outcome: MailSendOutcome): boolean =>
-    outcome === 'rejected' || outcome === 'unconfigured';
+export const contentNoticeIdempotencyKey = (noticeId: string): string => `${CONTENT_NOTICE_OUTBOX}-${noticeId}`;
+
+/**
+ * Whether a send's budget reservation goes back: only when it was certainly
+ * not sent (`rejected`, which includes no key and so no request). An
+ * `unknown` outcome may have gone out, and keeps it.
+ */
+export const refundsNoticeBudget = (result: ResendResult): boolean => result.outcome === 'rejected';
 
 /** What the outbox records for a send: retried with backoff unless it went out (or cannot, unconfigured). */
-const noticeOutcome = (outcome: MailSendOutcome): Exclude<NoticeOutcome, 'deferred'> =>
-    outcome === 'sent' || outcome === 'unconfigured' ? outcome : 'failed';
+const noticeOutcome = (result: ResendResult): Exclude<NoticeOutcome, 'deferred'> => {
+    if (result.outcome === 'sent') {
+        return 'sent';
+    }
+    return result.outcome === 'rejected' && result.reason === 'unconfigured' ? 'unconfigured' : 'failed';
+};
 
 type Reservation = { ok: true; keys: string[] } | { ok: false; retryAfterSec: number };
 
