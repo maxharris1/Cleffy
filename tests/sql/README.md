@@ -186,6 +186,17 @@ student with Edit keep writing; paying again lifts it immediately; and nobody
 can ask about another user's seat. It reports `failures | total` on its last
 line.
 
+`district_migrations_rerunnable.sql` proves the three district migrations
+(`20261020180400`, `20261020180500`, `20261020180600`) are rerunnable whole,
+not only the canonical block: it applies all three, in order, twice on top of a
+database that already has them (psql `\ir`, so psql only, never the MCP), then
+checks every trigger, policy, constraint and cron job exists once, every added
+column and index is there, RLS and grants are unchanged, the latest function
+definitions win, and an override, its log, a billing record and a kept seat
+written before the rerun are untouched -- with the log trigger firing once per
+change. A migration that is not rerunnable stops it with its error.
+`tests/billing/districtMigrationsRerunnable.test.ts` holds the guards in CI.
+
 `district_billing_canonical.sql` proves the canonical `public.district_billing`
 definition (the marked block in
 `supabase/migrations/20261020180500_district_seat_cap_and_grace.sql`, copied
