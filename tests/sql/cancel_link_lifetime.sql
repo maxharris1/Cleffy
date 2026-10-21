@@ -9,11 +9,17 @@
 --      nothing;
 --   3. once the expiry has passed nothing is saved, the row is settled
 --      `expired` for good, without its address, and never handed out again;
---   4. two sessions saving at once (two retries of one row) keep the first
+--   4. a spent link is never revived (Codex's round-4 major): Resend takes it,
+--      the answer is lost, the customer uses it, the row retries after the
+--      expiry, the cleanup runs, the row is retried -- and at no point is the
+--      link usable again; a retry after use keeps used_at; a token is deleted
+--      only once it has expired and its row can no longer retry, and nothing
+--      can insert it again;
+--   5. two sessions saving at once (two retries of one row) keep the first
 --      save's expiry.
 --
--- Sections 1-3 run inside one transaction and ROLL BACK. Section 3 needs two
--- real sessions, so section 4 opens them with dblink, commits its own rows there and
+-- Sections 1-4 run inside one transaction and ROLL BACK. Section 3 needs two
+-- real sessions, so section 5 opens them with dblink, commits its own rows there and
 -- deletes them again at the end. Run it against the LOCAL stack:
 --
 --     psql "$DATABASE_URL" -q -t -A -F ' | ' -f tests/sql/cancel_link_lifetime.sql
@@ -180,7 +186,150 @@ $q$select public.settle_billing_mail ((select id from t_ids where label = 'confi
 reset role;
 
 -- ===========================================================================
--- 4. Two retries in two sessions at once keep the first save's expiry
+-- 4. A spent link is never revived
+-- ===========================================================================
+insert into auth.users (id, email, is_anonymous) values (pg_temp.u(2), 'leaving@cancellink.test', false);
+select pg_temp.as_service();
+update public.billing_mail_outbox set next_attempt_at = now() + interval '1 day' where status = 'pending';
+insert into t_ids (label, id)
+select 'spent', public.enqueue_billing_mail ('cancel_link', null, 'test', '{"email": "lifetime@cancellink.test", "origin": "https://cleffy.io"}');
+update t_ids t set claim = c.claim_token, hash = repeat('1', 64)
+from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id;
+
+-- Attempt 1: saved and handed to Resend, whose answer is lost -- `unknown`,
+-- so the row is put back to retry.
+select pg_temp.chk('40 the first attempt saves the link',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'spent'),
+    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1)) = 'saved'$q$);
+select pg_temp.chk('41 ... Resend''s answer is lost, so the row will retry',
+$q$select public.settle_billing_mail ((select id from t_ids where label = 'spent'),
+    (select claim from t_ids where label = 'spent'), 'retry', 'resend unknown: network', interval '1 minute')$q$);
+-- The email did arrive, and the customer uses the link (consumeToken).
+select pg_temp.chk('42 the customer spends the link',
+$q$with spent as (update public.billing_cancel_tokens set used_at = now()
+    where token_hash = (select hash from t_ids where label = 'spent') and used_at is null returning 1)
+    select count(*) = 1 from spent$q$);
+select pg_temp.refused('43 a spent link cannot be made unspent',
+$q$update public.billing_cancel_tokens set used_at = null where token_hash = (select hash from t_ids where label = 'spent')$q$,
+'55000');
+select pg_temp.refused('44 ... or re-spent at another time',
+$q$update public.billing_cancel_tokens set used_at = now() + interval '1 minute'
+   where token_hash = (select hash from t_ids where label = 'spent')$q$, '55000');
+
+-- Attempt 2, still inside the hour: Resend answers from the first request.
+update public.billing_mail_outbox set next_attempt_at = now() - interval '1 second'
+where id = (select id from t_ids where label = 'spent');
+update t_ids t set claim = c.claim_token
+from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id and t.label = 'spent';
+select pg_temp.chk('45 a retry after the link was used saves it again',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'spent'),
+    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1)) = 'saved'$q$);
+select pg_temp.chk('46 ... and the link is still spent, at the moment it was spent, with its first expiry',
+$q$select t.used_at = now() and t.expires_at = o.created_at + interval '1 hour'
+   from public.billing_cancel_tokens t join public.billing_mail_outbox o on o.id = t.outbox_id
+   where t.token_hash = (select hash from t_ids where label = 'spent')$q$);
+select pg_temp.chk('47 ... answered unknown again, so it retries once more',
+$q$select public.settle_billing_mail ((select id from t_ids where label = 'spent'),
+    (select claim from t_ids where label = 'spent'), 'retry', 'resend unknown: timeout', interval '6 hours')$q$);
+
+-- A day goes by (both expiries brought forward, now() being fixed here).
+update public.billing_mail_outbox set link_expires_at = now() - interval '23 hours'
+where id = (select id from t_ids where label = 'spent');
+update public.billing_cancel_tokens set expires_at = now() - interval '23 hours'
+where token_hash = (select hash from t_ids where label = 'spent');
+select pg_temp.refused('48 the spent link cannot be deleted while its row can still retry, even expired',
+$q$delete from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'spent')$q$, '55000');
+reset role;
+select pg_temp.chk('49 the cleanup keeps it too',
+$q$select true from (select public.billing_mail_outbox_tick ()) t$q$);
+select pg_temp.chk('50 ... still there, still spent',
+$q$select used_at is not null from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'spent')$q$);
+select pg_temp.as_service();
+
+-- Attempt 3, the delayed retry: past the expiry, so nothing is saved or sent.
+update public.billing_mail_outbox set next_attempt_at = now() - interval '1 second'
+where id = (select id from t_ids where label = 'spent');
+update t_ids t set claim = c.claim_token
+from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id and t.label = 'spent';
+select pg_temp.chk('51 the delayed retry is refused as expired',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'spent'),
+    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1)) = 'expired'$q$);
+select pg_temp.chk('52 ... and settled for good',
+$q$select public.settle_billing_mail ((select id from t_ids where label = 'spent'),
+    (select claim from t_ids where label = 'spent'), 'expired', 'expired before delivery')$q$);
+reset role;
+select pg_temp.chk('53 now the cleanup removes the token',
+$q$select true from (select public.billing_mail_outbox_tick ()) t$q$);
+select pg_temp.chk('54 ... gone',
+$q$select not exists (select 1 from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'spent'))$q$);
+select pg_temp.as_service();
+-- And then the row is "retried".
+select pg_temp.refused('55 the settled row cannot be made pending again',
+$q$update public.billing_mail_outbox set status = 'pending', next_attempt_at = now() - interval '1 second'
+   where id = (select id from t_ids where label = 'spent')$q$, '55000');
+select pg_temp.chk('56 ... is never handed out',
+$q$select not exists (select 1 from public.claim_billing_mail (10, interval '2 minutes')
+    where id = (select id from t_ids where label = 'spent'))$q$);
+select pg_temp.chk('57 ... and its old lease cannot save the link',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'spent'),
+    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1)) = 'not_held'$q$);
+select pg_temp.refused('58 nothing can insert the spent token again: not for its row',
+$q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
+   values ((select hash from t_ids where label = 'spent'), pg_temp.u(1), 'test', now() + interval '1 hour',
+           (select id from t_ids where label = 'spent'))$q$, '55000');
+select pg_temp.refused('59 ... nor the way the store used to, with no row at all',
+$q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at)
+   values ((select hash from t_ids where label = 'spent'), pg_temp.u(1), 'test', now() + interval '1 hour')
+   on conflict (token_hash) do update set expires_at = excluded.expires_at$q$, '55000');
+select pg_temp.chk('60 the spent link never works again',
+$q$select not exists (select 1 from public.billing_cancel_tokens
+    where token_hash = (select hash from t_ids where label = 'spent') and used_at is null and expires_at > now())$q$);
+
+-- A link that went out (row deleted on `sent`) and one still unused.
+insert into t_ids (label, id)
+select 'sent', public.enqueue_billing_mail ('cancel_link', null, 'test', '{"email": "lifetime@cancellink.test", "origin": "https://cleffy.io"}');
+update t_ids t set claim = c.claim_token, hash = repeat('2', 64)
+from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id;
+select pg_temp.chk('61 a link is saved and sent; its row is deleted',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'sent'),
+    (select claim from t_ids where label = 'sent'), (select hash from t_ids where label = 'sent'), pg_temp.u(1)) = 'saved'
+   and public.settle_billing_mail ((select id from t_ids where label = 'sent'), (select claim from t_ids where label = 'sent'), 'sent')$q$);
+select pg_temp.refused('62 a live link cannot be deleted before its expiry',
+$q$delete from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'sent')$q$, '55000');
+select pg_temp.chk('63 once expired, with its row gone, it can be',
+$q$with gone as (update public.billing_cancel_tokens set expires_at = now() - interval '1 second'
+    where token_hash = (select hash from t_ids where label = 'sent') returning 1) select count(*) = 1 from gone$q$);
+select pg_temp.chk('64 ... (deleted)',
+$q$with gone as (delete from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'sent') returning 1)
+    select count(*) = 1 from gone$q$);
+select pg_temp.refused('65 ... and never inserted again, its row being gone',
+$q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
+   values ((select hash from t_ids where label = 'sent'), pg_temp.u(1), 'test', now() + interval '1 hour',
+           (select id from t_ids where label = 'sent'))$q$, '55000');
+
+-- Deleting an account takes its links, whatever state their rows are in.
+insert into t_ids (label, id)
+select 'leaving', public.enqueue_billing_mail ('cancel_link', null, 'test', '{"email": "leaving@cancellink.test", "origin": "https://cleffy.io"}');
+update t_ids t set claim = c.claim_token, hash = repeat('3', 64)
+from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id;
+select pg_temp.chk('66 a waiting request''s link is saved',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'leaving'),
+    (select claim from t_ids where label = 'leaving'), (select hash from t_ids where label = 'leaving'), pg_temp.u(2)) = 'saved'$q$);
+reset role;
+select pg_temp.chk('67 the account can still be deleted, and its link goes with it',
+$q$with gone as (delete from auth.users where id = pg_temp.u(2) returning 1)
+    select count(*) = 1 from gone$q$);
+select pg_temp.chk('68 ... gone',
+$q$select not exists (select 1 from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'leaving'))$q$);
+select pg_temp.chk('69 the token guard: search_path pinned empty, nobody may call it',
+$q$select p.proconfig @> array['search_path=""'] and p.prosecdef
+    and not has_function_privilege('authenticated', p.oid, 'execute')
+    and not has_function_privilege('anon', p.oid, 'execute')
+    and not has_function_privilege('service_role', p.oid, 'execute')
+    from pg_proc p where p.oid = 'public.billing_cancel_tokens_lifetime()'::regprocedure$q$);
+
+-- ===========================================================================
+-- 5. Two retries in two sessions at once keep the first save's expiry
 -- ===========================================================================
 -- Real concurrency needs committed rows and two connections: dblink sessions
 -- `a` and `b`, as postgres, on this database. Their rows use their own ids and

@@ -462,6 +462,25 @@ describe('billing-cancel: asking for a link', () => {
             expect((await handleCancel(post({ action: 'peek', token }), h.deps)).status).toBe(404);
         });
 
+        it('a link used after a lost answer is never mailed or made usable again by a late retry (the round-4 major)', async () => {
+            const resend = new FakeResend();
+            const h = harness({ resend });
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            resend.dropNextAnswer = true;
+            await h.flush();
+            const token = tokenFrom((JSON.parse(resend.delivered[0]?.body ?? '{}') as { text: string }).text);
+            expect(await body(await handleCancel(post({ action: 'cancel', token }), h.deps))).toMatchObject({
+                cancelled: true,
+            });
+
+            // A day and more later the row comes round again.
+            h.later(26 * 60 * 60_000);
+            expect(await h.flush()).toEqual([{ outcome: 'expired', reason: 'expired before delivery' }]);
+            expect(resend.requests).toHaveLength(1);
+            expect((await handleCancel(post({ action: 'peek', token }), h.deps)).status).toBe(404);
+            expect(h.tokens.get(await sha256Hex(token))?.usedAt).not.toBeNull();
+        });
+
         it("the database's clock has the last word: a save it refuses as expired sends nothing", async () => {
             const h = harness();
             h.linkDeps.saveToken = async () => 'expired';
@@ -837,8 +856,11 @@ describe('billing-cancel/index.ts is wiring only', () => {
     it('saves a link only through save_cancel_link_token, with the expiry the database fixed (Codex round 4 on #62)', () => {
         const store = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingCancelStore.ts'), 'utf8');
         expect(store).toContain("rpc('save_cancel_link_token', {");
-        // The upsert that refreshed the expiry on every retry is gone.
+        // The upsert that refreshed the expiry on every retry is gone, and so is
+        // the per-account cleanup that deleted a spent token while its row
+        // could still retry: the store no longer writes the token table at all.
         expect(store).not.toContain('.upsert(');
+        expect(store).not.toContain("from('billing_cancel_tokens')");
         const worker = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingMailWorker.ts'), 'utf8');
         expect(worker).toContain('linkExpiresAt: row.linkExpiresAt');
         expect(worker).toContain('linkExpiresAt: record.link_expires_at');

@@ -7,7 +7,11 @@
 -- a FRESH expiry -- an upsert on token_hash that set expires_at to "an hour
 -- from this send". Two retries racing kept whichever wrote last, and a retry
 -- that came after the link had expired, unused, made the same link valid
--- again for another hour.
+-- again for another hour. Worse (Codex's round-4 major): when Resend took a
+-- link but the answer was lost, the customer used it, and the row was still
+-- retrying a day later, the store's cleanup deleted the spent token -- and the
+-- next retry's upsert re-created the SAME token unused, so the spent emailed
+-- link worked again.
 --
 -- Now:
 --
@@ -21,7 +25,14 @@
 --   * a token's expires_at, too, can never be moved later;
 --   * nothing is sent once the expiry has passed: the row is settled
 --     `expired` ("expired before delivery"), keeping no address, and never
---     claimed again -- an expired link is never emailed.
+--     claimed again -- an expired link is never emailed;
+--   * a token can never come back. It is only ever inserted for a cancel-link
+--     row still waiting to send, before that row's expiry, with that expiry;
+--     an existing one is never reset (used_at is never cleared); and it is
+--     deleted only once it has expired AND its row can no longer retry (sent,
+--     expired, given up or gone) -- or with its account. A row settled for
+--     good never goes back to pending. So once a token could be gone, nothing
+--     can insert it again: the database refuses it, not just the code.
 --
 -- tests/sql/cancel_link_lifetime.sql proves it, two sessions at once included.
 --
@@ -47,7 +58,9 @@ add constraint billing_mail_outbox_link_expiry check ((kind = 'cancel_link') = (
 
 -- Set on insert from created_at, whatever the insert says (an hour: cancelFlow.ts
 -- CANCEL_LINK_TTL_MS); afterwards it may only be brought forward, which can
--- only ever make a link invalid sooner.
+-- only ever make a link invalid sooner. And a row settled for good (`sent` or
+-- `expired`) is never made pending again, so it is never retried and never
+-- saves its token again.
 create or replace function public.billing_mail_outbox_link_lifetime ()
 returns trigger
 language plpgsql
@@ -61,6 +74,10 @@ begin
     if new.link_expires_at is distinct from old.link_expires_at
        and (old.link_expires_at is null or new.link_expires_at is null or new.link_expires_at > old.link_expires_at) then
         raise exception 'a cancel link''s expiry is set once, when it is asked for'
+            using errcode = '55000';
+    end if;
+    if old.status <> 'pending' and new.status = 'pending' then
+        raise exception 'a billing mail settled for good is never retried'
             using errcode = '55000';
     end if;
     return new;
@@ -89,30 +106,75 @@ create index if not exists billing_cancel_tokens_outbox on public.billing_cancel
 
 drop trigger if exists billing_cancel_tokens_lifetime on public.billing_cancel_tokens;
 
--- A saved token keeps what it was saved with: the same link, account, mode and
--- request, and an expiry that can only come sooner.
+-- The token table's own guard, whoever writes to it (the save function, the
+-- cancel page spending a link, the tick, an operator):
+--
+--   INSERT -- only for a cancel-link row still waiting to send, before its
+--             expiry; the token takes that expiry, whatever the insert says.
+--   UPDATE -- the link, account, mode and row never change, the expiry only
+--             comes sooner, and used_at, once set, stays set.
+--   DELETE -- only once the token has expired and its row can no longer retry
+--             (it is gone, or settled for good), or once its account is gone
+--             (the cascade from auth.users).
+--
+-- Together: a token that may be gone is past its row's fixed expiry, or its
+-- row cannot retry, and either refuses a new insert -- so a spent link is
+-- never re-created unused. SECURITY DEFINER for the auth.users read only.
 create or replace function public.billing_cancel_tokens_lifetime ()
 returns trigger
 language plpgsql
+security definer
 set search_path = ''
 as $$
+declare
+    v_status text;
+    v_kind text;
+    v_expires timestamptz;
 begin
-    if new.token_hash <> old.token_hash
-       or new.user_id <> old.user_id
-       or new.mode <> old.mode
-       or new.outbox_id is distinct from old.outbox_id
-       or new.expires_at > old.expires_at then
-        raise exception 'a saved cancel link keeps its expiry and what it cancels'
+    if tg_op = 'INSERT' then
+        select o.status, o.kind, o.link_expires_at into v_status, v_kind, v_expires
+        from public.billing_mail_outbox o
+        where o.id = new.outbox_id;
+        if new.outbox_id is null or v_kind is distinct from 'cancel_link' or v_status is distinct from 'pending'
+           or v_expires <= now() then
+            raise exception 'a cancel link is only saved for its own request, while it waits to send and before it expires'
+                using errcode = '55000';
+        end if;
+        new.expires_at := v_expires;
+        return new;
+    end if;
+
+    if tg_op = 'UPDATE' then
+        if new.token_hash <> old.token_hash
+           or new.user_id <> old.user_id
+           or new.mode <> old.mode
+           or new.outbox_id is distinct from old.outbox_id
+           or new.expires_at > old.expires_at then
+            raise exception 'a saved cancel link keeps its expiry and what it cancels'
+                using errcode = '55000';
+        end if;
+        if old.used_at is not null and new.used_at is distinct from old.used_at then
+            raise exception 'a spent cancel link stays spent'
+                using errcode = '55000';
+        end if;
+        return new;
+    end if;
+
+    -- DELETE
+    if exists (select 1 from auth.users u where u.id = old.user_id)
+       and (old.expires_at > now()
+            or exists (select 1 from public.billing_mail_outbox o where o.id = old.outbox_id and o.status = 'pending')) then
+        raise exception 'a cancel link is kept until it has expired and its request can no longer be retried'
             using errcode = '55000';
     end if;
-    return new;
+    return old;
 end;
 $$;
 
 revoke all on function public.billing_cancel_tokens_lifetime () from public, anon, authenticated, service_role;
 
 create trigger billing_cancel_tokens_lifetime
-before update on public.billing_cancel_tokens
+before insert or update or delete on public.billing_cancel_tokens
 for each row execute function public.billing_cancel_tokens_lifetime ();
 
 -- ---------------------------------------------------------------------------
@@ -222,3 +284,63 @@ $$;
 
 revoke all on function public.settle_billing_mail (uuid, uuid, text, text, interval) from public, anon, authenticated;
 grant execute on function public.settle_billing_mail (uuid, uuid, text, text, interval) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The cron tick: and the cancel links nothing can use any more
+-- ---------------------------------------------------------------------------
+-- As 20261020160200 defines it, plus the token cleanup that used to run in
+-- billingCancelStore.ts saveToken -- which deleted a spent token while its row
+-- was still retrying, the gap the round-4 major went through. A token goes
+-- only once it has expired and its row can no longer retry (the trigger above
+-- holds every other delete to the same rule).
+create or replace function public.billing_mail_outbox_tick ()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+    v_url text;
+    v_secret text;
+begin
+    -- A sent confirmation is only needed as a de-duplication key while Stripe
+    -- may still redeliver its event (three days); 30 is generous.
+    delete from public.billing_mail_outbox
+    where status = 'sent' and sent_at < now() - interval '30 days';
+    -- A cancel link asked for a day ago is not one anybody is still waiting
+    -- for, and the row holds an address. (Its hour ran out long before.)
+    delete from public.billing_mail_outbox
+    where kind = 'cancel_link' and created_at < now() - interval '1 day';
+    -- Expired cancel links whose request can no longer be retried.
+    delete from public.billing_cancel_tokens t
+    where t.expires_at <= now()
+      and not exists (
+          select 1 from public.billing_mail_outbox o where o.id = t.outbox_id and o.status = 'pending'
+      );
+
+    if not exists (
+        select 1 from public.billing_mail_outbox
+        where status = 'pending' and next_attempt_at <= now()
+          and (claimed_until is null or claimed_until < now())
+    ) then
+        return;
+    end if;
+
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'billing_outbox_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'billing_outbox_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'billing_mail_outbox_tick: vault secrets billing_outbox_url/billing_outbox_secret missing — skip';
+        return;
+    end if;
+
+    perform net.http_post(
+        url := rtrim(v_url, '/'),
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-billing-outbox-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 5000
+    );
+end;
+$$;
+
+revoke all on function public.billing_mail_outbox_tick () from public, anon, authenticated;
+grant execute on function public.billing_mail_outbox_tick () to service_role;

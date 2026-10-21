@@ -305,4 +305,109 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
         expect(Date.parse(String((await tokenRow(hash))?.expires_at))).toBe(createdAt + HOUR);
         expect(await linkWorks(hash)).toBe(false);
     });
+
+    /** What billing-cancel consumeToken does when the customer presses "Cancel now". */
+    const spend = async (hash: string, at: string) => {
+        const { data, error } = await db
+            .from('billing_cancel_tokens')
+            .update({ used_at: at })
+            .eq('token_hash', hash)
+            .is('used_at', null)
+            .select('token_hash');
+        ok({ error }, 'spend the link');
+        return (data ?? []).length;
+    };
+
+    it('a link sent with its answer lost, used, then retried late and cleaned up, never works again', async () => {
+        // Codex round 4, the major on #62, step by step.
+        const { rowId, userId } = await subscriber();
+        const createdAt = Date.parse(String((await outboxRow(rowId))?.created_at));
+        const hash = await hashOf(rowId);
+
+        // Resend accepts the link and the answer is lost: `unknown`, retried.
+        resend.dropNextAnswer = true;
+        await drainBillingMailNow();
+        expect(resend.delivered).toHaveLength(1);
+        expect((await outboxRow(rowId))?.status).toBe('pending');
+
+        // The email arrived; the customer uses it.
+        expect(await spend(hash, new Date().toISOString())).toBe(1);
+        expect(await linkWorks(hash)).toBe(false);
+
+        // The row's next turn comes more than a day after the link expired.
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(createdAt + 26 * HOUR);
+        await makeDue(rowId);
+        await drainBillingMailNow();
+        expect(await linkWorks(hash)).toBe(false);
+
+        // The cleanup runs, with the token expired by the database's clock too.
+        vi.useRealTimers();
+        await db
+            .from('billing_cancel_tokens')
+            .update({ expires_at: new Date(Date.now() - 60_000).toISOString() })
+            .eq('token_hash', hash);
+        ok(await db.rpc('billing_mail_outbox_tick'), 'tick');
+
+        // And the row is retried.
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(createdAt + 27 * HOUR);
+        await db.from('billing_mail_outbox').update({ status: 'pending' }).eq('id', rowId);
+        await makeDue(rowId);
+        await drainBillingMailNow();
+
+        // One email ever, and the spent link has not come back.
+        expect(resend.delivered).toHaveLength(1);
+        expect(await linkWorks(hash)).toBe(false);
+        // Nor can anything put it back the way the store used to save it.
+        const { error } = await db.from('billing_cancel_tokens').upsert(
+            {
+                token_hash: hash,
+                user_id: userId,
+                mode: 'test',
+                expires_at: new Date(Date.now() + HOUR).toISOString(),
+            },
+            { onConflict: 'token_hash' },
+        );
+        expect(error).not.toBeNull();
+        expect(await linkWorks(hash)).toBe(false);
+    });
+
+    it('a retry after the link was used keeps it spent, and keeps its expiry', async () => {
+        const { rowId, userId } = await subscriber();
+        const createdAt = Date.parse(String((await outboxRow(rowId))?.created_at));
+        const hash = await hashOf(rowId);
+
+        resend.dropNextAnswer = true;
+        await drainBillingMailNow();
+        const usedAt = new Date().toISOString();
+        expect(await spend(hash, usedAt)).toBe(1);
+        const spent = await tokenRow(hash);
+
+        // Ten minutes on, the retry: Resend answers it from the first request.
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(createdAt + 10 * 60_000);
+        await makeDue(rowId);
+        await drainBillingMailNow();
+        expect(resend.requests).toHaveLength(2);
+        expect(resend.delivered).toHaveLength(1);
+        expect(await tokenRow(hash)).toEqual(spent);
+        expect(Date.parse(String(spent?.expires_at))).toBe(createdAt + HOUR);
+        expect(await linkWorks(hash)).toBe(false);
+
+        // And no write can make it unspent, or give it a new hour.
+        const unspend = await db.from('billing_cancel_tokens').update({ used_at: null }).eq('token_hash', hash);
+        expect(unspend.error).not.toBeNull();
+        const resave = await db.from('billing_cancel_tokens').upsert(
+            {
+                token_hash: hash,
+                user_id: userId,
+                mode: 'test',
+                expires_at: new Date(Date.now() + HOUR).toISOString(),
+            },
+            { onConflict: 'token_hash' },
+        );
+        expect(resave.error).not.toBeNull();
+        expect(await tokenRow(hash)).toEqual(spent);
+    });
 });

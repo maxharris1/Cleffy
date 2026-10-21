@@ -107,20 +107,16 @@ export const cancellableSubscription = async (
  * The link's token, saved through save_cancel_link_token (migration
  * 20261020160300): only by the worker holding the row's lease, with the row's
  * own expiry -- set once, when the link was asked for, and refused once it has
- * passed -- and INSERT ... ON
- * CONFLICT (token_hash) DO NOTHING, so a retry of the row, or two at once,
- * never moves the expiry an earlier save stored or touches its used_at.
+ * passed -- and INSERT ... ON CONFLICT (token_hash) DO NOTHING, so a retry of
+ * the row, or two at once, never moves the expiry an earlier save stored or
+ * touches its used_at.
  */
 export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, outboxId, claimToken }) => {
-    const client = admin();
-    // Spent and long-expired links are worth nothing; clear this account's
-    // before adding another, so the table cannot grow.
-    await client
-        .from('billing_cancel_tokens')
-        .delete()
-        .eq('user_id', userId)
-        .lt('expires_at', new Date(Date.now() - 24 * 60 * 60_000).toISOString());
-    const { data, error } = await client.rpc('save_cancel_link_token', {
+    // No cleanup here any more: deleting this account's old tokens while one's
+    // row was still retrying is how a spent link came back (Codex round 4,
+    // major on #62). The cron tick removes a token once it has expired and its
+    // row can no longer retry, and the table's trigger allows nothing sooner.
+    const { data, error } = await admin().rpc('save_cancel_link_token', {
         p_outbox_id: outboxId,
         p_claim: claimToken,
         p_hash: hash,

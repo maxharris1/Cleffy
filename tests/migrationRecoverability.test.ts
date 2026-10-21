@@ -310,3 +310,43 @@ describe('the out-of-band corpus objects (finding F2)', () => {
         }
     });
 });
+
+/**
+ * 20261020160300 (launch checkout, Codex round 4 on #62) redefines two
+ * functions 20261020160200 created -- settle_billing_mail and the cron's
+ * billing_mail_outbox_tick -- and adds columns, constraints and triggers to
+ * tables that migration made. A recovery replays migrations over a database
+ * that may already hold some of them, so this one has to apply twice cleanly,
+ * and it must not touch the cron job itself: the job calls the tick by name,
+ * so redefining the function is enough, and the job map above stays as it is.
+ * When the four launch PRs merge this block is reconciled by hand, like the
+ * job map: the generator does not write it.
+ */
+describe('20261020160300_cancel_link_token_lifetime — replays cleanly', () => {
+    const sql = (): string =>
+        migrations().find(({ name }) => name === '20261020160300_cancel_link_token_lifetime.sql')?.sql ?? '';
+
+    it('exists, and sorts after the outbox migration it extends', () => {
+        const names = migrations().map(({ name }) => name);
+        expect(names.indexOf('20261020160300_cancel_link_token_lifetime.sql')).toBeGreaterThan(
+            names.indexOf('20261020160200_billing_mail_outbox.sql'),
+        );
+    });
+
+    it('guards every column, index, constraint and trigger it adds, and only replaces functions', () => {
+        const text = sql();
+        expect(text).not.toMatch(/add\s+column\s+(?!if\s+not\s+exists)/i);
+        expect(text).not.toMatch(/create\s+index\s+(?!if\s+not\s+exists)/i);
+        expect(text).not.toMatch(/create\s+(table|function)\s/i);
+        for (const constraint of text.matchAll(/add\s+constraint\s+([a-z_]+)/gi)) {
+            expect(text).toContain(`drop constraint if exists ${constraint[1]}`);
+        }
+        for (const trigger of text.matchAll(/create\s+trigger\s+([a-z_]+)\s+[\s\S]*?\son\s+(public\.[a-z_]+)/gi)) {
+            expect(text).toContain(`drop trigger if exists ${trigger[1]} on ${trigger[2]}`);
+        }
+    });
+
+    it('leaves the cron job to the migration that schedules it', () => {
+        expect(sql()).not.toMatch(/cron\.(schedule|unschedule)/i);
+    });
+});
