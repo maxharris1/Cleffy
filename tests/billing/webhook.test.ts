@@ -644,6 +644,71 @@ describe('stripe event handling', () => {
             ]);
         });
 
+        it('still records the confirmation when the subscription ended between the failed attempt and the redelivery', async () => {
+            // Codex round 2, finding 3 on #62: the redelivery read the
+            // subscription back as `canceled`, the live state said "not
+            // cancelling", and the event was acknowledged with nothing recorded.
+            // Whether a cancellation was scheduled is now read from the event.
+            store.remote.set('sub_1', {
+                id: 'sub_1',
+                status: 'active',
+                customer: 'cus_1',
+                cancel_at_period_end: true,
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                metadata: { user_id: 'teacher-1' },
+            });
+            store.noticeFails = true;
+            const failed = await handleStripeEvent(scheduled({ cancel_at_period_end: false }), store, PRICE_TIERS);
+            expect(failed.status).toBe(500);
+            expect(store.cancellations).toEqual([]);
+
+            // The period runs out before Stripe tries again.
+            store.remote.set('sub_1', {
+                id: 'sub_1',
+                status: 'canceled',
+                customer: 'cus_1',
+                cancel_at_period_end: true,
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                metadata: { user_id: 'teacher-1' },
+            });
+            store.noticeFails = false;
+            const redelivered = await handleStripeEvent(scheduled({ cancel_at_period_end: false }), store, PRICE_TIERS);
+
+            expect(redelivered.status).toBe(200);
+            expect(store.events.get('evt_cancel')?.status).toBe('done');
+            expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'canceled' });
+            expect(store.cancellations).toEqual([
+                {
+                    userId: 'teacher-1',
+                    subscriptionId: 'sub_1',
+                    priceId: 'price_teacher_annual',
+                    endsAt: new Date(1_800_000_000 * 1000).toISOString(),
+                    cancelledAt: new Date(EVENT_CREATED * 1000).toISOString(),
+                },
+            ]);
+        });
+
+        it('still records the purchase confirmation when the subscription ended before the redelivery', async () => {
+            store.noticeFails = true;
+            expect((await handleStripeEvent(paidCheckout(), store, PRICE_TIERS)).status).toBe(500);
+
+            store.remote.set('sub_9', {
+                id: 'sub_9',
+                status: 'canceled',
+                customer: 'cus_9',
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_academy_annual' } }] },
+            });
+            store.noticeFails = false;
+            const redelivered = await handleStripeEvent(paidCheckout(), store, PRICE_TIERS);
+
+            expect(redelivered.status).toBe(200);
+            expect(store.purchases).toHaveLength(1);
+            expect(store.purchases[0]).toMatchObject({ sessionId: 'cs_9', consentId: 'consent-1' });
+        });
+
         it('says nothing for an update that did not schedule the cancellation', async () => {
             store.remote.set('sub_1', {
                 id: 'sub_1',

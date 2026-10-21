@@ -36,7 +36,7 @@ import type { StripeMode } from './stripeMode.ts';
  * Cancelling is `cancel_at_period_end`, exactly what the Customer Portal does:
  * the buyer keeps what they paid for, nothing is refunded automatically, and
  * the webhook mirrors the change and sends the cancellation confirmation the
- * same way for both routes (stripeEvents.ts isCancellationScheduled).
+ * same way for both routes (stripeEvents.ts scheduledCancellationOf).
  *
  * NO runtime imports, for the reason checkoutFlow.ts gives.
  */

@@ -490,27 +490,48 @@ const endingOf = (sub: StripeSubscriptionLike): { periodEnd: string | null; canc
 };
 
 /**
- * Whether this event is a subscription being SET to cancel -- from the portal,
- * from /cancel, or from the dashboard -- as opposed to any other update to one
- * that was already cancelling (or a cancellation being undone).
+ * The subscription a cancellation confirmation is owed for, when this event is
+ * one being SET to cancel -- from the portal, from /cancel, or from the
+ * dashboard -- and null for any other update to one that was already
+ * cancelling (or a cancellation being undone).
  *
- * `previous_attributes` names the fields that changed with their old values, so
- * a cancel_at_period_end that WAS false, or a cancel_at that WAS null, is the
- * transition; `current` is the subscription as Stripe holds it now, so a
- * cancellation already reversed by the time this is read sends nothing.
+ * Whether it is the transition is read from the EVENT alone: its
+ * `previous_attributes` name the fields that changed with their old values (a
+ * cancel_at_period_end that WAS false, or a cancel_at that WAS null), and its
+ * embedded object is the subscription as that change left it. That is what
+ * makes the confirmation durable across redeliveries (Codex round 2, finding 3
+ * on #62): when recording it fails, Stripe redelivers the same event, and by
+ * then the subscription may have ENDED -- which the live state alone read as
+ * "not cancelling", so the retry was acknowledged with nothing recorded.
+ *
+ * `current` (Stripe's state now) can only veto, and only for the one reason
+ * worth it: a cancellation already undone -- still running, no longer
+ * cancelling -- sends nothing. Ended is the cancellation having happened, and
+ * is confirmed from the event; still cancelling is confirmed from `current`,
+ * the fresher of the two.
  */
-export const isCancellationScheduled = (event: StripeEventLike, current: StripeSubscriptionLike): boolean => {
+export const scheduledCancellationOf = (
+    event: StripeEventLike,
+    current: StripeSubscriptionLike,
+): StripeSubscriptionLike | null => {
     if (event.type !== 'customer.subscription.updated') {
-        return false;
+        return null;
     }
     const previous = event.data.previous_attributes ?? null;
     if (!previous) {
-        return false;
+        return null;
     }
     const wasNotCancelling =
         ('cancel_at_period_end' in previous && previous.cancel_at_period_end === false) ||
         ('cancel_at' in previous && previous.cancel_at === null);
-    return wasNotCancelling && endingOf(current).cancelling && !isTerminalStatus(current.status);
+    const embedded = event.data.object as StripeSubscriptionLike;
+    if (!wasNotCancelling || !endingOf(embedded).cancelling || isTerminalStatus(embedded.status)) {
+        return null;
+    }
+    if (isTerminalStatus(current.status)) {
+        return embedded;
+    }
+    return endingOf(current).cancelling ? current : null;
 };
 
 export const cancellationNoticeFrom = (
@@ -1059,8 +1080,9 @@ const dispatchStripeEvent = async (
                 if (refused) {
                     return refused;
                 }
-                if (isCancellationScheduled(event, current)) {
-                    const notice = cancellationNoticeFrom(event, current, userId);
+                const cancelled = scheduledCancellationOf(event, current);
+                if (cancelled) {
+                    const notice = cancellationNoticeFrom(event, cancelled, userId);
                     const unrecorded = await recordNotice(store, event, () => store.recordCancellationNotice(notice));
                     if (unrecorded) {
                         return unrecorded;
