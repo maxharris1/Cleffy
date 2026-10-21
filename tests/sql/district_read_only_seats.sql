@@ -141,6 +141,28 @@ begin
 end;
 $$;
 
+-- Row removal that must touch p_rows rows, spelled at run time (README.md: no
+-- DELETE keyword in the file). Answers how many it removed, or the refusal.
+create function pg_temp.removes (p_name text, p_table text, p_where text, p_rows int) returns void language plpgsql as $$
+declare
+    v_rows int;
+    v_state text;
+    v_msg text;
+begin
+    begin
+        execute format('%s from %s where %s', 'del' || 'ete', p_table, p_where);
+        get diagnostics v_rows = row_count;
+    exception when others then
+        get stacked diagnostics v_state = returned_sqlstate, v_msg = message_text;
+        insert into integrity_results (check_name, passed, detail)
+        values (p_name, false, 'refused: ' || v_state || ' ' || v_msg);
+        return;
+    end;
+    insert into integrity_results (check_name, passed, detail)
+    values (p_name, v_rows = p_rows, 'removed ' || v_rows || ' row(s)');
+end;
+$$;
+
 -- The webhook's write, exactly as stripe-webhook makes it (see district_seat_cap.sql).
 create function pg_temp.webhook_write (
     p_sub text,
@@ -227,7 +249,20 @@ values
     ('d1700000-0000-4000-8000-0000000000d1', 'd1700000-0000-4000-8000-0000000000b1', 'Shared score',
      'd1700000-0000-4000-8000-0000000000d1/original.pdf'),
     ('d1700000-0000-4000-8000-0000000000d6', 'd1700000-0000-4000-8000-0000000000b6', 'Own score',
-     'd1700000-0000-4000-8000-0000000000d6/original.pdf');
+     'd1700000-0000-4000-8000-0000000000d6/original.pdf'),
+    ('d1700000-0000-4000-8000-0000000000d7', 'd1700000-0000-4000-8000-0000000000b6', 'Score to delete',
+     'd1700000-0000-4000-8000-0000000000d7/original.pdf');
+
+-- Their PDFs, as Storage holds them (migration 20261020180700).
+insert into storage.objects (bucket_id, name, owner)
+values
+    ('scores', 'd1700000-0000-4000-8000-0000000000d1/original.pdf', 'd1700000-0000-4000-8000-0000000000b1'),
+    ('scores', 'd1700000-0000-4000-8000-0000000000d6/original.pdf', 'd1700000-0000-4000-8000-0000000000b6'),
+    ('scores', 'd1700000-0000-4000-8000-0000000000d7/original.pdf', 'd1700000-0000-4000-8000-0000000000b6');
+
+-- As the Storage API marks its own deletes (see cross_branch_integration.sql),
+-- so the RLS policies are what decide.
+select set_config('storage.allow_delete_query', 'true', true);
 
 insert into public.document_members (document_id, user_id, role)
 values
@@ -421,6 +456,65 @@ select pg_temp.refused (
     '42501'
 );
 
+-- Storage (20261020180700): the PDF cannot be replaced, added or removed.
+select pg_temp.refused (
+    'no replacing their own PDF through Storage (upload with upsert)',
+    $q$insert into storage.objects (bucket_id, name, owner, metadata)
+       values ('scores', 'd1700000-0000-4000-8000-0000000000d6/original.pdf',
+               'd1700000-0000-4000-8000-0000000000b6', '{"size": 2}')
+       on conflict (bucket_id, name collate "C") where archived_at is null do update set metadata = excluded.metadata$q$,
+    '42501'
+);
+
+select pg_temp.allowed (
+    'nor through a plain update: it matches nothing',
+    $q$update storage.objects set metadata = '{"size": 3}'
+       where bucket_id = 'scores' and name = 'd1700000-0000-4000-8000-0000000000d6/original.pdf'$q$,
+    0
+);
+
+select pg_temp.refused (
+    'no new file in their own score''s folder (an import backup)',
+    $q$insert into storage.objects (bucket_id, name, owner)
+       values ('scores', 'd1700000-0000-4000-8000-0000000000d6/original.backup.pdf',
+               'd1700000-0000-4000-8000-0000000000b6')$q$,
+    '42501'
+);
+
+select pg_temp.removes (
+    'no deleting their own live score''s PDF: it matches nothing',
+    'storage.objects',
+    $q$bucket_id = 'scores' and name = 'd1700000-0000-4000-8000-0000000000d6/original.pdf'$q$,
+    0
+);
+
+select pg_temp.holds (
+    'but still reads (downloads) it',
+    $q$select count(*) = 1 from storage.objects
+       where bucket_id = 'scores' and name = 'd1700000-0000-4000-8000-0000000000d6/original.pdf'
+         and metadata is null$q$
+);
+
+select pg_temp.allowed (
+    'and the viewer''s cover backfill (thumbnails, not an edit) still lands',
+    $q$insert into storage.objects (bucket_id, name, owner)
+       values ('thumbnails', 'd1700000-0000-4000-8000-0000000000d6/1.jpg', 'd1700000-0000-4000-8000-0000000000b6')$q$
+);
+
+select pg_temp.removes (
+    'removing one''s own things stays allowed: b6 deletes their own score',
+    'public.documents',
+    $q$id = 'd1700000-0000-4000-8000-0000000000d7'$q$,
+    1
+);
+
+select pg_temp.removes (
+    'and then its PDF, under the storage-cleanup tombstone',
+    'storage.objects',
+    $q$bucket_id = 'scores' and name = 'd1700000-0000-4000-8000-0000000000d7/original.pdf'$q$,
+    1
+);
+
 -- View and export are untouched.
 select pg_temp.holds (
     'b6 still sees both scores and every mark on them',
@@ -446,6 +540,14 @@ select pg_temp.allowed (
     $q$insert into public.annotations (id, document_id, page, kind, color, payload, created_by)
        values ('d1700000-0000-4000-8000-000000000a11', 'd1700000-0000-4000-8000-0000000000d1', 0, 'stroke',
                '#2563eb', '{"pts":[0.3,0.3,0.5],"w":0.005}', 'd1700000-0000-4000-8000-0000000000b1')$q$
+);
+
+select pg_temp.allowed (
+    'and replaces their PDF through Storage',
+    $q$insert into storage.objects (bucket_id, name, owner, metadata)
+       values ('scores', 'd1700000-0000-4000-8000-0000000000d1/original.pdf',
+               'd1700000-0000-4000-8000-0000000000b1', '{"size": 2}')
+       on conflict (bucket_id, name collate "C") where archived_at is null do update set metadata = excluded.metadata$q$
 );
 
 select pg_temp.act_as_student ('d1700000-0000-4000-8000-0000000000e1');
@@ -491,6 +593,14 @@ select pg_temp.allowed (
 select pg_temp.allowed (
     'and renames it',
     $q$update public.documents set title = 'Renamed' where id = 'd1700000-0000-4000-8000-0000000000d6'$q$
+);
+
+select pg_temp.allowed (
+    'and replaces its PDF through Storage again',
+    $q$insert into storage.objects (bucket_id, name, owner, metadata)
+       values ('scores', 'd1700000-0000-4000-8000-0000000000d6/original.pdf',
+               'd1700000-0000-4000-8000-0000000000b6', '{"size": 4}')
+       on conflict (bucket_id, name collate "C") where archived_at is null do update set metadata = excluded.metadata$q$
 );
 
 -- ===========================================================================

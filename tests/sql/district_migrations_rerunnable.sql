@@ -2,7 +2,8 @@
 -- not only the canonical district_billing block). Applies
 -- 20261020180400_district_seat_overrides.sql,
 -- 20261020180500_district_seat_cap_and_grace.sql and
--- 20261020180600_read_only_seats_enforced.sql, in order, TWICE on top of a
+-- 20261020180600_read_only_seats_enforced.sql and
+-- 20261020180700_read_only_seats_storage.sql, in order, TWICE on top of a
 -- database that already has them, inside one transaction ending in ROLLBACK,
 -- then checks that the second run changed nothing it should not: every table,
 -- column, index, trigger, constraint, policy and cron job exists once, the
@@ -89,10 +90,12 @@ select
 \ir ../../supabase/migrations/20261020180400_district_seat_overrides.sql
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
 \ir ../../supabase/migrations/20261020180600_read_only_seats_enforced.sql
+\ir ../../supabase/migrations/20261020180700_read_only_seats_storage.sql
 
 \ir ../../supabase/migrations/20261020180400_district_seat_overrides.sql
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
 \ir ../../supabase/migrations/20261020180600_read_only_seats_enforced.sql
+\ir ../../supabase/migrations/20261020180700_read_only_seats_storage.sql
 
 reset role;
 
@@ -163,12 +166,13 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'each read-only seat policy exists once',
-    $q$select count(*) = 5
+    $q$select count(*) = 8
        from pg_policies
        where policyname in (
            'annotations_seat_read_only_insert', 'annotations_seat_read_only_update',
            'annotation_snapshots_seat_read_only_insert', 'doc_topic_seat_read_only_broadcast',
-           'share_links_seat_read_only_insert'
+           'share_links_seat_read_only_insert', 'scores_seat_read_only_insert', 'scores_seat_read_only_update',
+           'scores_seat_read_only_delete'
        )$q$
 );
 

@@ -96,3 +96,58 @@ describe('the SQL proof', () => {
         expect(PROOF).toContain(`'${name}'`);
     });
 });
+
+/**
+ * The score files (migration 20261020180700_read_only_seats_storage.sql; Codex
+ * round-3 review of #61): the PDF in the 'scores' bucket cannot be replaced,
+ * added to or removed by a read-only seat through the Storage API, while
+ * downloads and the thumbnails bucket are untouched and a deleted score's
+ * files can still be cleaned up. tests/sql/district_read_only_seats.sql proves
+ * it against a database and tests/live/readOnlySeatStorage.live.test.ts against
+ * the Storage API.
+ */
+describe('the read-only seat check on Storage', () => {
+    const STORAGE = read('supabase/migrations', '20261020180700_read_only_seats_storage.sql');
+    const SCORES_ONLY = String.raw`bucket_id is distinct from 'scores' or ${CHECK}`;
+
+    it.each(['insert', 'update', 'delete'])('restricts %s on score files with the same helper', (command) => {
+        expect(STORAGE).toMatch(
+            new RegExp(
+                `drop policy if exists scores_seat_read_only_${command} on storage\\.objects;\\s*create policy scores_seat_read_only_${command} on storage\\.objects as restrictive for ${command} to authenticated`,
+            ),
+        );
+    });
+
+    it('checks both the row it replaces and the row it writes, so an upsert is refused', () => {
+        expect(STORAGE).toMatch(new RegExp(`for insert to authenticated\\s*with check \\(${SCORES_ONLY}\\);`));
+        expect(STORAGE).toMatch(
+            new RegExp(`for update to authenticated\\s*using \\(${SCORES_ONLY}\\)\\s*with check \\(${SCORES_ONLY}\\);`),
+        );
+    });
+
+    it('still lets a deleted score’s files be cleaned up', () => {
+        expect(STORAGE).toMatch(
+            new RegExp(
+                `for delete to authenticated\\s*using \\(\\s*bucket_id is distinct from 'scores'\\s*or ${CHECK}\\s*or public\\.document_storage_cleanup_pending \\(\\(storage\\.foldername \\(name\\)\\)\\[1\\]\\)\\s*\\);`,
+            ),
+        );
+    });
+
+    it('changes no read path and no other bucket', () => {
+        const code = STORAGE.replace(/--[^\n]*/g, '');
+        expect(code).not.toMatch(/for select/i);
+        expect(code).not.toMatch(/thumbnails/);
+        expect(STORAGE).not.toMatch(/create policy \w+ on storage\.objects for /);
+    });
+
+    it.each([
+        'no replacing their own PDF through Storage (upload with upsert)',
+        "no new file in their own score''s folder (an import backup)",
+        "no deleting their own live score''s PDF: it matches nothing",
+        'but still reads (downloads) it',
+        'and then its PDF, under the storage-cleanup tombstone',
+        'and replaces its PDF through Storage again',
+    ])('the SQL proof checks: %s', (name) => {
+        expect(PROOF).toContain(`'${name}'`);
+    });
+});

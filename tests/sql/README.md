@@ -180,8 +180,11 @@ webhook and no hourly sweep yet, so nothing is archived) can write nothing at
 once -- no mark on its own score or on a score shared with it as an editor,
 through PostgREST or either batch RPC, no tombstone, no lesson-history
 snapshot, no live ink on `doc:{id}`, no rename or new file, no share link, no
-assignment, no seat invite -- while it still sees and exports everything,
-appears in presence and backfills a page count; an active seat and a roster
+assignment, no seat invite, and (`20261020180700_read_only_seats_storage.sql`)
+no write to its score's PDF in the `scores` bucket: an upsert over it, a new
+file in its folder and removing it are refused or match nothing -- while it
+still sees, downloads and exports everything, appears in presence, backfills a
+page count and a cover, and can delete its own score and clean up its files; an active seat and a roster
 student with Edit keep writing; paying again lifts it immediately; and nobody
 can ask about another user's seat. It reports `failures | total` on its last
 line.
