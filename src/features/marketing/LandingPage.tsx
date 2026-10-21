@@ -17,7 +17,7 @@ const STEPS = [
     {
         mark: 'B',
         title: 'Share the link',
-        body: 'Students open it in any browser and just type a name — no accounts, no installs.',
+        body: 'Students open it in any browser and type a name — no accounts, no installs. For ages 13 and up (older in some countries).',
     },
     {
         mark: 'C',
