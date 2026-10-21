@@ -455,7 +455,15 @@ select pg_temp.holds (
        from pg_proc p
        where p.proname in ('retention_purge_archived_students', 'retention_purge_stale_guests',
                            'retention_purge_rate_limits', 'retention_purge_support_messages',
-                           'scrub_student_markings')$q$
+                           'scrub_student_markings', 'revoke_and_scrub_student', 'retention_guest_last_active',
+                           'student_write_allowed')$q$
+);
+
+select pg_temp.holds (
+    'no client may read a guest''s last activity or call the deletion',
+    $q$select not has_function_privilege ('authenticated', 'public.retention_guest_last_active(uuid)', 'execute')
+       and not has_function_privilege ('anon', 'public.retention_guest_last_active(uuid)', 'execute')
+       and not has_function_privilege ('authenticated', 'public.revoke_and_scrub_student(uuid)', 'execute')$q$
 );
 
 -- ---------------------------------------------------------------------------

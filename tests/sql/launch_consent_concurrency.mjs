@@ -60,7 +60,7 @@ class Session {
         // Terminated, or psql would run the \echo before sending the statement.
         const statement = sql.trim().endsWith(';') ? sql : `${sql};`;
         this.proc.stdin.write(`${statement}\n\\echo ${marker} :SQLSTATE\n`);
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
             const deadline = Date.now() + 30_000;
             const poll = () => {
                 const at = this.out.indexOf(marker, start);
@@ -71,7 +71,10 @@ class Session {
                         .split(/\s/)[0];
                     resolve({ output: this.out.slice(start, at).trim(), state });
                 } else if (Date.now() > deadline) {
-                    reject(new Error(`${this.name}: no answer to ${sql.slice(0, 80)}`));
+                    // Resolved, not rejected: a step sent without being awaited
+                    // yet must not crash the run before cleanup.
+                    console.error(`${this.name}: no answer to ${sql.slice(0, 80)}`);
+                    resolve({ output: this.out.slice(start).trim(), state: 'TIMEOUT' });
                 } else {
                     setTimeout(poll, 20);
                 }
@@ -162,19 +165,23 @@ const setup = async () => {
     await query(`insert into public.document_members (document_id, user_id, role)
         values ${Object.values(students)
             .map((s) => `('${DOC}', '${s.uid}', 'editor')`)
-            .join(', ')}
+            .join(', ')}, ('${DOC}', '${guests.g1}', 'viewer')
         on conflict do nothing`);
 };
 
 const cleanup = async () => {
-    const all = [T, ...Object.values(students).map((s) => s.uid), ...Object.values(guests)];
-    const list = all.map((u) => `'${u}'`).join(', ');
+    // By the run's prefix, so a fixture a scenario created on its own goes too.
+    const mine = `like '${id('').slice(0, 13)}%'`;
+    // A scenario that failed half-way can leave a session holding locks.
+    await query(
+        `select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name like 'lc-${RUN}-%' and application_name <> '${control.name}'`,
+    );
     await query(`delete from public.annotations where document_id = '${DOC}'`);
     await query(`delete from public.annotation_snapshots where document_id = '${DOC}'`);
     await query(`delete from public.document_members where document_id = '${DOC}'`);
     await query(`delete from public.documents where id = '${DOC}'`);
-    await query(`delete from public.managed_students where student_user_id in (${list})`);
-    await query(`delete from auth.users where id in (${list})`);
+    await query(`delete from public.managed_students where id::text ${mine}`);
+    await query(`delete from auth.users where id::text ${mine}`);
 };
 
 // ---------------------------------------------------------------------------
@@ -259,8 +266,9 @@ const purgeVersusRestore = async () => {
         );
         check('purge: a student restored after the candidates were listed is kept', s4 === '1', s4);
 
-        // Guests: g1 stalls the purge; g2 signs in meanwhile and must survive.
-        await holder.send(`begin; select 1 from auth.users where id = '${guests.g1}' for key share;`);
+        // Guests: g1 stalls the purge (its membership row, which the account's
+        // deletion cascades to, is held); g2 signs in meanwhile and must survive.
+        await holder.send(`begin; select 1 from public.document_members where user_id = '${guests.g1}' for update;`);
         const g = purger.send(`select public.retention_purge_stale_guests (interval '300 days', 10);`);
         await blockedOnLock(purger);
         await query(`update auth.users set last_sign_in_at = now() where id = '${guests.g2}'`);
@@ -280,7 +288,11 @@ const purgeVersusRestore = async () => {
             `begin; update public.managed_students set archived_at = null where id = '${students.s4.row}';`,
         );
         const q = await purger.send(`select public.retention_purge_archived_students (interval '13 months', 10);`);
-        check('purge: a row a restore is writing is skipped (SKIP LOCKED), not deleted', q.state === '00000', q.output);
+        check(
+            'purge: a row a restore is writing is skipped (SKIP LOCKED), not waited on',
+            q.state === '00000' && q.output === '0',
+            `${q.state} ${q.output}`,
+        );
         await holder.send('commit;');
         const s4b = await query(
             `select count(*) from public.managed_students where id = '${students.s4.row}' and archived_at is null`,

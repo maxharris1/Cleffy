@@ -297,6 +297,15 @@ per-run id prefix and removes them at the end, pass or fail:
   `annotations_refuse_revoked_student` makes the first case fail (the deletion
   no longer waits, and the in-flight mark outlives the scrub).
 
+- **Retention vs. a restore** (`20261021120500_retention_recheck_under_lock.sql`)
+  — the archived-student purge is stalled on its first candidate after it has
+  listed a second; the second is restored in that gap and is kept, while the
+  first is purged. The same for guests: one that signs in after the list was
+  read is kept. A roster row a restore is still writing is skipped
+  (`SKIP LOCKED`) rather than waited on and deleted, and the restore lands.
+  Against the 20261021120300 purges the restored student is purged and the
+  guest case stalls.
+
 ```sh
 node tests/sql/launch_consent_concurrency.mjs          # every scenario
 node tests/sql/launch_consent_concurrency.mjs delete   # one group

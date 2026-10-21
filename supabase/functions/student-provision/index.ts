@@ -750,12 +750,24 @@ const restoreStudent = async (admin: SupabaseClient, userId: string, body: Provi
         return jsonResponse({ error: 'Could not restore the student' }, 502);
     }
 
-    const { error } = await admin
+    // Still archived, or nothing: the 12-month purge (20261021120500) locks the
+    // row it is about to delete, so a restore racing it either lands first (and
+    // the purge's re-check skips the student) or waits and then matches no row.
+    // That second case is reported, not answered ok for a student who is gone.
+    const { data: restored, error } = await admin
         .from('managed_students')
         .update({ archived_at: null, ...attestationColumns(checked.attestation) })
-        .eq('id', owned.row.id);
+        .eq('id', owned.row.id)
+        .not('archived_at', 'is', null)
+        .select('id');
     if (error) {
         return jsonResponse({ error: 'Could not restore the student' }, 502);
+    }
+    if (!restored?.length) {
+        const { data: still } = await admin.from('managed_students').select('id').eq('id', owned.row.id).maybeSingle();
+        if (!still) {
+            return jsonResponse({ error: 'Student not found' }, 404);
+        }
     }
 
     return jsonResponse({ ok: true });

@@ -70,3 +70,53 @@ describe('retention periods', () => {
         }
     });
 });
+
+/**
+ * 20261021120500 replaces the two account purges: each candidate is locked
+ * (FOR UPDATE SKIP LOCKED) and re-checked in a statement of its own before it
+ * is purged, so a restore or a returning guest after the list was read is
+ * kept. The race itself is proven by tests/sql/launch_consent_concurrency.mjs.
+ */
+describe('retention re-checks each candidate under its lock', () => {
+    const recheck = readFileSync(
+        resolve(process.cwd(), 'supabase/migrations/20261021120500_retention_recheck_under_lock.sql'),
+        'utf8',
+    );
+    const body = (fn: string): string =>
+        recheck.match(new RegExp(`function public\\.${fn} \\([\\s\\S]*?\\$\\$;`))?.[0] ?? '';
+
+    it.each([
+        [
+            'retention_purge_archived_students',
+            'm.archived_at is not null',
+            'delete from auth.users where id = v_student',
+        ],
+        [
+            'retention_purge_stale_guests',
+            'public.retention_guest_last_active (u.id) < v_cutoff',
+            'delete from auth.users where id = candidate.id',
+        ],
+    ])('%s locks, re-tests eligibility, then deletes', (fn, condition, del) => {
+        const b = body(fn);
+        const lock = b.indexOf('skip locked');
+        // The eligibility test appears twice: in the list and again in the lock.
+        expect(b.split(condition).length - 1).toBe(2);
+        expect(lock).toBeGreaterThan(b.lastIndexOf(condition));
+        expect(b.indexOf(del)).toBeGreaterThan(lock);
+        expect(b).toMatch(/if not found then\s+continue;/);
+    });
+
+    it('keeps the same defaults and stays the service role’s alone', () => {
+        expect(body('retention_purge_archived_students')).toContain(
+            "p_older_than interval default interval '12 months'",
+        );
+        expect(body('retention_purge_stale_guests')).toContain("p_idle interval default interval '90 days'");
+        for (const fn of [
+            'retention_purge_archived_students (interval, int)',
+            'retention_purge_stale_guests (interval, int)',
+            'retention_guest_last_active (uuid)',
+        ]) {
+            expect(recheck).toContain(`revoke all on function public.${fn} from public, anon, authenticated;`);
+        }
+    });
+});
