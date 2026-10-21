@@ -106,7 +106,9 @@ describe('the district purge (20261021120700)', () => {
             /function public\.retention_district_dry_run \(p_now timestamptz default now\(\)\) returns jsonb\s+language plpgsql stable/,
         );
         expect(migration).toContain("execute format('revoke all on function %s from public, anon, authenticated', fn)");
-        expect(migration).toMatch(/revoke all on table public\.district_billing from public, anon, authenticated;/);
+        expect(migration).toMatch(
+            /revoke all on table public\.district_billing from public, anon, authenticated, service_role;\s+grant select on table public\.district_billing to service_role;/,
+        );
     });
 
     it('logs every step with counts', () => {
@@ -122,11 +124,14 @@ describe('the district purge (20261021120700)', () => {
         expect(run.indexOf('v_step := public.retention_district_next_step')).toBeGreaterThan(lock);
     });
 
-    it('declares contract_ends_at as mh/district-seats does: timestamptz, nullable, added if missing', () => {
+    it('declares district_billing with #61’s canonical block, contract_ends_at nullable', () => {
+        // tests/legal/districtBillingCanonical.test.ts pins the block's bytes.
+        expect(migration).toContain('-- >>> canonical public.district_billing >>>');
         expect(migration).toMatch(
             /create table if not exists public\.district_billing \([\s\S]*?contract_ends_at timestamptz,/,
         );
-        expect(migration).toMatch(/add column if not exists contract_ends_at timestamptz;/);
+        expect(migration).not.toMatch(/add column if not exists contract_ends_at/);
+        expect(migration).not.toMatch(/grant all on table public\.district_billing\b/);
     });
 });
 

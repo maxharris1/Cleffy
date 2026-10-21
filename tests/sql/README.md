@@ -357,3 +357,14 @@ then end: the soft and hard deletes take exactly the four district students
 unrelated teacher's, every teacher account and the score untouched, with
 per-district counts in the log. Proven against the local stack on 2026-10-21:
 all 22 checks passed; against the 20261021120700 membership scope, 4 fail.
+
+`district_billing_canonical.sql` is a byte-for-byte copy of PR #61's proof of
+the canonical `public.district_billing` block, which this branch's
+`20261021120700_district_retention.sql` carries unchanged
+(`tests/legal/districtBillingCanonical.test.ts` pins the block to #61's sha256).
+With the table removed inside the transaction, the block alone builds it, and a
+second run leaves the same columns, constraints, indexes, RLS and grants (the
+service role's SELECT, and nothing for any client role). Proven against the
+local stack on 2026-10-21 with this branch's migrations: all 12 checks passed,
+and `district_retention.sql` (26), `district_student_scope.sql` (22) and
+`launch_consent.sql` (43) still pass under the narrowed grant.

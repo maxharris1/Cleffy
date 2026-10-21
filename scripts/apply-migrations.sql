@@ -10633,27 +10633,70 @@ grant execute on function public.compact_annotation_tombstones (interval) to ser
 -- The district billing record
 -- ---------------------------------------------------------------------------
 -- mh/district-seats (#61) creates this table in 20261020180500, which sorts
--- first; this is the same shape, so on a database that already has it the
--- create is a no-op, and on this branch alone the purge has its column.
+-- first. The block below is byte-identical to the one there, so on a
+-- database that already has the table it changes nothing, and on this branch
+-- alone the purge has its record. The purge functions that write it are
+-- SECURITY DEFINER and need no grant beyond the block's.
+-- >>> canonical public.district_billing >>>
+-- One definition, byte-identical in 20261020180500_district_seat_cap_and_grace.sql
+-- (mh/district-seats, PR #61) and 20261021120700_district_retention.sql
+-- (mh/launch-consent, PR #64), from this marker line to the closing one. It is
+-- rerunnable on its own: the table only if it is missing, each constraint only
+-- if it is missing by name, and the privileges reset to the same end state
+-- every time. Clients get nothing; the service role may read it; every write is
+-- made by SECURITY DEFINER functions, which need no grant.
+--
+-- contract_ends_at: null means the district's data is never auto-purged.
+-- contract_ends_source: 'admin' (pinned from the contract, null allowed: never)
+-- or 'stripe' (Stripe's actual end); null only with a null contract_ends_at.
+-- grace_extended_until: full access while past due lasts until the later of
+-- 30 days and this.
 create table if not exists public.district_billing (
     studio_id uuid primary key references public.studios (id) on delete cascade,
     stripe_subscription_id text references public.subscriptions (stripe_subscription_id) on delete set null,
     contract_ends_at timestamptz,
-    contract_ends_source text check (contract_ends_source in ('admin', 'stripe')),
+    contract_ends_source text,
     grace_extended_until timestamptz,
     updated_by text not null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
 
-alter table public.district_billing
-add column if not exists contract_ends_at timestamptz;
+do $district_billing$
+begin
+    if not exists (
+        select 1 from pg_constraint
+        where conrelid = 'public.district_billing'::regclass
+          and conname = 'district_billing_contract_ends_source_check'
+    ) then
+        alter table public.district_billing
+        add constraint district_billing_contract_ends_source_check
+        check (contract_ends_source in ('admin', 'stripe'));
+    end if;
+
+    if not exists (
+        select 1 from pg_constraint
+        where conrelid = 'public.district_billing'::regclass
+          and conname = 'district_billing_contract_ends_source_matches'
+    ) then
+        alter table public.district_billing
+        add constraint district_billing_contract_ends_source_matches
+        check ((contract_ends_source is null) = (contract_ends_at is null) or contract_ends_source is not distinct from 'admin');
+    end if;
+end;
+$district_billing$;
+
+create index if not exists district_billing_subscription on public.district_billing (stripe_subscription_id);
+
+create index if not exists district_billing_contract_ends on public.district_billing (contract_ends_at)
+where contract_ends_at is not null;
 
 alter table public.district_billing enable row level security;
 
-revoke all on table public.district_billing from public, anon, authenticated;
+revoke all on table public.district_billing from public, anon, authenticated, service_role;
 
-grant all on table public.district_billing to service_role;
+grant select on table public.district_billing to service_role;
+-- <<< canonical public.district_billing <<<
 
 -- ---------------------------------------------------------------------------
 -- Purge state, the student list, the notice outbox and the log
