@@ -279,7 +279,10 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'Deleting a score removes its file, its preview images, its markings and its history.',
                     `Emails you send us are kept for 24 months after we receive them; you can ask us to delete yours sooner at ${emails.privacy}.`,
                     'Counters used to limit how often a feature can be used are cleared daily.',
-                    'For a school or district under our School Use Addendum, its data is deleted 30 days after its contract ends.',
+                    // District retention (decisions item 1): contract_ends_at on the
+                    // district billing record (mh/district-seats), purged by the
+                    // retention job (mh/launch-consent); null never purges.
+                    'For a school or district under our School Use Addendum, its data is deleted 30 days after its contract ends: the end date in its contract, or the day its subscription ends or is cancelled. At least 14 days before, we email the account owner so the school can export its data first. Deletion takes the data out of use first, then erases it for good. If a contract has no end date, nothing is deleted automatically, and the school can ask us to delete its data at any time.',
                     'Stripe keeps payment and invoice records for as long as tax and accounting law requires, even after your account is deleted.',
                     'Our providers keep request logs and backups for a limited period, after which deleted information is gone from them too.',
                 ),

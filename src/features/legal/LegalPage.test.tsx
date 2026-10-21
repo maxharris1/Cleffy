@@ -128,6 +128,20 @@ describe('legal content', () => {
         expect(text).toMatch(/deleted 30 days after its contract ends/);
     });
 
+    it('states the district deletion as the retention job does it (decisions item 1)', () => {
+        // contract_ends_at (#61) set from the contract or the Stripe end date;
+        // the purge (#64): a 14-day export notice, soft then hard delete, and
+        // a null end date never purges.
+        const privacy = sectionText(PRIVACY_POLICY, 'retention');
+        expect(privacy).toMatch(/the end date in its contract, or the day its subscription ends or is cancelled/);
+        expect(privacy).toMatch(/At least 14 days before, we email the account owner so the school can export/);
+        expect(privacy).toMatch(/takes the data out of use first, then erases it/);
+        expect(privacy).toMatch(/no end date, nothing is deleted automatically/);
+        const addendum = sectionText(TERMS_OF_SERVICE, 'school-addendum');
+        expect(addendum).toMatch(/we delete its data 30 days later/);
+        expect(addendum).toMatch(/At least 14 days before, we email the school’s account owner/);
+    });
+
     it('states the age limits: 13, or up to 16 where a country requires', () => {
         for (const text of [sectionText(PRIVACY_POLICY, 'children'), sectionText(TERMS_OF_SERVICE, 'accounts')]) {
             expect(text).toMatch(/at least 13/);

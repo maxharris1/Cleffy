@@ -17,7 +17,8 @@ a New York LLC (being formed), 245 East 37th Street, Apt 3E, New York, NY
 10016; legal@ / privacy@ / support@cleffy.io; hosting region United States (AWS
 us-west-2, Oregon); ages 13+, up to 16 where a country requires; retention
 (archived students 12 months, guests 90 days, support mail 24 months, district
-data 30 days after contract end); a full refund within 14 days of first purchase
+data 30 days after contract end, with a 14-day export notice to the owner, and
+never for a contract with no end date); a full refund within 14 days of first purchase
 for everyone, no withdrawal waiver; schools buy by order form and invoice.
 
 **Still drafts.** Every document's version ends `-draft`, each page shows a

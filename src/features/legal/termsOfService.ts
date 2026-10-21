@@ -179,7 +179,7 @@ export const TERMS_OF_SERVICE: LegalDocument = {
                     'Student information is never sold, never used for advertising or to build profiles unrelated to the school’s use of Cleffy, and never used to train artificial-intelligence models.',
                     'Our service providers are those listed in our Privacy Policy. We tell the school before adding one that receives student information.',
                     'Security: we protect student information as our Privacy Policy describes, and tell the school without undue delay if we learn of a breach that affects it.',
-                    'Access and deletion: the school can ask us to give it, correct or delete its students’ information at any time. When the school’s contract ends, we delete its data 30 days later, unless the school asks us to return it first or the law requires us to keep it.',
+                    'Access and deletion: the school can ask us to give it, correct or delete its students’ information at any time. When the school’s contract ends (the end date in its contract, or the day its subscription ends or is cancelled), we delete its data 30 days later. At least 14 days before, we email the school’s account owner so it can export its data, or ask us to return it. We keep only what the law requires us to keep, such as invoices.',
                 ),
                 placeholder(
                     'Counsel to complete the addendum: data-processing terms for EU/UK schools (GDPR Art. 28), any state student-privacy law terms (for example California SOPIPA, New York Education Law §2-d), payment terms, term and termination, and the order of precedence with a school’s own contract.',
