@@ -180,14 +180,16 @@ grant execute on function pg_temp.archived () to public;
 insert into auth.users (id, aud, role, email)
 select ('d1600000-0000-4000-8000-0000000000' || suffix)::uuid, 'authenticated', 'authenticated',
        'd16-' || suffix || '@example.invalid'
-from unnest(array['a1', 'a2', 'a3', 'a4', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as suffix;
+from unnest(array['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as suffix;
 
 insert into public.studios (id, owner_id, name)
 values
     ('d1600000-0000-4000-8000-00000000c001', 'd1600000-0000-4000-8000-0000000000a1', 'District'),
     ('d1600000-0000-4000-8000-00000000c002', 'd1600000-0000-4000-8000-0000000000a2', 'Card academy'),
     ('d1600000-0000-4000-8000-00000000c003', 'd1600000-0000-4000-8000-0000000000a3', 'Late district'),
-    ('d1600000-0000-4000-8000-00000000c004', 'd1600000-0000-4000-8000-0000000000a4', 'Renewing district');
+    ('d1600000-0000-4000-8000-00000000c004', 'd1600000-0000-4000-8000-0000000000a4', 'Renewing district'),
+    ('d1600000-0000-4000-8000-00000000c005', 'd1600000-0000-4000-8000-0000000000a5', 'Early district'),
+    ('d1600000-0000-4000-8000-00000000c006', 'd1600000-0000-4000-8000-0000000000a6', 'Early district, ended');
 
 select pg_temp.act_as ('service_role');
 
@@ -735,15 +737,17 @@ select pg_temp.holds (
            'past_due', now() - interval '90 days', 'send_invoice', now() - interval '34 minutes') = 'written'$q$
 );
 
+-- Codex round-3 review of #61: without ended_at the only other date Stripe gave
+-- is current_period_end. The event's time is not Stripe's end and is never used.
 select pg_temp.holds (
-    'is cancelled now, by a webhook that does not send ended_at: the event that ended it counts',
+    'is cancelled now, by a webhook that does not send ended_at: Stripe''s period end counts, not the event',
     $q$select pg_temp.webhook_write ('sub_d16_late', 'd1600000-0000-4000-8000-0000000000a3', 'free',
            'canceled', now() - interval '90 days', 'send_invoice', now() - interval '31 minutes') = 'written'$q$
 );
 
 select pg_temp.holds (
-    'is cancelled now, by a webhook that does not send ended_at: the event that ended it counts: checked after the write',
-    $q$select contract_ends_at = now() - interval '31 minutes' and contract_ends_source = 'stripe'
+    'is cancelled now, by a webhook that does not send ended_at: Stripe''s period end counts, not the event: checked after the write',
+    $q$select contract_ends_at = now() - interval '90 days' and contract_ends_source = 'stripe'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c003'$q$
 );
 
@@ -758,6 +762,108 @@ select pg_temp.holds (
     'and Stripe''s own ended_at, once it arrives, is what stands -- never the period end: checked after the write',
     $q$select contract_ends_at = now() - interval '32 minutes'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c003'$q$
+);
+
+-- ===========================================================================
+-- The migration deploys before the new webhook
+-- ===========================================================================
+-- Codex round-3 review of #61, major 3. Migrations go first, so for a while the
+-- webhook running is the one from before 20261020180400: it calls
+-- write_subscription_under_lock with ten arguments (no collection_method, no
+-- ended_at). A cancellation it records carries no ended_at, and here no period
+-- end either: there is no Stripe date at all, so nothing may be invented -- not
+-- the event's time, not now(), not a date stored before.
+select pg_temp.act_as ('service_role');
+
+create function pg_temp.old_webhook_write (
+    p_sub text, p_user uuid, p_tier text, p_status text, p_period_end timestamptz, p_stamp timestamptz
+) returns text language plpgsql as $$
+declare
+    v_holder uuid;
+    v_answer text;
+begin
+    v_holder := public.claim_subscription_write (p_sub, interval '5 minutes');
+    v_answer := public.write_subscription_under_lock (
+        v_holder, p_sub, p_user, 'test', p_tier, p_status, 'price_district_custom', p_period_end, false, p_stamp
+    );
+    perform public.release_subscription_write (p_sub, v_holder);
+    return v_answer;
+end;
+$$;
+
+grant execute on function pg_temp.old_webhook_write (text, uuid, text, text, timestamptz, timestamptz) to public;
+
+select pg_temp.holds (
+    'a district on the new webhook (send_invoice recorded), no contract end yet',
+    $q$select pg_temp.webhook_write ('sub_d16_early', 'd1600000-0000-4000-8000-0000000000a5', 'academy',
+           'active', null, 'send_invoice', now() - interval '33 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'a district on the new webhook (send_invoice recorded), no contract end yet: checked after the write',
+    $q$select contract_ends_at is null from public.district_billing
+       where studio_id = 'd1600000-0000-4000-8000-00000000c005'$q$
+);
+
+select pg_temp.holds (
+    'is cancelled through the old webhook, which sends no ended_at, and Stripe gave no period end',
+    $q$select pg_temp.old_webhook_write ('sub_d16_early', 'd1600000-0000-4000-8000-0000000000a5', 'free',
+           'canceled', null, now() - interval '32 minutes 30 seconds') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'no Stripe date, so no contract end is invented: it stays null (and a warning is logged)',
+    $q$select contract_ends_at is null and contract_ends_source is null
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c005'$q$
+);
+
+select pg_temp.holds (
+    'the new webhook then delivers Stripe''s ended_at, and that is the end',
+    $q$select pg_temp.webhook_write ('sub_d16_early', 'd1600000-0000-4000-8000-0000000000a5', 'free',
+           'canceled', null, 'send_invoice', now() - interval '32 minutes', false, now() - interval '33 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'the new webhook then delivers Stripe''s ended_at, and that is the end: checked after the write',
+    $q$select contract_ends_at = now() - interval '33 minutes' and contract_ends_source = 'stripe'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c005'$q$
+);
+
+select pg_temp.holds (
+    'a district already holding a Stripe end',
+    $q$select pg_temp.webhook_write ('sub_d16_early2', 'd1600000-0000-4000-8000-0000000000a6', 'free',
+           'canceled', null, 'send_invoice', now() - interval '31 minutes 30 seconds', false,
+           now() - interval '40 days') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'a district already holding a Stripe end: checked after the write',
+    $q$select contract_ends_at = now() - interval '40 days'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c006'$q$
+);
+
+select pg_temp.act_as_server ();
+
+-- Stand-in for a row written before ended_at existed: the column is cleared
+-- with every trigger off, then the old webhook redelivers.
+set local session_replication_role = replica;
+
+update public.subscriptions set ended_at = null where stripe_subscription_id = 'sub_d16_early2';
+
+set local session_replication_role = origin;
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'when a later old-webhook write has no Stripe date, the existing end is kept, not replaced by the event''s time',
+    $q$select pg_temp.old_webhook_write ('sub_d16_early2', 'd1600000-0000-4000-8000-0000000000a6', 'free',
+           'canceled', null, now() - interval '31 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'when a later old-webhook write has no Stripe date, the existing end is kept, not replaced by the event''s time: checked after the write',
+    $q$select contract_ends_at = now() - interval '40 days' and contract_ends_source = 'stripe'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c006'$q$
 );
 
 -- ===========================================================================

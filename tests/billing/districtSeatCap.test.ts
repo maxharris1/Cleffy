@@ -242,15 +242,17 @@ describe('the seat-cap migration', () => {
         expect(SQL).toMatch(/\n\s+contract_ends_at timestamptz,\n/);
     });
 
-    it('derives the contract end from the actual end only: never a scheduled date or a period date', () => {
+    it('derives the contract end from Stripe’s dates only, never an invented one (Codex #61 round 3)', () => {
         const def = definition(SQL, 'district_billing_rederive');
-        const derivation = def.slice(
-            def.indexOf('v_end := coalesce('),
-            def.indexOf(');', def.indexOf('v_end := coalesce(')),
-        );
         expect(def).toMatch(/v_linked\.status in \('canceled', 'incomplete_expired'\) then/);
-        expect(derivation).toMatch(/coalesce\(\s*v_linked\.ended_at,/);
-        expect(def).not.toMatch(/current_period_end|cancel_at_period_end|cancel_at\b/);
+        // ended_at (Stripe's ended_at, or the cancel_at it ended on, filled by
+        // the webhook's endedAtOf), else the period end -- nothing else.
+        expect(def).toMatch(/v_end := coalesce\(v_linked\.ended_at, v_linked\.current_period_end\);/);
+        // Not the event's time, not now(), not the date already stored.
+        expect(def).not.toMatch(/last_event_created_at|now\(\)\s*\)|v_row\.contract_ends_at end/);
+        expect(def).not.toMatch(/cancel_at_period_end/);
+        // With no Stripe date the record is left as it is, with a warning.
+        expect(def).toMatch(/if v_end is null then\s*raise warning [\s\S]*?\);\s*return;\s*end if;/);
         expect(read('supabase/migrations', '20261020180400_district_seat_overrides.sql')).toMatch(
             /ended_at = coalesce\(excluded\.ended_at, subscriptions\.ended_at\)/,
         );

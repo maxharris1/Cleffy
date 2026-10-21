@@ -155,9 +155,11 @@ their status; removing a read-only teacher releases them to free with their
 scores back up to the free cap; `district_billing.contract_ends_at` follows
 Stripe's actual end only (null while a cancellation is merely scheduled or
 the subscription is resumed or past due; on cancellation Stripe's `ended_at`
--- not the scheduled date of an earlier schedule, and not a billing period that
-ended months before -- or, from a webhook that omits it, the event that ended
-it; never moved by a redelivery; untouched by an unrelated card subscription), and is null -- so the
+-- not the scheduled date of an earlier schedule -- or, from a webhook that
+omits it (the migration deployed before the new webhook), Stripe's
+`current_period_end`; with neither, nothing is invented: the record keeps what
+it had, null included, and a warning is logged -- never the event's time or
+now(); never moved by a redelivery; untouched by an unrelated card subscription), and is null -- so the
 retention purge selects nothing -- as soon as the district pays on a
 replacement subscription, with or without the override moved to it, while a
 replacement not yet paid leaves the old end, and the replacement's own end

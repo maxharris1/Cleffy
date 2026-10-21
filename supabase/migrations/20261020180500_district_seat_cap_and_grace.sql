@@ -604,11 +604,12 @@ for each row execute function public.studio_members_release_seat ();
 -- status confirms it ended on) once its status is terminal, and null while it
 -- has not ended. Never a scheduled cancellation, which can still be moved or
 -- withdrawn (a cancellation a year out, then an immediate one, must count from
--- the immediate one), and never a billing-period date, which can be long before
--- or after the day it ended. A subscription recorded as ended without an
--- ended_at (a webhook deployed before 20261020180400) falls back to the end
--- already stored, then to the event that ended it; a redelivery changes
--- nothing, because ended_at does not change once Stripe has set it.
+-- the immediate one). A subscription recorded as ended without an ended_at (a
+-- webhook deployed before 20261020180400) takes its current_period_end, the
+-- one other date Stripe gave us (Codex round-3 review of #61: never the stored
+-- end, the event's time or now()); with neither, the record keeps what it has
+-- and a warning is logged. A redelivery changes nothing, because ended_at does
+-- not change once Stripe has set it.
 --
 -- And never while the district pays (major 2): a district renewing on a NEW
 -- subscription -- the old one ended and recorded its end, then the owner signed
@@ -645,12 +646,18 @@ begin
     ) then
         select * into v_linked from public.subscriptions s where s.stripe_subscription_id = v_row.stripe_subscription_id;
         if found and v_linked.status in ('canceled', 'incomplete_expired') then
-            v_end := coalesce(
-                v_linked.ended_at,
-                case when v_row.contract_ends_source = 'stripe' then v_row.contract_ends_at end,
-                v_linked.last_event_created_at,
-                now()
-            );
+            -- Stripe's own dates only (Codex round-3 review of #61): ended_at
+            -- (which the webhook fills from Stripe's ended_at, or the cancel_at
+            -- it ended on), else the subscription's current_period_end. Never
+            -- the event's time or now(): with neither date -- a subscription
+            -- recorded as ended by a webhook from before this migration, with
+            -- no period end -- the record keeps what it has and says so.
+            v_end := coalesce(v_linked.ended_at, v_linked.current_period_end);
+            if v_end is null then
+                raise warning 'district_billing: studio % subscription % ended with no Stripe end date; contract_ends_at left at %',
+                    p_studio, v_linked.stripe_subscription_id, coalesce(v_row.contract_ends_at::text, 'null');
+                return;
+            end if;
         end if;
     end if;
 
