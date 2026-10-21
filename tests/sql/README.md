@@ -160,6 +160,19 @@ and an admin can hand it back to Stripe; every billing-record change is logged
 with its actor; and no client role reads the billing record or its log, calls
 the admin or reconcile functions, or writes `kept_active`. It reports
 `failures | total` on its last line.
+`district_read_only_seats.sql` proves
+`supabase/migrations/20261020180600_read_only_seats_enforced.sql`: a seat that
+the clock alone made read-only (an invoice grace period running out, with no
+webhook and no hourly sweep yet, so nothing is archived) can write nothing at
+once -- no mark on its own score or on a score shared with it as an editor,
+through PostgREST or either batch RPC, no tombstone, no lesson-history
+snapshot, no live ink on `doc:{id}`, no rename or new file, no share link, no
+assignment, no seat invite -- while it still sees and exports everything,
+appears in presence and backfills a page count; an active seat and a roster
+student with Edit keep writing; paying again lifts it immediately; and nobody
+can ask about another user's seat. It reports `failures | total` on its last
+line.
+
 `edge_rate_limit_refund.sql` proves
 `supabase/migrations/20261011120101_refund_edge_rate_limit.sql`: a refund hands
 back one use of a bucket inside its window (never below zero, never into the

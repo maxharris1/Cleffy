@@ -900,6 +900,13 @@ export type Database = {
                 Args: Record<string, never>;
                 Returns: boolean;
             };
+            // True when the caller holds a read-only Academy seat (past its
+            // academy's limit): RLS refuses every write it makes, on any score.
+            // The sync engine keeps such a change rather than undoing it.
+            caller_seat_read_only: {
+                Args: Record<string, never>;
+                Returns: boolean;
+            };
             // Service role only: student-provision ends a student's sessions on
             // archive and reset, and returns how many it ended.
             end_student_sessions: {

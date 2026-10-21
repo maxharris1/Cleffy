@@ -23,8 +23,14 @@ to the district's subscription. Schema and reasoning:
   moved to ordinary Academy), only the first limit − 1 teachers keep Academy:
   the ones the owner chose to keep, then the longest-seated. The rest can open
   and export their scores but cannot edit them, upload, import, run analyses or
-  add students. Their scores are archived as `plan_lapse` and their
-  entitlements read `seat_read_only`. **Nothing is deleted.** When the override
+  add students. That holds on **every** score, their own and ones shared with
+  them, from the moment the seat goes read-only: the database asks who is
+  writing on each write (marks, lesson history, live ink, renaming, share
+  links, assignments), not only whether the score is archived. Their own scores
+  are also archived as `plan_lapse` and their entitlements read
+  `seat_read_only`. Marks a read-only teacher drew are kept on their device and
+  upload once the seat is active again; roster students keep their Edit
+  access. **Nothing is deleted.** When the override
   comes back, or the district pays, every seat and every score returns at once.
   No one new can be seated while the studio is over its limit.
 - The owner chooses who stays active on **Account → Academy seats** (tick up to
@@ -34,8 +40,10 @@ to the district's subscription. Schema and reasoning:
   free cap.
 - Seats are re-ranked on every override change, subscription write, pick and
   removal, and an hourly `district-seat-reconcile` cron handles what only the
-  clock changes (a grace period running out). Entitlements are right
-  immediately either way. Only the archive can lag, by up to an hour.
+  clock changes (a grace period running out). Entitlements and the read-only
+  write check are right immediately either way. Only the archive (which stops
+  other collaborators editing a read-only teacher's own scores) can lag, by up
+  to an hour.
 - Every set, change and clear (including a hand-run SQL statement, and the
   cascade when a studio or its owner is deleted) is logged in
   `public.studio_seat_override_log`.

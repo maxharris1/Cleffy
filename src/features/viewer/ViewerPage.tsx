@@ -200,7 +200,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [rejected, setRejected] = useState<{ docId: string; ids: ReadonlySet<string> } | null>(null);
     const rejectedCount = rejected?.docId === docId ? rejected.ids.size : 0;
     /** Changes kept on this device because the score is archived (see SyncHold). */
-    const [held, setHeld] = useState<{ docId: string; pendingMarks: number } | null>(null);
+    const [held, setHeld] = useState<{
+        docId: string;
+        pendingMarks: number;
+        reason: 'archived' | 'seat-read-only';
+    } | null>(null);
     const heldCount = held?.docId === docId ? held.pendingMarks : 0;
     const [shareOpen, setShareOpen] = useState(false);
     const [notesOpen, setNotesOpen] = useState(false);
@@ -759,7 +763,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 setAccessLoss('ended');
                 return;
             }
-            setHeld({ docId, pendingMarks: hold.pendingMarks });
+            setHeld({ docId, pendingMarks: hold.pendingMarks, reason: hold.reason });
         },
         [docId],
     );
@@ -957,7 +961,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     </div>
                 ) : null}
                 <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
-                <SyncHeldNotice count={heldCount} />
+                <SyncHeldNotice count={heldCount} reason={held?.reason} />
                 {staleBytes ? (
                     <div
                         className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
