@@ -200,4 +200,18 @@ What it changes in the work above:
   - `mailBudget.ts` and its test, whose diff against `664ab41c` is still empty.
 - **Merge note:** it adds a migration, so `tests/migrationRecoverability.test.ts` and the `scripts/apply-migrations.sql` reconciliation at merge time now involve one more #62 migration.
 - **Local check on `78ee399`:** `tests/billing`, `resendDelivery`, `guestEmail` and `migrationRecoverability` give 634 passed and 1 skipped. The skipped test is `tests/billing/cancelLinkStore.test.ts`, which needs the local stack.
-- **CI on `78ee399`:** in progress at 20:50 UTC. `supabase-drift`, `omr-service` and Vercel had passed; both `checks` jobs were still running.
+- **Two more commits from the same session followed:**
+  - **`62bd6e0`, "Cancel links: never send one after its expiry".** A row past its `link_expires_at` is settled as `expired` and sends nothing. What earlier attempts reserved in the mail budget is kept, since one of them may have reached Resend. That is the same keep-on-doubt rule as this pass. The address is removed from the payload. The change is in the same migration, `20261020160300`.
+  - **`c7529f6`, "Restore imslpLicense.ts, reformatted by accident in the previous commit".**
+- **Invariants still hold at the PR head `c7529f6926f9d95b665dfa7d317c45f55be167ca`:**
+  - `resendDelivery.ts` and its test are unchanged since `c209c357`.
+  - The guest-email files are unchanged since `d9b83e20`.
+  - The `mailBudget.ts` and `mailBudget.test.ts` diff against `664ab41c` is empty.
+- **CI on `c7529f6` (the current head) is green**, checked at about 20:54 UTC:
+  - `checks` passed in both runs.
+  - `supabase-drift` passed in both runs.
+  - `omr-service` passed in both runs.
+  - Vercel and Vercel Preview Comments passed.
+  - Supabase Preview was skipped.
+  - `78ee399` was also green; `62bd6e0` was superseded within a minute.
+- No review comments arrived. The PR is still a draft.
