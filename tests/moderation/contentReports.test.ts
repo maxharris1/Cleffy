@@ -9,6 +9,7 @@ import {
     CONTENT_REPORT_LIMITS,
     REPEAT_INFRINGER_STRIKES as SERVER_STRIKES,
     STRIKE_WINDOW_MONTHS as SERVER_WINDOW,
+    contentNoticeIdempotencyKey,
     documentRefFromUrl,
     handleContentModeration,
     handleContentNotices,
@@ -16,6 +17,7 @@ import {
     parseContentReport,
     renderNotice,
     reportAcknowledgment,
+    refundsNoticeBudget,
     reporterOutcome,
     statementOfReasons,
     takedownLifted,
@@ -30,6 +32,11 @@ import {
     type OutboxNotice,
 } from '../../supabase/functions/_shared/contentReports';
 import { MAIL_CATEGORY_CAPS, MAIL_WINDOW_MS } from '../../supabase/functions/_shared/mailBudget';
+import {
+    outboxIdempotencyKey,
+    refundsMailBudget,
+    type MailSendOutcome,
+} from '../../supabase/functions/_shared/mailDelivery';
 
 const OPERATOR = {
     name: 'Cleffy LLC',
@@ -139,6 +146,11 @@ const countingLimiter = () => {
         counts.set(key, used);
         return used <= limit ? { ok: true } : { ok: false, retryAfterSec: 1800 };
     };
+    /** refund_edge_rate_limit: one use back, never below zero. */
+    const refundRateLimit: CommonDeps['refundRateLimit'] = async (key) => {
+        counts.set(key, Math.max(0, (counts.get(key) ?? 0) - 1));
+    };
+    const used = (key: string): number => counts.get(key) ?? 0;
     /** A new hour: the hourly windows reopen. */
     const nextHour = () => {
         for (const key of [...counts.keys()]) {
@@ -147,7 +159,7 @@ const countingLimiter = () => {
             }
         }
     };
-    return { checkRateLimit, nextHour };
+    return { checkRateLimit, refundRateLimit, used, nextHour };
 };
 
 type Sent = { to: string; subject: string; text: string; bcc?: string; idempotencyKey: string };
@@ -157,6 +169,7 @@ const commonDeps = (outbox: ReturnType<typeof fakeOutbox>, sent: Sent[]) => ({
     options: () => new Response('ok'),
     clientKey: () => '203.0.113.9',
     checkRateLimit: async () => ({ ok: true }) as const,
+    refundRateLimit: async () => undefined,
     sendEmail: async (
         to: string,
         message: { subject: string; text: string },
@@ -299,7 +312,7 @@ describe('content-report', () => {
                 to: 'ada@example.com',
                 subject: 'We received your report CR-0000000001',
                 bcc: 'legal@cleffy.io',
-                idempotencyKey: 'content-notice/notice-1',
+                idempotencyKey: 'content_notice_outbox/notice-1',
             }),
         ]);
         expect(outbox.rows[0]).toMatchObject({ status: 'sent', outcomes: [{ outcome: 'sent', retryAfterSec: null }] });
@@ -385,7 +398,7 @@ describe('content-report', () => {
     });
 
     it('keeps a notice whose send failed, for the retry', async () => {
-        const { deps, outbox } = reportDeps({ sendEmail: async () => 'failed' });
+        const { deps, outbox } = reportDeps({ sendEmail: async () => 'unknown' });
         const res = await handleContentReport(post(copyrightBody()), deps);
         expect(res.status).toBe(201);
         expect(await res.json()).toMatchObject({ acknowledged: false, delivery: 'failed' });
@@ -861,5 +874,106 @@ describe('the emails', () => {
         expect(takedownLifted({ documentTitle: 'Sonata', reason: 'Counter-notice' }, OPERATOR).text).toContain(
             'strike from it has been withdrawn',
         );
+    });
+});
+
+describe('the mail budget across uncertain sends (unknown keeps, a definite rejection refunds)', () => {
+    const HOUR = 'mail:content-report-ack:hour';
+    const DAY = 'mail:content-report-ack:day';
+
+    /** One acknowledgment in the outbox, a counting limiter, and a send that answers `outcomes` in turn. */
+    const setup = (outcomes: MailSendOutcome[]) => {
+        const outbox = fakeOutbox();
+        const id = outbox.enqueue({
+            sender: 'content-report-ack',
+            template: 'report_acknowledgment',
+            recipient: 'ada@example.com',
+            bccLegal: true,
+            payload: {
+                reference: 'CR-0000000001',
+                reporterName: 'Ada',
+                category: 'copyright',
+                contentUrl: 'https://cleffy.io/doc/x',
+                explanation: 'Explained at length.',
+            },
+        });
+        const limiter = countingLimiter();
+        const keys: string[] = [];
+        const answers = [...outcomes];
+        const sent: Sent[] = [];
+        const deps: ContentNoticesDeps = {
+            ...commonDeps(outbox, sent),
+            checkRateLimit: limiter.checkRateLimit,
+            refundRateLimit: limiter.refundRateLimit,
+            sendEmail: async (_to, _message, options) => {
+                keys.push(options.idempotencyKey);
+                return answers.shift() ?? 'sent';
+            },
+            authorized: async () => true,
+        };
+        return { outbox, id, limiter, keys, deps };
+    };
+    const run = async (deps: ContentNoticesDeps) => (await handleContentNotices(post({}), deps)).json();
+
+    it.each(['unknown'] as const)(
+        'an %s outcome (timeout, network error, 5xx) keeps the reservation and the notice',
+        async (outcome) => {
+            const { outbox, limiter, deps } = setup([outcome]);
+            expect(await run(deps)).toMatchObject({ sent: 0, failed: 1 });
+            // It may have gone out: the budget stays spent.
+            expect(limiter.used(HOUR)).toBe(1);
+            expect(limiter.used(DAY)).toBe(1);
+            // And it is still owed, for the retry.
+            expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'failed' }] });
+        },
+    );
+
+    it('a definite rejection (4xx) hands the reservation back, in every window', async () => {
+        const { outbox, limiter, deps } = setup(['rejected']);
+        expect(await run(deps)).toMatchObject({ sent: 0, failed: 1 });
+        expect(limiter.used(HOUR)).toBe(0);
+        expect(limiter.used(DAY)).toBe(0);
+        expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'failed' }] });
+    });
+
+    it('no API key (no request made) hands it back too', async () => {
+        const { limiter, deps } = setup(['unconfigured']);
+        expect(await run(deps)).toMatchObject({ unconfigured: 1 });
+        expect(limiter.used(HOUR)).toBe(0);
+        expect(limiter.used(DAY)).toBe(0);
+    });
+
+    it('the retry after an unknown outcome sends with the same Idempotency-Key, derived from the outbox row', async () => {
+        const { outbox, id, limiter, keys, deps } = setup(['unknown', 'sent']);
+        await run(deps);
+        expect(await run(deps)).toMatchObject({ sent: 1 });
+        // Attempt-independent: Resend answers the repeat with the first send's
+        // result, so a notice that did go out the first time is not sent twice.
+        expect(keys).toEqual([`content_notice_outbox/${id}`, `content_notice_outbox/${id}`]);
+        expect(keys[0]).toBe(contentNoticeIdempotencyKey(id));
+        expect(keys[0]).toBe(outboxIdempotencyKey('content_notice_outbox', id));
+        expect(outbox.rows[0]?.status).toBe('sent');
+        // Two attempts, two reservations kept: an over-count, never an under-count.
+        expect(limiter.used(HOUR)).toBe(2);
+    });
+
+    it('a window that refuses hands back what the other window reserved', async () => {
+        const { outbox, limiter, deps } = setup(['sent']);
+        // The day is spent; the hour is not.
+        for (let i = 0; i < MAIL_CATEGORY_CAPS.contentReportAck.day; i += 1) {
+            await limiter.checkRateLimit(DAY, MAIL_CATEGORY_CAPS.contentReportAck.day, MAIL_WINDOW_MS.day);
+        }
+        expect(await run(deps)).toMatchObject({ sent: 0, queued: 1 });
+        expect(limiter.used(HOUR)).toBe(0);
+        expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'deferred' }] });
+    });
+
+    it('decides refunds exactly as the shared mail-delivery contract does', () => {
+        for (const outcome of ['sent', 'rejected', 'unknown', 'unconfigured'] as const) {
+            expect(refundsNoticeBudget(outcome), outcome).toBe(refundsMailBudget(outcome));
+        }
+        expect(refundsMailBudget('unknown')).toBe(false);
+        expect(refundsMailBudget('sent')).toBe(false);
+        expect(refundsMailBudget('rejected')).toBe(true);
     });
 });

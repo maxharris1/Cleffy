@@ -26,6 +26,8 @@
  * the two index.ts files are only the wiring.
  */
 
+import type { MailSendOutcome } from './mailDelivery.ts';
+
 // ---------------------------------------------------------------------------
 // The rules
 // ---------------------------------------------------------------------------
@@ -552,14 +554,19 @@ export interface CommonDeps {
     clientKey: (req: Request) => string;
     checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
     /**
-     * Mail through Resend; 'unconfigured' on a deploy without a key. The
-     * idempotency key makes a resend after a crash mid-delivery a no-op.
+     * Mail through Resend (`_shared/mailDelivery.ts`): 'sent', 'rejected' (a
+     * definite refusal), 'unknown' (a timeout, network error or 5xx: it may
+     * have gone out) or 'unconfigured' (no key, so no request). The
+     * idempotency key is the outbox row's, the same on every attempt, so a
+     * retry after an unknown outcome cannot deliver the notice twice.
      */
     sendEmail: (
         to: string,
         message: MailMessage,
         options: { bcc?: string; idempotencyKey: string },
-    ) => Promise<Exclude<NoticeOutcome, 'deferred'>>;
+    ) => Promise<MailSendOutcome>;
+    /** Hand back one use of a checkRateLimit bucket (refund_edge_rate_limit); best effort. */
+    refundRateLimit: (key: string) => Promise<void>;
     /** Each sender's mail budget. */
     mailBudgets: Record<NoticeSender, MailBudget>;
     /** claim_content_notices(): due rows, `first` first, leased; null when the database is unreachable. */
@@ -571,16 +578,49 @@ export interface CommonDeps {
     now: () => number;
 }
 
-/** Spend one unit of a sender's mail budget, or say when there will be some again. */
-const takeMailBudget = async (deps: CommonDeps, sender: NoticeSender): Promise<Gate> => {
+/** The outbox table a notice's Idempotency-Key is derived from (outboxIdempotencyKey). */
+export const CONTENT_NOTICE_OUTBOX = 'content_notice_outbox';
+
+/** A notice's Idempotency-Key: its outbox row, never the attempt. Same as mailDelivery's outboxIdempotencyKey. */
+export const contentNoticeIdempotencyKey = (noticeId: string): string => `${CONTENT_NOTICE_OUTBOX}/${noticeId}`;
+
+/**
+ * Whether a send's budget reservation goes back: only when no mail can have
+ * gone out (a definite rejection, or no key so no request). An unknown outcome
+ * keeps it. Same as mailDelivery's refundsMailBudget, which
+ * tests/moderation/contentReports.test.ts holds this to.
+ */
+export const refundsNoticeBudget = (outcome: MailSendOutcome): boolean =>
+    outcome === 'rejected' || outcome === 'unconfigured';
+
+/** What the outbox records for a send: retried with backoff unless it went out (or cannot, unconfigured). */
+const noticeOutcome = (outcome: MailSendOutcome): Exclude<NoticeOutcome, 'deferred'> =>
+    outcome === 'sent' || outcome === 'unconfigured' ? outcome : 'failed';
+
+type Reservation = { ok: true; keys: string[] } | { ok: false; retryAfterSec: number };
+
+/**
+ * Reserve one unit of a sender's mail budget in every window, or say when
+ * there will be some again. A window that refuses hands back what the others
+ * reserved: no mail goes out, so none was spent.
+ */
+const takeMailBudget = async (deps: CommonDeps, sender: NoticeSender): Promise<Reservation> => {
+    const keys: string[] = [];
     for (const [window, { limit, windowMs }] of Object.entries(deps.mailBudgets[sender])) {
-        const gate = await deps.checkRateLimit(`mail:${sender}:${window}`, limit, windowMs);
+        const key = `mail:${sender}:${window}`;
+        const gate = await deps.checkRateLimit(key, limit, windowMs);
         if (!gate.ok) {
-            deps.logError(`mail:${sender}:${window}: the ceiling on this mail was reached; notices stay queued`);
+            deps.logError(`${key}: the ceiling on this mail was reached; notices stay queued`);
+            await releaseMailBudget(deps, keys);
             return gate;
         }
+        keys.push(key);
     }
-    return { ok: true };
+    return { ok: true, keys };
+};
+
+const releaseMailBudget = async (deps: CommonDeps, keys: string[]): Promise<void> => {
+    await Promise.all(keys.map((key) => deps.refundRateLimit(key).catch(() => undefined)));
 };
 
 /**
@@ -591,8 +631,9 @@ const takeMailBudget = async (deps: CommonDeps, sender: NoticeSender): Promise<G
  *
  * Out of budget, a notice goes back in the queue until the window reopens,
  * and so does every later one from the same sender this round — not an
- * attempt, and nothing dropped. A failed or unconfigured send is retried
- * with backoff by finish_content_notice().
+ * attempt, and nothing dropped. A send that was refused, whose outcome is
+ * unknown, or that is not configured is retried with backoff by
+ * finish_content_notice(). Only a definite non-send hands its budget back.
  */
 export const deliverNotices = async (
     deps: CommonDeps,
@@ -607,11 +648,14 @@ export const deliverNotices = async (
     const outOfBudget = new Map<NoticeSender, number>();
     for (const notice of claimed) {
         let retryAfter = outOfBudget.get(notice.sender);
+        let reserved: string[] = [];
         if (retryAfter === undefined) {
             const gate = await takeMailBudget(deps, notice.sender);
             if (!gate.ok) {
                 retryAfter = gate.retryAfterSec;
                 outOfBudget.set(notice.sender, retryAfter);
+            } else {
+                reserved = gate.keys;
             }
         }
         if (retryAfter !== undefined) {
@@ -622,14 +666,22 @@ export const deliverNotices = async (
         const message = renderNotice(notice, deps.operator);
         if (!message) {
             deps.logError(`content notice ${notice.id}: its ${notice.template} payload is incomplete`);
+            // Nothing was sent: the reservation goes back.
+            await releaseMailBudget(deps, reserved);
             await deps.finishNotice(notice.id, 'failed', null);
             outcomes.set(notice.id, 'failed');
             continue;
         }
-        const delivery = await deps.sendEmail(notice.recipient, message, {
+        const sent = await deps.sendEmail(notice.recipient, message, {
             ...(notice.bccLegal ? { bcc: deps.operator.legalEmail } : {}),
-            idempotencyKey: `content-notice/${notice.id}`,
+            idempotencyKey: contentNoticeIdempotencyKey(notice.id),
         });
+        // Kept unless the mail definitely did not go out: an unknown outcome
+        // may have spent it, and the retry (same key) cannot send it twice.
+        if (refundsNoticeBudget(sent)) {
+            await releaseMailBudget(deps, reserved);
+        }
+        const delivery = noticeOutcome(sent);
         await deps.finishNotice(notice.id, delivery, null);
         outcomes.set(notice.id, delivery);
     }
