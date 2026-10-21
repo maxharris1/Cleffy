@@ -70,7 +70,7 @@ jobs:
             - name: Checkout and cancel-link SQL proofs
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-                  for proof in cancel_link_lifetime cancel_link_tombstones cancel_link_db_clock cancel_link_tombstone_race cancel_link_read_db_clock checkout_consents launch_checkout_fixes; do
+                  for proof in cancel_link_lifetime cancel_link_tombstones cancel_link_db_clock cancel_link_tombstone_race cancel_link_read_db_clock cancel_link_save_after_insert checkout_consents launch_checkout_fixes; do
                       bash scripts/ci/sql-proof.sh "$DB_URL" "tests/sql/${proof}.sql"
                   done
 

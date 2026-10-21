@@ -11184,6 +11184,10 @@ grant execute on function public.save_cancel_link_token (uuid, uuid, text, uuid)
 -- decides that a link has expired, nor (cancelFlow.ts) refuses a send.
 -- tests/sql/cancel_link_read_db_clock.sql proves the read.
 --
+-- And the seconds left that decide the send are counted as the save's last
+-- step, after its INSERT, which can wait (Codex round 6 on #62, its new
+-- major): see save_cancel_link_token_v2 below.
+--
 -- Safe to re-run: every function is CREATE OR REPLACE, every trigger is
 -- dropped before it is made, the index is IF NOT EXISTS (and the one it
 -- replaces dropped IF EXISTS), the de-duplication changes nothing once there
@@ -11335,10 +11339,28 @@ $$;
 revoke all on function public.billing_cancel_tokens_not_tombstoned () from public, anon, authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
--- save_cancel_link_token_v2: the history locks before the history
+-- save_cancel_link_token_v2: the history locks before the history, and the
+-- time left counted last
 -- ---------------------------------------------------------------------------
--- As 20261020160500 defines it (its answers are unchanged), with the locks
--- taken after the row's and before the tombstones are read.
+-- As 20261020160500 defines it (its answers are unchanged), with two changes.
+--
+-- The locks are taken after the row's and before the tombstones are read.
+--
+-- And the seconds left are counted on clock_timestamp() as the save's last
+-- step, after every statement that can wait (Codex round 6 on #62, its new
+-- major; decision 34). They were counted before the INSERT -- which can wait:
+-- on the account's row (the foreign key's check, while someone holds it FOR
+-- UPDATE), or on another insert of the same hash. A save that counted 121
+-- seconds, waited, and answered 121 had cancelFlow.ts send a link with less
+-- than the margin left, or none. Now, after the INSERT, under 120 seconds
+-- left is refused like any other `expired`: the row settled without its
+-- address, and a token this save inserted made unusable in the same
+-- transaction (its expiry brought forward to now -- the one way it may move
+-- -- so read_cancel_link_token never answers for it; a token an earlier
+-- attempt saved is left as it is, as the check before the INSERT leaves it).
+-- The check before the INSERT stays, so a save already too late inserts
+-- nothing. tests/sql/cancel_link_save_after_insert.sql proves it, a second
+-- session holding the account's row.
 create or replace function public.save_cancel_link_token_v2 (
     p_outbox_id uuid,
     p_claim uuid,
@@ -11353,6 +11375,8 @@ declare
     v_mode text;
     v_expires timestamptz;
     v_left integer;
+    v_remaining interval;
+    v_inserted boolean;
 begin
     select o.mode, o.link_expires_at into v_mode, v_expires
     from public.billing_mail_outbox o
@@ -11386,11 +11410,26 @@ begin
         where id = p_outbox_id;
         return jsonb_build_object('answer', 'expired', 'remaining_seconds', v_left);
     end if;
-    v_left := floor(extract(epoch from v_expires - clock_timestamp()))::integer;
 
     insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
     values (p_hash, p_user, v_mode, v_expires, p_outbox_id)
     on conflict (token_hash) do nothing;
+    v_inserted := found;
+
+    v_expires := least(v_expires, (select t.expires_at from public.billing_cancel_tokens t where t.token_hash = p_hash));
+    v_remaining := v_expires - clock_timestamp();
+    v_left := greatest(0, coalesce(floor(extract(epoch from v_remaining))::integer, 0));
+    if v_remaining is null or v_remaining < interval '120 seconds' then
+        if v_inserted then
+            update public.billing_cancel_tokens
+            set expires_at = least(expires_at, clock_timestamp())
+            where token_hash = p_hash;
+        end if;
+        update public.billing_mail_outbox
+        set status = 'expired', last_error = 'expired before delivery', payload = payload - 'email'
+        where id = p_outbox_id;
+        return jsonb_build_object('answer', 'expired', 'remaining_seconds', v_left);
+    end if;
     return jsonb_build_object('answer', 'saved', 'remaining_seconds', v_left);
 end;
 $$;

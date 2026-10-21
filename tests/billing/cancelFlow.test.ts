@@ -1029,6 +1029,14 @@ describe('billing-cancel/index.ts is wiring only', () => {
         );
         expect(CANCEL_LINK_SEND_MARGIN_S).toBe(120);
         expect(migration).toContain("v_expires - clock_timestamp() < interval '120 seconds'");
+        // ... counted again as the save's last step, after its INSERT (Codex round 6 on #62).
+        const final = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20261020160600_cancel_link_serialized_history.sql'),
+            'utf8',
+        );
+        expect(final).toMatch(
+            /on conflict \(token_hash\) do nothing;\s+v_inserted := found;[\s\S]*?v_remaining := v_expires - clock_timestamp\(\);[\s\S]*?v_remaining < interval '120 seconds'/,
+        );
         const flow = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/cancelFlow.ts'), 'utf8');
         expect(flow).toContain('saved.remainingSeconds < CANCEL_LINK_SEND_MARGIN_S');
     });
