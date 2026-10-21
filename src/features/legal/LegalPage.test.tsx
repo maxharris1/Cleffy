@@ -139,6 +139,23 @@ describe('legal content', () => {
         const text = sectionText(PRIVACY_POLICY, 'who-can-see');
         expect(text).toMatch(/email addresses are never shown/);
         expect(text).not.toMatch(/your email address if you have not set one/);
+        // The fallbacks are the ones #64's safePresenceName() uses, never an address.
+        expect(text).toMatch(/shown as “Collaborator”, or “Guest” for a guest/);
+    });
+
+    it('has no document that lets presence fall back to an email address', () => {
+        // Presence is what other viewers of a score see. dev's single
+        // legalContent.ts said it showed "your email address if you have not
+        // set one"; no policy may say that again, whichever file the text
+        // moves to.
+        for (const [id, doc] of Object.entries(LEGAL_DOCUMENTS)) {
+            const sentences = legalText(doc)
+                .split(/(?<=[.;])\s+|\n/)
+                .filter((sentence) => /see each other|viewing it|presence/i.test(sentence));
+            for (const sentence of sentences) {
+                expect(sentence, id).not.toMatch(/email address(?!es are never shown)/i);
+            }
+        }
     });
 
     it('describes sign-out as session.ts and signOutSync.ts do it', async () => {
