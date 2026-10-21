@@ -671,6 +671,17 @@ export type Database = {
                 Args: { doc: string };
                 Returns: MemberRole | null;
             };
+            // Notice and action (20261020150000). The browser only asks and reads;
+            // every write is the content-report / content-moderation functions'.
+            is_content_moderator: {
+                Args: Record<string, never>;
+                Returns: boolean;
+            };
+            // Moderators only (42501 otherwise); parsed in moderationApi.ts.
+            moderation_queue: {
+                Args: Record<string, never>;
+                Returns: unknown;
+            };
             // Storage-policy helper: the caller owned this deleted score's folder
             // and has not finished cleaning it up.
             document_storage_cleanup_pending: {

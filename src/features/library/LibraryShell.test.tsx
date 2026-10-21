@@ -309,6 +309,8 @@ describe('LibraryShell', () => {
         );
         expect(screen.getByRole('menuitem', { name: 'Privacy' })).toHaveAttribute('href', '/privacy');
         expect(screen.getByRole('menuitem', { name: 'Terms' })).toHaveAttribute('href', '/terms');
+        expect(screen.getByRole('menuitem', { name: 'Refunds' })).toHaveAttribute('href', '/refunds');
+        expect(screen.getByRole('menuitem', { name: 'Copyright' })).toHaveAttribute('href', '/copyright');
     });
 
     it('pads the chrome for the iPhone status bar', () => {

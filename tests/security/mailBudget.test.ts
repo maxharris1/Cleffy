@@ -58,7 +58,7 @@ describe('the auth-mail reserve', () => {
     it('says which window over-allocates and by how much, rather than just failing', () => {
         // Proving the guard really catches it — the assertion above only shows
         // today's numbers are fine. A budget of 50/hour leaves 10 after the
-        // 40 reserved, and the guest-email cap of 60 does not fit in 10.
+        // 40 reserved, and the 60 the caps add up to does not fit in 10.
         const tight = env({ [MAIL_BUDGET_ENV.hour]: '50' });
         const problems = mailBudgetProblems(tight);
         expect(problems).toHaveLength(1);
@@ -139,11 +139,14 @@ describe('guest-email derives its ceilings from the budget', () => {
         }
     });
 
-    it('moves no behaviour today: the derived ceilings are the literals they replaced', () => {
-        // Deliberately the same size as before this module existed, so the
-        // change is a statement about ownership and not a quiet retune.
-        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 60, windowMs: MAIL_WINDOW_MS.hour });
-        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 300, windowMs: MAIL_WINDOW_MS.day });
+    it('gets its declared cap in full: the clamp is inert at the declared budget', () => {
+        // The same size as the literals this module replaced (60/300) until the
+        // content-report and moderation senders took 15/60 of it in October
+        // 2026 — a deliberate retune, pinned here so the next one is too.
+        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 45, windowMs: MAIL_WINDOW_MS.hour });
+        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 240, windowMs: MAIL_WINDOW_MS.day });
+        expect(mailLimit('contentReportAck', 'hour').limit).toBe(MAIL_CATEGORY_CAPS.contentReportAck.hour);
+        expect(mailLimit('moderationNotice', 'day').limit).toBe(MAIL_CATEGORY_CAPS.moderationNotice.day);
     });
 
     it('counts over windows a rate limiter can actually use', () => {

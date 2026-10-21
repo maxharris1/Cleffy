@@ -17,9 +17,10 @@
  *  * GoTrue sends password resets and sign-up confirmations over Resend SMTP.
  *    Those are the mails a human is sitting in front of their inbox waiting
  *    for, and the ones whose absence locks somebody out of their account.
- *  * Our own Edge Functions send through the Resend HTTP API — today just the
- *    guest-email verification code (`_shared/guestEmail.ts`). Nobody is locked
- *    out when one of those is delayed; a guest can try again later.
+ *  * Our own Edge Functions send through the Resend HTTP API — the guest-email
+ *    verification code (`_shared/guestEmail.ts`) and the content-report and
+ *    moderation notices (`_shared/contentReports.ts`). Nobody is locked out
+ *    when one of those is delayed.
  *
  * The second kind is discretionary and the first is not, but until this module
  * existed nothing said so. `GUEST_EMAIL_LIMITS` carried the bare numbers 60/h
@@ -119,8 +120,24 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
  * the reset budget quietly shrinking.
  */
 export const MAIL_CATEGORY_CAPS = {
-    /** `guest-email-start`: the one-time code a share-link guest proves an address with. */
-    guestEmailCode: { hour: 60, day: 300 },
+    /**
+     * `guest-email-start`: the one-time code a share-link guest proves an
+     * address with. 60/300 until the two content senders below arrived
+     * (October 2026); their caps were carved out of this one rather than out
+     * of the reserve or an unconfirmed bigger budget.
+     */
+    guestEmailCode: { hour: 45, day: 240 },
+    /**
+     * `content-report`: the acknowledgment a reporter gets, blind-copied to the
+     * legal mailbox. The endpoint is open to anyone, so it is the aimable one.
+     */
+    contentReportAck: { hour: 10, day: 40 },
+    /**
+     * `content-moderation`: statements of reasons and decisions mailed after a
+     * moderator acts. Moderator-initiated, so a handful a day; capped anyway so
+     * a runaway client cannot spend the reserve.
+     */
+    moderationNotice: { hour: 5, day: 20 },
 } as const;
 
 export type MailCategory = keyof typeof MAIL_CATEGORY_CAPS;
