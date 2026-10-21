@@ -35,6 +35,8 @@ interface CheckoutAttemptRow {
     attempt_id: string | null;
     price_id: string | null;
     session_id: string | null;
+    consent_id: string | null;
+    params_hash: string | null;
 }
 
 /**
@@ -187,11 +189,15 @@ Deno.serve((req) =>
                     attemptId: row.attempt_id ?? null,
                     priceId: row.price_id ?? null,
                     sessionId: row.session_id ?? null,
+                    consentId: row.consent_id ?? null,
+                    paramsHash: row.params_hash ?? null,
                 },
             };
         },
         // The idempotency key, durable before it is handed to Stripe, and only
-        // while this request still holds the lease (migration 20261013120100).
+        // while this request still holds the lease (migration 20261013120100) --
+        // with the consent and parameter fingerprint a replay of it must
+        // reproduce (migration 20261020160100).
         // `false` is the lease having been taken over, which is the one answer
         // the flow must not read as a failure: it means another request owns the
         // critical section and this one must open nothing.
@@ -202,6 +208,8 @@ Deno.serve((req) =>
                 p_holder: holder,
                 p_attempt_id: attempt.attemptId,
                 p_price_id: attempt.priceId,
+                p_consent_id: attempt.consentId,
+                p_params_hash: attempt.paramsHash,
             });
             if (error) {
                 throw new Error(`could not stage the checkout attempt: ${error.message}`);

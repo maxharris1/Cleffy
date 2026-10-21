@@ -15,6 +15,7 @@ import {
     type CheckoutDeps,
     type CheckoutSessionParams,
     type ConsentRecord,
+    type StagedAttempt,
 } from '../../supabase/functions/_shared/checkoutFlow';
 import {
     EDGE_FUNCTION_WALL_CLOCK_MS as WEBHOOK_WALL_CLOCK_MS,
@@ -124,6 +125,16 @@ class FakeStripe {
      * a buyer out of a plan when a create came back 500 (Codex round 2 of #56).
      */
     replays = new Map<string, { id: string; url: string } | { error: string }>();
+    /**
+     * The parameters each key was FIRST sent with. Stripe compares a replayed
+     * key's parameters with these and refuses any difference with an
+     * idempotency error rather than replaying (Codex finding 1 on #62: a stub
+     * that replayed whatever it was sent is how a replay carrying a fresh
+     * consent id passed here and would have failed in Stripe).
+     */
+    keyParams = new Map<string, string>();
+    /** Replays Stripe refused for differing parameters. */
+    idempotencyErrors: string[] = [];
     /** The customer's subscriptions, as Stripe holds them. */
     subscriptions = new Map<string, string>();
     expireFails = false;
@@ -174,6 +185,15 @@ class FakeStripe {
         options: { idempotencyKey: string },
     ): { id: string; url: string } => {
         this.keysUsed.push(options.idempotencyKey);
+        const sent = JSON.stringify(params);
+        const first = this.keyParams.get(options.idempotencyKey);
+        if (first !== undefined && first !== sent) {
+            this.idempotencyErrors.push(options.idempotencyKey);
+            throw new Error(
+                'Keys for idempotent requests can only be used with the same parameters they were first used with.',
+            );
+        }
+        this.keyParams.set(options.idempotencyKey, sent);
         const replay = this.replays.get(options.idempotencyKey);
         if (replay) {
             if ('error' in replay) {
@@ -235,6 +255,8 @@ class FakeAttempts {
     attemptId: string | null = null;
     priceId: string | null = null;
     sessionId: string | null = null;
+    consentId: string | null = null;
+    paramsHash: string | null = null;
     /** Attempts begun, holders issued in order — for assertions about the lock. */
     holders: string[] = [];
     beginFails = false;
@@ -246,6 +268,8 @@ class FakeAttempts {
         attemptId: string | null;
         priceId: string | null;
         sessionId: string | null;
+        consentId: string | null;
+        paramsHash: string | null;
     } | null => {
         if (this.holder !== null && this.clock - this.claimedAt < LEASE_MS) {
             return null;
@@ -258,6 +282,8 @@ class FakeAttempts {
             attemptId: this.attemptId,
             priceId: this.priceId,
             sessionId: this.sessionId,
+            consentId: this.consentId,
+            paramsHash: this.paramsHash,
         };
     };
 
@@ -267,13 +293,15 @@ class FakeAttempts {
      * an attempt whose lease has been taken over cannot stage -- which is what
      * stops it reaching the Stripe create at all.
      */
-    stage = (holder: string, attempt: { attemptId: string; priceId: string }): boolean => {
+    stage = (holder: string, attempt: StagedAttempt): boolean => {
         if (this.holder !== holder) {
             return false;
         }
         this.attemptId = attempt.attemptId;
         this.priceId = attempt.priceId;
         this.sessionId = null;
+        this.consentId = attempt.consentId;
+        this.paramsHash = attempt.paramsHash;
         return true;
     };
 
@@ -288,6 +316,9 @@ class FakeAttempts {
         this.attemptId = attempt.attemptId;
         this.priceId = attempt.priceId;
         this.sessionId = attempt.sessionId;
+        // finish_checkout_attempt clears the replay inputs with the key.
+        this.consentId = null;
+        this.paramsHash = null;
         return true;
     };
 
@@ -396,7 +427,13 @@ const harness = (
                 ? {
                       ok: true as const,
                       holder: taken.holder,
-                      stored: { attemptId: taken.attemptId, priceId: taken.priceId, sessionId: taken.sessionId },
+                      stored: {
+                          attemptId: taken.attemptId,
+                          priceId: taken.priceId,
+                          sessionId: taken.sessionId,
+                          consentId: taken.consentId,
+                          paramsHash: taken.paramsHash,
+                      },
                   }
                 : { ok: false as const, reason: 'in_flight' as const };
         }),
@@ -801,6 +838,68 @@ describe('stripe-checkout flow', () => {
             expect((h.deps.expireOpenSessions as ReturnType<typeof vi.fn>).mock.calls.length).toBe(expiresBefore);
             expect(h.stripe.openSessions()).toHaveLength(1);
             expect(await body(next)).toEqual({ url: h.stripe.openSessions()[0]?.url });
+        });
+
+        it('replays the dead attempt with the consent it recorded, so Stripe sees the same request', async () => {
+            // Codex finding 1 on #62: the replay used to record a FRESH consent
+            // and put its id in the metadata, so the replayed key arrived with
+            // different parameters and Stripe refused it. The stub above now
+            // compares parameters the way Stripe does, so this is the real test.
+            const h = harness({ customerId: 'cus_1' });
+            await diesInsideCreate(h);
+            expect(h.attempts.consentId).toBe('consent-1');
+            expect(h.attempts.paramsHash).toMatch(/^[0-9a-f]{64}$/);
+
+            const next = await handleCheckout(post(), h.deps);
+
+            expect(next.status).toBe(200);
+            expect(h.stripe.idempotencyErrors).toEqual([]);
+            expect(h.stripe.sessions).toHaveLength(1);
+            // Both creates named the consent the dead attempt recorded, and the
+            // replay recorded none of its own.
+            expect(h.params.map((p) => p.metadata.consent_id)).toEqual(['consent-1', 'consent-1']);
+            expect(h.params.map((p) => p.subscription_data.metadata.consent_id)).toEqual(['consent-1', 'consent-1']);
+            expect(h.consents).toHaveLength(1);
+            expect(h.consents[0]?.sessionId).toBe('cs_1');
+            // Recorded, so the replay inputs are spent with the key.
+            expect(h.attempts.consentId).toBeNull();
+            expect(h.attempts.paramsHash).toBeNull();
+        });
+
+        it('mints a fresh key, and expires the orphan, when the request differs from the dead one', async () => {
+            // Same plan, same currency -- but a request whose parameters would
+            // not match (here, it came from another origin, so the return URLs
+            // differ). Replaying would be refused by Stripe; this is a
+            // different request and gets a key and a session of its own, and
+            // the dead attempt's orphan is expired so only one stays payable.
+            const h = harness({ customerId: 'cus_1' });
+            await diesInsideCreate(h);
+            h.deps.appOrigin = () => 'https://www.cleffy.io';
+
+            const next = await handleCheckout(post(), h.deps);
+
+            expect(next.status).toBe(200);
+            expect(h.stripe.idempotencyErrors).toEqual([]);
+            expect(h.stripe.keysUsed).toEqual([
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-1'),
+                checkoutIdempotencyKey(USER, 'live', PRICE_KEY, 'attempt-2'),
+            ]);
+            expect(h.stripe.openSessions().map((session) => session.id)).toEqual(['cs_2']);
+            expect(h.params[1]?.metadata.consent_id).toBe('consent-2');
+            expect(h.logs.some((line) => line.includes('other parameters than this request'))).toBe(true);
+        });
+
+        it('does not replay a key staged without its replay inputs (before migration 20261020160100)', async () => {
+            const h = harness({ customerId: 'cus_1' });
+            await diesInsideCreate(h);
+            h.attempts.consentId = null;
+            h.attempts.paramsHash = null;
+
+            const next = await handleCheckout(post(), h.deps);
+
+            expect(next.status).toBe(200);
+            expect(h.stripe.idempotencyErrors).toEqual([]);
+            expect(h.stripe.openSessions().map((session) => session.id)).toEqual(['cs_2']);
         });
 
         it('still expires, and uses a fresh key, when the dead attempt was for another plan', async () => {

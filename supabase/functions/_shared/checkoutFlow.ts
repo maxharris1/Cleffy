@@ -138,6 +138,28 @@ export const checkoutIdempotencyKey = (userId: string, mode: StripeMode, priceId
     `checkout:${mode}:${userId}:${priceId}:${attemptId}`;
 
 /**
+ * SHA-256 (hex) of everything a replay of an attempt's key has to reproduce:
+ * the session parameters exactly as they are sent to Stripe, and the consent
+ * wording the buyer ticked.
+ *
+ * Stripe compares a replayed key's parameters with the first request's and
+ * refuses any difference (Codex finding 1 on #62: a fresh consent id in the
+ * metadata made every replay a refusal). Staging this beside the key lets the
+ * attempt that follows a dead isolate tell "the same request again" -- replay
+ * the key -- from "a different request" -- mint a fresh key and expire the
+ * orphan -- before Stripe has to. Web Crypto, which Deno and Node both have, so
+ * the module stays import-free.
+ */
+export const checkoutParamsFingerprint = async (
+    params: CheckoutSessionParams,
+    consentText: string,
+): Promise<string> => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ params, consentText }));
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+};
+
+/**
  * Stripe subscription statuses that mean this buyer is already subscribed, read
  * from Stripe rather than from our mirror. Deliberately the same rule
  * `holdsRunningSubscription` applies to the mirror -- entitling, or still being
@@ -247,6 +269,23 @@ export interface StoredAttempt {
     attemptId: string | null;
     priceId: string | null;
     sessionId: string | null;
+    /**
+     * The consent the staged attempt recorded, and the fingerprint of the
+     * session parameters it sent (`checkoutParamsFingerprint`). A replay reuses
+     * the first and has to reproduce the second, because Stripe refuses a key
+     * replayed with different parameters (migration 20261020160100). Null on a
+     * row staged before that migration, which is then not replayed.
+     */
+    consentId: string | null;
+    paramsHash: string | null;
+}
+
+/** What `stageAttempt` persists before the create: everything a replay needs. */
+export interface StagedAttempt {
+    attemptId: string;
+    priceId: string;
+    consentId: string;
+    paramsHash: string;
 }
 
 /**
@@ -382,12 +421,7 @@ export interface CheckoutDeps {
      * the next attempt replays the SAME key, and Stripe answers with the session
      * the dead one opened instead of a second one.
      */
-    stageAttempt: (
-        userId: string,
-        mode: StripeMode,
-        holder: string,
-        attempt: { attemptId: string; priceId: string },
-    ) => Promise<boolean>;
+    stageAttempt: (userId: string, mode: StripeMode, holder: string, attempt: StagedAttempt) => Promise<boolean>;
     /**
      * Releases the lock, recording the session this attempt opened. False when
      * the lease had already been taken over, so nothing was recorded -- see the
@@ -620,8 +654,64 @@ const openSessionUnderLock = async (
     // time-bucket key to avoid. Nothing else can be open for it to miss: the
     // attempt that staged this key ran the expiry before staging, and opening a
     // session needs this lock.
-    const resumed =
-        stored.attemptId !== null && stored.sessionId === null && stored.priceId === priceId ? stored.attemptId : null;
+    //
+    // A replay is only a replay if it sends Stripe EXACTLY what the dead attempt
+    // sent: Stripe refuses a key reused with different parameters (Codex finding
+    // 1 on #62). So the replay reuses the consent the dead attempt recorded --
+    // its id is in the session metadata -- rather than recording another, and
+    // rebuilds the parameters from it and the stored attempt id. Only if they
+    // fingerprint the same as what was staged is the key replayed; a request
+    // that differs in anything (the origin it came from, a submit message a
+    // deploy reworded) is a different request, and goes down layer 5 with a
+    // fresh key, which also expires whatever the dead attempt left open.
+    const origin = deps.appOrigin(req);
+    const paramsFor = (consentId: string, attemptId: string): CheckoutSessionParams => {
+        const idempotencyKey = checkoutIdempotencyKey(caller.userId, mode, priceId, attemptId);
+        return {
+            mode: 'subscription',
+            customer: customerId,
+            line_items: [{ price: purchase.priceId, quantity: 1 }],
+            // The currency the consent named; the price carries a
+            // `currency_options` entry for each, with its own tax_behavior.
+            currency: purchase.terms.currency,
+            // Stripe Tax works out VAT / sales tax from the billing address,
+            // which is why the address is required rather than optional.
+            automatic_tax: { enabled: true },
+            billing_address_collection: 'required',
+            customer_update: { address: 'auto', name: 'auto' },
+            custom_text: { submit: { message: deps.terms.checkoutSubmitMessage(purchase.terms) } },
+            // Both are belt-and-braces for the webhook's user resolution:
+            // either survives even if the billing_customers row is somehow
+            // missing.
+            client_reference_id: caller.userId,
+            subscription_data: { metadata: { user_id: caller.userId, consent_id: consentId } },
+            // `checkout_key` is provenance only now: nothing reads it back
+            // (the expire step no longer spares a session by it), but a
+            // session in the Stripe dashboard saying which attempt opened it
+            // is what makes a double-charge report answerable afterwards.
+            // `consent_id` is the checkout_consents row this purchase rests on.
+            metadata: { user_id: caller.userId, checkout_key: idempotencyKey, consent_id: consentId },
+            success_url: `${origin}/settings?checkout=success`,
+            cancel_url: `${origin}/settings?checkout=cancelled`,
+            allow_promotion_codes: true,
+        };
+    };
+
+    let resumed: { attemptId: string; consentId: string } | null = null;
+    if (stored.attemptId !== null && stored.sessionId === null && stored.priceId === priceId) {
+        const replay =
+            stored.consentId && stored.paramsHash
+                ? await checkoutParamsFingerprint(paramsFor(stored.consentId, stored.attemptId), purchase.consentText)
+                : null;
+        if (replay !== null && replay === stored.paramsHash && stored.consentId) {
+            resumed = { attemptId: stored.attemptId, consentId: stored.consentId };
+        } else {
+            deps.log(
+                `checkout: the staged key for ${caller.userId} was sent with other parameters than this ` +
+                    `request's; opening a fresh session instead of replaying it (${mode})`,
+            );
+        }
+    }
 
     // Layer 5, for every attempt that is NOT a replay. Expiring is what makes
     // "only one session can be paid" true, so it must not be possible for it to
@@ -631,8 +721,12 @@ const openSessionUnderLock = async (
     // Nothing is kept: the session the buyer might have wanted back was handed to
     // them above, and the key minted below is one no previous attempt could have
     // used.
-    // Before anything is expired or staged, so a refusal here has nothing to undo.
-    const consentId = await recordConsent();
+    //
+    // The consent is recorded before anything is expired or staged, so a refusal
+    // here has nothing to undo. A replay records none: the consent the dead
+    // attempt recorded, for this same plan and currency, is the one the replayed
+    // session names.
+    const consentId = resumed ? resumed.consentId : await recordConsent();
     if (!consentId) {
         return consentUnavailable();
     }
@@ -651,8 +745,10 @@ const openSessionUnderLock = async (
         }
     }
 
-    const attemptId = resumed ?? deps.newAttemptId();
+    const attemptId = resumed?.attemptId ?? deps.newAttemptId();
     const idempotencyKey = checkoutIdempotencyKey(caller.userId, mode, priceId, attemptId);
+    const params = paramsFor(consentId, attemptId);
+    const paramsHash = await checkoutParamsFingerprint(params, purchase.consentText);
 
     // The key goes to the DATABASE before it goes to Stripe, which is what makes
     // the paragraph above possible at all -- a key only this isolate's memory
@@ -668,7 +764,7 @@ const openSessionUnderLock = async (
     // above is: the alternative is a session whose key nothing can recover.
     let staged: boolean;
     try {
-        staged = await deps.stageAttempt(caller.userId, mode, holder, { attemptId, priceId });
+        staged = await deps.stageAttempt(caller.userId, mode, holder, { attemptId, priceId, consentId, paramsHash });
     } catch (err) {
         return unrecorded(unavailable(deps, 'checkout_attempt_stage_failed', err));
     }
@@ -696,41 +792,9 @@ const openSessionUnderLock = async (
         }
     };
 
-    const origin = deps.appOrigin(req);
     let session: Awaited<ReturnType<CheckoutDeps['createSession']>>;
     try {
-        session = await deps.createSession(
-            {
-                mode: 'subscription',
-                customer: customerId,
-                line_items: [{ price: purchase.priceId, quantity: 1 }],
-                // The currency the consent named; the price carries a
-                // `currency_options` entry for each, with its own tax_behavior.
-                currency: purchase.terms.currency,
-                // Stripe Tax works out VAT / sales tax from the billing address,
-                // which is why the address is required rather than optional.
-                automatic_tax: { enabled: true },
-                billing_address_collection: 'required',
-                customer_update: { address: 'auto', name: 'auto' },
-                custom_text: { submit: { message: deps.terms.checkoutSubmitMessage(purchase.terms) } },
-                // Both are belt-and-braces for the webhook's user resolution:
-                // either survives even if the billing_customers row is somehow
-                // missing.
-                client_reference_id: caller.userId,
-                subscription_data: { metadata: { user_id: caller.userId, consent_id: consentId } },
-                // `checkout_key` is provenance only now: nothing reads it back
-                // (the expire step no longer spares a session by it), but a
-                // session in the Stripe dashboard saying which attempt opened it
-                // is what makes a double-charge report answerable afterwards.
-                // `consent_id` is the checkout_consents row this purchase rests on.
-                metadata: { user_id: caller.userId, checkout_key: idempotencyKey, consent_id: consentId },
-                success_url: `${origin}/settings?checkout=success`,
-                cancel_url: `${origin}/settings?checkout=cancelled`,
-                allow_promotion_codes: true,
-            },
-            { idempotencyKey },
-            mode,
-        );
+        session = await deps.createSession(params, { idempotencyKey }, mode);
     } catch (err) {
         // A create we watched fail is a create whose key must never be used
         // again: Stripe has saved that failure against it and will replay it for
