@@ -767,9 +767,16 @@ const restoreStudent = async (admin: SupabaseClient, userId: string, body: Provi
  * The scrub comes FIRST because the account is what names the marks. Once the
  * auth user is gone, annotations.created_by is cleared by its ON DELETE SET
  * NULL (20261007120600) and nothing could tell this student's marks from
- * anyone else's. A failure after the scrub leaves a student whose marks are
- * already gone and whose account still exists — a retry finishes it, and the
- * scrub is a no-op the second time.
+ * anyone else's.
+ *
+ * revoke_and_scrub_student (20261021120400) archives the row, ends the
+ * student's sessions and scrubs their markings in ONE transaction, holding the
+ * roster row's lock that every student write also takes. A mark drawn while
+ * it runs is either committed before it and scrubbed, or refused after it; one
+ * drawn between a scrub and a later revocation can no longer slip through and
+ * lose its author when the account goes. A failure after it leaves a student
+ * who is archived, signed out and without markings, whose account still
+ * exists — a retry finishes it, and the second scrub is a no-op.
  *
  * Allowed on any plan, active or archived, like archive: it hands a seat
  * back rather than claiming one.
@@ -781,19 +788,12 @@ const deleteStudent = async (admin: SupabaseClient, userId: string, body: Provis
     }
     const row = owned.row;
 
-    const { data: scrubbed, error: scrubError } = await admin.rpc('scrub_student_markings', {
+    const { data: scrubbed, error: scrubError } = await admin.rpc('revoke_and_scrub_student', {
         p_student: row.student_user_id,
     });
     if (scrubError) {
-        console.error(`could not scrub the markings of student ${row.id}: ${scrubError.message}`);
+        console.error(`could not revoke and scrub student ${row.id}: ${scrubError.message}`);
         return jsonResponse({ error: 'Could not delete the student' }, 502);
-    }
-
-    // Best effort: deleting the account ends every session anyway; this is the
-    // ping that makes an open viewer notice now.
-    const ended = await endStudentSessions(admin, row.student_user_id);
-    if (!ended.ok) {
-        logError('student-provision', new Error(ended.message), { code: 'delete_sessions_not_ended' });
     }
 
     const { error: deleteError } = await admin.auth.admin.deleteUser(row.student_user_id);

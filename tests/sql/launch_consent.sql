@@ -327,6 +327,70 @@ select pg_temp.holds (
 );
 
 -- ===========================================================================
+-- revoke_and_scrub_student (20261021120400): Delete student in one transaction
+-- ===========================================================================
+-- The races themselves need two sessions: tests/sql/launch_consent_concurrency.mjs.
+select pg_temp.act_as ('1c000000-0000-4000-8000-0000000000a1');
+
+select pg_temp.refused (
+    'a teacher cannot call revoke_and_scrub_student themselves',
+    $q$select public.revoke_and_scrub_student ('1c000000-0000-4000-8000-0000000000b1')$q$,
+    '42501'
+);
+
+select pg_temp.act_as_service ();
+
+select pg_temp.refused (
+    'revoke_and_scrub_student refuses an account with no roster row',
+    $q$select public.revoke_and_scrub_student ('1c000000-0000-4000-8000-0000000000a1')$q$,
+    'P0002'
+);
+
+select pg_temp.holds (
+    'revoke_and_scrub_student scrubs (nothing left to cut by now)',
+    $q$select (public.revoke_and_scrub_student ('1c000000-0000-4000-8000-0000000000b1') ->> 'snapshots')::int = 0$q$
+);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.holds (
+    'and leaves the student archived with their sessions ended',
+    $q$select archived_at is not null and access_revoked_at is not null from public.managed_students
+       where id = '1c000000-0000-4000-8000-0000000005b1'$q$
+);
+
+select pg_temp.act_as ('1c000000-0000-4000-8000-0000000000b1');
+
+select pg_temp.refused (
+    'the revoked student can write no mark',
+    $q$insert into public.annotations (id, document_id, page, kind, color, payload, created_by)
+       values ('1c000000-0000-4000-8000-0000000a0009', '1c000000-0000-4000-8000-00000000d001', 0, 'stroke',
+               '#112233', '{"pts":[0.1,0.1,0.5,0.2,0.2,0.5],"w":0.01}', '1c000000-0000-4000-8000-0000000000b1')$q$,
+    '42501'
+);
+
+select pg_temp.act_as ('1c000000-0000-4000-8000-0000000000a1');
+
+select pg_temp.holds (
+    'the teacher still writes marks: the guard is for roster students only',
+    $q$with i as (
+           insert into public.annotations (id, document_id, page, kind, color, payload, created_by)
+           values ('1c000000-0000-4000-8000-0000000a000a', '1c000000-0000-4000-8000-00000000d001', 0, 'stroke',
+                   '#112233', '{"pts":[0.1,0.1,0.5,0.2,0.2,0.5],"w":0.01}', '1c000000-0000-4000-8000-0000000000a1')
+           returning 1
+       ) select count(*) = 1 from i$q$
+);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.holds (
+    'the write guard is a BEFORE statement trigger on annotations and lesson history',
+    $q$select count(*) = 2 from pg_trigger
+       where tgname in ('annotations_refuse_revoked_student', 'annotation_snapshots_refuse_revoked_student')
+         and tgtype & 1 = 0 and tgtype & 2 = 2 and tgenabled = 'O'$q$
+);
+
+-- ===========================================================================
 -- Retention
 -- ===========================================================================
 select pg_temp.act_as_server ();

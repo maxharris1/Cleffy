@@ -120,7 +120,8 @@ describe('student-provision asks for it, and deletes in a safe order', () => {
 
     it('scrubs a deleted student’s markings before the account goes', () => {
         const fn = body('deleteStudent');
-        const scrub = fn.indexOf("rpc('scrub_student_markings'");
+        // Revoke and scrub in one transaction (20261021120400), then the account.
+        const scrub = fn.indexOf("rpc('revoke_and_scrub_student'");
         expect(scrub).toBeGreaterThan(-1);
         expect(scrub).toBeLessThan(fn.indexOf('admin.auth.admin.deleteUser('));
         expect(source).toMatch(/case 'delete':\s*return await deleteStudent\(admin, userId, body\);/);

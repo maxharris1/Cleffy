@@ -276,3 +276,28 @@ registered account, drop stale rate-limit and login buckets but not live
 ones, and drop support mail older than 24 months; the five cron jobs are
 scheduled off the hour. Proven against the local stack (PostgreSQL 17.11) on
 2026-10-21: all 29 checks passed.
+
+The fix pass adds `20261021120400_delete_student_one_transaction.sql`:
+`revoke_and_scrub_student` is the service role's alone and refuses an account
+with no roster row; it leaves the student archived with their sessions ended
+and their markings scrubbed, after which the student can write no mark while
+the teacher still can; and the write guard is a BEFORE statement trigger on
+`annotations` and `annotation_snapshots`.
+
+`launch_consent_concurrency.mjs` proves what one transaction cannot: the
+races. It drives two or three real `psql` sessions against the **local stack
+only** (it refuses any host but localhost), orders them by waiting until a
+session is blocked on a lock (never by sleeping), commits its fixtures under a
+per-run id prefix and removes them at the end, pass or fail:
+
+- **Delete student vs. the student's writes** — a mark the student is still
+  writing when Delete student starts makes the deletion wait, then is scrubbed;
+  a mark the student starts while the deletion runs waits, then is refused
+  (`42501`), and nothing escapes the scrub. Disabling
+  `annotations_refuse_revoked_student` makes the first case fail (the deletion
+  no longer waits, and the in-flight mark outlives the scrub).
+
+```sh
+node tests/sql/launch_consent_concurrency.mjs          # every scenario
+node tests/sql/launch_consent_concurrency.mjs delete   # one group
+```
