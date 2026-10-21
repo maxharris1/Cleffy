@@ -1,9 +1,10 @@
 -- The district migrations are rerunnable, whole (Codex round-3 review of #61:
 -- not only the canonical district_billing block). Applies
 -- 20261020180400_district_seat_overrides.sql,
--- 20261020180500_district_seat_cap_and_grace.sql and
--- 20261020180600_read_only_seats_enforced.sql and
--- 20261020180700_read_only_seats_storage.sql, in order, TWICE on top of a
+-- 20261020180500_district_seat_cap_and_grace.sql,
+-- 20261020180600_read_only_seats_enforced.sql,
+-- 20261020180700_read_only_seats_storage.sql and
+-- 20261020180800_read_only_seats_live_ink.sql, in order, TWICE on top of a
 -- database that already has them, inside one transaction ending in ROLLBACK,
 -- then checks that the second run changed nothing it should not: every table,
 -- column, index, trigger, constraint, policy and cron job exists once, the
@@ -91,11 +92,13 @@ select
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
 \ir ../../supabase/migrations/20261020180600_read_only_seats_enforced.sql
 \ir ../../supabase/migrations/20261020180700_read_only_seats_storage.sql
+\ir ../../supabase/migrations/20261020180800_read_only_seats_live_ink.sql
 
 \ir ../../supabase/migrations/20261020180400_district_seat_overrides.sql
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
 \ir ../../supabase/migrations/20261020180600_read_only_seats_enforced.sql
 \ir ../../supabase/migrations/20261020180700_read_only_seats_storage.sql
+\ir ../../supabase/migrations/20261020180800_read_only_seats_live_ink.sql
 
 reset role;
 
@@ -196,6 +199,18 @@ select pg_temp.holds (
 select pg_temp.holds (
     'studio_effective_seat_limit is 20261020180500''s (grace included)',
     $q$select pg_get_functiondef('public.studio_effective_seat_limit(uuid)'::regprocedure) like '%subscription_is_live%'$q$
+);
+
+select pg_temp.holds (
+    'reconcile_studio_seats is 20261020180800''s (it follows each seat for live ink)',
+    $q$select pg_get_functiondef('public.reconcile_studio_seats(uuid)'::regprocedure) like '%seat_live_ink_follow%'
+          and pg_get_functiondef('public.studio_members_release_seat()'::regprocedure) like '%seat_live_ink_follow%'$q$
+);
+
+select pg_temp.holds (
+    'seat_read_only_since is there once, with RLS on and nothing for clients',
+    $q$select c.relrowsecurity and not has_table_privilege('authenticated', 'public.seat_read_only_since', 'select')
+       from pg_class c where c.oid = 'public.seat_read_only_since'::regclass$q$
 );
 
 select pg_temp.holds (

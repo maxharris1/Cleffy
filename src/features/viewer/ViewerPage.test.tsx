@@ -9,6 +9,7 @@ import type { DocumentRow } from '@/types/database';
 
 const fetchDocument = vi.fn();
 const fetchMyRole = vi.fn();
+const fetchSeatReadOnly = vi.fn();
 const loadDocumentBytes = vi.fn();
 const loadDocumentSource = vi.fn();
 const loadDocumentOffline = vi.fn();
@@ -28,6 +29,7 @@ vi.mock('@/features/library/documentsService', () => ({
     isCloudDocId: (id: string) => /^[0-9a-f-]{36}$/i.test(id),
     fetchDocument: (...args: unknown[]) => fetchDocument(...args),
     fetchMyRole: (...args: unknown[]) => fetchMyRole(...args),
+    fetchSeatReadOnly: (...args: unknown[]) => fetchSeatReadOnly(...args),
     loadDocumentBytes: (...args: unknown[]) => loadDocumentBytes(...args),
     loadDocumentSource: (...args: unknown[]) => loadDocumentSource(...args),
     loadDocumentOffline: (...args: unknown[]) => loadDocumentOffline(...args),
@@ -244,6 +246,7 @@ beforeEach(() => {
     sessionKind.userType = null;
     viewportSync.current = undefined;
     purgeLocalDocument.mockResolvedValue(undefined);
+    fetchSeatReadOnly.mockResolvedValue(false);
     removeCachedLibraryDocument.mockResolvedValue(undefined);
     signOutKeepingChanges.mockResolvedValue(2);
     signOutDeletedAccount.mockResolvedValue(2);
@@ -1161,5 +1164,61 @@ describe('CloudViewer refused changes across scores', () => {
 
         expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
         expect(screen.queryByText(/saved only on this device/)).not.toBeInTheDocument();
+    });
+});
+
+describe('CloudViewer on a read-only Academy seat', () => {
+    // Codex round-3 review of #61: the server refuses a read-only seat's every
+    // write and its live ink, but a channel opened while the seat was active
+    // keeps Realtime's permission until it rejoins. The viewer drops to view
+    // only, which restarts sync without the live-ink publisher and rejoins.
+    const openAsOwner = () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+    };
+
+    it('opens view only when the seat is already read-only', async () => {
+        fetchSeatReadOnly.mockResolvedValue(true);
+        openAsOwner();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByTitle('View only — your Academy seat is read-only')).toHaveTextContent('view only');
+        // Still syncing: it receives everyone else's marks, and keeps its own outbox.
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+    });
+
+    it('drops to view only on the server’s hint when the seat turns read-only, and back when it is active', async () => {
+        openAsOwner();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+
+        fetchSeatReadOnly.mockResolvedValue(true);
+        act(() => viewportSync.current?.onMembershipChanged?.());
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByTitle('View only — your Academy seat is read-only')).toBeInTheDocument();
+
+        fetchSeatReadOnly.mockResolvedValue(false);
+        act(() => viewportSync.current?.onMembershipChanged?.());
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(screen.queryByText('view only')).not.toBeInTheDocument();
+    });
+
+    it('drops to view only as soon as sync holds a change the seat was refused', async () => {
+        openAsOwner();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+
+        act(() => lastSync.current?.onHeld?.({ reason: 'seat-read-only', pendingMarks: 1 }));
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByTitle('View only — your Academy seat is read-only')).toBeInTheDocument();
+    });
+
+    it('keeps the last answer when the seat cannot be asked', async () => {
+        fetchSeatReadOnly.mockRejectedValue(new Error('Could not load seat: JWT expired'));
+        openAsOwner();
+
+        await waitFor(() => expect(fetchSeatReadOnly).toHaveBeenCalled());
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
     });
 });

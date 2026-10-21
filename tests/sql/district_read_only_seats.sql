@@ -327,6 +327,13 @@ select pg_temp.holds (
 );
 
 select pg_temp.holds (
+    'and nothing has recorded it yet: no read-only seat on file (20261020180800)',
+    $q$select not exists (
+           select 1 from public.seat_read_only_since
+           where user_id in ('d1700000-0000-4000-8000-0000000000b5', 'd1700000-0000-4000-8000-0000000000b6'))$q$
+);
+
+select pg_temp.holds (
     'and nothing has reconciled: b6''s own score is not archived',
     $q$select not public.document_is_archived ('d1700000-0000-4000-8000-0000000000d6')
           and not public.document_is_archived ('d1700000-0000-4000-8000-0000000000d1')$q$
@@ -562,6 +569,118 @@ select pg_temp.allowed (
 );
 
 -- ===========================================================================
+-- The seat's change reaches channels that are already open (20261020180800)
+-- ===========================================================================
+-- Realtime keeps a channel's send permission from its join until the client's
+-- next token refresh, so the policy alone cannot stop a teacher who joined
+-- while active. The change itself acts: the hourly sweep (the only thing that
+-- notices a grace period the clock ended) records the seat as read-only, sends
+-- the membership hint on the live topic of every score b6 can write on, and
+-- rotates those scores' topics where PR #63's rotate_document_realtime exists.
+-- Without #63 (this branch alone) a stand-in records the calls; with it, its
+-- epochs are read instead.
+select pg_temp.act_as_server ();
+
+create temp table seat_rotations (document_id uuid not null, at timestamptz not null default clock_timestamp());
+
+grant all on seat_rotations to public;
+
+do $stand_in$
+begin
+    if to_regprocedure('public.rotate_document_realtime(uuid)') is null then
+        execute $f$
+            create function public.rotate_document_realtime (p_document uuid) returns integer language sql as $b$
+                insert into seat_rotations (document_id) values (p_document) returning 1;
+            $b$
+        $f$;
+    end if;
+end;
+$stand_in$;
+
+create function pg_temp.rotations (p_doc uuid) returns bigint language plpgsql as $$
+declare
+    v bigint;
+begin
+    if to_regclass('public.document_realtime_epochs') is not null then
+        execute 'select coalesce((select epoch from public.document_realtime_epochs where document_id = $1), 0)'
+            into v using p_doc;
+        return v;
+    end if;
+    return (select count(*) from seat_rotations r where r.document_id = p_doc);
+end;
+$$;
+
+-- The hints b6's account got on a score's (generation-0) live topic, when the
+-- day's realtime.messages partition exists to hold them; null when it does not.
+create function pg_temp.seat_hints (p_doc uuid) returns bigint language sql as $$
+    select case when exists (
+        select 1 from pg_class
+        where relnamespace = 'realtime'::regnamespace and relname = 'messages_' || to_char(now(), 'YYYY_MM_DD')
+    ) then (
+        select count(*) from realtime.messages m
+        where m.topic = 'doc:' || p_doc::text
+          and m.event = 'membership'
+          and m.payload ->> 'user_id' = 'd1700000-0000-4000-8000-0000000000b6'
+    ) end;
+$$;
+
+grant execute on function pg_temp.rotations (uuid) to public;
+grant execute on function pg_temp.seat_hints (uuid) to public;
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds ('the hourly sweep runs', $q$select public.reconcile_district_seats () >= 0$q$);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.holds (
+    'it records b5 and b6 as read-only seats, and nobody else',
+    $q$select array_agg(user_id order by user_id) = array[
+           'd1700000-0000-4000-8000-0000000000b5', 'd1700000-0000-4000-8000-0000000000b6']::uuid[]
+       from public.seat_read_only_since
+       where user_id::text like 'd1700000-%'$q$
+);
+
+select pg_temp.holds (
+    'b6''s app is told on the live topic of the score they edit and the one they own',
+    $q$select coalesce(pg_temp.seat_hints ('d1700000-0000-4000-8000-0000000000d1') = 1
+                   and pg_temp.seat_hints ('d1700000-0000-4000-8000-0000000000d6') = 1, true)$q$
+);
+
+select pg_temp.holds (
+    'and both scores move to a new topic, so a channel that ignores the hint is cut off',
+    $q$select pg_temp.rotations ('d1700000-0000-4000-8000-0000000000d1') = 1
+          and pg_temp.rotations ('d1700000-0000-4000-8000-0000000000d6') = 1$q$
+);
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds ('the next sweep runs', $q$select public.reconcile_district_seats () >= 0$q$);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.holds (
+    'and changes nothing: no second hint, no second rotation',
+    $q$select coalesce(pg_temp.seat_hints ('d1700000-0000-4000-8000-0000000000d6') = 1, true)
+          and pg_temp.rotations ('d1700000-0000-4000-8000-0000000000d6') = 1
+          and pg_temp.rotations ('d1700000-0000-4000-8000-0000000000d1') = 1$q$
+);
+
+select pg_temp.act_as_user ('d1700000-0000-4000-8000-0000000000b6');
+
+select pg_temp.refused (
+    'no client reads who is a read-only seat',
+    $q$select count(*) from public.seat_read_only_since$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor sends the hint or rotates a score itself',
+    $q$select public.seat_live_ink_notify ('d1700000-0000-4000-8000-0000000000b1', true)$q$,
+    '42501'
+);
+
+-- ===========================================================================
 -- Paying again gives b6 everything back at once
 -- ===========================================================================
 select pg_temp.act_as ('service_role');
@@ -575,6 +694,18 @@ select pg_temp.holds (
 select pg_temp.act_as_user ('d1700000-0000-4000-8000-0000000000b6');
 
 select pg_temp.holds ('b6 is not read-only any more', $q$select not public.caller_seat_read_only ()$q$);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.holds (
+    'the payment''s own reconcile clears the record and tells b6''s app, without rotating again',
+    $q$select not exists (select 1 from public.seat_read_only_since
+                          where user_id = 'd1700000-0000-4000-8000-0000000000b6')
+          and coalesce(pg_temp.seat_hints ('d1700000-0000-4000-8000-0000000000d6') = 2, true)
+          and pg_temp.rotations ('d1700000-0000-4000-8000-0000000000d6') = 1$q$
+);
+
+select pg_temp.act_as_user ('d1700000-0000-4000-8000-0000000000b6');
 
 select pg_temp.allowed (
     'b6 marks the shared score again',

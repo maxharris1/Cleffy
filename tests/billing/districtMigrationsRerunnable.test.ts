@@ -20,6 +20,7 @@ const MIGRATIONS = [
     '20261020180500_district_seat_cap_and_grace.sql',
     '20261020180600_read_only_seats_enforced.sql',
     '20261020180700_read_only_seats_storage.sql',
+    '20261020180800_read_only_seats_live_ink.sql',
 ];
 
 const read = (file: string) => readFileSync(resolve(process.cwd(), 'supabase/migrations', file), 'utf8');

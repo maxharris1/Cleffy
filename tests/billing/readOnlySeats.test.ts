@@ -151,3 +151,67 @@ describe('the read-only seat check on Storage', () => {
         expect(PROOF).toContain(`'${name}'`);
     });
 });
+
+/**
+ * Live ink on a channel opened before the seat changed (migration
+ * 20261020180800_read_only_seats_live_ink.sql; Codex round-3 review of #61).
+ * Realtime keeps a channel's send permission from its join until the next
+ * token refresh, so the change itself acts: the seat is recorded, the
+ * membership hint goes to every score it can write on (the viewer re-reads its
+ * seat and drops to view only, restarting its channel), and PR #63's topic
+ * rotation is called when present to cut off a client that ignores it.
+ * tests/sql/district_read_only_seats.sql and
+ * tests/live/readOnlySeatLiveInk.live.test.ts prove it.
+ */
+describe('a seat change reaches live ink that is already flowing', () => {
+    const LIVE = read('supabase/migrations', '20261020180800_read_only_seats_live_ink.sql');
+    const fn = (name: string) => {
+        const start = LIVE.indexOf(`create or replace function public.${name} (`);
+        const open = LIVE.indexOf('$$', start);
+        return LIVE.slice(start, LIVE.indexOf('$$', open + 2));
+    };
+
+    it('acts on the change, recorded per account, not on every sweep', () => {
+        expect(fn('seat_live_ink_follow')).toMatch(
+            /insert into public\.seat_read_only_since \(user_id\) values \(p_user\) on conflict \(user_id\) do nothing;\s*if found then\s*perform public\.seat_live_ink_notify \(p_user, true\);/,
+        );
+        expect(fn('seat_live_ink_follow')).toMatch(
+            /delete from public\.seat_read_only_since s where s\.user_id = p_user;\s*if found then\s*perform public\.seat_live_ink_notify \(p_user, false\);/,
+        );
+    });
+
+    it('follows every member wherever seats move, and a removed member too', () => {
+        expect(fn('reconcile_studio_seats')).toMatch(/perform public\.seat_live_ink_follow \(v_member, v_read_only\);/);
+        expect(fn('studio_members_release_seat')).toMatch(
+            /perform public\.seat_live_ink_follow \(old\.user_id, public\.seat_read_only \(old\.user_id\)\);/,
+        );
+    });
+
+    it('hints on every score the account can write on, with the payload the app already follows', () => {
+        const notify = fn('seat_live_ink_notify');
+        expect(notify).toMatch(/from public\.documents d where d\.owner_id = p_user/);
+        expect(notify).toMatch(/dm\.role in \('owner', 'editor'\)/);
+        expect(notify).toMatch(
+            /jsonb_build_object\('table', 'document_members', 'document_id', v_doc, 'user_id', p_user, 'role', v_role\),\s*'membership',/,
+        );
+    });
+
+    it('rotates the score’s topics through #63 when it is there, and only on the way to read-only', () => {
+        const notify = fn('seat_live_ink_notify');
+        expect(notify).toMatch(
+            /v_rotate boolean := p_rotate and to_regprocedure\('public\.rotate_document_realtime\(uuid\)'\) is not null;/,
+        );
+        expect(notify).toMatch(/execute 'select public\.rotate_document_realtime \(\$1\)' using v_doc;/);
+        expect(notify).toMatch(/to_regprocedure\('public\.document_live_topic\(uuid\)'\)/);
+    });
+
+    it('keeps the record and the functions from every client role', () => {
+        expect(LIVE).toMatch(/alter table public\.seat_read_only_since enable row level security;/);
+        for (const role of ['public', 'anon', 'authenticated']) {
+            expect(LIVE).toContain(`revoke all on table public.seat_read_only_since from ${role};`);
+            expect(LIVE).toContain(`revoke all on function public.seat_live_ink_notify (uuid, boolean) from ${role};`);
+            expect(LIVE).toContain(`revoke all on function public.seat_live_ink_follow (uuid, boolean) from ${role};`);
+        }
+        expect(LIVE).not.toMatch(/grant [^;]* to (anon|authenticated)/);
+    });
+});

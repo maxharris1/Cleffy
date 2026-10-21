@@ -26,7 +26,10 @@ to the district's subscription. Schema and reasoning:
   add students. That holds on **every** score, their own and ones shared with
   them, from the moment the seat goes read-only: the database asks who is
   writing on each write (marks, lesson history, live ink, renaming, share
-  links, assignments), not only whether the score is archived. Their own scores
+  links, assignments, and the score's PDF in Storage: replacing, adding to or
+  removing it), not only whether the score is archived. Downloads still work,
+  and deleting one of their own scores still cleans up its files. The app
+  shows **view only** on every score. Their own scores
   are also archived as `plan_lapse` and their entitlements read
   `seat_read_only`. Marks a read-only teacher drew are kept on their device and
   upload once the seat is active again; roster students keep their Edit
@@ -44,6 +47,18 @@ to the district's subscription. Schema and reasoning:
   write check are right immediately either way. Only the archive (which stops
   other collaborators editing a read-only teacher's own scores) can lag, by up
   to an hour.
+- **Live ink on a score that was already open.** Realtime decides what a
+  channel may send when it joins, and again only when the app refreshes its
+  sign-in token. So the moment a seat is recorded as read-only (at once for an
+  override change, subscription write, pick or removal; at the hourly sweep
+  for a grace period the clock ended), the database sends the app the
+  membership hint on every score that teacher can write on: the app re-reads
+  the seat, goes view only and rejoins, and the rejoin may not broadcast. The
+  first refused mark does the same. An app that ignores the hint is refused
+  from its next token refresh (at most an hour, `jwt_expiry`). Once PR #63's
+  topic rotation is deployed, those scores are also moved to fresh realtime
+  topics, which cuts such an app off at once. `public.seat_read_only_since`
+  records who is read-only.
 - Every set, change and clear (including a hand-run SQL statement, and the
   cascade when a studio or its owner is deleted) is logged in
   `public.studio_seat_override_log`.

@@ -184,7 +184,13 @@ assignment, no seat invite, and (`20261020180700_read_only_seats_storage.sql`)
 no write to its score's PDF in the `scores` bucket: an upsert over it, a new
 file in its folder and removing it are refused or match nothing -- while it
 still sees, downloads and exports everything, appears in presence, backfills a
-page count and a cover, and can delete its own score and clean up its files; an active seat and a roster
+page count and a cover, and can delete its own score and clean up its files;
+the hourly sweep (`20261020180800_read_only_seats_live_ink.sql`) records the
+seat as read-only, sends the membership hint on the live topic of every score
+it can write on and rotates those scores' topics through PR #63's
+`rotate_document_realtime` (a stand-in records the calls when #63 is absent),
+once -- a second sweep changes nothing, and paying clears the record and hints
+again without rotating; no client reads the record or sends the hint; an active seat and a roster
 student with Edit keep writing; paying again lifts it immediately; and nobody
 can ask about another user's seat. It reports `failures | total` on its last
 line.
