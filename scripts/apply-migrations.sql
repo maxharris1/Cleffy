@@ -10029,8 +10029,9 @@ grant execute on function public.stage_checkout_attempt (uuid, text, uuid, uuid,
 --     mid-send leaves a row the next tick picks up, never a stuck claim, and
 --     retries with backoff until the mail goes out.
 --
--- `billing_notices` (20261020160000) did the de-duplication half of this and
--- is replaced by the outbox's unique (kind, dedupe_key).
+-- `billing_notices` (20261020160000) did the de-duplication half of this for
+-- the previous webhook, and the outbox's unique (kind, dedupe_key) replaces it
+-- for the new one. It is deliberately KEPT here (see the end of this file).
 --
 -- What a row holds: confirmations carry the user id and what the email says,
 -- never an address (it is read from auth.users at send time, so an address
@@ -10261,6 +10262,18 @@ $$;
 select cron.schedule ('billing-mail-outbox', '* * * * *', $$select public.billing_mail_outbox_tick ()$$);
 
 -- ---------------------------------------------------------------------------
--- billing_notices: replaced by the outbox's (kind, dedupe_key)
+-- billing_notices: kept until the previous webhook has drained
 -- ---------------------------------------------------------------------------
-drop table if exists public.billing_notices;
+-- NOT dropped here (Codex round 2, finding 2 on #62). The rollout applies
+-- migrations before it deploys functions, so for a while the PREVIOUS
+-- stripe-webhook runs against this schema. That webhook claims each
+-- confirmation by inserting into billing_notices and sends it inline; had
+-- this migration dropped the table, every such insert would fail, the old
+-- code's best-effort wrapper would swallow it and acknowledge the event, and
+-- the confirmation would reach neither the old path nor this outbox. With the
+-- table kept, the old webhook keeps confirming exactly as it did until the
+-- new one replaces it, and the new one never touches the table.
+--
+-- Removing it is a LATER migration, written and applied only after the new
+-- stripe-webhook is live and Stripe's retry window for events the old one
+-- handled (three days) has passed -- SETUP_SUPABASE.md, "Billing mail rollout".

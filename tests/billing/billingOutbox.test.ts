@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
@@ -424,6 +424,37 @@ describe('the outbox wiring', () => {
         expect(cancel).toContain('sendEmail: sendBillingEmailWithinBudget');
         expect(cancel).not.toContain('sendBillingEmail,');
         expect(read('supabase/functions/_shared/cancelFlow.ts')).toMatch(/billing-cancel:global/);
+    });
+
+    it('keeps billing_notices through a migrations-first rollout, so the previous webhook loses nothing', () => {
+        // Codex round 2, finding 2 on #62. The rollout applies migrations
+        // before functions, and until the new stripe-webhook is live the
+        // previous one claims each confirmation by inserting into
+        // billing_notices -- a dropped table turned every one of those into a
+        // swallowed error and an acknowledged event, so the confirmation
+        // reached neither path. tests/sql/launch_checkout_fixes.sql 43-48 runs
+        // the old claim, duplicate and release against the migrated schema.
+        const migrations = readdirSync(resolve(process.cwd(), 'supabase/migrations'))
+            .filter((name) => name.endsWith('.sql'))
+            .sort();
+        const creating = migrations.filter((name) =>
+            /create table public\.billing_notices/.test(read(`supabase/migrations/${name}`)),
+        );
+        expect(creating).toEqual(['20261020160000_checkout_consents_and_self_service_cancel.sql']);
+        for (const name of migrations) {
+            expect(read(`supabase/migrations/${name}`), name).not.toMatch(/drop\s+table[^;]*billing_notices/i);
+        }
+        // The new functions never touch it, so the later migration that drops
+        // it (SETUP_SUPABASE.md, "Billing mail rollout") is safe once they are live.
+        for (const path of [
+            'supabase/functions/stripe-webhook/index.ts',
+            'supabase/functions/_shared/billingMail.ts',
+            'supabase/functions/_shared/billingMailWorker.ts',
+            'supabase/functions/billing-cancel/index.ts',
+        ]) {
+            expect(read(path), path).not.toContain('billing_notices');
+        }
+        expect(read('SETUP_SUPABASE.md')).toContain('drop table if exists public.billing_notices;');
     });
 
     it('has a retry path the cron can reach, behind a shared secret', () => {

@@ -92,8 +92,9 @@ delete from auth.users where id = pg_temp.u(3);
 select pg_temp.chk('13 deleting the account keeps the consent and clears only its user_id', $q$select user_id is null and stripe_customer_id = 'cus_3'
     from public.checkout_consents where id = pg_temp.u(8)$q$);
 
--- billing_notices (checks 20-21, 53) was replaced by billing_mail_outbox in
--- 20261020160200; its de-duplication is proved in launch_checkout_fixes.sql.
+-- billing_notices (checks 20-21, 53) is replaced by billing_mail_outbox for the
+-- new webhook (20261020160200) but kept for the previous one until it drains;
+-- launch_checkout_fixes.sql 43-48 proves the old claims still work.
 select pg_temp.as_service();
 
 -- ---- billing_cancel_tokens

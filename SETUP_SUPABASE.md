@@ -243,6 +243,16 @@ select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/billi
 select vault.create_secret('<same value as BILLING_OUTBOX_SECRET>', 'billing_outbox_secret');
 ```
 
+**Billing mail rollout.** Apply the migrations first, then deploy
+`stripe-webhook`, `billing-mail-outbox`, `billing-cancel` and `stripe-checkout`
+together. Until the new `stripe-webhook` is live, the previous one keeps
+claiming confirmations in `billing_notices` and sending them inline, which is
+why migration 20261020160200 keeps that table rather than dropping it. Drop
+it in a separate, later migration
+(`drop table if exists public.billing_notices;`), only after the new webhook
+has been live for longer than Stripe's three-day retry window. Nothing in the
+new functions reads or writes it.
+
 Chip browse reads the live `public.imslp_works` snapshot: one row per IMSLP
 work with the array of taxonomy categories it belongs to. Refresh ticks write
 `imslp_works_building` and only promote after a category walk completes, so a

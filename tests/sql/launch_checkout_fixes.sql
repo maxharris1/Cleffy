@@ -204,7 +204,23 @@ $q$select not exists (select 1 from public.billing_mail_outbox
     where id in (select id from t_mail where label in ('old-link', 'purchase')))$q$);
 select pg_temp.chk('42 the tick is scheduled every minute',
 $q$select exists (select 1 from cron.job where jobname = 'billing-mail-outbox' and schedule = '* * * * *')$q$);
-select pg_temp.chk('43 billing_notices is gone', $q$select to_regclass ('public.billing_notices') is null$q$);
+-- Migrations first, functions after (Codex round 2, finding 2 on #62): the
+-- PREVIOUS stripe-webhook still runs against this schema for a while, and it
+-- claims a confirmation by inserting into billing_notices, treats 23505 as
+-- "already sent", and deletes its claim when the send fails. All three must
+-- still work, or its confirmations reach neither its own path nor the outbox.
+select pg_temp.chk('43 billing_notices is kept for the previous webhook', $q$select to_regclass ('public.billing_notices') is not null$q$);
+select pg_temp.chk('45 the previous webhook can still claim a confirmation in it',
+$q$with claimed as (insert into public.billing_notices (kind, stripe_object_id)
+    values ('purchase_confirmation', 'cs_legacy_1') returning 1) select count(*) = 1 from claimed$q$);
+select pg_temp.refused('46 ... a second claim of the same one reads as already sent',
+$q$insert into public.billing_notices (kind, stripe_object_id) values ('purchase_confirmation', 'cs_legacy_1')$q$, '23505');
+select pg_temp.chk('47 ... and a claim whose send failed can be released for the redelivery',
+$q$with released as (delete from public.billing_notices
+    where kind = 'purchase_confirmation' and stripe_object_id = 'cs_legacy_1' returning 1) select count(*) = 1 from released$q$);
+select pg_temp.chk('48 the cancellation key shape it uses still fits',
+$q$with claimed as (insert into public.billing_notices (kind, stripe_object_id)
+    values ('cancellation_confirmation', 'sub_legacy:2027-01-15T08:00:00.000Z') returning 1) select count(*) = 1 from claimed$q$);
 select pg_temp.chk('44 RLS is on for the outbox', $q$select relrowsecurity from pg_class where oid = 'public.billing_mail_outbox'::regclass$q$);
 
 select pg_temp.as_user(1);
