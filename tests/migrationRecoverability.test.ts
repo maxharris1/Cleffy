@@ -144,6 +144,9 @@ describe('imslp-sync — the cron job the push has to pause', () => {
             }
         }
         expect(Object.fromEntries([...touched].sort())).toEqual({
+            // Safe to leave running across a push: it calls a function its own
+            // migration defines, and only pokes content-notices while notices are due.
+            'content-notice-retry': ['20261020150000_content_moderation.sql'],
             'imslp-sync': ['20260902120000_imslp_category_index.sql'],
             'omr-sweep': ['20260806140000_omr_cron.sql'],
         });

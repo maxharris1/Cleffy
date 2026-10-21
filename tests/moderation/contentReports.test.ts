@@ -11,17 +11,25 @@ import {
     STRIKE_WINDOW_MONTHS as SERVER_WINDOW,
     documentRefFromUrl,
     handleContentModeration,
+    handleContentNotices,
     handleContentReport,
     parseContentReport,
+    renderNotice,
     reportAcknowledgment,
     reporterOutcome,
     statementOfReasons,
     takedownLifted,
+    type CommonDeps,
     type ContentModerationDeps,
+    type ContentNoticesDeps,
     type ContentReportDeps,
     type ContentReportInput,
-    type NoticeLogEntry,
+    type MailBudget,
+    type NoticeOutcome,
+    type NoticeSender,
+    type OutboxNotice,
 } from '../../supabase/functions/_shared/contentReports';
+import { MAIL_CATEGORY_CAPS, MAIL_WINDOW_MS } from '../../supabase/functions/_shared/mailBudget';
 
 const OPERATOR = {
     name: 'Cleffy LLC',
@@ -57,41 +65,150 @@ const post = (body: unknown): Request =>
         headers: { 'Content-Type': 'application/json' },
     });
 
-const reportDeps = (overrides: Partial<ContentReportDeps> = {}) => {
-    const log: NoticeLogEntry[] = [];
-    const sent: Array<{ to: string; subject: string; bcc?: string }> = [];
+/** The budgets MAIL_CATEGORY_CAPS declares: 10/40 acknowledgments, 5/20 moderation notices. */
+const BUDGETS: Record<NoticeSender, MailBudget> = {
+    'content-report-ack': {
+        hour: { limit: MAIL_CATEGORY_CAPS.contentReportAck.hour, windowMs: MAIL_WINDOW_MS.hour },
+        day: { limit: MAIL_CATEGORY_CAPS.contentReportAck.day, windowMs: MAIL_WINDOW_MS.day },
+    },
+    'moderation-notice': {
+        hour: { limit: MAIL_CATEGORY_CAPS.moderationNotice.hour, windowMs: MAIL_WINDOW_MS.hour },
+        day: { limit: MAIL_CATEGORY_CAPS.moderationNotice.day, windowMs: MAIL_WINDOW_MS.day },
+    },
+};
+
+type OutboxRow = OutboxNotice & {
+    status: 'pending' | 'sent';
+    claimed: boolean;
+    outcomes: Array<{ outcome: NoticeOutcome; retryAfterSec: number | null }>;
+};
+
+/**
+ * content_notice_outbox in memory: the SQL actions' enqueue, and
+ * claim/finish as the RPCs do them (a deferred or failed row goes back to
+ * pending; only 'sent' finishes it).
+ */
+const fakeOutbox = () => {
+    const rows: OutboxRow[] = [];
+    let next = 0;
+    const enqueue = (notice: Omit<OutboxNotice, 'id'>): string => {
+        next += 1;
+        const id = `notice-${next}`;
+        rows.push({ ...notice, id, status: 'pending', claimed: false, outcomes: [] });
+        return id;
+    };
+    const claimNotices: CommonDeps['claimNotices'] = async (limit, first) => {
+        const due = rows
+            .filter((row) => row.status === 'pending' && !row.claimed)
+            .sort((a, b) => Number(first.includes(b.id)) - Number(first.includes(a.id)))
+            .slice(0, limit);
+        for (const row of due) {
+            row.claimed = true;
+        }
+        return due.map(({ id, sender, template, recipient, bccLegal, payload }) => ({
+            id,
+            sender,
+            template,
+            recipient,
+            bccLegal,
+            payload,
+        }));
+    };
+    const finishNotice: CommonDeps['finishNotice'] = async (id, outcome, retryAfterSec) => {
+        const row = rows.find((candidate) => candidate.id === id);
+        if (row) {
+            row.claimed = false;
+            row.outcomes.push({ outcome, retryAfterSec });
+            if (outcome === 'sent') {
+                row.status = 'sent';
+            }
+        }
+    };
+    return { rows, enqueue, claimNotices, finishNotice };
+};
+
+/** checkRateLimit over real counters: the mail budgets run out as they would. */
+const countingLimiter = () => {
+    const counts = new Map<string, number>();
+    const checkRateLimit: CommonDeps['checkRateLimit'] = async (key, limit) => {
+        const used = (counts.get(key) ?? 0) + 1;
+        counts.set(key, used);
+        return used <= limit ? { ok: true } : { ok: false, retryAfterSec: 1800 };
+    };
+    /** A new hour: the hourly windows reopen. */
+    const nextHour = () => {
+        for (const key of [...counts.keys()]) {
+            if (key.endsWith(':hour')) {
+                counts.delete(key);
+            }
+        }
+    };
+    return { checkRateLimit, nextHour };
+};
+
+type Sent = { to: string; subject: string; text: string; bcc?: string; idempotencyKey: string };
+
+const commonDeps = (outbox: ReturnType<typeof fakeOutbox>, sent: Sent[]) => ({
+    json,
+    options: () => new Response('ok'),
+    clientKey: () => '203.0.113.9',
+    checkRateLimit: async () => ({ ok: true }) as const,
+    sendEmail: async (
+        to: string,
+        message: { subject: string; text: string },
+        options: { bcc?: string; idempotencyKey: string },
+    ) => {
+        sent.push({
+            to,
+            subject: message.subject,
+            text: message.text,
+            bcc: options.bcc,
+            idempotencyKey: options.idempotencyKey,
+        });
+        return 'sent' as const;
+    },
+    mailBudgets: BUDGETS,
+    claimNotices: outbox.claimNotices,
+    finishNotice: outbox.finishNotice,
+    operator: OPERATOR,
+    logError: () => undefined,
+    now: () => Date.parse('2026-10-20T12:00:00Z'),
+});
+
+/** As content_reports_enqueue_ack queues it. */
+const ackNotice = (report: ContentReportInput, reference: string): Omit<OutboxNotice, 'id'> => ({
+    sender: 'content-report-ack',
+    template: 'report_acknowledgment',
+    recipient: report.reporterEmail,
+    bccLegal: true,
+    payload: {
+        reference,
+        reporterName: report.reporterName,
+        category: report.category,
+        contentUrl: report.contentUrl,
+        workDescription: report.workDescription,
+        onBehalfOf: report.onBehalfOf,
+        explanation: report.explanation,
+    },
+});
+
+const reportDeps = (overrides: Partial<ContentReportDeps> = {}, outbox = fakeOutbox()) => {
+    const sent: Sent[] = [];
     const saved: Array<ContentReportInput & { documentId: string | null; reporterUserId: string | null }> = [];
-    const acknowledged: string[] = [];
     const deps: ContentReportDeps = {
-        json,
-        options: () => new Response('ok'),
-        clientKey: () => '203.0.113.9',
-        checkRateLimit: async () => ({ ok: true }),
-        sendEmail: async (to, message, options) => {
-            sent.push({ to, subject: message.subject, bcc: options?.bcc });
-            return 'sent';
-        },
-        logNotice: async (entry) => {
-            log.push(entry);
-        },
-        operator: OPERATOR,
-        logError: () => undefined,
-        now: () => Date.parse('2026-10-20T12:00:00Z'),
+        ...commonDeps(outbox, sent),
         verifyCaptcha: async () => ({ ok: true, verified: true }),
-        mailBudget: { hour: { limit: 10, windowMs: 3_600_000 }, day: { limit: 40, windowMs: 86_400_000 } },
         optionalUserId: async () => null,
         reporterKey: async (email) => `content-report:to:${email.length}`,
         resolveDocument: async (ref) => (ref.kind === 'document' ? ref.id : null),
         saveReport: async (report) => {
             saved.push(report);
-            return { id: REPORT, reference: 'CR-ABCDEF1234' };
-        },
-        markAcknowledged: async (id) => {
-            acknowledged.push(id);
+            const reference = `CR-${String(saved.length).padStart(10, '0')}`;
+            return { id: REPORT, reference, ackNoticeId: outbox.enqueue(ackNotice(report, reference)) };
         },
         ...overrides,
     };
-    return { deps, log, sent, saved, acknowledged };
+    return { deps, sent, saved, outbox };
 };
 
 describe('the rules the policy quotes', () => {
@@ -167,20 +284,21 @@ describe('documentRefFromUrl', () => {
 });
 
 describe('content-report', () => {
-    it('stores the report, acknowledges it with the reference, and copies the legal mailbox', async () => {
-        const { deps, log, sent, saved, acknowledged } = reportDeps({ optionalUserId: async () => 'user-1' });
+    it('stores the report, sends the queued acknowledgment, and copies the legal mailbox', async () => {
+        const { deps, sent, saved, outbox } = reportDeps({ optionalUserId: async () => 'user-1' });
         const res = await handleContentReport(post(copyrightBody()), deps);
         expect(res.status).toBe(201);
-        expect(await res.json()).toEqual({ reference: 'CR-ABCDEF1234', acknowledged: true });
+        expect(await res.json()).toEqual({ reference: 'CR-0000000001', acknowledged: true, delivery: 'sent' });
         expect(saved[0]).toMatchObject({ documentId: DOC, reporterUserId: 'user-1', reporterEmail: 'ada@example.com' });
         expect(sent).toEqual([
-            { to: 'ada@example.com', subject: 'We received your report CR-ABCDEF1234', bcc: 'legal@cleffy.io' },
+            expect.objectContaining({
+                to: 'ada@example.com',
+                subject: 'We received your report CR-0000000001',
+                bcc: 'legal@cleffy.io',
+                idempotencyKey: 'content-notice/notice-1',
+            }),
         ]);
-        expect(acknowledged).toEqual([REPORT]);
-        expect(log.map((entry) => [entry.event, entry.delivery ?? null])).toEqual([
-            ['report_received', null],
-            ['report_acknowledged', 'sent'],
-        ]);
+        expect(outbox.rows[0]).toMatchObject({ status: 'sent', outcomes: [{ outcome: 'sent', retryAfterSec: null }] });
     });
 
     it('refuses a failed "I’m human" check before storing or mailing anything', async () => {
@@ -213,24 +331,80 @@ describe('content-report', () => {
         ]);
     });
 
-    it('still stores the report and answers the reference when the mail budget is spent', async () => {
-        const { deps, saved, sent, log, acknowledged } = reportDeps({
-            checkRateLimit: async (key) => (key.startsWith('mail:') ? { ok: false, retryAfterSec: 60 } : { ok: true }),
+    it('queues the eleventh acknowledgment in an hour, legal copy included, and sends it when the hour turns', async () => {
+        // Codex #63 major 2: the acknowledgment budget is 10 an hour, and the
+        // eleventh used to be stored, never mailed, and its BCC to the legal
+        // mailbox lost with it.
+        const limiter = countingLimiter();
+        const outbox = fakeOutbox();
+        const { deps, sent } = reportDeps(
+            {
+                // The per-IP and per-reporter gates are not what this is about.
+                checkRateLimit: (key, limit, windowMs) =>
+                    key.startsWith('mail:')
+                        ? limiter.checkRateLimit(key, limit, windowMs)
+                        : Promise.resolve({ ok: true }),
+            },
+            outbox,
+        );
+        for (let i = 0; i < 10; i += 1) {
+            expect(await (await handleContentReport(post(copyrightBody()), deps)).json()).toMatchObject({
+                acknowledged: true,
+            });
+        }
+        const eleventh = await handleContentReport(post(copyrightBody()), deps);
+        expect(eleventh.status).toBe(201);
+        expect(await eleventh.json()).toEqual({ reference: 'CR-0000000011', acknowledged: false, delivery: 'queued' });
+        expect(sent).toHaveLength(10);
+        // Still owed, with the legal copy, back in the queue until the window reopens.
+        expect(outbox.rows[10]).toMatchObject({
+            status: 'pending',
+            bccLegal: true,
+            outcomes: [{ outcome: 'deferred', retryAfterSec: 1800 }],
         });
-        const res = await handleContentReport(post(copyrightBody()), deps);
-        expect(res.status).toBe(201);
-        expect(await res.json()).toEqual({ reference: 'CR-ABCDEF1234', acknowledged: false });
-        expect(saved).toHaveLength(1);
-        expect(sent).toEqual([]);
-        expect(acknowledged).toEqual([]);
-        expect(log.at(-1)).toMatchObject({ event: 'report_acknowledged', delivery: 'skipped' });
+
+        limiter.nextHour();
+        const retry: ContentNoticesDeps = {
+            ...commonDeps(outbox, sent),
+            checkRateLimit: limiter.checkRateLimit,
+            authorized: async () => true,
+        };
+        const run = await handleContentNotices(post({}), retry);
+        expect(await run.json()).toEqual({ sent: 1, queued: 0, failed: 0, unconfigured: 0 });
+        expect(sent.at(-1)).toMatchObject({
+            to: 'ada@example.com',
+            subject: 'We received your report CR-0000000011',
+            bcc: 'legal@cleffy.io',
+        });
+        expect(outbox.rows.every((row) => row.status === 'sent')).toBe(true);
     });
 
-    it('does not mark a report acknowledged when the send failed', async () => {
-        const { deps, acknowledged, log } = reportDeps({ sendEmail: async () => 'failed' });
-        expect((await handleContentReport(post(copyrightBody()), deps)).status).toBe(201);
-        expect(acknowledged).toEqual([]);
-        expect(log.at(-1)).toMatchObject({ delivery: 'failed' });
+    it('keeps a notice whose send failed, for the retry', async () => {
+        const { deps, outbox } = reportDeps({ sendEmail: async () => 'failed' });
+        const res = await handleContentReport(post(copyrightBody()), deps);
+        expect(res.status).toBe(201);
+        expect(await res.json()).toMatchObject({ acknowledged: false, delivery: 'failed' });
+        expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'failed' }] });
+    });
+
+    it('sends its own acknowledgment ahead of an older backlog', async () => {
+        const outbox = fakeOutbox();
+        for (let i = 0; i < 8; i += 1) {
+            outbox.enqueue({
+                sender: 'moderation-notice',
+                template: 'takedown_lifted',
+                recipient: `old${i}@example.com`,
+                bccLegal: false,
+                payload: { documentTitle: 'Old', reason: 'Old' },
+            });
+        }
+        const { deps, sent } = reportDeps({}, outbox);
+        expect(await (await handleContentReport(post(copyrightBody()), deps)).json()).toMatchObject({
+            acknowledged: true,
+        });
+        expect(sent[0]?.to).toBe('ada@example.com');
+        // A few of the backlog ride along; the rest wait for the next request or the retry.
+        expect(sent).toHaveLength(5);
     });
 
     it('answers 503 when the report cannot be stored', async () => {
@@ -247,49 +421,89 @@ describe('content-report', () => {
     });
 });
 
-const moderationDeps = (overrides: Partial<ContentModerationDeps> = {}) => {
-    const log: NoticeLogEntry[] = [];
-    const sent: Array<{ to: string; subject: string; text: string }> = [];
+/** What apply/lift/reject queue, as the SQL actions do (the uploader's address resolved there). */
+const moderationDeps = (
+    overrides: Partial<ContentModerationDeps> = {},
+    { uploaderEmail = 'uploader@example.com' as string | null, outbox = fakeOutbox() } = {},
+) => {
+    const sent: Sent[] = [];
+    const queue = (notice: Omit<OutboxNotice, 'id' | 'recipient'>, to: string | null): string | null =>
+        to ? outbox.enqueue({ ...notice, recipient: to }) : null;
     const deps: ContentModerationDeps = {
-        json,
-        options: () => new Response('ok'),
-        clientKey: () => '203.0.113.9',
-        checkRateLimit: async () => ({ ok: true }),
-        sendEmail: async (to, message) => {
-            sent.push({ to, subject: message.subject, text: message.text });
-            return 'sent';
-        },
-        logNotice: async (entry) => {
-            log.push(entry);
-        },
-        operator: OPERATOR,
-        logError: () => undefined,
-        now: () => Date.parse('2026-10-20T12:00:00Z'),
+        ...commonDeps(outbox, sent),
         authenticate: async () => 'moderator-1',
         isModerator: async () => true,
-        mailBudget: { hour: { limit: 5, windowMs: 3_600_000 }, day: { limit: 20, windowMs: 86_400_000 } },
         resolveDocument: async (ref) => (ref.kind === 'document' ? ref.id : null),
-        applyTakedown: vi.fn(async () => ({
+        applyTakedown: vi.fn(async (input) => ({
             takedownId: TAKEDOWN,
             uploaderId: 'uploader-1',
             documentTitle: 'Sonata <b>in C</b>',
             activeStrikes: 3,
+            uploaderNoticeId: queue(
+                {
+                    sender: 'moderation-notice',
+                    template: 'statement_of_reasons',
+                    bccLegal: false,
+                    payload: {
+                        documentTitle: 'Sonata <b>in C</b>',
+                        action: input.action,
+                        ground: input.ground,
+                        legalBasis: input.legalBasis,
+                        facts: input.facts,
+                        fromReport: input.reportId !== null,
+                        activeStrikes: 3,
+                        decidedAt: '2026-10-20T12:00:00.000Z',
+                    },
+                },
+                uploaderEmail,
+            ),
+            reporterNoticeId: input.reportId
+                ? queue(
+                      {
+                          sender: 'moderation-notice',
+                          template: 'reporter_outcome',
+                          bccLegal: false,
+                          payload: {
+                              reference: 'CR-ABCDEF1234',
+                              reporterName: 'Ada',
+                              decision: 'actioned',
+                              action: input.action,
+                          },
+                      },
+                      'ada@example.com',
+                  )
+                : null,
         })),
-        liftTakedown: vi.fn(async () => ({ uploaderId: 'uploader-1', documentTitle: 'Sonata' })),
-        rejectReport: vi.fn(async () => ({
-            reference: 'CR-ABCDEF1234',
-            reporterName: 'Ada',
-            reporterEmail: 'ada@example.com',
+        liftTakedown: vi.fn(async (input) => ({
+            uploaderNoticeId: queue(
+                {
+                    sender: 'moderation-notice',
+                    template: 'takedown_lifted',
+                    bccLegal: false,
+                    payload: { documentTitle: 'Sonata', reason: input.reason },
+                },
+                uploaderEmail,
+            ),
         })),
-        reportContact: async () => ({
-            reference: 'CR-ABCDEF1234',
-            reporterName: 'Ada',
-            reporterEmail: 'ada@example.com',
-        }),
-        userEmail: async () => 'uploader@example.com',
+        rejectReport: vi.fn(async (input) => ({
+            reporterNoticeId: queue(
+                {
+                    sender: 'moderation-notice',
+                    template: 'reporter_outcome',
+                    bccLegal: false,
+                    payload: {
+                        reference: 'CR-ABCDEF1234',
+                        reporterName: 'Ada',
+                        decision: 'rejected',
+                        note: input.note,
+                    },
+                },
+                'ada@example.com',
+            ),
+        })),
         ...overrides,
     };
-    return { deps, log, sent };
+    return { deps, sent, outbox };
 };
 
 const takedownBody = {
@@ -311,7 +525,7 @@ describe('content-moderation', () => {
     });
 
     it('takes a score down, sends the statement of reasons and tells the reporter', async () => {
-        const { deps, sent, log } = moderationDeps();
+        const { deps, sent } = moderationDeps();
         const res = await handleContentModeration(post(takedownBody), deps);
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({
@@ -329,20 +543,44 @@ describe('content-moderation', () => {
             }),
         );
         expect(sent.map((mail) => mail.to)).toEqual(['uploader@example.com', 'ada@example.com']);
+        expect(sent[0]?.subject).toBe('About your score “Sonata <b>in C</b>”: removed');
         // The uploader is never told who reported them.
         expect(sent[0]?.text).not.toContain('ada@example.com');
         expect(sent[0]?.text).not.toContain('Ada');
-        expect(log.map((entry) => [entry.event, entry.delivery])).toEqual([
-            ['statement_of_reasons', 'sent'],
-            ['reporter_notified', 'sent'],
-        ]);
     });
 
     it('commits the decision even when the uploader has no address, and says the mail was skipped', async () => {
-        const { deps, log } = moderationDeps({ userEmail: async () => null });
+        const { deps, sent } = moderationDeps({}, { uploaderEmail: null });
         const res = await handleContentModeration(post({ ...takedownBody, reportId: '' }), deps);
         expect(await res.json()).toMatchObject({ delivery: { uploader: 'skipped', reporter: null } });
-        expect(log).toEqual([expect.objectContaining({ event: 'statement_of_reasons', delivery: 'skipped' })]);
+        expect(sent).toEqual([]);
+    });
+
+    it('queues what the moderation budget cannot send yet, and the retry sends it later', async () => {
+        // Codex #63 major 2: 5 notices an hour, two per reported takedown.
+        const limiter = countingLimiter();
+        const outbox = fakeOutbox();
+        const { deps, sent } = moderationDeps({ checkRateLimit: limiter.checkRateLimit }, { outbox });
+        const deliveries = [];
+        for (let i = 0; i < 3; i += 1) {
+            deliveries.push((await (await handleContentModeration(post(takedownBody), deps)).json()).delivery);
+        }
+        expect(deliveries).toEqual([
+            { uploader: 'sent', reporter: 'sent' },
+            { uploader: 'sent', reporter: 'sent' },
+            { uploader: 'sent', reporter: 'queued' },
+        ]);
+        expect(sent).toHaveLength(5);
+        expect(outbox.rows.filter((row) => row.status === 'pending')).toHaveLength(1);
+
+        limiter.nextHour();
+        const run = await handleContentNotices(post({}), {
+            ...commonDeps(outbox, sent),
+            checkRateLimit: limiter.checkRateLimit,
+            authorized: async () => true,
+        });
+        expect(await run.json()).toMatchObject({ sent: 1 });
+        expect(sent.at(-1)?.to).toBe('ada@example.com');
     });
 
     it('answers a refusal from the database with its own status', async () => {
@@ -369,14 +607,13 @@ describe('content-moderation', () => {
     });
 
     it('lifts a takedown and tells the uploader', async () => {
-        const { deps, sent, log } = moderationDeps();
+        const { deps, sent } = moderationDeps();
         const res = await handleContentModeration(
             post({ action: 'lift', takedownId: TAKEDOWN, reason: 'Counter-notice received; no court action filed.' }),
             deps,
         );
         expect(await res.json()).toEqual({ lifted: true, delivery: { uploader: 'sent' } });
         expect(sent[0]?.subject).toBe('Your score “Sonata” is available again');
-        expect(log[0]).toMatchObject({ event: 'uploader_notified_lift', takedownId: TAKEDOWN });
     });
 
     it('rejects a report and tells the reporter why', async () => {
@@ -392,6 +629,132 @@ describe('content-moderation', () => {
     it('refuses an unknown action', async () => {
         const { deps } = moderationDeps();
         expect((await handleContentModeration(post({ action: 'ban' }), deps)).status).toBe(422);
+    });
+});
+
+describe('content-notices (the retry)', () => {
+    const retryDeps = (overrides: Partial<ContentNoticesDeps> = {}, outbox = fakeOutbox()) => {
+        const sent: Sent[] = [];
+        const deps: ContentNoticesDeps = { ...commonDeps(outbox, sent), authorized: async () => true, ...overrides };
+        return { deps, sent, outbox };
+    };
+
+    it('refuses a caller without the scheduler’s secret, and says so when none is configured', async () => {
+        expect((await handleContentNotices(post({}), retryDeps({ authorized: async () => false }).deps)).status).toBe(
+            403,
+        );
+        expect((await handleContentNotices(post({}), retryDeps({ authorized: async () => null }).deps)).status).toBe(
+            503,
+        );
+    });
+
+    it('works through the backlog in rounds until the budget is spent, leaving the rest queued', async () => {
+        const outbox = fakeOutbox();
+        for (let i = 0; i < 25; i += 1) {
+            outbox.enqueue({
+                sender: 'content-report-ack',
+                template: 'report_acknowledgment',
+                recipient: `r${i}@example.com`,
+                bccLegal: true,
+                payload: {
+                    reference: `CR-${i}`,
+                    reporterName: 'R',
+                    category: 'other',
+                    contentUrl: 'u',
+                    explanation: 'Explained at length.',
+                },
+            });
+        }
+        const limiter = countingLimiter();
+        const { deps, sent } = retryDeps({ checkRateLimit: limiter.checkRateLimit }, outbox);
+        expect(await (await handleContentNotices(post({}), deps)).json()).toEqual({
+            sent: 10,
+            queued: 10,
+            failed: 0,
+            unconfigured: 0,
+        });
+        expect(sent).toHaveLength(10);
+        expect(sent.every((mail) => mail.bcc === 'legal@cleffy.io')).toBe(true);
+        expect(outbox.rows.filter((row) => row.status === 'pending')).toHaveLength(15);
+    });
+
+    it('marks a notice it cannot render as failed rather than sending half of it', async () => {
+        const outbox = fakeOutbox();
+        outbox.enqueue({
+            sender: 'moderation-notice',
+            template: 'statement_of_reasons',
+            recipient: 'u@example.com',
+            bccLegal: false,
+            payload: { action: 'remove' },
+        });
+        const { deps, sent } = retryDeps({}, outbox);
+        expect(await (await handleContentNotices(post({}), deps)).json()).toMatchObject({ failed: 1 });
+        expect(sent).toEqual([]);
+        expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'failed' }] });
+    });
+});
+
+describe('renderNotice', () => {
+    it('renders each template exactly as the direct email builders do', () => {
+        const parsed = parseContentReport(copyrightBody());
+        if (!parsed.ok) {
+            throw new Error('fixture');
+        }
+        const ack = { id: 'n', ...ackNotice(parsed.value, 'CR-1') };
+        expect(renderNotice(ack, OPERATOR)).toEqual(reportAcknowledgment(parsed.value, 'CR-1', OPERATOR));
+        const reasons = {
+            documentTitle: 'Sonata',
+            action: 'restrict' as const,
+            ground: 'terms' as const,
+            legalBasis: 'Terms',
+            facts: 'Facts',
+            fromReport: false,
+            activeStrikes: null,
+            decidedAt: '2026-10-20T12:00:00.000Z',
+        };
+        expect(
+            renderNotice(
+                {
+                    id: 'n',
+                    sender: 'moderation-notice',
+                    template: 'statement_of_reasons',
+                    recipient: 'u@example.com',
+                    bccLegal: false,
+                    payload: reasons,
+                },
+                OPERATOR,
+            ),
+        ).toEqual(statementOfReasons(reasons, OPERATOR));
+    });
+
+    it('reads the keys the SQL actions record', () => {
+        // The payloads are built in SQL and read here: hold the names together.
+        const sql = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20261020150000_content_moderation.sql'),
+            'utf8',
+        );
+        for (const key of [
+            'reference',
+            'reporterName',
+            'category',
+            'contentUrl',
+            'workDescription',
+            'onBehalfOf',
+            'explanation',
+            'documentTitle',
+            'action',
+            'ground',
+            'legalBasis',
+            'facts',
+            'fromReport',
+            'activeStrikes',
+            'decidedAt',
+            'decision',
+            'note',
+            'reason',
+        ]) {
+            expect(sql, key).toContain(`'${key}', `);
+        }
     });
 });
 

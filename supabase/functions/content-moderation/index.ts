@@ -1,12 +1,6 @@
 import { requireUser } from '../_shared/auth.ts';
-import {
-    handleContentModeration,
-    type ActionRefusal,
-    type ReportContact,
-    type TakedownResult,
-} from '../_shared/contentReports.ts';
-import { common, logNotice, refusalCode, resolveDocument, sendEmail } from '../_shared/contentReportsWiring.ts';
-import { mailLimit } from '../_shared/mailBudget.ts';
+import { handleContentModeration, type ActionRefusal, type TakedownResult } from '../_shared/contentReports.ts';
+import { common, refusalCode, resolveDocument, sendEmail } from '../_shared/contentReportsWiring.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 
 /**
@@ -16,8 +10,6 @@ import { serviceClient } from '../_shared/rateLimit.ts';
  * 20261020150000_content_moderation.sql, called under the service role; the
  * flow and the emails are in _shared/contentReports.ts.
  */
-
-const env = (name: string): string | undefined => Deno.env.get(name);
 
 const KNOWN: ActionRefusal[] = [
     'document_not_found',
@@ -53,12 +45,7 @@ const text = (value: unknown): string | null => (typeof value === 'string' ? val
 Deno.serve((req) =>
     handleContentModeration(req, {
         ...common,
-        mailBudget: {
-            hour: mailLimit('moderationNotice', 'hour', env),
-            day: mailLimit('moderationNotice', 'day', env),
-        },
         sendEmail,
-        logNotice,
         resolveDocument,
         authenticate: async (request) => {
             const auth = await requireUser(request);
@@ -102,6 +89,8 @@ Deno.serve((req) =>
                 uploaderId: text(result['uploader_id']),
                 documentTitle: text(result['document_title']),
                 activeStrikes: typeof result['active_strikes'] === 'number' ? result['active_strikes'] : null,
+                uploaderNoticeId: text(result['uploader_notice_id']),
+                reporterNoticeId: text(result['reporter_notice_id']),
             };
         },
         liftTakedown: async (input) => {
@@ -113,9 +102,9 @@ Deno.serve((req) =>
             if (result === null || typeof result === 'string') {
                 return result;
             }
-            return { uploaderId: text(result['uploader_id']), documentTitle: text(result['document_title']) };
+            return { uploaderNoticeId: text(result['uploader_notice_id']) };
         },
-        rejectReport: async (input): Promise<ReportContact | ActionRefusal | null> => {
+        rejectReport: async (input) => {
             const result = await callAction('reject_content_report', {
                 p_report: input.reportId,
                 p_note: input.note,
@@ -124,38 +113,7 @@ Deno.serve((req) =>
             if (result === null || typeof result === 'string') {
                 return result;
             }
-            return {
-                reference: text(result['reference']) ?? '',
-                reporterName: text(result['reporter_name']) ?? '',
-                reporterEmail: text(result['reporter_email']) ?? '',
-            };
-        },
-        reportContact: async (reportId) => {
-            const admin = serviceClient();
-            if (!admin) {
-                return null;
-            }
-            const { data } = await admin
-                .from('content_reports')
-                .select('reference, reporter_name, reporter_email')
-                .eq('id', reportId)
-                .maybeSingle();
-            const row = data as { reference: string; reporter_name: string; reporter_email: string } | null;
-            return row
-                ? { reference: row.reference, reporterName: row.reporter_name, reporterEmail: row.reporter_email }
-                : null;
-        },
-        userEmail: async (userId) => {
-            const admin = serviceClient();
-            if (!admin) {
-                return null;
-            }
-            const { data, error } = await admin.auth.admin.getUserById(userId);
-            if (error) {
-                common.logError(`content-moderation: could not read the uploader's email: ${error.message}`);
-                return null;
-            }
-            return data.user?.email ?? null;
+            return { reporterNoticeId: text(result['reporter_notice_id']) };
         },
     }),
 );

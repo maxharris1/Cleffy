@@ -2,8 +2,10 @@ import { useCallback, useRef, useState } from 'react';
 
 import type { Page } from '@/features/moderation/moderationApi';
 
-export interface PagedList<Row> {
+export interface PagedList<Row, First = Page<Row, unknown>> {
     rows: Row[];
+    /** The first page's whole answer, for anything it carries besides rows. */
+    first: First | null;
     /** The whole filtered list's size, when the server counts it. */
     total: number | null;
     hasMore: boolean;
@@ -20,11 +22,16 @@ export interface PagedList<Row> {
  * by more(). A reload started while an older request is in flight wins; the
  * older answer is dropped rather than appended to the wrong list.
  */
-export const usePagedList = <Row, Cursor>(
-    fetchPage: (after: Cursor | null) => Promise<Page<Row, Cursor>>,
+// Generic over the page type alone, so a fetcher's extra fields (`first`) keep their types.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyPage = Page<any, any>;
+
+export const usePagedList = <P extends AnyPage, Row = P['rows'][number], Cursor = NonNullable<P['next']>>(
+    fetchPage: (after: Cursor | null) => Promise<P>,
     what: string,
-): PagedList<Row> => {
+): PagedList<Row, P> => {
     const [rows, setRows] = useState<Row[]>([]);
+    const [first, setFirst] = useState<P | null>(null);
     const [total, setTotal] = useState<number | null>(null);
     const [next, setNext] = useState<Cursor | null>(null);
     const [loading, setLoading] = useState(false);
@@ -41,6 +48,9 @@ export const usePagedList = <Row, Cursor>(
                     return;
                 }
                 setRows((prev) => (after === null ? page.rows : [...prev, ...page.rows]));
+                if (after === null) {
+                    setFirst(page);
+                }
                 setNext(page.next);
                 setTotal(page.total);
                 setError(null);
@@ -64,5 +74,5 @@ export const usePagedList = <Row, Cursor>(
         }
     }, [load, next, loading]);
 
-    return { rows, total, hasMore: next !== null, loading, error, reload, more };
+    return { rows, first, total, hasMore: next !== null, loading, error, reload, more };
 };

@@ -1,6 +1,5 @@
 import { handleContentReport, type ContentReportInput } from '../_shared/contentReports.ts';
-import { common, logNotice, optionalUserId, resolveDocument, sendEmail } from '../_shared/contentReportsWiring.ts';
-import { mailLimit } from '../_shared/mailBudget.ts';
+import { common, optionalUserId, resolveDocument, sendEmail } from '../_shared/contentReportsWiring.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 import { verifyTurnstileRequest } from '../_shared/turnstileVerify.ts';
 
@@ -34,12 +33,7 @@ Deno.serve((req) =>
     handleContentReport(req, {
         ...common,
         verifyCaptcha: verifyTurnstileRequest,
-        mailBudget: {
-            hour: mailLimit('contentReportAck', 'hour', env),
-            day: mailLimit('contentReportAck', 'day', env),
-        },
         sendEmail,
-        logNotice,
         optionalUserId,
         reporterKey,
         resolveDocument,
@@ -75,20 +69,15 @@ Deno.serve((req) =>
                 common.logError(`content-report: could not store the report: ${error?.message ?? 'no row'}`);
                 return null;
             }
-            return data as { id: string; reference: string };
-        },
-        markAcknowledged: async (reportId: string) => {
-            const admin = serviceClient();
-            if (!admin) {
-                return;
-            }
-            const { error } = await admin
-                .from('content_reports')
-                .update({ acknowledged_at: new Date().toISOString() })
-                .eq('id', reportId);
-            if (error) {
-                common.logError(`content-report: could not mark ${reportId} acknowledged: ${error.message}`);
-            }
+            const row = data as { id: string; reference: string };
+            // Queued by the insert (content_reports_enqueue_ack); delivered first.
+            const { data: ack } = await admin
+                .from('content_notice_outbox')
+                .select('id')
+                .eq('report_id', row.id)
+                .eq('template', 'report_acknowledgment')
+                .maybeSingle();
+            return { ...row, ackNoticeId: (ack as { id?: string } | null)?.id ?? null };
         },
     }),
 );

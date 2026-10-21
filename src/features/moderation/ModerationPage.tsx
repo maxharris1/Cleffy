@@ -43,7 +43,7 @@ const fetchLiftedTakedowns = (after: TimeCursor | null) => fetchTakedownsPage('l
 const fetchLog = (after: LogCursor | null) => fetchNoticeLogPage(after);
 
 /** "Show more" under a list that has another page. */
-const MoreButton = ({ list, label }: { list: PagedList<unknown>; label: string }) =>
+const MoreButton = ({ list, label }: { list: PagedList<unknown, unknown>; label: string }) =>
     list.hasMore ? (
         <Button size="sm" variant="ghost" className="mt-3" disabled={list.loading} onClick={() => void list.more()}>
             {list.loading ? 'Loading…' : label}
@@ -51,7 +51,7 @@ const MoreButton = ({ list, label }: { list: PagedList<unknown>; label: string }
     ) : null;
 
 /** A list's heading count: the server's total when it has one. */
-const countOf = (list: PagedList<unknown>): number => list.total ?? list.rows.length;
+const countOf = (list: PagedList<unknown, unknown>): number => list.total ?? list.rows.length;
 
 const GROUND_DEFAULTS = {
     copyright: '17 U.S.C. §512(c) (DMCA); EU Directive 2001/29/EC',
@@ -408,7 +408,7 @@ export const ModerationPage = () => {
                 <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Reports</h1>
                 <p className="mt-1 text-sm text-stone-500">
                     Reports about scores, takedowns and the notices sent. Every decision emails the people involved and
-                    is logged.
+                    is logged; an email the mail budget cannot send yet is queued, never dropped.
                 </p>
             </header>
 
@@ -583,6 +583,18 @@ export const ModerationPage = () => {
                 <h2 id="notice-log" className={SECTION_HEADING}>
                     Notice log
                 </h2>
+                {noticeLog.first?.outbox && noticeLog.first.outbox.undelivered > 0 ? (
+                    <p className="mt-2 rounded-lg border border-amber-300/70 bg-amber-50/70 px-3 py-2 text-sm text-amber-900">
+                        {noticeLog.first.outbox.undelivered === 1
+                            ? '1 email is queued'
+                            : `${noticeLog.first.outbox.undelivered} emails are queued`}{' '}
+                        and will go out by themselves as the mail budget allows
+                        {noticeLog.first.outbox.failing > 0
+                            ? `; ${noticeLog.first.outbox.failing} last failed to send and ${noticeLog.first.outbox.failing === 1 ? 'is' : 'are'} being retried`
+                            : ''}
+                        .
+                    </p>
+                ) : null}
                 {noticeLog.rows.length === 0 ? (
                     <p className="mt-2 text-sm text-stone-600">Nothing logged yet.</p>
                 ) : (

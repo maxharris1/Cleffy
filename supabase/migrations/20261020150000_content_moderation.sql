@@ -204,7 +204,9 @@ create table if not exists public.content_notice_log (
     ),
     -- The address mailed, for an email event.
     recipient text,
-    delivery text check (delivery is null or delivery in ('sent', 'failed', 'unconfigured', 'skipped')),
+    -- queued: put in content_notice_outbox; each attempt then logs how it went.
+    -- skipped: there was no address to send to.
+    delivery text check (delivery is null or delivery in ('queued', 'sent', 'failed', 'unconfigured', 'skipped')),
     actor_id uuid references auth.users (id) on delete set null,
     detail jsonb not null default '{}'::jsonb
 );
@@ -213,6 +215,286 @@ create index if not exists content_notice_log_created_idx on public.content_noti
 
 alter table public.content_notice_log enable row level security;
 revoke all on table public.content_notice_log from anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Outbox: every notice we owe, kept until it is sent
+-- ---------------------------------------------------------------------------
+-- The acknowledgment (blind-copied to the legal mailbox), the statement of
+-- reasons, the reporter's outcome and the lift notice are promises the
+-- policy makes, and a mail budget or a Resend outage must delay them, never
+-- lose them. So each is written here IN THE SAME TRANSACTION as the report or
+-- decision it is about (the trigger and the three actions below), and the
+-- content-report, content-moderation and content-notices functions deliver
+-- them: claim due rows (a lease, so two deliverers never send one twice),
+-- take a unit of the sender's mail budget, send with the row id as Resend's
+-- idempotency key, and finish the row. Out of budget: back in the queue until
+-- the budget's window reopens, not counted as an attempt. A failed or
+-- unconfigured send: retried with backoff (1 minute doubling, at most 6
+-- hours), indefinitely; the moderation page shows how many are waiting. A
+-- crash mid-send: the lease runs out and the row is claimed again, and the
+-- idempotency key stops Resend sending it twice.
+--
+-- What it sends is rendered at delivery from `payload` by contentReports.ts
+-- (renderNotice), from the facts recorded here: the decision's wording, not
+-- whatever the rows say later. The recipient is resolved now: the reporter's
+-- address, or the uploader's sign-in address from auth.users.
+
+create table if not exists public.content_notice_outbox (
+    id uuid primary key default gen_random_uuid(),
+    created_at timestamptz not null default now(),
+    -- Whose mail budget it spends (MAIL_CATEGORY_CAPS in _shared/mailBudget.ts).
+    sender text not null check (sender in ('content-report-ack', 'moderation-notice')),
+    template text not null check (
+        template in ('report_acknowledgment', 'statement_of_reasons', 'reporter_outcome', 'takedown_lifted')
+    ),
+    -- The content_notice_log event each attempt is logged as.
+    event text not null check (
+        event in ('report_acknowledged', 'statement_of_reasons', 'reporter_notified', 'uploader_notified_lift')
+    ),
+    report_id uuid references public.content_reports (id) on delete set null,
+    takedown_id uuid references public.content_takedowns (id) on delete set null,
+    actor_id uuid references auth.users (id) on delete set null,
+    recipient text not null check (char_length(recipient) between 3 and 320),
+    -- Blind-copy the legal mailbox (the acknowledgment: how a person hears of a report).
+    bcc_legal boolean not null default false,
+    payload jsonb not null,
+    status text not null default 'pending' check (status in ('pending', 'sent')),
+    attempts int not null default 0,
+    next_attempt_at timestamptz not null default now(),
+    claimed_until timestamptz,
+    last_outcome text check (last_outcome is null or last_outcome in ('failed', 'unconfigured', 'deferred')),
+    sent_at timestamptz
+);
+
+create index if not exists content_notice_outbox_due_idx on public.content_notice_outbox (next_attempt_at)
+where status = 'pending';
+
+alter table public.content_notice_outbox enable row level security;
+revoke all on table public.content_notice_outbox from anon, authenticated;
+
+-- Queue one notice and log it as queued. A recipient-less notice (an uploader
+-- with no sign-in address: a guest, a roster student) is logged as skipped,
+-- so the moderator sees it needs following up by hand. Internal.
+create or replace function public.enqueue_content_notice (
+    p_sender text,
+    p_template text,
+    p_event text,
+    p_recipient text,
+    p_bcc_legal boolean,
+    p_payload jsonb,
+    p_report uuid,
+    p_takedown uuid,
+    p_actor uuid
+) returns uuid language plpgsql security definer
+set search_path = public as $$
+declare
+    v_id uuid;
+begin
+    if nullif(btrim(coalesce(p_recipient, '')), '') is null then
+        insert into public.content_notice_log (report_id, takedown_id, event, recipient, delivery, actor_id)
+        values (p_report, p_takedown, p_event, null, 'skipped', p_actor);
+        return null;
+    end if;
+    insert into public.content_notice_outbox (
+        sender, template, event, report_id, takedown_id, actor_id, recipient, bcc_legal, payload
+    ) values (
+        p_sender, p_template, p_event, p_report, p_takedown, p_actor, p_recipient, p_bcc_legal, p_payload
+    ) returning id into v_id;
+    insert into public.content_notice_log (report_id, takedown_id, event, recipient, delivery, actor_id, detail)
+    values (p_report, p_takedown, p_event, p_recipient, 'queued', p_actor, jsonb_build_object('notice_id', v_id));
+    return v_id;
+end;
+$$;
+
+revoke all on function public.enqueue_content_notice (text, text, text, text, boolean, jsonb, uuid, uuid, uuid) from public;
+revoke all on function public.enqueue_content_notice (text, text, text, text, boolean, jsonb, uuid, uuid, uuid) from anon;
+revoke all on function public.enqueue_content_notice (text, text, text, text, boolean, jsonb, uuid, uuid, uuid) from authenticated;
+
+-- The decision time as the emails print it (UTC, ISO 8601).
+create or replace function public.content_notice_time (p_at timestamptz) returns text language sql immutable
+set search_path = public as $$
+    select to_char(p_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+$$;
+
+-- The report is logged and its acknowledgment queued by the insert itself, so
+-- a stored report always has one owed, whatever happens to the request after.
+create or replace function public.content_report_enqueue_ack () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    insert into public.content_notice_log (report_id, event, actor_id, detail)
+    values (new.id, 'report_received', new.reporter_user_id,
+            jsonb_build_object('kind', new.kind, 'category', new.category, 'resolved', new.document_id is not null));
+    perform public.enqueue_content_notice (
+        'content-report-ack',
+        'report_acknowledgment',
+        'report_acknowledged',
+        new.reporter_email,
+        true,
+        jsonb_build_object(
+            'reference', new.reference,
+            'reporterName', new.reporter_name,
+            'category', new.category,
+            'contentUrl', new.content_url,
+            'workDescription', new.work_description,
+            'onBehalfOf', new.on_behalf_of,
+            'explanation', new.explanation
+        ),
+        new.id,
+        null,
+        new.reporter_user_id
+    );
+    return null;
+end;
+$$;
+
+revoke all on function public.content_report_enqueue_ack () from public;
+revoke all on function public.content_report_enqueue_ack () from anon;
+revoke all on function public.content_report_enqueue_ack () from authenticated;
+
+drop trigger if exists content_reports_enqueue_ack on public.content_reports;
+create trigger content_reports_enqueue_ack
+after insert on public.content_reports
+for each row execute function public.content_report_enqueue_ack ();
+
+-- Delivery (service role only). Claim: the due rows, the caller's own first
+-- (`p_first`, the notices its request just queued), each leased for
+-- p_lease_seconds and counted as an attempt.
+create or replace function public.claim_content_notices (
+    p_limit integer default 10,
+    p_first uuid[] default '{}',
+    p_lease_seconds integer default 120
+) returns setof public.content_notice_outbox language plpgsql security definer
+set search_path = public as $$
+begin
+    return query
+    update public.content_notice_outbox o
+    set claimed_until = now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 30)),
+        attempts = o.attempts + 1
+    where o.id in (
+        select c.id
+        from public.content_notice_outbox c
+        where c.status = 'pending'
+          and (c.next_attempt_at <= now() or c.id = any (coalesce(p_first, '{}')))
+          and (c.claimed_until is null or c.claimed_until < now())
+        order by (c.id = any (coalesce(p_first, '{}'))) desc, c.next_attempt_at, c.created_at
+        limit least(greatest(coalesce(p_limit, 10), 1), 50)
+        for update skip locked
+    )
+    returning o.*;
+end;
+$$;
+
+-- Finish a claimed row: sent; failed or unconfigured (retry with backoff,
+-- logged); or deferred because the sender's budget is spent (retry when
+-- p_retry_after_seconds says the window reopens; not an attempt, not logged:
+-- the row's queued entry already says it is owed).
+create or replace function public.finish_content_notice (
+    p_id uuid,
+    p_outcome text,
+    p_retry_after_seconds integer default null
+) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.content_notice_outbox;
+begin
+    if p_outcome not in ('sent', 'failed', 'unconfigured', 'deferred') then
+        raise exception 'unknown outcome: %', p_outcome using errcode = '22023';
+    end if;
+    select * into v_row from public.content_notice_outbox where id = p_id and status = 'pending' for update;
+    if not found then
+        return;
+    end if;
+
+    if p_outcome = 'sent' then
+        update public.content_notice_outbox
+        set status = 'sent', sent_at = now(), claimed_until = null, last_outcome = null
+        where id = p_id;
+        if v_row.template = 'report_acknowledgment' and v_row.report_id is not null then
+            update public.content_reports set acknowledged_at = coalesce(acknowledged_at, now())
+            where id = v_row.report_id;
+        end if;
+    elsif p_outcome = 'deferred' then
+        update public.content_notice_outbox
+        set claimed_until = null,
+            attempts = greatest(attempts - 1, 0),
+            last_outcome = 'deferred',
+            next_attempt_at = now() + make_interval(secs => greatest(coalesce(p_retry_after_seconds, 60), 1))
+        where id = p_id;
+        return;
+    else
+        update public.content_notice_outbox
+        set claimed_until = null,
+            last_outcome = p_outcome,
+            next_attempt_at = now() + coalesce(
+                make_interval(secs => p_retry_after_seconds),
+                least(interval '6 hours', interval '1 minute' * power(2, least(greatest(attempts - 1, 0), 20)))
+            )
+        where id = p_id;
+    end if;
+
+    insert into public.content_notice_log (report_id, takedown_id, event, recipient, delivery, actor_id, detail)
+    values (v_row.report_id, v_row.takedown_id, v_row.event, v_row.recipient, p_outcome, v_row.actor_id,
+            jsonb_build_object('notice_id', p_id, 'attempt', v_row.attempts));
+end;
+$$;
+
+revoke all on function public.claim_content_notices (integer, uuid[], integer) from public;
+revoke all on function public.claim_content_notices (integer, uuid[], integer) from anon;
+revoke all on function public.claim_content_notices (integer, uuid[], integer) from authenticated;
+grant execute on function public.claim_content_notices (integer, uuid[], integer) to service_role;
+
+revoke all on function public.finish_content_notice (uuid, text, integer) from public;
+revoke all on function public.finish_content_notice (uuid, text, integer) from anon;
+revoke all on function public.finish_content_notice (uuid, text, integer) from authenticated;
+grant execute on function public.finish_content_notice (uuid, text, integer) to service_role;
+
+-- The retry when nobody is using either function: every five minutes, if
+-- anything is due, pg_cron pokes content-notices (pg_net + vault, the
+-- omr_sweep pattern). Vault secrets content_notice_url (the function's URL)
+-- and content_notice_secret (= the function's CONTENT_NOTICE_SECRET) are
+-- created out of band (DEPLOY.md); without them the tick is a no-op, and
+-- notices still go out with the next report or moderator action.
+create or replace function public.content_notice_retry_tick () returns void language plpgsql security definer
+set search_path = public, extensions, vault as $$
+declare
+    v_url text;
+    v_secret text;
+begin
+    if not exists (
+        select 1 from public.content_notice_outbox
+        where status = 'pending' and next_attempt_at <= now()
+          and (claimed_until is null or claimed_until < now())
+    ) then
+        return;
+    end if;
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'content_notice_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'content_notice_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'content_notice_retry_tick: vault secrets content_notice_url/content_notice_secret missing — skip';
+        return;
+    end if;
+    perform net.http_post(
+        url := v_url,
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-content-notice-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 10000
+    );
+end;
+$$;
+
+revoke all on function public.content_notice_retry_tick () from public, anon, authenticated;
+grant execute on function public.content_notice_retry_tick () to service_role;
+
+do $$
+begin
+    perform cron.unschedule (jobid) from cron.job where jobname = 'content-notice-retry';
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('content-notice-retry', '*/5 * * * *', $$select public.content_notice_retry_tick ()$$);
 
 -- ---------------------------------------------------------------------------
 -- Actions (service role only: content-moderation calls them after checking
@@ -233,6 +515,9 @@ declare
     v_doc record;
     v_takedown uuid;
     v_strikes int := null;
+    v_report record;
+    v_uploader_notice uuid;
+    v_reporter_notice uuid;
 begin
     select d.id, d.owner_id, d.title into v_doc from public.documents d where d.id = p_document for update;
     if not found then
@@ -273,11 +558,48 @@ begin
     -- Viewers who already have the score open: re-check, and lose it.
     perform public.content_takedown_notify_viewers (p_document, p_action);
 
+    -- The statement of reasons to the uploader, and the outcome to the
+    -- reporter, owed from this commit on (see "Outbox").
+    v_uploader_notice := public.enqueue_content_notice (
+        'moderation-notice', 'statement_of_reasons', 'statement_of_reasons',
+        (select u.email from auth.users u where u.id = v_doc.owner_id),
+        false,
+        jsonb_build_object(
+            'documentTitle', v_doc.title,
+            'action', p_action,
+            'ground', p_ground,
+            'legalBasis', p_legal_basis,
+            'facts', p_facts,
+            'fromReport', p_report is not null,
+            'activeStrikes', v_strikes,
+            'decidedAt', public.content_notice_time (now())
+        ),
+        p_report, v_takedown, p_moderator
+    );
+    if p_report is not null then
+        select r.reference, r.reporter_name, r.reporter_email into v_report
+        from public.content_reports r where r.id = p_report;
+        v_reporter_notice := public.enqueue_content_notice (
+            'moderation-notice', 'reporter_outcome', 'reporter_notified',
+            v_report.reporter_email,
+            false,
+            jsonb_build_object(
+                'reference', v_report.reference,
+                'reporterName', v_report.reporter_name,
+                'decision', 'actioned',
+                'action', p_action
+            ),
+            p_report, v_takedown, p_moderator
+        );
+    end if;
+
     return jsonb_build_object(
         'takedown_id', v_takedown,
         'uploader_id', v_doc.owner_id,
         'document_title', v_doc.title,
-        'active_strikes', v_strikes
+        'active_strikes', v_strikes,
+        'uploader_notice_id', v_uploader_notice,
+        'reporter_notice_id', v_reporter_notice
     );
 end;
 $$;
@@ -286,6 +608,7 @@ create or replace function public.lift_content_takedown (p_takedown uuid, p_reas
 set search_path = public as $$
 declare
     v_row record;
+    v_uploader_notice uuid;
 begin
     update public.content_takedowns
     set lifted_at = now(), lifted_by = p_moderator, lift_reason = p_reason
@@ -303,12 +626,21 @@ begin
     insert into public.content_notice_log (report_id, takedown_id, event, actor_id, detail)
     values (v_row.report_id, p_takedown, 'takedown_lifted', p_moderator, jsonb_build_object('reason', p_reason));
 
+    v_uploader_notice := public.enqueue_content_notice (
+        'moderation-notice', 'takedown_lifted', 'uploader_notified_lift',
+        (select u.email from auth.users u where u.id = v_row.uploader_id),
+        false,
+        jsonb_build_object('documentTitle', v_row.document_title, 'reason', p_reason),
+        null, p_takedown, p_moderator
+    );
+
     return jsonb_build_object(
         'takedown_id', v_row.id,
         'document_id', v_row.document_id,
         'uploader_id', v_row.uploader_id,
         'document_title', v_row.document_title,
-        'report_id', v_row.report_id
+        'report_id', v_row.report_id,
+        'uploader_notice_id', v_uploader_notice
     );
 end;
 $$;
@@ -329,7 +661,21 @@ begin
     insert into public.content_notice_log (report_id, event, actor_id, detail)
     values (p_report, 'report_rejected', p_moderator, jsonb_build_object('note', p_note));
 
-    return to_jsonb(v_row);
+    return to_jsonb(v_row) || jsonb_build_object(
+        'reporter_notice_id',
+        public.enqueue_content_notice (
+            'moderation-notice', 'reporter_outcome', 'reporter_notified',
+            v_row.reporter_email,
+            false,
+            jsonb_build_object(
+                'reference', v_row.reference,
+                'reporterName', v_row.reporter_name,
+                'decision', 'rejected',
+                'note', p_note
+            ),
+            p_report, null, p_moderator
+        )
+    );
 end;
 $$;
 
@@ -588,7 +934,14 @@ begin
         'rows', v_rows,
         'next', case when v_count > v_limit
                      then jsonb_build_object('id', (v_rows -> (v_limit - 1) ->> 'id')::bigint)
-                end
+                end,
+        -- Notices still owed (content_notice_outbox), and how many of those
+        -- last failed or found mail unconfigured rather than waiting on budget.
+        'undelivered', (select count(*)::int from public.content_notice_outbox where status = 'pending'),
+        'failing', (
+            select count(*)::int from public.content_notice_outbox
+            where status = 'pending' and last_outcome in ('failed', 'unconfigured')
+        )
     );
 end;
 $$;

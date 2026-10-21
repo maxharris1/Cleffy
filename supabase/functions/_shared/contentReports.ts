@@ -4,14 +4,22 @@
  * promise; this is what keeps it.
  *
  *  * content-report (no JWT required — a rights holder may have no account):
- *    validate, check the "I'm human" token, store the report, and email the
- *    reporter an acknowledgment with a reference, blind-copied to the legal
- *    mailbox so a person hears about it.
+ *    validate, check the "I'm human" token, and store the report. Storing it
+ *    also queues the acknowledgment to the reporter, with a reference and
+ *    blind-copied to the legal mailbox so a person hears about it.
  *  * content-moderation (moderators only): restrict or remove a score, lift a
  *    takedown, or reject a report — each through one SQL function
- *    (20261020150000_content_moderation.sql) that also records the strike and
- *    logs the decision — then email the uploader a statement of reasons and
- *    the reporter the outcome, and log each email and how it went.
+ *    (20261020150000_content_moderation.sql) that also records the strike,
+ *    logs the decision, and queues the statement of reasons to the uploader
+ *    and the outcome to the reporter.
+ *  * content-notices (pg_cron, every five minutes, with a shared secret):
+ *    retries whatever is still owed.
+ *
+ * Every notice goes through content_notice_outbox, written in the same
+ * transaction as the report or decision, so a spent mail budget or a Resend
+ * outage delays a notice and never loses it. Each of the three functions then
+ * delivers what is due (deliverNotices): its own notices first, within the
+ * sender's mail budget, each send logged.
  *
  * NO runtime imports, like guestEmail.ts: Deno wants the `.ts` extension and
  * vitest wants it gone, so everything the handlers touch arrives in `deps` and
@@ -289,8 +297,14 @@ const CATEGORY_LABELS: Record<ContentReportInput['category'], string> = {
 
 export const categoryLabel = (category: ContentReportInput['category']): string => CATEGORY_LABELS[category];
 
+/** What the acknowledgment quotes back: the report as stored. */
+export type AcknowledgedReport = Pick<
+    ContentReportInput,
+    'reporterName' | 'category' | 'contentUrl' | 'workDescription' | 'onBehalfOf' | 'explanation'
+>;
+
 /** To the reporter, as soon as the report is stored. */
-export const reportAcknowledgment = (report: ContentReportInput, reference: string, operator: Operator): MailMessage =>
+export const reportAcknowledgment = (report: AcknowledgedReport, reference: string, operator: Operator): MailMessage =>
     render(`We received your report ${reference}`, [
         `Hello ${report.reporterName},`,
         `Thank you for your report. We have received it and a person will review it. Your reference is ${reference}; please quote it if you write to us about this report.`,
@@ -389,11 +403,134 @@ export const takedownLifted = (
 };
 
 // ---------------------------------------------------------------------------
+// The outbox
+// ---------------------------------------------------------------------------
+
+/** Whose mail budget a notice spends: MAIL_CATEGORY_CAPS' contentReportAck and moderationNotice. */
+export const NOTICE_SENDERS = ['content-report-ack', 'moderation-notice'] as const;
+export type NoticeSender = (typeof NOTICE_SENDERS)[number];
+
+export const NOTICE_TEMPLATES = [
+    'report_acknowledgment',
+    'statement_of_reasons',
+    'reporter_outcome',
+    'takedown_lifted',
+] as const;
+export type NoticeTemplate = (typeof NOTICE_TEMPLATES)[number];
+
+/** A claimed content_notice_outbox row. */
+export interface OutboxNotice {
+    id: string;
+    sender: NoticeSender;
+    template: NoticeTemplate;
+    recipient: string;
+    bccLegal: boolean;
+    /** What the SQL action recorded, rendered by renderNotice(). */
+    payload: Record<string, unknown>;
+}
+
+/** How one attempt ended, as finish_content_notice() takes it. */
+export type NoticeOutcome = 'sent' | 'failed' | 'unconfigured' | 'deferred';
+
+const field = (payload: Record<string, unknown>, key: string): string | null =>
+    typeof payload[key] === 'string' ? (payload[key] as string) : null;
+
+const oneOf = <T extends string>(values: readonly T[], value: unknown): T | null =>
+    typeof value === 'string' && (values as readonly string[]).includes(value) ? (value as T) : null;
+
+/**
+ * A queued notice → the email, from what the SQL action recorded. Null for a
+ * payload missing what its template needs; the row is then retried as failed
+ * (and counted on the moderation page) rather than sent half-written.
+ */
+export const renderNotice = (notice: OutboxNotice, operator: Operator): MailMessage | null => {
+    const p = notice.payload;
+    switch (notice.template) {
+        case 'report_acknowledgment': {
+            const reference = field(p, 'reference');
+            const reporterName = field(p, 'reporterName');
+            const category = oneOf(['copyright', ...ILLEGAL_CATEGORIES] as const, p['category']);
+            const contentUrl = field(p, 'contentUrl');
+            const explanation = field(p, 'explanation');
+            if (!reference || !reporterName || !category || !contentUrl || !explanation) {
+                return null;
+            }
+            return reportAcknowledgment(
+                {
+                    reporterName,
+                    category,
+                    contentUrl,
+                    workDescription: field(p, 'workDescription'),
+                    onBehalfOf: field(p, 'onBehalfOf'),
+                    explanation,
+                },
+                reference,
+                operator,
+            );
+        }
+        case 'statement_of_reasons': {
+            const action = oneOf(TAKEDOWN_ACTIONS, p['action']);
+            const ground = oneOf(TAKEDOWN_GROUNDS, p['ground']);
+            const legalBasis = field(p, 'legalBasis');
+            const facts = field(p, 'facts');
+            const decidedAt = field(p, 'decidedAt');
+            if (!action || !ground || !legalBasis || !facts || !decidedAt) {
+                return null;
+            }
+            return statementOfReasons(
+                {
+                    documentTitle: field(p, 'documentTitle'),
+                    action,
+                    ground,
+                    legalBasis,
+                    facts,
+                    fromReport: p['fromReport'] === true,
+                    activeStrikes: typeof p['activeStrikes'] === 'number' ? p['activeStrikes'] : null,
+                    decidedAt,
+                },
+                operator,
+            );
+        }
+        case 'reporter_outcome': {
+            const reference = field(p, 'reference');
+            const reporterName = field(p, 'reporterName');
+            const decision = oneOf(['actioned', 'rejected'] as const, p['decision']);
+            if (!reference || reporterName === null || !decision) {
+                return null;
+            }
+            return reporterOutcome(
+                {
+                    reference,
+                    reporterName,
+                    decision,
+                    action: oneOf(TAKEDOWN_ACTIONS, p['action']) ?? undefined,
+                    note: field(p, 'note'),
+                },
+                operator,
+            );
+        }
+        case 'takedown_lifted': {
+            const reason = field(p, 'reason');
+            return reason ? takedownLifted({ documentTitle: field(p, 'documentTitle'), reason }, operator) : null;
+        }
+        default:
+            return null;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // The handlers
 // ---------------------------------------------------------------------------
 
 type Gate = { ok: true } | { ok: false; retryAfterSec: number };
-type Delivery = 'sent' | 'failed' | 'unconfigured' | 'skipped';
+
+/**
+ * What a moderator or reporter is told about one notice: sent now; queued
+ * (waiting on the mail budget, or another delivery holds it); failed or
+ * unconfigured (queued, retried automatically); skipped (no address to send
+ * to — follow up by hand).
+ */
+export type Delivery = 'sent' | 'queued' | 'failed' | 'unconfigured' | 'skipped';
 
 /** As guestEmail.ts's CaptchaVerdict, restated for the no-runtime-imports reason. */
 export type CaptchaVerdict =
@@ -406,49 +543,105 @@ const CAPTCHA_REFUSALS = {
     captcha_unavailable: CONTENT_REPORT_ERRORS.captchaUnavailable,
 } as const;
 
-export interface NoticeLogEntry {
-    event:
-        | 'report_received'
-        | 'report_acknowledged'
-        | 'report_rejected'
-        | 'reporter_notified'
-        | 'statement_of_reasons'
-        | 'uploader_notified_lift';
-    reportId?: string | null;
-    takedownId?: string | null;
-    recipient?: string | null;
-    delivery?: Delivery | null;
-    actorId?: string | null;
-    detail?: Record<string, unknown>;
-}
+/** A window of the project's mail budget (_shared/mailBudget.ts), keyed per sender. */
+export type MailBudget = { hour: { limit: number; windowMs: number }; day: { limit: number; windowMs: number } };
 
-interface CommonDeps {
+export interface CommonDeps {
     json: (body: unknown, status?: number) => Response;
     options: () => Response;
     clientKey: (req: Request) => string;
     checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
-    /** Mail through Resend; 'unconfigured' on a deploy without a key. */
-    sendEmail: (to: string, message: MailMessage, options?: { bcc?: string }) => Promise<Exclude<Delivery, 'skipped'>>;
-    logNotice: (entry: NoticeLogEntry) => Promise<void>;
+    /**
+     * Mail through Resend; 'unconfigured' on a deploy without a key. The
+     * idempotency key makes a resend after a crash mid-delivery a no-op.
+     */
+    sendEmail: (
+        to: string,
+        message: MailMessage,
+        options: { bcc?: string; idempotencyKey: string },
+    ) => Promise<Exclude<NoticeOutcome, 'deferred'>>;
+    /** Each sender's mail budget. */
+    mailBudgets: Record<NoticeSender, MailBudget>;
+    /** claim_content_notices(): due rows, `first` first, leased; null when the database is unreachable. */
+    claimNotices: (limit: number, first: string[]) => Promise<OutboxNotice[] | null>;
+    /** finish_content_notice(). */
+    finishNotice: (id: string, outcome: NoticeOutcome, retryAfterSec: number | null) => Promise<void>;
     operator: Operator;
     logError: (message: string, err?: unknown) => void;
     now: () => number;
 }
 
-/** A window of the project's mail budget (_shared/mailBudget.ts), keyed per sender. */
-type MailBudget = { hour: { limit: number; windowMs: number }; day: { limit: number; windowMs: number } };
-
-/** Spend one unit of a sender's mail budget, or say there is none left. */
-const takeMailBudget = async (deps: CommonDeps, sender: string, budget: MailBudget): Promise<boolean> => {
-    for (const [window, { limit, windowMs }] of Object.entries(budget)) {
+/** Spend one unit of a sender's mail budget, or say when there will be some again. */
+const takeMailBudget = async (deps: CommonDeps, sender: NoticeSender): Promise<Gate> => {
+    for (const [window, { limit, windowMs }] of Object.entries(deps.mailBudgets[sender])) {
         const gate = await deps.checkRateLimit(`mail:${sender}:${window}`, limit, windowMs);
         if (!gate.ok) {
-            deps.logError(`mail:${sender}:${window}: the ceiling on this mail was reached`);
-            return false;
+            deps.logError(`mail:${sender}:${window}: the ceiling on this mail was reached; notices stay queued`);
+            return gate;
         }
     }
-    return true;
+    return { ok: true };
 };
+
+/**
+ * Deliver what is due from the outbox: `first` (the notices this request just
+ * queued) ahead of any backlog, at most `limit`. Answers how each claimed
+ * notice went; a notice not claimed (not due, or another delivery holds it)
+ * is simply absent.
+ *
+ * Out of budget, a notice goes back in the queue until the window reopens,
+ * and so does every later one from the same sender this round — not an
+ * attempt, and nothing dropped. A failed or unconfigured send is retried
+ * with backoff by finish_content_notice().
+ */
+export const deliverNotices = async (
+    deps: CommonDeps,
+    first: string[],
+    limit: number,
+): Promise<Map<string, Exclude<Delivery, 'skipped'>>> => {
+    const outcomes = new Map<string, Exclude<Delivery, 'skipped'>>();
+    const claimed = await deps.claimNotices(limit, first);
+    if (!claimed) {
+        return outcomes;
+    }
+    const outOfBudget = new Map<NoticeSender, number>();
+    for (const notice of claimed) {
+        let retryAfter = outOfBudget.get(notice.sender);
+        if (retryAfter === undefined) {
+            const gate = await takeMailBudget(deps, notice.sender);
+            if (!gate.ok) {
+                retryAfter = gate.retryAfterSec;
+                outOfBudget.set(notice.sender, retryAfter);
+            }
+        }
+        if (retryAfter !== undefined) {
+            await deps.finishNotice(notice.id, 'deferred', retryAfter);
+            outcomes.set(notice.id, 'queued');
+            continue;
+        }
+        const message = renderNotice(notice, deps.operator);
+        if (!message) {
+            deps.logError(`content notice ${notice.id}: its ${notice.template} payload is incomplete`);
+            await deps.finishNotice(notice.id, 'failed', null);
+            outcomes.set(notice.id, 'failed');
+            continue;
+        }
+        const delivery = await deps.sendEmail(notice.recipient, message, {
+            ...(notice.bccLegal ? { bcc: deps.operator.legalEmail } : {}),
+            idempotencyKey: `content-notice/${notice.id}`,
+        });
+        await deps.finishNotice(notice.id, delivery, null);
+        outcomes.set(notice.id, delivery);
+    }
+    return outcomes;
+};
+
+/** How a notice the request queued went: its outcome, queued if not claimed, skipped if never queued. */
+const deliveryOf = (outcomes: Map<string, Exclude<Delivery, 'skipped'>>, id: string | null): Delivery =>
+    id === null ? 'skipped' : (outcomes.get(id) ?? 'queued');
+
+/** How many notices one request delivers, its own first: enough to clear a small backlog, never a long wait. */
+const DELIVER_PER_REQUEST = 5;
 
 const readBody = async (req: Request): Promise<Record<string, unknown> | null> => {
     try {
@@ -471,24 +664,26 @@ const tooMany = (json: CommonDeps['json'], retryAfterSec: number): Response =>
 
 export interface ContentReportDeps extends CommonDeps {
     verifyCaptcha: (req: Request, body: Record<string, unknown> | null) => Promise<CaptchaVerdict>;
-    mailBudget: MailBudget;
     /** The signed-in reporter, if the request carries a valid user JWT; null otherwise (never a refusal). */
     optionalUserId: (req: Request) => Promise<string | null>;
     /** HMAC of the reporter's mailbox, for the per-reporter limit: the bucket never holds an address. */
     reporterKey: (email: string) => Promise<string | null>;
     resolveDocument: (ref: DocumentRef) => Promise<string | null>;
+    /**
+     * Store the report. The insert also logs it and queues its acknowledgment
+     * (content_reports_enqueue_ack), whose outbox id comes back here.
+     */
     saveReport: (
         report: ContentReportInput & { documentId: string | null; reporterUserId: string | null },
-    ) => Promise<{ id: string; reference: string } | null>;
-    markAcknowledged: (reportId: string) => Promise<void>;
+    ) => Promise<{ id: string; reference: string; ackNoticeId: string | null } | null>;
 }
 
 /**
  * content-report: the form's body → a stored report and an acknowledgment.
  *
- * The answer carries the reference either way: a report that was stored but
- * whose acknowledgment could not be mailed is still a report, and the page
- * shows the reference so the reporter has it.
+ * The answer carries the reference either way: a report whose acknowledgment
+ * is still queued is still a report, and the page shows the reference so the
+ * reporter has it meanwhile.
  */
 export const handleContentReport = async (req: Request, deps: ContentReportDeps): Promise<Response> => {
     const { json } = deps;
@@ -543,32 +738,11 @@ export const handleContentReport = async (req: Request, deps: ContentReportDeps)
     if (!saved) {
         return json(CONTENT_REPORT_ERRORS.unavailable, 503);
     }
-    await deps.logNotice({
-        event: 'report_received',
-        reportId: saved.id,
-        actorId: reporterUserId,
-        detail: { kind: report.kind, category: report.category, resolved: documentId !== null },
-    });
 
-    let delivery: Delivery = 'skipped';
-    if (await takeMailBudget(deps, 'content-report-ack', deps.mailBudget)) {
-        delivery = await deps.sendEmail(
-            report.reporterEmail,
-            reportAcknowledgment(report, saved.reference, deps.operator),
-            { bcc: deps.operator.legalEmail },
-        );
-    }
-    if (delivery === 'sent') {
-        await deps.markAcknowledged(saved.id);
-    }
-    await deps.logNotice({
-        event: 'report_acknowledged',
-        reportId: saved.id,
-        recipient: report.reporterEmail,
-        delivery,
-    });
-
-    return json({ reference: saved.reference, acknowledged: delivery === 'sent' }, 201);
+    const first = saved.ackNoticeId ? [saved.ackNoticeId] : [];
+    const outcomes = await deliverNotices(deps, first, DELIVER_PER_REQUEST);
+    const delivery = deliveryOf(outcomes, saved.ackNoticeId);
+    return json({ reference: saved.reference, acknowledged: delivery === 'sent', delivery }, 201);
 };
 
 export interface TakedownResult {
@@ -576,12 +750,10 @@ export interface TakedownResult {
     uploaderId: string | null;
     documentTitle: string | null;
     activeStrikes: number | null;
-}
-
-export interface ReportContact {
-    reference: string;
-    reporterName: string;
-    reporterEmail: string;
+    /** The queued statement of reasons; null when the uploader has no address. */
+    uploaderNoticeId: string | null;
+    /** The queued outcome to the reporter; null without a report. */
+    reporterNoticeId: string | null;
 }
 
 /** A refusal from one of the SQL actions, by its `detail` code. */
@@ -592,7 +764,6 @@ export interface ContentModerationDeps extends CommonDeps {
     /** The caller's user id from the JWT, or the Response refusing it. */
     authenticate: (req: Request) => Promise<string | Response>;
     isModerator: (userId: string) => Promise<boolean | null>;
-    mailBudget: MailBudget;
     resolveDocument: (ref: DocumentRef) => Promise<string | null>;
     applyTakedown: (input: {
         documentId: string;
@@ -607,15 +778,12 @@ export interface ContentModerationDeps extends CommonDeps {
         takedownId: string;
         reason: string;
         moderatorId: string;
-    }) => Promise<{ uploaderId: string | null; documentTitle: string | null } | ActionRefusal | null>;
+    }) => Promise<{ uploaderNoticeId: string | null } | ActionRefusal | null>;
     rejectReport: (input: {
         reportId: string;
         note: string;
         moderatorId: string;
-    }) => Promise<ReportContact | ActionRefusal | null>;
-    reportContact: (reportId: string) => Promise<ReportContact | null>;
-    /** The uploader's sign-in email (admin API); null for an account with none, or a failure. */
-    userEmail: (userId: string) => Promise<string | null>;
+    }) => Promise<{ reporterNoticeId: string | null } | ActionRefusal | null>;
 }
 
 const REFUSAL_STATUS: Record<ActionRefusal, { status: number; error: string }> = {
@@ -637,10 +805,10 @@ const boundedText = (body: Record<string, unknown>, key: string, max: number): s
 
 /**
  * content-moderation: `{ action: 'takedown' | 'lift' | 'reject', … }` from a
- * moderator. The decision is committed (and logged) before any email goes
- * out; an email that fails is logged as failed, and the answer says so, so
- * the moderator knows to follow up by hand rather than the decision being
- * lost to a mail outage.
+ * moderator. The decision and the notices it owes commit together; this
+ * request then tries to send them, and the answer says how each went, so the
+ * moderator knows which are sent, which are queued (they go out by
+ * themselves), and which have no address and need following up by hand.
  */
 export const handleContentModeration = async (req: Request, deps: ContentModerationDeps): Promise<Response> => {
     const { json } = deps;
@@ -664,20 +832,13 @@ export const handleContentModeration = async (req: Request, deps: ContentModerat
 
     const body = (await readBody(req)) ?? {};
     const invalid = (field: string, error: string) => json({ error, code: 'invalid_request', field }, 422);
-    const decidedAt = new Date(deps.now()).toISOString();
 
-    const mail = async (
-        to: string | null,
-        message: MailMessage,
-        entry: Omit<NoticeLogEntry, 'recipient' | 'delivery'>,
-    ): Promise<Delivery> => {
-        let delivery: Delivery = 'skipped';
-        if (to && (await takeMailBudget(deps, 'moderation-notice', deps.mailBudget))) {
-            delivery = await deps.sendEmail(to, message);
-        }
-        await deps.logNotice({ ...entry, recipient: to, delivery, actorId: caller });
-        return delivery;
-    };
+    const deliver = async (ids: Array<string | null>) =>
+        deliverNotices(
+            deps,
+            ids.filter((id): id is string => id !== null),
+            DELIVER_PER_REQUEST,
+        );
 
     const action = str(body, 'action');
     if (action === 'takedown') {
@@ -723,48 +884,15 @@ export const handleContentModeration = async (req: Request, deps: ContentModerat
             return json({ error: REFUSAL_STATUS[result].error, code: result }, REFUSAL_STATUS[result].status);
         }
 
-        const uploaderEmail = result.uploaderId ? await deps.userEmail(result.uploaderId) : null;
-        const uploader = await mail(
-            uploaderEmail,
-            statementOfReasons(
-                {
-                    documentTitle: result.documentTitle,
-                    action: mode as TakedownAction,
-                    ground: ground as TakedownGround,
-                    legalBasis,
-                    facts,
-                    fromReport: reportId !== null,
-                    activeStrikes: result.activeStrikes,
-                    decidedAt,
-                },
-                deps.operator,
-            ),
-            { event: 'statement_of_reasons', takedownId: result.takedownId, reportId },
-        );
-
-        let reporter: Delivery | null = null;
-        if (reportId) {
-            const contact = await deps.reportContact(reportId);
-            reporter = await mail(
-                contact?.reporterEmail ?? null,
-                reporterOutcome(
-                    {
-                        reference: contact?.reference ?? '',
-                        reporterName: contact?.reporterName ?? '',
-                        decision: 'actioned',
-                        action: mode as TakedownAction,
-                    },
-                    deps.operator,
-                ),
-                { event: 'reporter_notified', takedownId: result.takedownId, reportId },
-            );
-        }
-
+        const outcomes = await deliver([result.uploaderNoticeId, result.reporterNoticeId]);
         return json({
             takedownId: result.takedownId,
             activeStrikes: result.activeStrikes,
             repeatInfringer: (result.activeStrikes ?? 0) >= REPEAT_INFRINGER_STRIKES,
-            delivery: { uploader, reporter },
+            delivery: {
+                uploader: deliveryOf(outcomes, result.uploaderNoticeId),
+                reporter: reportId ? deliveryOf(outcomes, result.reporterNoticeId) : null,
+            },
         });
     }
 
@@ -784,13 +912,8 @@ export const handleContentModeration = async (req: Request, deps: ContentModerat
         if (isRefusal(result)) {
             return json({ error: REFUSAL_STATUS[result].error, code: result }, REFUSAL_STATUS[result].status);
         }
-        const uploaderEmail = result.uploaderId ? await deps.userEmail(result.uploaderId) : null;
-        const uploader = await mail(
-            uploaderEmail,
-            takedownLifted({ documentTitle: result.documentTitle, reason }, deps.operator),
-            { event: 'uploader_notified_lift', takedownId },
-        );
-        return json({ lifted: true, delivery: { uploader } });
+        const outcomes = await deliver([result.uploaderNoticeId]);
+        return json({ lifted: true, delivery: { uploader: deliveryOf(outcomes, result.uploaderNoticeId) } });
     }
 
     if (action === 'reject') {
@@ -809,16 +932,54 @@ export const handleContentModeration = async (req: Request, deps: ContentModerat
         if (isRefusal(result)) {
             return json({ error: REFUSAL_STATUS[result].error, code: result }, REFUSAL_STATUS[result].status);
         }
-        const reporter = await mail(
-            result.reporterEmail,
-            reporterOutcome(
-                { reference: result.reference, reporterName: result.reporterName, decision: 'rejected', note },
-                deps.operator,
-            ),
-            { event: 'reporter_notified', reportId },
-        );
-        return json({ rejected: true, delivery: { reporter } });
+        const outcomes = await deliver([result.reporterNoticeId]);
+        return json({ rejected: true, delivery: { reporter: deliveryOf(outcomes, result.reporterNoticeId) } });
     }
 
     return invalid('action', 'Unknown action.');
+};
+
+export interface ContentNoticesDeps extends CommonDeps {
+    /** Whether the request carries the scheduler's secret; null when none is configured. */
+    authorized: (req: Request) => Promise<boolean | null>;
+}
+
+/** Rounds of claims one scheduled run makes: 50 notices at most, inside an Edge Function's time. */
+const RETRY_ROUNDS = 5;
+const RETRY_BATCH = 10;
+
+/**
+ * content-notices: the retry. pg_cron (content_notice_retry_tick) posts here
+ * every five minutes while anything is due; it delivers in rounds until
+ * nothing due is left or a sender's budget is spent.
+ */
+export const handleContentNotices = async (req: Request, deps: ContentNoticesDeps): Promise<Response> => {
+    const { json } = deps;
+    if (req.method !== 'POST') {
+        return json({ error: 'Method not allowed' }, 405);
+    }
+    const authorized = await deps.authorized(req);
+    if (authorized === null) {
+        return json({ error: 'Not configured.', code: 'unavailable' }, 503);
+    }
+    if (!authorized) {
+        return json({ error: 'Forbidden.', code: 'forbidden' }, 403);
+    }
+    const counts: Record<Exclude<Delivery, 'skipped'>, number> = {
+        sent: 0,
+        queued: 0,
+        failed: 0,
+        unconfigured: 0,
+    };
+    for (let round = 0; round < RETRY_ROUNDS; round += 1) {
+        const outcomes = await deliverNotices(deps, [], RETRY_BATCH);
+        for (const outcome of outcomes.values()) {
+            counts[outcome] += 1;
+        }
+        // Nothing more due, or everything left is waiting on a budget window.
+        if (outcomes.size < RETRY_BATCH || [...outcomes.values()].every((outcome) => outcome === 'queued')) {
+            break;
+        }
+    }
+    return json(counts);
 };

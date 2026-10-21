@@ -232,8 +232,17 @@ export const fetchTakedownsPage = async (
     return { rows: page.rows, next: page.next, total: page.total ?? null };
 };
 
-/** The notice log, newest first. */
-export const fetchNoticeLogPage = async (after: LogCursor | null = null): Promise<Page<NoticeLogRow, LogCursor>> => {
+/** Notices still owed (content_notice_outbox), as the log's first page counts them. */
+export interface OutboxCounts {
+    undelivered: number;
+    /** Of those, how many last failed or found mail unconfigured, rather than waiting on the budget. */
+    failing: number;
+}
+
+/** The notice log, newest first; the first page also counts the notices still owed. */
+export const fetchNoticeLogPage = async (
+    after: LogCursor | null = null,
+): Promise<Page<NoticeLogRow, LogCursor> & { outbox: OutboxCounts | null }> => {
     const { data, error } = await getSupabase().rpc('moderation_log', {
         ...(after ? { p_before_id: after.id } : {}),
         p_limit: MODERATION_PAGE_SIZE * 2,
@@ -241,8 +250,15 @@ export const fetchNoticeLogPage = async (after: LogCursor | null = null): Promis
     if (error) {
         throw readFailure(error, 'notice log');
     }
-    const page = pageSchema(logRow, logCursor).parse(data);
-    return { rows: page.rows, next: page.next, total: null };
+    const page = pageSchema(logRow, logCursor)
+        .extend({ undelivered: z.number().optional(), failing: z.number().optional() })
+        .parse(data);
+    return {
+        rows: page.rows,
+        next: page.next,
+        total: null,
+        outbox: page.undelivered === undefined ? null : { undelivered: page.undelivered, failing: page.failing ?? 0 },
+    };
 };
 
 export type ModerationAction =
@@ -260,9 +276,10 @@ export type ModerationAction =
 
 const deliveryWords: Record<string, string> = {
     sent: 'emailed',
-    failed: 'email FAILED — follow up by hand',
-    unconfigured: 'email not configured on this deploy — follow up by hand',
-    skipped: 'not emailed (no address, or the mail budget is spent) — follow up by hand',
+    queued: 'email queued — it goes out by itself when the mail budget allows',
+    failed: 'email failed — queued, and retried by itself',
+    unconfigured: 'email not configured on this deploy — queued until it is',
+    skipped: 'not emailed: no address on file — follow up by hand',
 };
 
 /** One line for each email the action sent, for the moderator to read. */

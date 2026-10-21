@@ -1,9 +1,17 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from './cors.ts';
-import type { DocumentRef, MailMessage, NoticeLogEntry } from './contentReports.ts';
+import {
+    NOTICE_SENDERS,
+    NOTICE_TEMPLATES,
+    type DocumentRef,
+    type MailMessage,
+    type NoticeOutcome,
+    type OutboxNotice,
+} from './contentReports.ts';
 import { logError } from './errorReporting.ts';
 import { LEGAL_OPERATOR } from './legalVersions.ts';
+import { mailLimit } from './mailBudget.ts';
 import { checkRateLimit, clientKey, serviceClient } from './rateLimit.ts';
 
 /**
@@ -20,6 +28,33 @@ const RESEND_API = 'https://api.resend.com';
  */
 const mailFrom = (): string => Deno.env.get('CONTENT_NOTICE_FROM') ?? 'Cleffy <noreply@cleffy.io>';
 
+const env = (name: string): string | undefined => Deno.env.get(name);
+
+/** A content_notice_outbox row as claim_content_notices() returns it → the handler's shape. */
+const toNotice = (row: Record<string, unknown>): OutboxNotice | null => {
+    const sender = NOTICE_SENDERS.find((value) => value === row['sender']);
+    const template = NOTICE_TEMPLATES.find((value) => value === row['template']);
+    const payload = row['payload'];
+    if (
+        typeof row['id'] !== 'string' ||
+        typeof row['recipient'] !== 'string' ||
+        !sender ||
+        !template ||
+        !payload ||
+        typeof payload !== 'object'
+    ) {
+        return null;
+    }
+    return {
+        id: row['id'],
+        sender,
+        template,
+        recipient: row['recipient'],
+        bccLegal: row['bcc_legal'] === true,
+        payload: payload as Record<string, unknown>,
+    };
+};
+
 export const common = {
     json: jsonResponse,
     options: optionsResponse,
@@ -34,12 +69,56 @@ export const common = {
     logError: (message: string, err?: unknown) =>
         logError('content-moderation', err ?? new Error(message), { code: message }),
     now: () => Date.now(),
+    mailBudgets: {
+        'content-report-ack': {
+            hour: mailLimit('contentReportAck', 'hour', env),
+            day: mailLimit('contentReportAck', 'day', env),
+        },
+        'moderation-notice': {
+            hour: mailLimit('moderationNotice', 'hour', env),
+            day: mailLimit('moderationNotice', 'day', env),
+        },
+    },
+    claimNotices: async (limit: number, first: string[]): Promise<OutboxNotice[] | null> => {
+        const admin = serviceClient();
+        if (!admin) {
+            return null;
+        }
+        const { data, error } = await admin.rpc('claim_content_notices', { p_limit: limit, p_first: first });
+        if (error) {
+            logError('content-moderation', new Error(`claim_content_notices failed: ${error.message}`), {
+                code: 'outbox_claim_failed',
+            });
+            return null;
+        }
+        return ((data ?? []) as Array<Record<string, unknown>>)
+            .map(toNotice)
+            .filter((notice): notice is OutboxNotice => notice !== null);
+    },
+    finishNotice: async (id: string, outcome: NoticeOutcome, retryAfterSec: number | null): Promise<void> => {
+        const admin = serviceClient();
+        if (!admin) {
+            return;
+        }
+        const { error } = await admin.rpc('finish_content_notice', {
+            p_id: id,
+            p_outcome: outcome,
+            p_retry_after_seconds: retryAfterSec,
+        });
+        if (error) {
+            // The row's lease runs out and it is claimed again; the idempotency
+            // key stops a sent one going out twice.
+            logError('content-moderation', new Error(`finish_content_notice failed: ${error.message}`), {
+                code: 'outbox_finish_failed',
+            });
+        }
+    },
 };
 
 export const sendEmail = async (
     to: string,
     message: MailMessage,
-    options?: { bcc?: string },
+    options: { bcc?: string; idempotencyKey: string },
 ): Promise<'sent' | 'failed' | 'unconfigured'> => {
     const apiKey = Deno.env.get('RESEND_API_KEY');
     if (!apiKey) {
@@ -48,11 +127,17 @@ export const sendEmail = async (
     try {
         const res = await fetch(`${RESEND_API}/emails`, {
             method: 'POST',
-            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            headers: {
+                Authorization: `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                // Resend sends one email per key for 24 hours: a notice re-claimed
+                // after a crash mid-send is not delivered twice.
+                'Idempotency-Key': options.idempotencyKey,
+            },
             body: JSON.stringify({
                 from: mailFrom(),
                 to: [to],
-                ...(options?.bcc ? { bcc: [options.bcc] } : {}),
+                ...(options.bcc ? { bcc: [options.bcc] } : {}),
                 reply_to: LEGAL_OPERATOR.legalEmail,
                 ...message,
             }),
@@ -69,28 +154,6 @@ export const sendEmail = async (
     } catch (err) {
         logError('content-moderation', err, { code: 'send_failed' });
         return 'failed';
-    }
-};
-
-export const logNotice = async (entry: NoticeLogEntry): Promise<void> => {
-    const admin = serviceClient();
-    if (!admin) {
-        return;
-    }
-    const { error } = await admin.from('content_notice_log').insert({
-        event: entry.event,
-        report_id: entry.reportId ?? null,
-        takedown_id: entry.takedownId ?? null,
-        recipient: entry.recipient ?? null,
-        delivery: entry.delivery ?? null,
-        actor_id: entry.actorId ?? null,
-        detail: entry.detail ?? {},
-    });
-    if (error) {
-        // The decision itself is already committed; a lost log row is reported, not fatal.
-        logError('content-moderation', new Error(`notice log insert failed: ${error.message}`), {
-            code: 'log_failed',
-        });
     }
 };
 

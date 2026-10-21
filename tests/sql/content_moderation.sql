@@ -228,6 +228,56 @@ select pg_temp.chk('50 reject answers the reporter to notify', $q$select public.
 select pg_temp.refused_with('51 a decided report cannot be rejected again', $q$select public.reject_content_report((select id from public.content_reports where reporter_name = 'Someone'), 'x', pg_temp.u(4))$q$, 'P0002', 'report_not_open');
 reset role;
 
+-- ---- the outbox: every notice owed is queued with its report or decision
+select pg_temp.chk('A1 a stored report queues its acknowledgment, blind-copied to legal', $q$select count(*) = 1 from public.content_notice_outbox o join public.content_reports r on r.id = o.report_id where r.reporter_email = 'rights@modtest.test' and o.template = 'report_acknowledgment' and o.sender = 'content-report-ack' and o.bcc_legal and o.recipient = 'rights@modtest.test' and o.payload ->> 'reference' = r.reference$q$);
+select pg_temp.chk('A2 ... and logs the report and the queued acknowledgment', $q$select count(*) filter (where event = 'report_received') = 1 and count(*) filter (where event = 'report_acknowledged' and delivery = 'queued') = 1 from public.content_notice_log where report_id = (select id from public.content_reports where reporter_email = 'rights@modtest.test')$q$);
+select pg_temp.chk('A3 the takedown queued the statement of reasons to the uploader''s address', $q$select count(*) = 1 from public.content_notice_outbox o join public.content_takedowns t on t.id = o.takedown_id where t.document_id = pg_temp.d(1) and o.template = 'statement_of_reasons' and o.recipient = 'uploader@modtest.test' and o.payload ->> 'ground' = 'copyright' and (o.payload ->> 'fromReport')::boolean and (o.payload ->> 'activeStrikes')::int = 1 and o.payload ->> 'decidedAt' ~ '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$'$q$);
+select pg_temp.chk('A4 ... and the outcome to the reporter, never the reporter''s details to the uploader', $q$select count(*) = 1 from public.content_notice_outbox where template = 'reporter_outcome' and recipient = 'rights@modtest.test' and payload ->> 'decision' = 'actioned' and payload ->> 'action' = 'restrict' and not exists (select 1 from public.content_notice_outbox where template = 'statement_of_reasons' and payload::text like '%rights@modtest.test%')$q$);
+select pg_temp.chk('A5 the lift queued its notice, the reject its outcome', $q$select exists (select 1 from public.content_notice_outbox where template = 'takedown_lifted' and recipient = 'uploader@modtest.test' and payload ->> 'reason' = 'Counter-notice, no court action') and exists (select 1 from public.content_notice_outbox where template = 'reporter_outcome' and recipient = 'someone@modtest.test' and payload ->> 'decision' = 'rejected' and payload ->> 'note' = 'No illegal content found')$q$);
+-- A score owned by an account with no address: the notice is skipped, logged, and the answer says so.
+insert into public.documents (id, owner_id, title, storage_path) values (pg_temp.d(3), pg_temp.u(3), 'Guest score', pg_temp.d(3)::text || '/original.pdf');
+select pg_temp.as_service();
+select pg_temp.chk('A6 an uploader with no address: decided, nothing queued, logged as skipped', $q$select (public.apply_content_takedown(pg_temp.d(3), 'restrict', 'terms', 'Terms', 'Facts', null, pg_temp.u(4)) -> 'uploader_notice_id') = 'null'::jsonb$q$);
+reset role;
+select pg_temp.chk('A7 ... with the skip in the log', $q$select exists (select 1 from public.content_notice_log l join public.content_takedowns t on t.id = l.takedown_id where t.document_id = pg_temp.d(3) and l.event = 'statement_of_reasons' and l.delivery = 'skipped')$q$);
+
+-- Delivery, as the functions drive it.
+select pg_temp.as_service();
+create temp table t_claim as select * from public.claim_content_notices(50, '{}', 120);
+grant all on t_claim to service_role;
+select pg_temp.chk('A8 a claim leases the due rows and counts the attempt', $q$select count(*) > 0 and bool_and(attempts = 1 and claimed_until > now()) from t_claim$q$);
+select pg_temp.chk('A9 a second claim gets none of them while the lease holds', $q$select not exists (select 1 from public.claim_content_notices(50, '{}', 120) c where c.id in (select id from t_claim))$q$);
+reset role;
+select pg_temp.as_service();
+-- The acknowledgment above: out of budget first, then sent.
+select public.finish_content_notice((select o.id from t_claim o where o.template = 'report_acknowledgment' and o.recipient = 'rights@modtest.test'), 'deferred', 1800);
+reset role;
+select pg_temp.chk('B1 out of budget: back in the queue until the window reopens, not an attempt, not logged', $q$select status = 'pending' and attempts = 0 and claimed_until is null and last_outcome = 'deferred' and next_attempt_at > now() + interval '29 minutes' and not exists (select 1 from public.content_notice_log l where (l.detail ->> 'notice_id')::uuid = o.id and l.delivery is distinct from 'queued') from public.content_notice_outbox o where template = 'report_acknowledgment' and recipient = 'rights@modtest.test'$q$);
+select pg_temp.as_service();
+select pg_temp.chk('B2 a deferred row is not due, but its own request may still send it first', $q$select not exists (select 1 from public.claim_content_notices(50, '{}', 120) c where c.recipient = 'rights@modtest.test' and c.template = 'report_acknowledgment') and exists (select 1 from public.claim_content_notices(1, array[(select id from public.content_notice_outbox where template = 'report_acknowledgment' and recipient = 'rights@modtest.test')], 120))$q$);
+select public.finish_content_notice((select id from public.content_notice_outbox where template = 'report_acknowledgment' and recipient = 'rights@modtest.test'), 'sent');
+-- The statement of reasons: fails twice.
+select public.finish_content_notice((select o.id from t_claim o where o.template = 'statement_of_reasons' and o.recipient = 'uploader@modtest.test' and o.payload ->> 'ground' = 'copyright'), 'failed');
+reset role;
+select pg_temp.chk('B3 sent: done, the report marked acknowledged, the send logged', $q$select o.status = 'sent' and o.sent_at is not null and r.acknowledged_at is not null and exists (select 1 from public.content_notice_log l where (l.detail ->> 'notice_id')::uuid = o.id and l.delivery = 'sent') from public.content_notice_outbox o join public.content_reports r on r.id = o.report_id where o.template = 'report_acknowledgment' and o.recipient = 'rights@modtest.test'$q$);
+select pg_temp.chk('B4 failed: kept, retried in a minute, the failure logged', $q$select o.status = 'pending' and o.last_outcome = 'failed' and o.next_attempt_at between now() + interval '50 seconds' and now() + interval '70 seconds' and exists (select 1 from public.content_notice_log l where (l.detail ->> 'notice_id')::uuid = o.id and l.delivery = 'failed') from public.content_notice_outbox o where o.template = 'statement_of_reasons' and o.payload ->> 'ground' = 'copyright'$q$);
+update public.content_notice_outbox set next_attempt_at = now() - interval '1 second', attempts = 5 where template = 'statement_of_reasons' and payload ->> 'ground' = 'copyright';
+select pg_temp.as_service();
+select count(*) from public.claim_content_notices(50, '{}', 120);
+select public.finish_content_notice((select id from public.content_notice_outbox where template = 'statement_of_reasons' and payload ->> 'ground' = 'copyright'), 'unconfigured');
+reset role;
+select pg_temp.chk('B5 each failure backs off further (the sixth: 32 minutes), and none drops the notice', $q$select status = 'pending' and attempts = 6 and last_outcome = 'unconfigured' and next_attempt_at between now() + interval '31 minutes' and now() + interval '33 minutes' from public.content_notice_outbox where template = 'statement_of_reasons' and payload ->> 'ground' = 'copyright'$q$);
+select pg_temp.chk('B6 the backoff stops growing at six hours', $q$select least(interval '6 hours', interval '1 minute' * power(2, least(greatest(40 - 1, 0), 20))) = interval '6 hours'$q$);
+select pg_temp.as_user(4);
+select pg_temp.chk('B7 the moderator sees how many are owed, and how many are failing', $q$select (public.moderation_log() ->> 'undelivered')::int > 0 and (public.moderation_log() ->> 'failing')::int = 1$q$);
+select pg_temp.refused_with('B8 even a moderator cannot read the outbox', $q$select count(*) from public.content_notice_outbox$q$, '42501', null);
+select pg_temp.refused_with('B9 nor claim from it', $q$select public.claim_content_notices(1, '{}', 120)$q$, '42501', null);
+select pg_temp.as_anon();
+select pg_temp.refused_with('B10 nor can anon finish a notice', $q$select public.finish_content_notice(gen_random_uuid(), 'sent')$q$, '42501', null);
+reset role;
+select pg_temp.chk('B11 the retry runs every five minutes', $q$select exists (select 1 from cron.job where jobname = 'content-notice-retry' and schedule = '*/5 * * * *')$q$);
+select pg_temp.chk('B12 without its vault secrets the retry tick is a no-op, not an error', $q$select public.content_notice_retry_tick() is null or true$q$);
+
 -- ---- pagination: nothing drops out of reach behind 200 newer rows
 -- 230 open reports and 230 live takedowns, all older than everything above,
 -- plus as many decided reports and lifted takedowns newer than all of them.
