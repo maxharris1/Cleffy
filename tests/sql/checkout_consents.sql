@@ -103,10 +103,16 @@ select pg_temp.as_service();
 -- tests/sql/cancel_link_lifetime.sql proves the rest of its lifetime).
 insert into public.billing_mail_outbox (id, kind, mode, payload)
 values ('c0c5e000-5ac0-4000-8000-0000000000aa', 'cancel_link', 'test', '{}');
-select pg_temp.chk('30 the service role stores a hashed token', $q$with ins as (
+-- The service role no longer inserts tokens itself (20261020160400): they go
+-- in through save_cancel_link_token, which runs as the table's owner, so the
+-- owner stands in for it here.
+select pg_temp.refused('29 the service role cannot insert a token directly', $q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id) values (repeat('a', 64), pg_temp.u(1), 'test', now() + interval '1 hour', 'c0c5e000-5ac0-4000-8000-0000000000aa')$q$, '42501');
+reset role;
+select pg_temp.chk('30 a hashed token is stored', $q$with ins as (
     insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
     values (repeat('a', 64), pg_temp.u(1), 'test', now() + interval '1 hour', 'c0c5e000-5ac0-4000-8000-0000000000aa') returning 1) select count(*) = 1 from ins$q$);
 select pg_temp.refused('31 anything but a SHA-256 hex digest is refused', $q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id) values ('the-raw-token', pg_temp.u(1), 'test', now(), 'c0c5e000-5ac0-4000-8000-0000000000aa')$q$, '23514');
+select pg_temp.as_service();
 select pg_temp.chk('32 a token is spent once (what consumeToken does)', $q$with first as (
     update public.billing_cancel_tokens set used_at = now() where token_hash = repeat('a', 64) and used_at is null returning 1)
     select count(*) = 1 from first$q$);

@@ -49,6 +49,15 @@ import type { StripeMode } from './stripeMode.ts';
  */
 export const CANCEL_LINK_TTL_MS = 60 * 60_000;
 
+/**
+ * The least of a link's hour that must be left, on the DATABASE's clock, for
+ * it to be sent (Codex round 5 on #62, decision 30): save_cancel_link_token
+ * (migration 20261020160400) refuses below it and answers how many seconds
+ * are left, and the send is decided on that answer, never on this function's
+ * own clock -- which may be behind. What it leaves covers the send itself.
+ */
+export const CANCEL_LINK_SEND_MARGIN_S = 120;
+
 export const CANCEL_LIMITS = {
     startPerIp: { limit: 5, windowMs: 60 * 60_000 },
     startPerRecipient: { limit: 3, windowMs: 60 * 60_000 },
@@ -128,13 +137,19 @@ export interface CancelLinkLease {
 }
 
 /** What saving a link's token answered (save_cancel_link_token). */
-export type SaveTokenResult =
-    /** Stored -- now, or by an earlier attempt at this row, whose expiry and used_at stand. */
-    | 'saved'
-    /** The row's expiry has passed: nothing saved, nothing to send. */
-    | 'expired'
-    /** This worker no longer holds the row's lease: it must not send. */
-    | 'not_held';
+export interface SaveTokenResult {
+    answer:
+        /** Stored -- now, or by an earlier attempt at this row, whose expiry and used_at stand. */
+        | 'saved'
+        /** Under CANCEL_LINK_SEND_MARGIN_S left: nothing saved, the row settled, nothing to send. */
+        | 'expired'
+        /** This link, or its request, was deleted before: nothing saved, the row settled, nothing to send. */
+        | 'spent'
+        /** This worker no longer holds the row's lease: it must not send. */
+        | 'not_held';
+    /** What is left of the link's hour, in seconds, on the database's clock after the row's lock. */
+    remainingSeconds: number;
+}
 
 /** Resend, with an Idempotency-Key that is the same on every attempt at one mail (resendDelivery.ts). */
 type SendEmail = (
@@ -173,7 +188,8 @@ export interface CancelLinkDeps {
     /**
      * Saves the token's hash for its outbox row, with the row's expiry, under
      * the row's lease. A token an earlier attempt saved is left exactly as it
-     * is: its expiry is never moved and its used_at never touched.
+     * is: its expiry is never moved and its used_at never touched. Answers how
+     * long the link has left on the database's clock, which decides the send.
      */
     saveToken: (token: {
         hash: string;
@@ -276,6 +292,8 @@ const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, 
 
 /** What a cancel link past its expiry is settled as: never sent, never tried again. */
 const EXPIRED: Delivery = { outcome: 'expired', reason: 'expired before delivery' };
+/** A link whose token, or whose request, was deleted before: never sent again (migration 20261020160400). */
+const SPENT: Delivery = { outcome: 'expired', reason: 'cancel link already spent or removed' };
 
 /**
  * The worker's half of `start`: decide whether a queued request gets a link,
@@ -294,8 +312,10 @@ const EXPIRED: Delivery = { outcome: 'expired', reason: 'expired before delivery
  *               same Idempotency-Key and the same link, so it is not a second
  *               email;
  *  * `expired` -- the link's hour, counted from when it was asked for, ran out
- *               before it could go (Codex round 4 on #62): nothing is sent,
- *               the row is settled for good, and what earlier attempts
+ *               before it could go (Codex round 4 on #62), or the database
+ *               says less than CANCEL_LINK_SEND_MARGIN_S of it is left, or the
+ *               link was spent and deleted before (Codex round 5): nothing is
+ *               sent, the row is settled for good, and what earlier attempts
  *               reserved stays reserved -- one of them may have reached
  *               Resend, and a reservation is only handed back when nothing
  *               can have gone;
@@ -312,7 +332,9 @@ export const deliverCancelLink = async (
 ): Promise<Delivery> => {
     // Before anything is counted or looked up: an expired link is never
     // emailed, and its row is never tried again. A row without an expiry is
-    // one nobody can say is still good, so it is treated the same.
+    // one nobody can say is still good, so it is treated the same. This
+    // clock may only ever refuse early; whether the link is sent is the
+    // database's answer below.
     const expiresAtMs = Date.parse(lease.linkExpiresAt ?? '');
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= deps.now()) {
         return EXPIRED;
@@ -385,32 +407,35 @@ export const deliverCancelLink = async (
     // by a retry (Codex round 4 on #62): a link that waited is good for what
     // is left of its hour, and the email says until when.
     let token: string;
+    let saved: SaveTokenResult;
     try {
         token = await deps.linkToken(secret, rowId);
-        const saved = await deps.saveToken({
+        saved = await deps.saveToken({
             hash: await deps.sha256Hex(token),
             userId,
             outboxId: rowId,
             claimToken: lease.claimToken,
         });
-        if (saved === 'not_held') {
-            // Another worker holds the row now and sends it under the same key.
-            await handBack();
-            return { outcome: 'retry', reason: 'lease taken over' };
-        }
-        if (saved === 'expired') {
-            // The database's clock says the hour is over. What this attempt
-            // reserved is kept, as for every attempt at a row whose earlier
-            // outcome may be unknown.
-            return EXPIRED;
-        }
     } catch (err) {
         await handBack();
         deps.logError('cancel_token_save_failed', err);
         return { outcome: 'retry', reason: 'token not saved' };
     }
-
-    if (expiresAtMs <= deps.now()) {
+    if (saved.answer === 'not_held') {
+        // Another worker holds the row now and sends it under the same key.
+        await handBack();
+        return { outcome: 'retry', reason: 'lease taken over' };
+    }
+    // Every other refusal keeps what this attempt reserved, as for every
+    // attempt at a row whose earlier outcome may be unknown.
+    if (saved.answer === 'spent') {
+        return SPENT;
+    }
+    // The final send decision: the database's count of the seconds left,
+    // read on its clock once it held the row (Codex round 5 on #62). This
+    // function's clock is not consulted -- behind, it would send a link the
+    // database has already called expired.
+    if (saved.answer !== 'saved' || saved.remainingSeconds < CANCEL_LINK_SEND_MARGIN_S) {
         return EXPIRED;
     }
     const link = `${request.origin}${deps.terms.BILLING_PATHS.cancel}?token=${encodeURIComponent(token)}`;

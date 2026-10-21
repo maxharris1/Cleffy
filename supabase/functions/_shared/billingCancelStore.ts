@@ -104,12 +104,14 @@ export const cancellableSubscription = async (
 };
 
 /**
- * The link's token, saved through save_cancel_link_token (migration
- * 20261020160300): only by the worker holding the row's lease, with the row's
- * own expiry -- set once, when the link was asked for, and refused once it has
- * passed -- and INSERT ... ON CONFLICT (token_hash) DO NOTHING, so a retry of
- * the row, or two at once, never moves the expiry an earlier save stored or
- * touches its used_at.
+ * The link's token, saved through save_cancel_link_token (migrations
+ * 20261020160300 and 20261020160400): only by the worker holding the row's
+ * lease, with the row's own expiry -- set once, when the link was asked for --
+ * and INSERT ... ON CONFLICT (token_hash) DO NOTHING, so a retry of the row,
+ * or two at once, never moves the expiry an earlier save stored or touches its
+ * used_at. A link deleted before (tombstoned) is never saved again, and one
+ * with under two minutes left on the database's clock is refused; the answer
+ * carries the seconds left on that clock, which is what the send goes on.
  */
 export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, outboxId, claimToken }) => {
     // No cleanup here any more: deleting this account's old tokens while one's
@@ -125,8 +127,14 @@ export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, out
     if (error) {
         throw new Error(`could not save the cancel link: ${error.message}`);
     }
-    if (data !== 'saved' && data !== 'expired' && data !== 'not_held') {
-        throw new Error(`save_cancel_link_token answered ${String(data)}`);
+    const answer = (data as { answer?: unknown } | null)?.answer;
+    const remaining = (data as { remaining_seconds?: unknown } | null)?.remaining_seconds;
+    if (
+        (answer !== 'saved' && answer !== 'expired' && answer !== 'spent' && answer !== 'not_held') ||
+        typeof remaining !== 'number' ||
+        !Number.isFinite(remaining)
+    ) {
+        throw new Error(`save_cancel_link_token answered ${JSON.stringify(data)}`);
     }
-    return data;
+    return { answer, remainingSeconds: remaining };
 };

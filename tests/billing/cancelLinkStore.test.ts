@@ -242,6 +242,17 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
 
     const hashOf = async (rowId: string) => sha256(await store.cancelLinkToken('cancel-link-store-test-secret', rowId));
 
+    /** The permanent record of a deleted token (migration 20261020160400). */
+    const tombstone = async (hash: string) => {
+        const { data, error } = await db
+            .from('billing_cancel_token_tombstones')
+            .select('*')
+            .eq('token_hash', hash)
+            .maybeSingle();
+        ok({ error }, 'read tombstone');
+        return data as { token_hash: string; outbox_id: string | null; deleted_at: string } | null;
+    };
+
     it('two retries at once keep the expiry the link was asked with', async () => {
         const { request, rowId } = await subscriber();
         const createdAt = Date.parse(String((await outboxRow(rowId))?.created_at));
@@ -409,5 +420,107 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
         );
         expect(resave.error).not.toBeNull();
         expect(await tokenRow(hash)).toEqual(spent);
+    });
+    it('a spent link the cleanup deleted is tombstoned: no direct insert and no re-used row id brings it back (Codex round 5 on #62)', async () => {
+        const { rowId, userId, request } = await subscriber();
+        const hash = await hashOf(rowId);
+
+        // Sent -- the request's row is deleted -- and used.
+        await drainBillingMailNow();
+        expect(resend.delivered).toHaveLength(1);
+        expect(await outboxRow(rowId)).toBeNull();
+        expect(await spend(hash, new Date().toISOString())).toBe(1);
+
+        // Its hour over, the cleanup deletes it, and keeps its tombstone.
+        ok(
+            await db
+                .from('billing_cancel_tokens')
+                .update({ expires_at: new Date(Date.now() - 60_000).toISOString() })
+                .eq('token_hash', hash),
+            'expire the link',
+        );
+        ok(await db.rpc('billing_mail_outbox_tick'), 'tick');
+        expect(await tokenRow(hash)).toBeNull();
+        expect(await tombstone(hash)).toMatchObject({ token_hash: hash, outbox_id: rowId });
+
+        // A new pending request from the same subscriber, and the service role
+        // inserting the deleted hash against it, unused, with a fresh hour.
+        const fresh = must(
+            await db.rpc('enqueue_billing_mail', {
+                p_kind: 'cancel_link',
+                p_dedupe_key: null,
+                p_mode: 'test',
+                p_payload: request,
+            }),
+            'enqueue',
+        ) as string;
+        rows.push(fresh);
+        await db.from('billing_mail_outbox').update({ next_attempt_at: '2999-01-01T00:00:00Z' }).eq('id', fresh);
+        expect((await outboxRow(fresh))?.status).toBe('pending');
+        const direct = await db.from('billing_cancel_tokens').insert({
+            token_hash: hash,
+            user_id: userId,
+            mode: 'test',
+            expires_at: new Date(Date.now() + HOUR).toISOString(),
+            outbox_id: fresh,
+        });
+        expect(direct.error).not.toBeNull();
+        expect(await tokenRow(hash)).toBeNull();
+
+        // The request re-created under the deleted row's id: the same HMAC,
+        // so the same link -- which the save refuses, settling the row.
+        ok(
+            await db
+                .from('billing_mail_outbox')
+                .insert({ id: rowId, kind: 'cancel_link', mode: 'test', payload: request }),
+            're-create the request',
+        );
+        await drainBillingMailNow();
+        expect(resend.requests).toHaveLength(1);
+        expect(await tokenRow(hash)).toBeNull();
+        expect(await linkWorks(hash)).toBe(false);
+        const row = await outboxRow(rowId);
+        expect(row).toMatchObject({
+            status: 'expired',
+            claim_token: null,
+            last_error: 'cancel link already spent or removed',
+        });
+        expect(row?.payload).not.toHaveProperty('email');
+    });
+
+    it("hands back the database's own count of the seconds left, and refuses under 120 (Codex round 5 on #62)", async () => {
+        const first = await subscriber();
+        const lease = await claim(first.rowId);
+        const saved = await store.saveToken({
+            hash: await hashOf(first.rowId),
+            userId: first.userId,
+            outboxId: first.rowId,
+            claimToken: lease.claimToken,
+        });
+        expect(saved.answer).toBe('saved');
+        expect(saved.remainingSeconds).toBeGreaterThan(HOUR / 1000 - 120);
+        expect(saved.remainingSeconds).toBeLessThanOrEqual(HOUR / 1000);
+
+        // A request with 100 s of its hour left: fewer than a send needs.
+        const late = await subscriber();
+        const lateLease = await claim(late.rowId);
+        ok(
+            await db
+                .from('billing_mail_outbox')
+                .update({ link_expires_at: new Date(Date.now() + 100_000).toISOString() })
+                .eq('id', late.rowId),
+            'bring the expiry forward',
+        );
+        const lateHash = await hashOf(late.rowId);
+        const refused = await store.saveToken({
+            hash: lateHash,
+            userId: late.userId,
+            outboxId: late.rowId,
+            claimToken: lateLease.claimToken,
+        });
+        expect(refused.answer).toBe('expired');
+        expect(refused.remainingSeconds).toBeLessThan(120);
+        expect(await tokenRow(lateHash)).toBeNull();
+        expect(await outboxRow(late.rowId)).toMatchObject({ status: 'expired', last_error: 'expired before delivery' });
     });
 });

@@ -350,3 +350,49 @@ describe('20261020160300_cancel_link_token_lifetime — replays cleanly', () => 
         expect(sql()).not.toMatch(/cron\.(schedule|unschedule)/i);
     });
 });
+
+/**
+ * 20261020160400 (launch checkout, Codex round 5 on #62) adds the cancel-link
+ * tombstone table and its triggers, and redefines functions 20261020160300
+ * made: the token guard, the tick, and save_cancel_link_token -- dropped and
+ * recreated, since its result type changes. Like 20261020160300 it must apply
+ * twice cleanly and leave the cron job alone. It also has to sort before
+ * #61's first migration (20261020180400) for the binding merge order. When
+ * the four launch PRs merge this block is reconciled by hand, like the one
+ * above: the generator does not write it.
+ */
+describe('20261020160400_cancel_link_tombstones_db_clock — replays cleanly', () => {
+    const NAME = '20261020160400_cancel_link_tombstones_db_clock.sql';
+    const sql = (): string => migrations().find(({ name }) => name === NAME)?.sql ?? '';
+
+    it('exists, after the migration it extends and before #61 district seats', () => {
+        const names = migrations().map(({ name }) => name);
+        expect(names.indexOf(NAME)).toBeGreaterThan(names.indexOf('20261020160300_cancel_link_token_lifetime.sql'));
+        expect(NAME < '20261020180400').toBe(true);
+    });
+
+    it('guards every table, index and trigger it adds, and only replaces functions', () => {
+        const text = sql();
+        expect(text).toMatch(/create\s+table\s+if\s+not\s+exists\s+public\.billing_cancel_token_tombstones/i);
+        expect(text).not.toMatch(/create\s+table\s+(?!if\s+not\s+exists)/i);
+        expect(text).not.toMatch(/create\s+index\s+(?!if\s+not\s+exists)/i);
+        expect(text).not.toMatch(/create\s+function\s/i);
+        expect(text).not.toMatch(/add\s+(column|constraint)\s/i);
+        for (const trigger of text.matchAll(/create\s+trigger\s+([a-z_]+)\s+[\s\S]*?\son\s+(public\.[a-z_]+)/gi)) {
+            expect(text).toContain(`drop trigger if exists ${trigger[1]} on ${trigger[2]}`);
+        }
+        // The one function dropped is the one whose result type changes, and
+        // it is recreated with its grant.
+        expect([...text.matchAll(/drop\s+function\s+if\s+exists\s+([a-z_.]+)/gi)].map((m) => m[1])).toEqual([
+            'public.save_cancel_link_token',
+        ]);
+        expect(text).toMatch(/create\s+or\s+replace\s+function\s+public\.save_cancel_link_token\s*\(/i);
+        expect(text).toContain(
+            'grant execute on function public.save_cancel_link_token (uuid, uuid, text, uuid) to service_role',
+        );
+    });
+
+    it('leaves the cron job to the migration that schedules it', () => {
+        expect(sql()).not.toMatch(/cron\.(schedule|unschedule)/i);
+    });
+});

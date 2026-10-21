@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Delivery, SendResult } from '../../supabase/functions/_shared/billingOutbox';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import {
+    CANCEL_LINK_SEND_MARGIN_S,
     CANCEL_LINK_TTL_MS,
     deliverCancelLink,
     handleCancel,
@@ -71,6 +72,12 @@ const harness = (
         queueFails?: boolean;
         /** The mail budget windows, smaller to model them being spent. */
         mailBudget?: CancelLinkDeps['mailBudget'];
+        /**
+         * How far the database's clock runs ahead of the edge function's
+         * (negative: behind). save_cancel_link_token counts what is left of a
+         * link on its own clock (Codex round 5 on #62).
+         */
+        dbAheadMs?: number;
     } = {},
 ) => {
     const tokens = new Map<string, StoredCancelToken>();
@@ -235,17 +242,23 @@ const harness = (
         userForEmail: vi.fn(async (email: string) => (email === EMAIL ? USER : null)),
         cancellableSubscription,
         // save_cancel_link_token, modelled: under the row's lease, with the
-        // row's expiry, and DO NOTHING for a token already saved.
+        // row's expiry, DO NOTHING for a token already saved, and refused --
+        // the row settled -- with under 120 s left on the DATABASE's clock,
+        // whose count of the seconds left is the answer.
         // tests/billing/cancelLinkStore.test.ts holds the real one to this.
         saveToken: async ({ hash, userId, outboxId, claimToken }) => {
             const row = outbox.get(outboxId);
             if (!row || row.claimToken !== claimToken) {
-                return 'not_held';
+                return { answer: 'not_held', remainingSeconds: 0 };
+            }
+            const left = Math.floor((Date.parse(row.linkExpiresAt) - (clock.now + (options.dbAheadMs ?? 0))) / 1000);
+            if (left < CANCEL_LINK_SEND_MARGIN_S) {
+                return { answer: 'expired', remainingSeconds: Math.max(0, left) };
             }
             if (!tokens.has(hash)) {
                 tokens.set(hash, { userId, mode: row.mode, expiresAt: row.linkExpiresAt, usedAt: null });
             }
-            return 'saved';
+            return { answer: 'saved', remainingSeconds: left };
         },
         sendEmail,
         idempotencyKey: resendIdempotencyKey,
@@ -483,11 +496,64 @@ describe('billing-cancel: asking for a link', () => {
 
         it("the database's clock has the last word: a save it refuses as expired sends nothing", async () => {
             const h = harness();
-            h.linkDeps.saveToken = async () => 'expired';
+            h.linkDeps.saveToken = async () => ({ answer: 'expired', remainingSeconds: 0 });
             await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
             expect(await h.flush()).toEqual([{ outcome: 'expired', reason: 'expired before delivery' }]);
             expect(h.sent).toEqual([]);
             expect(h.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+        });
+
+        describe("the database's clock decides whether it can still go (Codex round 5 on #62, decision 30)", () => {
+            it('the edge clock running behind cannot send a link the database says has under 120 s left', async () => {
+                // The edge function thinks the link was asked for a moment
+                // ago; the database's clock is 59.5 minutes further on.
+                const h = harness({ dbAheadMs: CANCEL_LINK_TTL_MS - 30_000 });
+                await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+                expect(await h.flush()).toEqual([{ outcome: 'expired', reason: 'expired before delivery' }]);
+                expect(h.sent).toEqual([]);
+                expect(h.tokens.size).toBe(0);
+                // Refused after the budget was counted: it stays counted, as for
+                // any refusal an earlier attempt's unknown outcome may lie behind.
+                expect(h.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+            });
+
+            it("sends on the database's count of the seconds left, not the edge function's", async () => {
+                const h = harness();
+                const save = h.linkDeps.saveToken;
+                // 'saved' with less than the margin is refused all the same...
+                h.linkDeps.saveToken = async (token) => ({
+                    ...(await save(token)),
+                    remainingSeconds: CANCEL_LINK_SEND_MARGIN_S - 1,
+                });
+                await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+                expect(await h.flush()).toEqual([{ outcome: 'expired', reason: 'expired before delivery' }]);
+                expect(h.sent).toEqual([]);
+
+                // ...and the edge clock jumping past the expiry while the save
+                // ran does not override a database that says half an hour is left.
+                const g = harness();
+                const saveG = g.linkDeps.saveToken;
+                g.linkDeps.saveToken = async (token) => {
+                    const answer = await saveG(token);
+                    g.later(CANCEL_LINK_TTL_MS + 60_000);
+                    return { ...answer, remainingSeconds: 1800 };
+                };
+                await handleCancel(post({ action: 'start', email: EMAIL }), g.deps);
+                expect(await g.flush()).toEqual([{ outcome: 'sent' }]);
+                expect(g.sent).toHaveLength(1);
+            });
+
+            it('a link already spent or removed is refused for good, and nothing is sent', async () => {
+                const h = harness();
+                h.linkDeps.saveToken = async () => ({ answer: 'spent', remainingSeconds: 0 });
+                await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+                expect(await h.flush()).toEqual([
+                    { outcome: 'expired', reason: 'cancel link already spent or removed' },
+                ]);
+                expect(h.sent).toEqual([]);
+                expect(h.queue).toEqual([]);
+                expect(h.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+            });
         });
 
         it('a row with no expiry is never mailed', async () => {
@@ -871,6 +937,20 @@ describe('billing-cancel/index.ts is wiring only', () => {
         );
         expect(CANCEL_LINK_TTL_MS).toBe(60 * 60_000);
         expect(migration).toContain("then new.created_at + interval '1 hour'");
+    });
+
+    it("sends only on the database's count of the time left, with the margin it refuses below (Codex round 5 on #62)", () => {
+        const migration = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20261020160400_cancel_link_tombstones_db_clock.sql'),
+            'utf8',
+        );
+        expect(CANCEL_LINK_SEND_MARGIN_S).toBe(120);
+        expect(migration).toContain("v_expires - clock_timestamp() < interval '120 seconds'");
+        const flow = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/cancelFlow.ts'), 'utf8');
+        // The one comparison against the edge clock left is the early refusal,
+        // before anything is counted; the send itself waits on the database.
+        expect(flow.match(/<= deps\.now\(\)/g)).toHaveLength(2);
+        expect(flow).toContain('saved.remainingSeconds < CANCEL_LINK_SEND_MARGIN_S');
     });
 
     it("reads the subscription back from Stripe rather than trusting the mirror's copy", () => {
