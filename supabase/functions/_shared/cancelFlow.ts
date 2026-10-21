@@ -65,6 +65,21 @@ export interface CancellableSubscription {
     cancelAtPeriodEnd: boolean;
 }
 
+/**
+ * The subscription as STRIPE holds it right now, which is what the link acts on
+ * and reports (Codex finding 2 on #62). The `subscriptions` mirror is only as
+ * fresh as the last webhook: a buyer who resumed in the portal a moment ago is
+ * still `cancelAtPeriodEnd` there, and a "Cancel now" that believed it would
+ * skip Stripe and promise a cancellation Stripe was not going to make.
+ */
+export interface LiveSubscription {
+    status: string;
+    /** cancel_at_period_end, or a cancel_at date set some other way. */
+    cancelling: boolean;
+    /** When access ends if it is cancelling, else when the paid period does (ISO). */
+    endsAt: string | null;
+}
+
 export interface StoredCancelToken {
     userId: string;
     mode: StripeMode;
@@ -103,8 +118,13 @@ export interface CancelDeps {
     readToken: (hash: string) => Promise<StoredCancelToken | null>;
     /** Marks the token used if it still is not; false when another request got there first. */
     consumeToken: (hash: string, nowIso: string) => Promise<boolean>;
-    /** Stripe: cancel_at_period_end = true. Answers when access ends. */
-    cancelAtPeriodEnd: (subscriptionId: string, mode: StripeMode) => Promise<{ endsAt: string | null }>;
+    /** Stripe's own copy of the subscription; null when Stripe has no such subscription. */
+    liveSubscription: (subscriptionId: string, mode: StripeMode) => Promise<LiveSubscription | null>;
+    /**
+     * Stripe: cancel_at_period_end = true. Answers with the subscription as the
+     * update left it, which is what decides whether the buyer is told it worked.
+     */
+    cancelAtPeriodEnd: (subscriptionId: string, mode: StripeMode) => Promise<LiveSubscription>;
     sendEmail: (
         to: string,
         message: BillingTerms.BillingEmail,
@@ -274,11 +294,27 @@ const resolveToken = async (deps: CancelDeps, token: unknown): Promise<Resolved 
         return deps.json(CANCEL_ERRORS.linkInvalid, 404);
     }
     try {
-        const [email, subscription, firstPurchaseAt] = await Promise.all([
+        const [email, mirrored, firstPurchaseAt] = await Promise.all([
             deps.emailOfUser(live.row.userId),
             deps.cancellableSubscription(live.row.userId, live.row.mode),
             deps.firstPurchaseAt(live.row.userId, live.row.mode),
         ]);
+        // The mirror only says WHICH subscription; everything the page shows
+        // and the button acts on is read back from Stripe. A subscription
+        // Stripe has ended (or no longer has) is nothing to cancel, whatever
+        // the mirror still says.
+        let subscription: CancellableSubscription | null = null;
+        if (mirrored) {
+            const current = await deps.liveSubscription(mirrored.subscriptionId, live.row.mode);
+            if (current && CANCELLABLE_STATUSES.includes(current.status)) {
+                subscription = {
+                    ...mirrored,
+                    status: current.status,
+                    periodEnd: current.endsAt ?? mirrored.periodEnd,
+                    cancelAtPeriodEnd: current.cancelling,
+                };
+            }
+        }
         return { ...live, email, subscription, firstPurchaseAt };
     } catch (err) {
         deps.logError('cancel_lookup_failed', err);
@@ -320,14 +356,29 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     // a retry, and setting cancel_at_period_end twice is harmless. The token's
     // conditional update then decides which of two racing clicks sends the
     // refund request, so support hears about it once.
+    //
+    // `subscription` is Stripe's live copy (resolveToken), so "already
+    // cancelling" is Stripe's answer and not the mirror's. And success is only
+    // reported when Stripe's answer to the update SAYS cancelling: a buyer told
+    // "cancelled" while Stripe is still going to renew is the one outcome this
+    // page must never produce.
     let endsAt: string | null = subscription.periodEnd;
     if (!subscription.cancelAtPeriodEnd) {
+        let updated: LiveSubscription;
         try {
-            endsAt = (await deps.cancelAtPeriodEnd(subscription.subscriptionId, resolved.row.mode)).endsAt ?? endsAt;
+            updated = await deps.cancelAtPeriodEnd(subscription.subscriptionId, resolved.row.mode);
         } catch (err) {
             deps.logError('cancel_stripe_failed', err);
             return deps.json(CANCEL_ERRORS.unavailable, 502);
         }
+        if (!updated.cancelling) {
+            deps.logError(
+                'cancel_not_confirmed',
+                new Error(`Stripe did not confirm the cancellation of ${subscription.subscriptionId}`),
+            );
+            return deps.json(CANCEL_ERRORS.unavailable, 502);
+        }
+        endsAt = updated.endsAt ?? endsAt;
     }
 
     const cancelledAt = new Date(deps.now()).toISOString();

@@ -12,6 +12,7 @@ import {
     maskEmail,
     type CancelDeps,
     type CancellableSubscription,
+    type LiveSubscription,
     type StoredCancelToken,
 } from '../../supabase/functions/_shared/cancelFlow';
 
@@ -44,6 +45,16 @@ const harness = (
         sendFails?: boolean;
         stripeFails?: boolean;
         limited?: string[];
+        /**
+         * Stripe's own copy of the subscription, which the flow reads before it
+         * acts (Codex finding 2 on #62). Defaults to agreeing with the mirror;
+         * set it to model a mirror the webhook has not caught up with. null is
+         * a subscription Stripe does not have.
+         */
+        live?: LiveSubscription | null;
+        stripeReadFails?: boolean;
+        /** Stripe answers the update without the subscription cancelling. */
+        updateNotApplied?: boolean;
     } = {},
 ) => {
     const tokens = new Map<string, StoredCancelToken>();
@@ -51,7 +62,7 @@ const harness = (
     const limiter = new Map<string, number>();
     const refunded: string[] = [];
     const errors: string[] = [];
-    let subscription: CancellableSubscription | null =
+    const subscription: CancellableSubscription | null =
         options.subscription === undefined
             ? {
                   subscriptionId: 'sub_1',
@@ -61,6 +72,14 @@ const harness = (
                   cancelAtPeriodEnd: false,
               }
             : options.subscription;
+    let live: LiveSubscription | null =
+        options.live !== undefined
+            ? options.live
+            : subscription && {
+                  status: subscription.status,
+                  cancelling: subscription.cancelAtPeriodEnd,
+                  endsAt: subscription.periodEnd,
+              };
     let tokenCount = 0;
     const deps: CancelDeps = {
         json,
@@ -100,14 +119,24 @@ const harness = (
             row.usedAt = nowIso;
             return true;
         },
+        liveSubscription: vi.fn(async () => {
+            if (options.stripeReadFails) {
+                throw new Error('Stripe is down');
+            }
+            return live;
+        }),
         cancelAtPeriodEnd: vi.fn(async () => {
             if (options.stripeFails) {
                 throw new Error('Stripe is down');
             }
-            if (subscription) {
-                subscription = { ...subscription, cancelAtPeriodEnd: true };
+            if (!live) {
+                throw new Error('No such subscription');
             }
-            return { endsAt: '2026-11-20T20:00:00.000Z' };
+            if (!options.updateNotApplied) {
+                live = { ...live, cancelling: true, endsAt: '2026-11-20T20:00:00.000Z' };
+                // The mirror catches up when the webhook lands, not before.
+            }
+            return live;
         }),
         sendEmail: vi.fn(async (to, message, mailOptions) => {
             if (options.sendFails) {
@@ -280,7 +309,7 @@ describe('billing-cancel: using the link', () => {
         expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
     });
 
-    it('does not call Stripe again for a subscription already set to cancel', async () => {
+    it('does not call Stripe again for a subscription Stripe says is already set to cancel', async () => {
         const h = await linked({
             subscription: {
                 subscriptionId: 'sub_1',
@@ -292,7 +321,73 @@ describe('billing-cancel: using the link', () => {
         });
         const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
         expect(await body(response)).toMatchObject({ cancelled: true, endsAt: '2026-11-20T20:00:00.000Z' });
+        expect(h.deps.liveSubscription).toHaveBeenCalledWith('sub_1', 'live');
         expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+    });
+
+    describe("acts on Stripe's copy of the subscription, never the mirror's (Codex finding 2 on #62)", () => {
+        const cancellingMirror: CancellableSubscription = {
+            subscriptionId: 'sub_1',
+            priceId: 'price_teacher_monthly',
+            status: 'active',
+            periodEnd: '2026-11-20T20:00:00.000Z',
+            cancelAtPeriodEnd: true,
+        };
+
+        it('cancels in Stripe when the buyer resumed in the portal before the webhook landed', async () => {
+            // The review's scenario: the mirror still says cancelling, Stripe
+            // says it will renew. Trusting the mirror skipped Stripe, spent the
+            // link and promised a cancellation that was never made.
+            const h = await linked({
+                subscription: cancellingMirror,
+                live: { status: 'active', cancelling: false, endsAt: '2026-11-20T20:00:00.000Z' },
+            });
+
+            const peek = await body(await handleCancel(post({ action: 'peek', token: h.token }), h.deps));
+            expect(peek.alreadyCancelling).toBe(false);
+
+            const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+
+            expect(await body(response)).toMatchObject({ cancelled: true, endsAt: '2026-11-20T20:00:00.000Z' });
+            expect(h.deps.cancelAtPeriodEnd).toHaveBeenCalledWith('sub_1', 'live');
+        });
+
+        it('never reports success when Stripe does not confirm the subscription is cancelling', async () => {
+            const h = await linked({ updateNotApplied: true });
+
+            const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+
+            expect(response.status).toBe(502);
+            expect(await body(response)).toMatchObject({ code: 'unavailable' });
+            expect(h.errors).toContain('cancel_not_confirmed');
+            // The link is not spent, so the buyer can try again.
+            expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(200);
+        });
+
+        it('shows Stripe saying it is already cancelling even when the mirror has not caught up', async () => {
+            const h = await linked({
+                live: { status: 'active', cancelling: true, endsAt: '2026-11-05T00:00:00.000Z' },
+            });
+            const peek = await body(await handleCancel(post({ action: 'peek', token: h.token }), h.deps));
+            expect(peek).toMatchObject({ alreadyCancelling: true, periodEnd: '2026-11-05T00:00:00.000Z' });
+        });
+
+        it('has nothing to cancel once Stripe has ended the subscription the mirror still holds', async () => {
+            for (const live of [{ status: 'canceled', cancelling: false, endsAt: null }, null]) {
+                const h = await linked({ live });
+                const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+                expect(response.status).toBe(404);
+                expect(await body(response)).toMatchObject({ code: 'nothing_to_cancel' });
+                expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+            }
+        });
+
+        it('refuses to guess when Stripe cannot be read', async () => {
+            const h = await linked({ stripeReadFails: true });
+            const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+            expect(response.status).toBe(503);
+            expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+        });
     });
 });
 
@@ -307,6 +402,10 @@ describe('billing-cancel/index.ts is wiring only', () => {
     it('cancels at the period end, as the Customer Portal does', () => {
         expect(source).toContain('cancel_at_period_end: true');
         expect(source).not.toMatch(/subscriptions\.cancel\(/);
+    });
+
+    it("reads the subscription back from Stripe rather than trusting the mirror's copy", () => {
+        expect(source).toContain('subscriptions.retrieve(subscriptionId)');
     });
 
     it('is reachable without signing in', () => {

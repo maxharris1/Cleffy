@@ -1,11 +1,11 @@
 import { emailOfUser, sendBillingEmail } from '../_shared/billingMail.ts';
 import * as billingTerms from '../_shared/billingTerms.ts';
-import { CANCELLABLE_STATUSES, handleCancel } from '../_shared/cancelFlow.ts';
+import { CANCELLABLE_STATUSES, handleCancel, type LiveSubscription } from '../_shared/cancelFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { mailLimit } from '../_shared/mailBudget.ts';
 import { checkRateLimit, clientKey, refundRateLimit, serviceClient } from '../_shared/rateLimit.ts';
-import { appOrigin, modeForRequest, slotForPrice, stripeClient } from '../_shared/stripe.ts';
+import { appOrigin, modeForRequest, slotForPrice, stripeClient, type StripeMode } from '../_shared/stripe.ts';
 
 /**
  * Signed-out cancellation: /cancel's email lookup, its one-time link, and the
@@ -37,6 +37,32 @@ const newToken = (): string => {
         .replace(/\+/g, '-')
         .replace(/\//g, '_')
         .replace(/=+$/, '');
+};
+
+const stripeFor = (mode: StripeMode) => {
+    const stripe = stripeClient(mode);
+    if (!stripe) {
+        throw new Error('Billing is not configured');
+    }
+    return stripe;
+};
+
+/** What the cancel page needs of a Stripe subscription (cancelFlow.ts LiveSubscription). */
+const liveOf = (sub: {
+    status: string;
+    cancel_at_period_end?: boolean | null;
+    cancel_at?: number | null;
+    items?: { data?: Array<{ current_period_end?: number }> };
+}): LiveSubscription => {
+    const periodEnd =
+        (sub as { current_period_end?: number }).current_period_end ?? sub.items?.data?.[0]?.current_period_end;
+    const cancelAt = typeof sub.cancel_at === 'number' ? sub.cancel_at : null;
+    const seconds = cancelAt ?? periodEnd ?? null;
+    return {
+        status: sub.status,
+        cancelling: sub.cancel_at_period_end === true || cancelAt !== null,
+        endsAt: typeof seconds === 'number' ? new Date(seconds * 1000).toISOString() : null,
+    };
 };
 
 Deno.serve((req) =>
@@ -141,21 +167,23 @@ Deno.serve((req) =>
             }
             return (data ?? []).length > 0;
         },
-        cancelAtPeriodEnd: async (subscriptionId, mode) => {
-            const stripe = stripeClient(mode);
-            if (!stripe) {
-                throw new Error('Billing is not configured');
+        liveSubscription: async (subscriptionId, mode) => {
+            try {
+                return liveOf(await stripeFor(mode).subscriptions.retrieve(subscriptionId));
+            } catch (err) {
+                if ((err as { code?: string }).code === 'resource_missing') {
+                    return null;
+                }
+                throw err;
             }
-            const updated = await stripe.subscriptions.update(subscriptionId, {
-                cancel_at_period_end: true,
-                metadata: { cancelled_via: 'cleffy_cancel_page' },
-            });
-            const seconds =
-                (updated as unknown as { current_period_end?: number }).current_period_end ??
-                updated.items?.data?.[0]?.current_period_end ??
-                null;
-            return { endsAt: typeof seconds === 'number' ? new Date(seconds * 1000).toISOString() : null };
         },
+        cancelAtPeriodEnd: async (subscriptionId, mode) =>
+            liveOf(
+                await stripeFor(mode).subscriptions.update(subscriptionId, {
+                    cancel_at_period_end: true,
+                    metadata: { cancelled_via: 'cleffy_cancel_page' },
+                }),
+            ),
         sendEmail: sendBillingEmail,
         terms: billingTerms,
         planNameForPrice: (priceId) => {
