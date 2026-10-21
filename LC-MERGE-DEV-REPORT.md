@@ -28,24 +28,24 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
 - Reviewed SHA: `553f5d2544f85bee52034f38859ea762fb9b7a5e`. It was still the head on
   origin and on GitHub before I touched the branch.
 - It conflicted with dev after #63, so I merged `origin/dev` (`9b106e0`) into the branch:
-  - **Conflict-resolution merge commit `438ad800fd1d07b351db7e15dd25bbff94573efb`**, with
-    parents `553f5d2` (the reviewed head, first parent) and `9b106e0`. Authored by Max
-    Harris. It went to `mh/launch-checkout` as a fast-forward push.
-  - Conflicted files and how I resolved them:
-    - `scripts/apply-migrations.sql`: regenerated with `npm run migrations:mirror` (77
-      files, 75 mirrored). The output is the same whichever side is checked out first.
-    - `tests/migrationRecoverability.test.ts`: the job map is now the union of
-      billing-mail-outbox, content-notice-retry, imslp-sync and omr-sweep. #62's static
-      replay blocks (160300–160700) are kept.
-    - `src/app/routes.tsx`, `supabase/config.toml`, `SETUP_SUPABASE.md`: both sides only
-      added entries, so I kept both (`/cancel`, `/refunds`, `/copyright`, `/report`; the
-      billing-cancel, billing-mail-outbox, content-report, content-moderation and
-      content-notices function blocks; both outbox runbook paragraphs).
-      `SETUP_SUPABASE.md` was already not Prettier-formatted on dev, on #62 and at the
-      base, so I left its formatting alone.
-  - Shared files after the merge are byte-identical to #62's: `_shared/mailBudget.ts`,
-    `_shared/resendDelivery.ts`, `_shared/legalVersions.ts`,
-    `tests/security/mailBudget.test.ts`, `tests/security/resendDelivery.test.ts`.
+    - **Conflict-resolution merge commit `438ad800fd1d07b351db7e15dd25bbff94573efb`**, with
+      parents `553f5d2` (the reviewed head, first parent) and `9b106e0`. Authored by Max
+      Harris. It went to `mh/launch-checkout` as a fast-forward push.
+    - Conflicted files and how I resolved them:
+        - `scripts/apply-migrations.sql`: regenerated with `npm run migrations:mirror` (77
+          files, 75 mirrored). The output is the same whichever side is checked out first.
+        - `tests/migrationRecoverability.test.ts`: the job map is now the union of
+          billing-mail-outbox, content-notice-retry, imslp-sync and omr-sweep. #62's static
+          replay blocks (160300–160700) are kept.
+        - `src/app/routes.tsx`, `supabase/config.toml`, `SETUP_SUPABASE.md`: both sides only
+          added entries, so I kept both (`/cancel`, `/refunds`, `/copyright`, `/report`; the
+          billing-cancel, billing-mail-outbox, content-report, content-moderation and
+          content-notices function blocks; both outbox runbook paragraphs).
+          `SETUP_SUPABASE.md` was already not Prettier-formatted on dev, on #62 and at the
+          base, so I left its formatting alone.
+    - Shared files after the merge are byte-identical to #62's: `_shared/mailBudget.ts`,
+      `_shared/resendDelivery.ts`, `_shared/legalVersions.ts`,
+      `tests/security/mailBudget.test.ts`, `tests/security/resendDelivery.test.ts`.
 - Local checks on `438ad80`: `lint:check` ✅, `typecheck` ✅, `test` ✅ (203 files
   passed, 2 skipped; 3067 tests passed, 10 skipped), `build` ✅.
 - CI on `438ad80` (push and pull_request runs): `checks` ✅, **`supabase-local` ✅**,
@@ -54,3 +54,133 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
 - Marked ready for review, then merged with `merge_method=merge` at 2026-10-21 23:51:38Z.
 - **Merge commit on dev: `225bd64afb5a61502f3308c5018b1df0cceab7cd`**, with parents
   `9b106e0` (dev) and `438ad80`. GitHub shows #62 merged into `dev`.
+
+## 3. #61 `mh/district-seats`: stopped before merge
+
+- Reviewed SHA: `a472674a7d86990642271506bbb8b7c5cc92ac5e`. It was still the head on
+  origin and on GitHub, and it is unchanged. **I pushed nothing to `mh/district-seats`.**
+- I merged `origin/dev` (`225bd64`) into it locally. Only two files conflicted:
+    - `scripts/apply-migrations.sql`: regenerated (86 files, 84 mirrored).
+    - `tests/migrationRecoverability.test.ts`: union of 5 jobs (billing-mail-outbox,
+      content-notice-retry, district-seat-reconcile, imslp-sync, omr-sweep).
+- **Why I stopped:** the merged tree fails `npm run typecheck`, and CI's `checks` job runs
+  that same step:
+
+    ```
+    tests/billing/districtSeats.test.ts(147,11): error TS2739: Type '{ claimEvent: ...; ... 14 more ...; log: ... }'
+    is missing the following properties from type 'WebhookStore': recordPurchaseNotice, recordCancellationNotice
+    ```
+
+    This is a semantic conflict. Git sees no conflicting lines, but the result doesn't
+    compile:
+    - #62 added two required methods to `WebhookStore` in `_shared/stripeEvents.ts`.
+    - #61's new test (`storeFor` in `tests/billing/districtSeats.test.ts`, from commit
+      `5a9feef`) builds a `WebhookStore` literal without them.
+    - Each PR compiles on its own; the combination does not.
+    - Lint passes, and all tests pass, because vitest doesn't typecheck.
+
+    Fixing it means changing code beyond conflict resolution, which the packet rules out
+    ("Resolve only the conflicts. Don't make any other code changes."). So I merged nothing
+    more, did not push a branch I knew would fail CI, and backed out the local merge.
+
+- **Proposed fix** (not applied). Add two no-op stubs to `storeFor`'s store literal in
+  `tests/billing/districtSeats.test.ts`, the way `tests/billing/resubscribe.test.ts` on
+  dev already does:
+
+    ```ts
+            recordPurchaseNotice: async () => {},
+            recordCancellationNotice: async () => {},
+    ```
+
+    This is test-only. It goes either in the `origin/dev` → `mh/district-seats` merge commit,
+    or on dev in a small PR. It needs Max's (or Codex's) OK, because it is code outside the
+    reviewed heads.
+
+## 4. #64 `mh/launch-consent`: not started
+
+- Reviewed SHA: `82d32c7052846f1b7827cea2eac48e3cd3152ad9`. It is unchanged, and I pushed
+  nothing to it.
+- To save time later, I rehearsed the final merge in a scratch worktree. #64 at
+  `82d32c7` merged with a local, unpushed #61 resolution (`6e7b836`, tree `064d762`, the
+  same tree the real #61 merge produced). Nothing from the rehearsal was pushed.
+    - Conflicts: `scripts/apply-migrations.sql`, `src/sync/syncEngine.ts`,
+      `src/sync/syncEngine.test.ts`, `src/sync/realtimeChannel.test.ts`,
+      `src/types/database.ts`, `tests/migrationRecoverability.test.ts`.
+    - Resolution, per the packet:
+        - The `applyServerRow` gate is
+          `!this.watermarkHeld && state?.checkedSeq !== undefined && row.seq > state.watermarkSeq`,
+          writing `{ ...state, docId, watermarkSeq: row.seq }`.
+        - The rest was a union: both adapters (`fetchResyncFloor`, `fetchSeatReadOnly`); both
+          RPC types (`annotation_resync_floor`, `caller_seat_read_only`); #64's presence-names
+          test plus #63's takedown-topic tests, with #63's `TopicEpochRead` shape; and #64's
+          `checkedSeq` assertion.
+    - Result: mirror **96 files, 94 mirrored**. The recoverability map has **10 jobs**:
+      billing-mail-outbox, content-notice-retry, district-seat-reconcile, imslp-sync,
+      omr-sweep and the 5 retention-* jobs.
+    - Checks: lint ✅. Tests ✅: 219 files passed, 5 skipped; 3381 tests passed, 13
+      skipped, including `districtBillingCanonical.test.ts`, which pins the district_billing
+      sha256 `a3043de5…`.
+    - Typecheck ❌, with **only** the same `districtSeats.test.ts` error. So once that is
+      fixed at the #61 step, nothing else is expected to block #64.
+
+## Final state
+
+- `dev` is at **`225bd64afb5a61502f3308c5018b1df0cceab7cd`**: #63 and #62 are merged; #61 and
+  #64 are not. Migrations on dev: 77 files, 75 mirrored. Recoverability job count on dev: 4. The expected 96/94 and 10 depend on #61 and #64.
+- Shared files on dev are byte-identical to #62's version (blob SHAs match):
+  `_shared/mailBudget.ts`, `_shared/resendDelivery.ts`, `_shared/legalVersions.ts`, and
+  `tests/security/mailBudget.test.ts` / `resendDelivery.test.ts`. The district_billing
+  check (sha256 `a3043de5…`) doesn't apply yet, because neither #61 nor #64 is merged.
+- Dev CI on `9b106e0` (#63 merge): `checks`, `supabase-drift` and `omr-service` ✅ (push
+  and PR runs), Vercel ✅, Supabase Preview ✅.
+- **Dev CI on `225bd64` (#62 merge, the latest commit on dev): all green.** `checks` ✅,
+  **`supabase-local` ✅**, `supabase-drift` ✅ and `omr-service` ✅ (push and PR runs),
+  Vercel Preview Comments ✅, Supabase Preview ✅.
+
+## Automatic deployments (observed only; I applied nothing)
+
+- **Hosted dev Supabase (`qdbnlrgylelelvwbkvnm`): it probably deployed.** The Supabase
+  GitHub integration's **"Supabase Preview" check ran and succeeded on both dev merge
+  commits**, with links to project `qdbnlrgylelelvwbkvnm`:
+    - `9b106e0` at 23:43:10–23:43:39Z
+    - `225bd64` at 23:52:13–23:52:47Z
+
+    On the PR heads it was "skipped". Its check output is empty, so I can't tell from GitHub
+    exactly what it applied. Most likely it pushed #63's and #62's migrations, and maybe
+    `config.toml`, to hosted dev. I did not open the project to check (hosted Supabase is
+    off-limits). Max should check the dev project's migration history. #62's hosted steps
+    (Stripe Tax, the Vault secrets for `billing_outbox_url` / `billing_outbox_secret`, and
+    deploying functions) are still manual. The `billing-mail-outbox` cron posts nowhere until
+    the Vault secrets exist.
+
+- **Vercel:** Preview deployments only, from `vercel[bot]`, one per push: `9b106e0`,
+  `438ad80`, `225bd64`, and the report branch. There has been no Production deployment
+  since 2026-08-29 (`cf1e968`, main). Whether the dev alias (e.g. dev.cleffy.io) now
+  serves `225bd64` depends on Vercel's branch-alias settings, which I can't see from here.
+- Prod Supabase (`jibgwgosihadbjgxdsfe`), `main`, PR #54 and live Stripe: untouched.
+
+## Open questions for Max
+
+1. **Approve the two-line test fix for #61** (above): put it in the #61 conflict-resolution
+   merge commit, or land it on dev first. After that, #61 then #64 should go through as
+   rehearsed; the only typecheck error in the four-way rehearsal is this one.
+2. **Hosted dev Supabase:** confirm what the integration applied after the #63 and #62
+   merges (see above). With #61 and #64 still out, dev now has 77 migrations.
+3. `SETUP_SUPABASE.md` is not Prettier-formatted on dev. That predates this work, and CI
+   doesn't check it. I left it as it was.
+
+## Environment
+
+- Ran in the Cleffy cloud environment **`env_01WAd3yiz3qpSnsofpyEwCh2`**
+  (`anthropic_cloud`), not Sandbox. I confirmed it at the start with `get_session` for this
+  session.
+- I never started the local Supabase stack: none of the steps here needed it, because CI's
+  supabase-local covered the DB proofs. No hosted project, live Stripe or secret was
+  touched. I sent no messages to any session or person.
+- Pushes made:
+    - `mh/launch-checkout`: one fast-forward, to `438ad80`.
+    - `claude/lc-merge-dev-report`: fast-forwards only.
+
+    Nothing was force-pushed, and nothing was pushed directly to `dev`.
+
+STATUS: STOPPED typecheck-failed #61 (checks would fail: tests/billing/districtSeats.test.ts WebhookStore mock lacks #62's recordPurchaseNotice/recordCancellationNotice; the fix is a code change beyond conflict resolution and needs approval). #63 and #62 are merged into dev; #61 and #64 are not merged.
