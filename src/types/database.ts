@@ -884,6 +884,13 @@ export type Database = {
                 Args: Record<string, never>;
                 Returns: boolean;
             };
+            // The highest seq tombstone compaction removed on the score (0 when
+            // none; null when the caller cannot read it). A sync watermark below
+            // it means the device must resync in full (20261021120600).
+            annotation_resync_floor: {
+                Args: { p_document: string };
+                Returns: number | null;
+            };
             // Service role only: student-provision ends a student's sessions on
             // archive and reset, and returns how many it ended.
             end_student_sessions: {

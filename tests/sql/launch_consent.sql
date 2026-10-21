@@ -441,6 +441,55 @@ select pg_temp.holds (
        where resend_email_id like 'lc-%'$q$
 );
 
+-- Tombstone compaction leaves a resync floor (20261021120600).
+insert into public.annotations (id, document_id, page, kind, color, payload, created_by, deleted_at)
+values ('1c000000-0000-4000-8000-0000000a00f1', '1c000000-0000-4000-8000-00000000d001', 0, 'stroke', '#112233',
+        '{"pts":[0,0,0],"w":0.001}', '1c000000-0000-4000-8000-0000000000a1', now() - interval '100 days');
+
+create temp table compacted as
+select seq from public.annotations where id = '1c000000-0000-4000-8000-0000000a00f1';
+
+grant select on compacted to public;
+
+select pg_temp.holds (
+    'compaction removes at least the 100-day-old tombstone',
+    $q$select public.compact_annotation_tombstones (interval '90 days') >= 1$q$
+);
+
+select pg_temp.holds (
+    'that tombstone is gone, and a live mark stays',
+    $q$select not exists (select 1 from public.annotations where id = '1c000000-0000-4000-8000-0000000a00f1')
+       and exists (select 1 from public.annotations where id = '1c000000-0000-4000-8000-0000000a0003')$q$
+);
+
+select pg_temp.holds (
+    'and records the score''s floor as the highest seq it removed there',
+    $q$select f.floor_seq >= (select seq from compacted) from public.annotation_sync_floors f
+       where f.document_id = '1c000000-0000-4000-8000-00000000d001'$q$
+);
+
+select pg_temp.act_as ('1c000000-0000-4000-8000-0000000000a1');
+
+select pg_temp.holds (
+    'a member of the score is told the floor',
+    $q$select public.annotation_resync_floor ('1c000000-0000-4000-8000-00000000d001') >= (select seq from compacted)$q$
+);
+
+select pg_temp.refused (
+    'nobody reads the floors table directly',
+    $q$select * from public.annotation_sync_floors$q$,
+    '42501'
+);
+
+select pg_temp.act_as ('1c000000-0000-4000-8000-0000000000a2');
+
+select pg_temp.holds (
+    'someone who cannot read the score is told nothing',
+    $q$select public.annotation_resync_floor ('1c000000-0000-4000-8000-00000000d001') is null$q$
+);
+
+select pg_temp.act_as_server ();
+
 select pg_temp.holds (
     'the five retention jobs are scheduled, off the hour',
     $q$select count(*) = 5 and bool_and(schedule !~ '^0 ')

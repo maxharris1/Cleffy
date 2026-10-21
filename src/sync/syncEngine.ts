@@ -64,6 +64,14 @@ export interface AnnotationsApi {
         limit: number,
     ): Promise<{ data: AnnotationRow[] | null; error: ApiError | null }>;
     /**
+     * The highest seq tombstone compaction has removed on this score
+     * (annotation_resync_floor, 20261021120600): 0 when nothing there was
+     * compacted, null when the score cannot be read. A watermark below it may
+     * have missed a deletion whose tombstone is gone, so the device resyncs in
+     * full (see pullOnce). Absent in fakes that never compact.
+     */
+    fetchResyncFloor?(docId: string): Promise<{ floor: number | null; error: ApiError | null }>;
+    /**
      * Get a fresh access token after a 401. True when one is now in place.
      * A tab that slept past its JWT's expiry wakes before the auth client's
      * refresh timer does, and its first flush would otherwise be refused.
@@ -1488,7 +1496,9 @@ export class SyncEngine {
             return;
         }
         if (!state || row.seq > state.watermarkSeq) {
-            await db.syncState.put({ docId, watermarkSeq: row.seq });
+            // checkedSeq stays: a live row says nothing about deletions this
+            // device missed while it was away (see pullOnce).
+            await db.syncState.put({ ...state, docId, watermarkSeq: row.seq });
         }
     }
 
@@ -1525,10 +1535,44 @@ export class SyncEngine {
         return this.pulling;
     }
 
+    /**
+     * Compares `checkedSeq` with the score's compaction floor: `floor` is set
+     * when it is below it (resync), and `checked` says whether the server
+     * answered. A device that has never synced the score pulls everything
+     * anyway, and one that cannot ask (an older server, a failed request)
+     * pulls as before without moving checkedSeq, so it asks again next time:
+     * the check never holds sync up, and never lets a stale device off.
+     */
+    private async compactionFloor(checkedSeq: number): Promise<{ floor: number | null; checked: boolean }> {
+        const { api, docId } = this.deps;
+        if (checkedSeq === 0 || !api.fetchResyncFloor) {
+            return { floor: null, checked: true };
+        }
+        const fetchFloor = api.fetchResyncFloor.bind(api);
+        const { floor, error } = await this.withAuth(() => fetchFloor(docId));
+        if (error) {
+            return { floor: null, checked: false };
+        }
+        return { floor: floor !== null && checkedSeq < floor ? floor : null, checked: true };
+    }
+
     private async pullOnce(): Promise<void> {
         const { db, api, docId } = this.deps;
         const state = await db.syncState.get(docId);
         let watermark = state?.watermarkSeq ?? 0;
+        const checkedSeq = state?.checkedSeq ?? watermark;
+        // Away longer than the tombstones lasted: deletions this device never
+        // saw are gone from the server, so watermark pulls cannot bring them.
+        // Pull the score's whole current set instead, and afterwards drop every
+        // synced mark it did not contain.
+        const { floor, checked } = await this.compactionFloor(checkedSeq);
+        if (this.stopped) {
+            return;
+        }
+        const seen = floor === null ? null : new Set<string>();
+        if (floor !== null) {
+            watermark = 0;
+        }
         let after = Math.max(0, watermark - PULL_OVERLAP);
 
         for (;;) {
@@ -1558,6 +1602,7 @@ export class SyncEngine {
             if (this.stopped) {
                 return;
             }
+            rows.forEach((row) => seen?.add(row.id));
             const last = rows[rows.length - 1];
             if (last) {
                 watermark = Math.max(watermark, last.seq);
@@ -1570,7 +1615,18 @@ export class SyncEngine {
         if (this.stopped) {
             return;
         }
-        await db.syncState.put({ docId, watermarkSeq: watermark });
+        if (seen && floor !== null) {
+            // Everything up to the floor (and up to what was pulled) is now
+            // accounted for: a synced mark at or below it that the server did
+            // not return is gone there. Above it, a mark not returned may simply
+            // have arrived since the pull read past it, and is kept.
+            watermark = Math.max(watermark, floor);
+            await this.deps.store.dropAbsent(seen, watermark, await this.queuedIds());
+            if (this.stopped) {
+                return;
+            }
+        }
+        await db.syncState.put({ docId, watermarkSeq: watermark, checkedSeq: checked ? watermark : checkedSeq });
         this.lastPullError = null;
     }
 }
@@ -1653,6 +1709,10 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
             }
             const { data: revoked, error, status } = await supabase.rpc('student_access_revoked');
             return { ended: !error && revoked === true, error: fail(error, status) };
+        },
+        async fetchResyncFloor(docId) {
+            const { data, error, status } = await supabase.rpc('annotation_resync_floor', { p_document: docId });
+            return { floor: error || typeof data !== 'number' ? null : data, error: fail(error, status) };
         },
         async fetchSince(docId, afterSeq, limit) {
             const { data, error, status } = await supabase

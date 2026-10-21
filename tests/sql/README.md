@@ -284,6 +284,15 @@ and their markings scrubbed, after which the student can write no mark while
 the teacher still can; and the write guard is a BEFORE statement trigger on
 `annotations` and `annotation_snapshots`.
 
+`20261021120600_tombstone_resync_floor.sql` is proven there too: compaction
+removes a 100-day-old tombstone and keeps a live mark, and records the score's
+floor (the highest seq it removed); a member of the score is told the floor
+by `annotation_resync_floor`, someone who cannot read the score is told
+nothing (null), and no client reads `annotation_sync_floors` directly. The
+client half (a device below the floor resyncs in full and drops marks the
+server no longer has) is in `src/sync/syncEngine.test.ts`, "SyncEngine after
+tombstone compaction".
+
 `launch_consent_concurrency.mjs` proves what one transaction cannot: the
 races. It drives two or three real `psql` sessions against the **local stack
 only** (it refuses any host but localhost), orders them by waiting until a
