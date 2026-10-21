@@ -131,6 +131,8 @@ export interface CancelLinkLease {
 export type SaveTokenResult =
     /** Stored -- now, or by an earlier attempt at this row, whose expiry and used_at stand. */
     | 'saved'
+    /** The row's expiry has passed: nothing saved, nothing to send. */
+    | 'expired'
     /** This worker no longer holds the row's lease: it must not send. */
     | 'not_held';
 
@@ -272,6 +274,9 @@ const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, 
     return deps.json({ sent: true });
 };
 
+/** What a cancel link past its expiry is settled as: never sent, never tried again. */
+const EXPIRED: Delivery = { outcome: 'expired', reason: 'expired before delivery' };
+
 /**
  * The worker's half of `start`: decide whether a queued request gets a link,
  * and send it. Runs from the billing mail outbox, so its outcome is never part
@@ -288,8 +293,15 @@ const startCancel = async (req: Request, deps: CancelDeps, body: Record<string, 
  *               (Codex round 3, new major on #62) and the retry carries the
  *               same Idempotency-Key and the same link, so it is not a second
  *               email;
+ *  * `expired` -- the link's hour, counted from when it was asked for, ran out
+ *               before it could go (Codex round 4 on #62): nothing is sent,
+ *               the row is settled for good, and what earlier attempts
+ *               reserved stays reserved -- one of them may have reached
+ *               Resend, and a reservation is only handed back when nothing
+ *               can have gone;
  *  * `sent`  -- the row's one-time link went out.
  */
+
 export const deliverCancelLink = async (
     deps: CancelLinkDeps,
     mode: StripeMode,
@@ -298,6 +310,13 @@ export const deliverCancelLink = async (
     rowId: string,
     lease: CancelLinkLease,
 ): Promise<Delivery> => {
+    // Before anything is counted or looked up: an expired link is never
+    // emailed, and its row is never tried again. A row without an expiry is
+    // one nobody can say is still good, so it is treated the same.
+    const expiresAtMs = Date.parse(lease.linkExpiresAt ?? '');
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= deps.now()) {
+        return EXPIRED;
+    }
     const secret = deps.secret();
     if (!secret) {
         deps.logError('cancel_secret_missing', new Error('no secret for the recipient limiter'));
@@ -365,12 +384,6 @@ export const deliverCancelLink = async (
     // the row's expiry -- fixed when the link was asked for, never refreshed
     // by a retry (Codex round 4 on #62): a link that waited is good for what
     // is left of its hour, and the email says until when.
-    const expiresAtMs = Date.parse(lease.linkExpiresAt ?? '');
-    if (!Number.isFinite(expiresAtMs)) {
-        await handBack();
-        deps.logError('cancel_link_expiry_missing', new Error(`outbox row ${rowId} has no link expiry`));
-        return { outcome: 'retry', reason: 'link has no expiry' };
-    }
     let token: string;
     try {
         token = await deps.linkToken(secret, rowId);
@@ -385,12 +398,21 @@ export const deliverCancelLink = async (
             await handBack();
             return { outcome: 'retry', reason: 'lease taken over' };
         }
+        if (saved === 'expired') {
+            // The database's clock says the hour is over. What this attempt
+            // reserved is kept, as for every attempt at a row whose earlier
+            // outcome may be unknown.
+            return EXPIRED;
+        }
     } catch (err) {
         await handBack();
         deps.logError('cancel_token_save_failed', err);
         return { outcome: 'retry', reason: 'token not saved' };
     }
 
+    if (expiresAtMs <= deps.now()) {
+        return EXPIRED;
+    }
     const link = `${request.origin}${deps.terms.BILLING_PATHS.cancel}?token=${encodeURIComponent(token)}`;
     const sent = await deps.sendEmail(email, deps.terms.cancelLinkEmail(link, expiresAtMs), {
         tag: 'cancel_link',

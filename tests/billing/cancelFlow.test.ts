@@ -443,6 +443,53 @@ describe('billing-cancel: asking for a link', () => {
             expect(h.tokens.get(hash ?? '')?.expiresAt).toBe(new Date(NOW + CANCEL_LINK_TTL_MS).toISOString());
         });
 
+        it('a retry delayed past the expiry sends nothing, is settled for good, keeps the budget, and the link stays dead', async () => {
+            const resend = new FakeResend();
+            const h = harness({ resend });
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            resend.dropNextAnswer = true;
+            expect(await h.flush()).toEqual([{ outcome: 'retry', reason: 'resend unknown: network', uncertain: true }]);
+            const token = tokenFrom((JSON.parse(resend.delivered[0]?.body ?? '{}') as { text: string }).text);
+
+            // The row comes round again an hour and a minute after it was asked for.
+            h.later(CANCEL_LINK_TTL_MS + 60_000);
+            expect(await h.flush()).toEqual([{ outcome: 'expired', reason: 'expired before delivery' }]);
+            expect(resend.requests).toHaveLength(1);
+            // The first attempt's outcome is unknown, so its reservation stays.
+            expect(h.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+            // Settled: not queued again.
+            expect(h.queue).toEqual([]);
+            expect((await handleCancel(post({ action: 'peek', token }), h.deps)).status).toBe(404);
+        });
+
+        it("the database's clock has the last word: a save it refuses as expired sends nothing", async () => {
+            const h = harness();
+            h.linkDeps.saveToken = async () => 'expired';
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            expect(await h.flush()).toEqual([{ outcome: 'expired', reason: 'expired before delivery' }]);
+            expect(h.sent).toEqual([]);
+            expect(h.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+        });
+
+        it('a row with no expiry is never mailed', async () => {
+            const h = harness();
+            await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+            const [item] = h.queue;
+            const outcome = await deliverCancelLink(
+                h.linkDeps,
+                'live',
+                item?.request ?? { email: '', origin: '' },
+                'row-1',
+                {
+                    claimToken: '',
+                    linkExpiresAt: null,
+                },
+            );
+            expect(outcome).toEqual({ outcome: 'expired', reason: 'expired before delivery' });
+            expect(h.sent).toEqual([]);
+            expect(h.linkDeps.userForEmail).not.toHaveBeenCalled();
+        });
+
         it("a worker that lost the row's lease saves nothing and sends nothing", async () => {
             const h = harness();
             await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);

@@ -15,6 +15,8 @@ import type { StripeMode } from './stripeMode.ts';
  *  * `sent`  -- it went out;
  *  * `done`  -- handled, nothing to send (a cancel link for an address with no
  *               subscription, an account deleted since the purchase);
+ *  * `expired` -- a cancel link whose hour ran out before it could go: never
+ *               sent, settled for good (migration 20261020160300);
  *  * `retry` -- not yet (Resend refused it or is unconfigured, Resend may or
  *               may not have taken it, the mail budget is spent, a read
  *               failed), due again after a backoff. Every attempt at a row
@@ -48,6 +50,8 @@ export interface OutboxRow {
 export type Delivery =
     | { outcome: 'sent' }
     | { outcome: 'done'; reason: string }
+    /** A cancel link past its expiry: nothing sent, never retried. */
+    | { outcome: 'expired'; reason: string }
     | {
           outcome: 'retry';
           reason: string;
@@ -130,6 +134,9 @@ export const drainBillingMail = async (deps: OutboxDeps): Promise<DrainSummary> 
                 deps.log(row.kind !== 'cancel_link' && row.attempts >= ALERT_AFTER_ATTEMPTS ? `ALERT ${line}` : line);
             } else if (delivery.outcome === 'sent') {
                 summary.sent += 1;
+            } else if (delivery.outcome === 'expired') {
+                summary.done += 1;
+                deps.log(`billing mail ${row.kind} ${row.id}: attempt ${row.attempts} not sent (${delivery.reason})`);
             } else {
                 summary.done += 1;
             }

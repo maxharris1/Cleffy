@@ -106,7 +106,8 @@ export const cancellableSubscription = async (
 /**
  * The link's token, saved through save_cancel_link_token (migration
  * 20261020160300): only by the worker holding the row's lease, with the row's
- * own expiry -- set once, when the link was asked for -- and INSERT ... ON
+ * own expiry -- set once, when the link was asked for, and refused once it has
+ * passed -- and INSERT ... ON
  * CONFLICT (token_hash) DO NOTHING, so a retry of the row, or two at once,
  * never moves the expiry an earlier save stored or touches its used_at.
  */
@@ -128,7 +129,7 @@ export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, out
     if (error) {
         throw new Error(`could not save the cancel link: ${error.message}`);
     }
-    if (data !== 'saved' && data !== 'not_held') {
+    if (data !== 'saved' && data !== 'expired' && data !== 'not_held') {
         throw new Error(`save_cancel_link_token answered ${String(data)}`);
     }
     return data;

@@ -7,11 +7,13 @@
 --   2. the token is saved only under the row's lease, with the row's expiry,
 --      and a second save -- or the upsert the store used to make -- changes
 --      nothing;
---   3. two sessions saving at once (two retries of one row) keep the first
+--   3. once the expiry has passed nothing is saved, the row is settled
+--      `expired` for good, without its address, and never handed out again;
+--   4. two sessions saving at once (two retries of one row) keep the first
 --      save's expiry.
 --
--- Sections 1-2 run inside one transaction and ROLL BACK. Section 3 needs two
--- real sessions, so it opens them with dblink, commits its own rows there and
+-- Sections 1-3 run inside one transaction and ROLL BACK. Section 3 needs two
+-- real sessions, so section 4 opens them with dblink, commits its own rows there and
 -- deletes them again at the end. Run it against the LOCAL stack:
 --
 --     psql "$DATABASE_URL" -q -t -A -F ' | ' -f tests/sql/cancel_link_lifetime.sql
@@ -131,7 +133,54 @@ $q$select has_function_privilege('service_role', 'public.save_cancel_link_token(
    and not has_function_privilege('anon', 'public.save_cancel_link_token(uuid, uuid, text, uuid)', 'execute')$q$);
 
 -- ===========================================================================
--- 3. Two retries in two sessions at once keep the first save's expiry
+-- 3. Nothing is sent once the expiry has passed
+-- ===========================================================================
+select pg_temp.as_service();
+insert into t_ids (label, id)
+select 'late', public.enqueue_billing_mail ('cancel_link', null, 'test', '{"email": "lifetime@cancellink.test", "origin": "https://cleffy.io"}');
+update public.billing_mail_outbox set next_attempt_at = now() + interval '1 day' where id = (select id from t_ids where label = 'link');
+update t_ids t set claim = c.claim_token, hash = repeat('f', 64)
+from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id;
+-- The hour runs out while the row waits (brought forward, since now() is fixed
+-- inside this transaction; bringing an expiry forward is the one move allowed).
+update public.billing_mail_outbox set link_expires_at = now() - interval '1 second'
+where id = (select id from t_ids where label = 'late');
+
+select pg_temp.chk('20 a save after the expiry is refused as expired',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'late'),
+    (select claim from t_ids where label = 'late'), (select hash from t_ids where label = 'late'), pg_temp.u(1)) = 'expired'$q$);
+select pg_temp.chk('21 ... and saves nothing',
+$q$select not exists (select 1 from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'late'))$q$);
+select pg_temp.chk('22 the worker settles it expired',
+$q$select public.settle_billing_mail ((select id from t_ids where label = 'late'),
+    (select claim from t_ids where label = 'late'), 'expired', 'expired before delivery')$q$);
+select pg_temp.chk('23 ... for good: no lease, the reason kept, the address gone',
+$q$select status = 'expired' and claim_token is null and claimed_until is null
+       and last_error = 'expired before delivery' and not (payload ? 'email') and payload->>'origin' = 'https://cleffy.io'
+   from public.billing_mail_outbox where id = (select id from t_ids where label = 'late')$q$);
+update public.billing_mail_outbox set next_attempt_at = now() - interval '1 minute'
+where id = (select id from t_ids where label = 'late');
+select pg_temp.chk('24 an expired row is never handed out again, however due',
+$q$select not exists (select 1 from public.claim_billing_mail (10, interval '2 minutes')
+    where id = (select id from t_ids where label = 'late'))$q$);
+select pg_temp.chk('25 ... and its old lease can neither save nor settle it',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'late'),
+    (select claim from t_ids where label = 'late'), (select hash from t_ids where label = 'late'), pg_temp.u(1)) = 'not_held'
+   and not public.settle_billing_mail ((select id from t_ids where label = 'late'), (select claim from t_ids where label = 'late'), 'retry')$q$);
+insert into t_ids (label, id, claim)
+select 'confirmation', id, claim_token from public.billing_mail_outbox
+where id = (select id from t_ids where label = 'purchase');
+update public.billing_mail_outbox set next_attempt_at = now() - interval '1 minute'
+where id = (select id from t_ids where label = 'purchase');
+update t_ids t set claim = c.claim_token
+from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id and t.label = 'confirmation';
+select pg_temp.refused('26 only a cancel link can expire: a confirmation is retried until it goes',
+$q$select public.settle_billing_mail ((select id from t_ids where label = 'confirmation'),
+    (select claim from t_ids where label = 'confirmation'), 'expired')$q$, '22023');
+reset role;
+
+-- ===========================================================================
+-- 4. Two retries in two sessions at once keep the first save's expiry
 -- ===========================================================================
 -- Real concurrency needs committed rows and two connections: dblink sessions
 -- `a` and `b`, as postgres, on this database. Their rows use their own ids and

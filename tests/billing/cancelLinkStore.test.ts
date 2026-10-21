@@ -47,7 +47,9 @@ const state = vi.hoisted(() => {
 vi.mock('../../supabase/functions/_shared/rateLimit', () => ({
     serviceClient: () => state.client,
     checkRateLimit: async () => ({ ok: true }),
-    refundRateLimit: async () => undefined,
+    refundRateLimit: async (key: string) => {
+        state.refunded.push(key);
+    },
 }));
 vi.mock('../../supabase/functions/_shared/errorReporting', () => ({ logError: () => undefined }));
 vi.mock('../../supabase/functions/_shared/stripe', () => ({ slotForPrice: () => null }));
@@ -70,6 +72,10 @@ const shared = (name: string) => `../../supabase/functions/_shared/${name}`;
 const store = (await import(/* @vite-ignore */ shared('billingCancelStore'))) as Store;
 const { sendBillingEmail } = (await import(/* @vite-ignore */ shared('billingMail'))) as {
     sendBillingEmail: CancelLinkDeps['sendEmail'];
+};
+/** billingMailWorker.ts drainBillingMailNow: claim, deliver and settle through the real RPCs. */
+const { drainBillingMailNow } = (await import(/* @vite-ignore */ shared('billingMailWorker'))) as {
+    drainBillingMailNow: () => Promise<unknown>;
 };
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -99,9 +105,13 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
                 : realFetch(input, init)) as typeof fetch;
     });
 
-    afterEach(() => {
+    afterEach(async () => {
         globalThis.fetch = realFetch;
         vi.useRealTimers();
+        // Park this file's rows, so a later test's drain only meets its own.
+        if (rows.length) {
+            await db.from('billing_mail_outbox').update({ next_attempt_at: '2999-01-01T00:00:00Z' }).in('id', rows);
+        }
     });
 
     afterAll(async () => {
@@ -166,8 +176,8 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
         return data as Record<string, string | number | null> | null;
     };
 
-    /** Leases the row the way claim_billing_mail does for a worker, making it due first. */
-    const claim = async (id: string): Promise<{ claimToken: string; linkExpiresAt: string | null }> => {
+    /** Its backoff over and no lease on it: the next drain takes it. */
+    const makeDue = async (id: string) =>
         ok(
             await db
                 .from('billing_mail_outbox')
@@ -175,6 +185,10 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
                 .eq('id', id),
             'make due',
         );
+
+    /** Leases the row the way claim_billing_mail does for a worker, making it due first. */
+    const claim = async (id: string): Promise<{ claimToken: string; linkExpiresAt: string | null }> => {
+        await makeDue(id);
         const claimed = must(
             await db.rpc('claim_billing_mail', { p_limit: 50, p_lease: '2 minutes' }),
             'claim',
@@ -220,6 +234,12 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
         logError: () => undefined,
     });
 
+    /** Whether the link would open the cancel page: cancelFlow.ts liveToken's test, on the stored row. */
+    const linkWorks = async (hash: string) => {
+        const token = await tokenRow(hash);
+        return token !== null && token.used_at === null && Date.parse(token.expires_at) > Date.now();
+    };
+
     const hashOf = async (rowId: string) => sha256(await store.cancelLinkToken('cancel-link-store-test-secret', rowId));
 
     it('two retries at once keep the expiry the link was asked with', async () => {
@@ -254,5 +274,35 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
         // One email, and the same one each time.
         expect(resend.delivered).toHaveLength(1);
         expect(new Set(resend.requests.map((r) => r.body)).size).toBe(1);
+    });
+
+    it('a retry delayed past the expiry sends nothing, is settled for good, keeps the budget, and the link stays dead', async () => {
+        const { rowId } = await subscriber();
+        const createdAt = Date.parse(String((await outboxRow(rowId))?.created_at));
+        const hash = await hashOf(rowId);
+
+        resend.dropNextAnswer = true;
+        await drainBillingMailNow();
+        expect(resend.delivered).toHaveLength(1);
+        expect(await linkWorks(hash)).toBe(true);
+
+        // The worker comes round to it an hour and a minute after it was asked for.
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(createdAt + HOUR + 60_000);
+        await makeDue(rowId);
+        await drainBillingMailNow();
+        expect(resend.requests).toHaveLength(1);
+        // The first attempt's outcome is unknown, so what it reserved stays.
+        expect(state.refunded.filter((key) => key.startsWith('billing-cancel:global'))).toEqual([]);
+        const row = await outboxRow(rowId);
+        expect(row).toMatchObject({ status: 'expired', claim_token: null, last_error: 'expired before delivery' });
+        expect(row?.payload).not.toHaveProperty('email');
+
+        // Settled for good: made due again, it is still never sent.
+        await makeDue(rowId);
+        await drainBillingMailNow();
+        expect(resend.requests).toHaveLength(1);
+        expect(Date.parse(String((await tokenRow(hash))?.expires_at))).toBe(createdAt + HOUR);
+        expect(await linkWorks(hash)).toBe(false);
     });
 });
