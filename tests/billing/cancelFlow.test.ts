@@ -19,6 +19,7 @@ import {
     type LiveSubscription,
     type StoredCancelToken,
 } from '../../supabase/functions/_shared/cancelFlow';
+import { liveSubscriptionOf } from '../../supabase/functions/_shared/stripeEvents';
 import type { StripeMode } from '../../supabase/functions/_shared/stripeMode';
 
 /**
@@ -510,6 +511,29 @@ describe('billing-cancel: using the link', () => {
             expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(200);
         });
 
+        it('still cancels at period end when Stripe holds a cancel_at months after it', async () => {
+            // Codex round 2, finding 1 on #62: billing-cancel read ANY cancel_at
+            // as already cancelling, skipped the update, spent the link and
+            // said "cancelled" while the renewals before that date still billed.
+            // The Stripe object goes through the adapter billing-cancel uses.
+            const periodEnd = Date.parse('2026-11-20T20:00:00.000Z') / 1000;
+            const live = liveSubscriptionOf({
+                id: 'sub_1',
+                status: 'active',
+                cancel_at_period_end: false,
+                cancel_at: periodEnd + 90 * 24 * 60 * 60,
+                items: { data: [{ price: { id: 'price_teacher_monthly' }, current_period_end: periodEnd }] },
+            });
+            const h = await linked({ live });
+
+            const peek = await body(await handleCancel(post({ action: 'peek', token: h.token }), h.deps));
+            expect(peek).toMatchObject({ alreadyCancelling: false, periodEnd: '2026-11-20T20:00:00.000Z' });
+
+            const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+            expect(await body(response)).toMatchObject({ cancelled: true, endsAt: '2026-11-20T20:00:00.000Z' });
+            expect(h.deps.cancelAtPeriodEnd).toHaveBeenCalledWith('sub_1', 'live');
+        });
+
         it('shows Stripe saying it is already cancelling even when the mirror has not caught up', async () => {
             const h = await linked({
                 live: { status: 'active', cancelling: true, endsAt: '2026-11-05T00:00:00.000Z' },
@@ -566,5 +590,46 @@ describe('billing-cancel/index.ts is wiring only', () => {
 
     it('is reachable without signing in', () => {
         expect(config).toMatch(/\[functions\.billing-cancel\]\s*\nverify_jwt = false/);
+    });
+});
+
+describe("reading Stripe's subscription for the cancel page (stripeEvents.ts liveSubscriptionOf)", () => {
+    const PERIOD_END = Date.parse('2026-11-20T20:00:00.000Z') / 1000;
+    const stripeSub = (fields: { cancel_at_period_end?: boolean; cancel_at?: number | null }) =>
+        liveSubscriptionOf({
+            id: 'sub_1',
+            status: 'active',
+            items: { data: [{ price: { id: 'price_teacher_monthly' }, current_period_end: PERIOD_END }] },
+            ...fields,
+        });
+
+    it('counts a cancel_at later than the period end as not cancelling yet', () => {
+        expect(stripeSub({ cancel_at: PERIOD_END + 90 * 86_400 })).toEqual({
+            status: 'active',
+            cancelling: false,
+            endsAt: '2026-11-20T20:00:00.000Z',
+        });
+    });
+
+    it('counts a cancel_at at or before the period end as the last period, ending then', () => {
+        expect(stripeSub({ cancel_at: PERIOD_END })).toMatchObject({
+            cancelling: true,
+            endsAt: '2026-11-20T20:00:00.000Z',
+        });
+        expect(stripeSub({ cancel_at: PERIOD_END - 86_400 })).toMatchObject({
+            cancelling: true,
+            endsAt: '2026-11-19T20:00:00.000Z',
+        });
+    });
+
+    it('counts cancel_at_period_end as cancelling, and nothing at all as renewing', () => {
+        expect(stripeSub({ cancel_at_period_end: true })).toMatchObject({ cancelling: true });
+        expect(stripeSub({})).toMatchObject({ cancelling: false, endsAt: '2026-11-20T20:00:00.000Z' });
+    });
+
+    it('is what billing-cancel reads Stripe with', () => {
+        const fn = readFileSync(resolve(process.cwd(), 'supabase/functions/billing-cancel/index.ts'), 'utf8');
+        expect(fn).toContain('liveSubscriptionOf(sub)');
+        expect(fn).not.toMatch(/cancelAt !== null/);
     });
 });

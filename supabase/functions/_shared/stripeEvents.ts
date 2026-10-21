@@ -490,6 +490,24 @@ const endingOf = (sub: StripeSubscriptionLike): { periodEnd: string | null; canc
 };
 
 /**
+ * What /cancel's "Cancel now" needs of Stripe's live subscription
+ * (cancelFlow.ts LiveSubscription), by the same rule the mirror is written
+ * with. billing-cancel used to count ANY `cancel_at` as already cancelling, so
+ * a monthly plan with a cancellation date three months out skipped the Stripe
+ * update and told the buyer "cancelled" while two renewals were still to bill
+ * (Codex round 2, finding 1 on #62). Only `cancel_at_period_end`, or a
+ * `cancel_at` at or before the current period end, stops the next renewal;
+ * anything later is not cancelling yet, and "Cancel now" sets
+ * cancel_at_period_end.
+ */
+export const liveSubscriptionOf = (
+    sub: StripeSubscriptionLike,
+): { status: string; cancelling: boolean; endsAt: string | null } => {
+    const ending = endingOf(sub);
+    return { status: sub.status, cancelling: ending.cancelling, endsAt: ending.periodEnd };
+};
+
+/**
  * The subscription a cancellation confirmation is owed for, when this event is
  * one being SET to cancel -- from the portal, from /cancel, or from the
  * dashboard -- and null for any other update to one that was already

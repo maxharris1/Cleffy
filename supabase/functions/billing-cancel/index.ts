@@ -7,6 +7,7 @@ import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import { appOrigin, modeForRequest, slotForPrice, stripeClient, type StripeMode } from '../_shared/stripe.ts';
+import { liveSubscriptionOf, type StripeSubscriptionLike } from '../_shared/stripeEvents.ts';
 
 /**
  * Signed-out cancellation: /cancel's email lookup, its one-time link, and the
@@ -32,23 +33,12 @@ const stripeFor = (mode: StripeMode) => {
     return stripe;
 };
 
-/** What the cancel page needs of a Stripe subscription (cancelFlow.ts LiveSubscription). */
-const liveOf = (sub: {
-    status: string;
-    cancel_at_period_end?: boolean | null;
-    cancel_at?: number | null;
-    items?: { data?: Array<{ current_period_end?: number }> };
-}): LiveSubscription => {
-    const periodEnd =
-        (sub as { current_period_end?: number }).current_period_end ?? sub.items?.data?.[0]?.current_period_end;
-    const cancelAt = typeof sub.cancel_at === 'number' ? sub.cancel_at : null;
-    const seconds = cancelAt ?? periodEnd ?? null;
-    return {
-        status: sub.status,
-        cancelling: sub.cancel_at_period_end === true || cancelAt !== null,
-        endsAt: typeof seconds === 'number' ? new Date(seconds * 1000).toISOString() : null,
-    };
-};
+/**
+ * What the cancel page needs of a Stripe subscription (cancelFlow.ts
+ * LiveSubscription): stripeEvents.ts liveSubscriptionOf, the rule the webhook
+ * mirrors with -- a `cancel_at` later than the period end is not cancelling.
+ */
+const liveOf = (sub: StripeSubscriptionLike): LiveSubscription => liveSubscriptionOf(sub);
 
 Deno.serve((req) =>
     handleCancel(req, {
