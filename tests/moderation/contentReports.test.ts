@@ -65,7 +65,11 @@ const post = (body: unknown): Request =>
         headers: { 'Content-Type': 'application/json' },
     });
 
-/** The budgets MAIL_CATEGORY_CAPS declares: 10/40 acknowledgments, 5/20 moderation notices. */
+/** The budgets MAIL_CATEGORY_CAPS (LAUNCH_MAIL_SPLIT) declares for the two senders. */
+/** Acknowledgments and moderation notices an hour, as the split has them. */
+const ACKS_PER_HOUR = MAIL_CATEGORY_CAPS.contentReportAck.hour;
+const NOTICES_PER_HOUR = MAIL_CATEGORY_CAPS.moderationNotice.hour;
+
 const BUDGETS: Record<NoticeSender, MailBudget> = {
     'content-report-ack': {
         hour: { limit: MAIL_CATEGORY_CAPS.contentReportAck.hour, windowMs: MAIL_WINDOW_MS.hour },
@@ -331,10 +335,10 @@ describe('content-report', () => {
         ]);
     });
 
-    it('queues the eleventh acknowledgment in an hour, legal copy included, and sends it when the hour turns', async () => {
-        // Codex #63 major 2: the acknowledgment budget is 10 an hour, and the
-        // eleventh used to be stored, never mailed, and its BCC to the legal
-        // mailbox lost with it.
+    it('queues the acknowledgment past the hourly budget, legal copy included, and sends it when the hour turns', async () => {
+        // Codex #63 major 2: the one past the acknowledgment budget (8 an hour
+        // in the launch split; 10 then) used to be stored, never mailed, and
+        // its BCC to the legal mailbox lost with it.
         const limiter = countingLimiter();
         const outbox = fakeOutbox();
         const { deps, sent } = reportDeps(
@@ -347,17 +351,18 @@ describe('content-report', () => {
             },
             outbox,
         );
-        for (let i = 0; i < 10; i += 1) {
+        for (let i = 0; i < ACKS_PER_HOUR; i += 1) {
             expect(await (await handleContentReport(post(copyrightBody()), deps)).json()).toMatchObject({
                 acknowledged: true,
             });
         }
-        const eleventh = await handleContentReport(post(copyrightBody()), deps);
-        expect(eleventh.status).toBe(201);
-        expect(await eleventh.json()).toEqual({ reference: 'CR-0000000011', acknowledged: false, delivery: 'queued' });
-        expect(sent).toHaveLength(10);
+        const reference = `CR-${String(ACKS_PER_HOUR + 1).padStart(10, '0')}`;
+        const over = await handleContentReport(post(copyrightBody()), deps);
+        expect(over.status).toBe(201);
+        expect(await over.json()).toEqual({ reference, acknowledged: false, delivery: 'queued' });
+        expect(sent).toHaveLength(ACKS_PER_HOUR);
         // Still owed, with the legal copy, back in the queue until the window reopens.
-        expect(outbox.rows[10]).toMatchObject({
+        expect(outbox.rows[ACKS_PER_HOUR]).toMatchObject({
             status: 'pending',
             bccLegal: true,
             outcomes: [{ outcome: 'deferred', retryAfterSec: 1800 }],
@@ -373,7 +378,7 @@ describe('content-report', () => {
         expect(await run.json()).toEqual({ sent: 1, queued: 0, failed: 0, unconfigured: 0 });
         expect(sent.at(-1)).toMatchObject({
             to: 'ada@example.com',
-            subject: 'We received your report CR-0000000011',
+            subject: `We received your report ${reference}`,
             bcc: 'legal@cleffy.io',
         });
         expect(outbox.rows.every((row) => row.status === 'sent')).toBe(true);
@@ -557,21 +562,25 @@ describe('content-moderation', () => {
     });
 
     it('queues what the moderation budget cannot send yet, and the retry sends it later', async () => {
-        // Codex #63 major 2: 5 notices an hour, two per reported takedown.
+        // Codex #63 major 2: two notices per reported takedown, against the
+        // hourly moderation budget (4 in the launch split; 5 then).
         const limiter = countingLimiter();
         const outbox = fakeOutbox();
         const { deps, sent } = moderationDeps({ checkRateLimit: limiter.checkRateLimit }, { outbox });
+        const takedowns = Math.ceil((NOTICES_PER_HOUR + 1) / 2);
         const deliveries = [];
-        for (let i = 0; i < 3; i += 1) {
+        for (let i = 0; i < takedowns; i += 1) {
             deliveries.push((await (await handleContentModeration(post(takedownBody), deps)).json()).delivery);
         }
-        expect(deliveries).toEqual([
-            { uploader: 'sent', reporter: 'sent' },
-            { uploader: 'sent', reporter: 'sent' },
-            { uploader: 'sent', reporter: 'queued' },
-        ]);
-        expect(sent).toHaveLength(5);
-        expect(outbox.rows.filter((row) => row.status === 'pending')).toHaveLength(1);
+        // Uploader then reporter, in order, until the hour's budget is spent.
+        const expected = (n: number) => (n < NOTICES_PER_HOUR ? 'sent' : 'queued');
+        expect(deliveries).toEqual(
+            Array.from({ length: takedowns }, (_, i) => ({ uploader: expected(2 * i), reporter: expected(2 * i + 1) })),
+        );
+        expect(deliveries.at(-1)?.reporter).toBe('queued');
+        expect(sent).toHaveLength(NOTICES_PER_HOUR);
+        const owed = 2 * takedowns - NOTICES_PER_HOUR;
+        expect(outbox.rows.filter((row) => row.status === 'pending')).toHaveLength(owed);
 
         limiter.nextHour();
         const run = await handleContentNotices(post({}), {
@@ -579,7 +588,7 @@ describe('content-moderation', () => {
             checkRateLimit: limiter.checkRateLimit,
             authorized: async () => true,
         });
-        expect(await run.json()).toMatchObject({ sent: 1 });
+        expect(await run.json()).toMatchObject({ sent: owed });
         expect(sent.at(-1)?.to).toBe('ada@example.com');
     });
 
@@ -667,15 +676,17 @@ describe('content-notices (the retry)', () => {
         }
         const limiter = countingLimiter();
         const { deps, sent } = retryDeps({ checkRateLimit: limiter.checkRateLimit }, outbox);
+        // Round one (a batch of 10) sends the hour's budget and defers the
+        // rest; round two finds every claim deferred and stops.
         expect(await (await handleContentNotices(post({}), deps)).json()).toEqual({
-            sent: 10,
-            queued: 10,
+            sent: ACKS_PER_HOUR,
+            queued: 20 - ACKS_PER_HOUR,
             failed: 0,
             unconfigured: 0,
         });
-        expect(sent).toHaveLength(10);
+        expect(sent).toHaveLength(ACKS_PER_HOUR);
         expect(sent.every((mail) => mail.bcc === 'legal@cleffy.io')).toBe(true);
-        expect(outbox.rows.filter((row) => row.status === 'pending')).toHaveLength(15);
+        expect(outbox.rows.filter((row) => row.status === 'pending')).toHaveLength(25 - ACKS_PER_HOUR);
     });
 
     it('marks a notice it cannot render as failed rather than sending half of it', async () => {
