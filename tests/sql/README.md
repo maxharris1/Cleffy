@@ -153,9 +153,11 @@ included, while a card subscription past due gets none; the hourly
 seats (never more than the limit leaves room for, never a non-member) or reads
 their status; removing a read-only teacher releases them to free with their
 scores back up to the free cap; `district_billing.contract_ends_at` follows
-Stripe (the cancel date while one is scheduled, null on resume, the day it
-ended on cancellation, never moved later by a redelivery, untouched by an
-unrelated card subscription) until an admin pins it (a date, or null for never),
+Stripe's actual end only (null while a cancellation is merely scheduled or
+the subscription is resumed or past due; on cancellation Stripe's `ended_at`
+-- not the scheduled date of an earlier schedule, and not a billing period that
+ended months before -- or, from a webhook that omits it, the event that ended
+it; never moved by a redelivery; untouched by an unrelated card subscription) until an admin pins it (a date, or null for never),
 and an admin can hand it back to Stripe; every billing-record change is logged
 with its actor; and no client role reads the billing record or its log, calls
 the admin or reconcile functions, or writes `kept_active`. It reports

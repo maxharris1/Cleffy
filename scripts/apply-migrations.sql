@@ -9760,12 +9760,19 @@ grant execute on function public.library_documents (text, timestamptz, text, uui
 alter table public.subscriptions
     add column collection_method text check (collection_method in ('charge_automatically', 'send_invoice'));
 
--- Re-declared from 20261013120101_subscription_write_under_lock.sql with one more
--- parameter. Dropped first because adding a parameter makes a NEW overload, and
+-- When Stripe says the subscription actually ended: its ended_at, or the
+-- cancel_at it ended on (stripeEvents.ts endedAtOf). Set only once the status
+-- is terminal. A district's contract end is derived from this and nothing else
+-- Stripe sends -- never a scheduled cancellation or a billing-period date
+-- (20261020180500, district_billing_follow).
+alter table public.subscriptions add column ended_at timestamptz;
+
+-- Re-declared from 20261013120101_subscription_write_under_lock.sql with two more
+-- parameters. Dropped first because adding a parameter makes a NEW overload, and
 -- the old ten-argument one would then be ambiguous for a call naming ten. The
--- default keeps a webhook deployed before this migration working against it, and
--- the coalesce in the update keeps such a write from nulling a method a newer
--- delivery already recorded.
+-- defaults keep a webhook deployed before this migration working against it, and
+-- the coalesces in the update keep such a write from nulling a method or an end
+-- a newer delivery already recorded.
 --
 -- The grant service_role needs even though it bypasses RLS: the function is
 -- SECURITY INVOKER (see 20261013120101 for why).
@@ -9786,7 +9793,8 @@ create or replace function public.write_subscription_under_lock (
     p_current_period_end timestamptz,
     p_cancel_at_period_end boolean,
     p_last_event_created_at timestamptz,
-    p_collection_method text default null
+    p_collection_method text default null,
+    p_ended_at timestamptz default null
 ) returns text language plpgsql set search_path = public as $$
 declare
     v_constraint text;
@@ -9815,6 +9823,7 @@ begin
             cancel_at_period_end,
             last_event_created_at,
             collection_method,
+            ended_at,
             updated_at
         ) values (
             p_subscription_id,
@@ -9827,6 +9836,7 @@ begin
             p_cancel_at_period_end,
             p_last_event_created_at,
             p_collection_method,
+            p_ended_at,
             now()
         )
         -- The primary key, as before: a redelivery updates the subscription's
@@ -9843,6 +9853,7 @@ begin
             cancel_at_period_end = excluded.cancel_at_period_end,
             last_event_created_at = excluded.last_event_created_at,
             collection_method = coalesce(excluded.collection_method, subscriptions.collection_method),
+            ended_at = coalesce(excluded.ended_at, subscriptions.ended_at),
             updated_at = now();
     exception
         when unique_violation then
@@ -9860,11 +9871,11 @@ end;
 $$;
 
 revoke all on function public.write_subscription_under_lock (
-    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text, timestamptz
 ) from public, anon, authenticated;
 
 grant execute on function public.write_subscription_under_lock (
-    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text, timestamptz
 ) to service_role;
 
 -- ---------------------------------------------------------------------------
@@ -10752,9 +10763,17 @@ for each row execute function public.studio_members_release_seat ();
 -- Runs inside the webhook's write_subscription_under_lock (and any hand-run
 -- write), only when something an entitlement reads has changed.
 --
--- contract_ends_at follows Stripe unless an admin pinned it: the cancel date
--- while one is scheduled, the day it ended once it has (never moved later by a
--- redelivery), and null again if the district resumes. Past due leaves it be.
+-- contract_ends_at follows Stripe unless an admin pinned it -- and only Stripe's
+-- ACTUAL end (Codex round-2 review of #61, major 3): the subscription's ended_at
+-- (stripeEvents.ts endedAtOf: Stripe's ended_at, or the cancel_at a terminal
+-- status confirms it ended on) once its status is terminal, and null while it
+-- has not ended. Never a scheduled cancellation, which can still be moved or
+-- withdrawn (a cancellation a year out, then an immediate one, must count from
+-- the immediate one), and never a billing-period date, which can be long before
+-- or after the day it ended. A subscription recorded as ended without an
+-- ended_at (a webhook deployed before 20261020180400) falls back to the end
+-- already stored, then to the event that ended it; a redelivery changes
+-- nothing, because ended_at does not change once Stripe has set it.
 create or replace function public.district_billing_follow (p_studio uuid, s public.subscriptions) returns void
 language plpgsql security definer
 set search_path = public as $$
@@ -10791,10 +10810,12 @@ begin
         and v_current.contract_ends_source is distinct from 'admin' then
         v_end := case
             when s.status in ('canceled', 'incomplete_expired') then
-                coalesce(v_current.contract_ends_at, least(coalesce(s.current_period_end, now()), now()))
-            when s.cancel_at_period_end then s.current_period_end
-            when s.status in ('active', 'trialing') then null
-            else v_current.contract_ends_at
+                coalesce(
+                    s.ended_at,
+                    case when v_current.contract_ends_source = 'stripe' then v_current.contract_ends_at end,
+                    s.last_event_created_at,
+                    now()
+                )
         end;
 
         update public.district_billing b
@@ -10827,7 +10848,8 @@ begin
         and new.current_period_end is not distinct from old.current_period_end
         and new.cancel_at_period_end is not distinct from old.cancel_at_period_end
         and new.collection_method is not distinct from old.collection_method
-        and new.past_due_since is not distinct from old.past_due_since then
+        and new.past_due_since is not distinct from old.past_due_since
+        and new.ended_at is not distinct from old.ended_at then
         return null;
     end if;
 

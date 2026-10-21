@@ -47,12 +47,19 @@
 alter table public.subscriptions
     add column collection_method text check (collection_method in ('charge_automatically', 'send_invoice'));
 
--- Re-declared from 20261013120101_subscription_write_under_lock.sql with one more
--- parameter. Dropped first because adding a parameter makes a NEW overload, and
+-- When Stripe says the subscription actually ended: its ended_at, or the
+-- cancel_at it ended on (stripeEvents.ts endedAtOf). Set only once the status
+-- is terminal. A district's contract end is derived from this and nothing else
+-- Stripe sends -- never a scheduled cancellation or a billing-period date
+-- (20261020180500, district_billing_follow).
+alter table public.subscriptions add column ended_at timestamptz;
+
+-- Re-declared from 20261013120101_subscription_write_under_lock.sql with two more
+-- parameters. Dropped first because adding a parameter makes a NEW overload, and
 -- the old ten-argument one would then be ambiguous for a call naming ten. The
--- default keeps a webhook deployed before this migration working against it, and
--- the coalesce in the update keeps such a write from nulling a method a newer
--- delivery already recorded.
+-- defaults keep a webhook deployed before this migration working against it, and
+-- the coalesces in the update keep such a write from nulling a method or an end
+-- a newer delivery already recorded.
 --
 -- The grant service_role needs even though it bypasses RLS: the function is
 -- SECURITY INVOKER (see 20261013120101 for why).
@@ -73,7 +80,8 @@ create or replace function public.write_subscription_under_lock (
     p_current_period_end timestamptz,
     p_cancel_at_period_end boolean,
     p_last_event_created_at timestamptz,
-    p_collection_method text default null
+    p_collection_method text default null,
+    p_ended_at timestamptz default null
 ) returns text language plpgsql set search_path = public as $$
 declare
     v_constraint text;
@@ -102,6 +110,7 @@ begin
             cancel_at_period_end,
             last_event_created_at,
             collection_method,
+            ended_at,
             updated_at
         ) values (
             p_subscription_id,
@@ -114,6 +123,7 @@ begin
             p_cancel_at_period_end,
             p_last_event_created_at,
             p_collection_method,
+            p_ended_at,
             now()
         )
         -- The primary key, as before: a redelivery updates the subscription's
@@ -130,6 +140,7 @@ begin
             cancel_at_period_end = excluded.cancel_at_period_end,
             last_event_created_at = excluded.last_event_created_at,
             collection_method = coalesce(excluded.collection_method, subscriptions.collection_method),
+            ended_at = coalesce(excluded.ended_at, subscriptions.ended_at),
             updated_at = now();
     exception
         when unique_violation then
@@ -147,11 +158,11 @@ end;
 $$;
 
 revoke all on function public.write_subscription_under_lock (
-    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text, timestamptz
 ) from public, anon, authenticated;
 
 grant execute on function public.write_subscription_under_lock (
-    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text, timestamptz
 ) to service_role;
 
 -- ---------------------------------------------------------------------------

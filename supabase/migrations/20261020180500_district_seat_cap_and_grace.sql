@@ -553,9 +553,17 @@ for each row execute function public.studio_members_release_seat ();
 -- Runs inside the webhook's write_subscription_under_lock (and any hand-run
 -- write), only when something an entitlement reads has changed.
 --
--- contract_ends_at follows Stripe unless an admin pinned it: the cancel date
--- while one is scheduled, the day it ended once it has (never moved later by a
--- redelivery), and null again if the district resumes. Past due leaves it be.
+-- contract_ends_at follows Stripe unless an admin pinned it -- and only Stripe's
+-- ACTUAL end (Codex round-2 review of #61, major 3): the subscription's ended_at
+-- (stripeEvents.ts endedAtOf: Stripe's ended_at, or the cancel_at a terminal
+-- status confirms it ended on) once its status is terminal, and null while it
+-- has not ended. Never a scheduled cancellation, which can still be moved or
+-- withdrawn (a cancellation a year out, then an immediate one, must count from
+-- the immediate one), and never a billing-period date, which can be long before
+-- or after the day it ended. A subscription recorded as ended without an
+-- ended_at (a webhook deployed before 20261020180400) falls back to the end
+-- already stored, then to the event that ended it; a redelivery changes
+-- nothing, because ended_at does not change once Stripe has set it.
 create or replace function public.district_billing_follow (p_studio uuid, s public.subscriptions) returns void
 language plpgsql security definer
 set search_path = public as $$
@@ -592,10 +600,12 @@ begin
         and v_current.contract_ends_source is distinct from 'admin' then
         v_end := case
             when s.status in ('canceled', 'incomplete_expired') then
-                coalesce(v_current.contract_ends_at, least(coalesce(s.current_period_end, now()), now()))
-            when s.cancel_at_period_end then s.current_period_end
-            when s.status in ('active', 'trialing') then null
-            else v_current.contract_ends_at
+                coalesce(
+                    s.ended_at,
+                    case when v_current.contract_ends_source = 'stripe' then v_current.contract_ends_at end,
+                    s.last_event_created_at,
+                    now()
+                )
         end;
 
         update public.district_billing b
@@ -628,7 +638,8 @@ begin
         and new.current_period_end is not distinct from old.current_period_end
         and new.cancel_at_period_end is not distinct from old.cancel_at_period_end
         and new.collection_method is not distinct from old.collection_method
-        and new.past_due_since is not distinct from old.past_due_since then
+        and new.past_due_since is not distinct from old.past_due_since
+        and new.ended_at is not distinct from old.ended_at then
         return null;
     end if;
 

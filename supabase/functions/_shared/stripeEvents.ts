@@ -107,6 +107,12 @@ export interface SubscriptionUpsert {
      * row already had in that case, so an incomplete object cannot unset it.
      */
     collection_method: CollectionMethod | null;
+    /**
+     * When the subscription actually ended, by Stripe's own account of it:
+     * null until the status is terminal (endedAtOf). The write keeps a stored
+     * one over a null, like collection_method.
+     */
+    ended_at: string | null;
 }
 
 /** Only the fields this handler reads — not a full mirror of Stripe's type. */
@@ -116,6 +122,8 @@ export interface StripeSubscriptionLike {
     cancel_at_period_end?: boolean | null;
     /** A scheduled cancellation (seconds), set from the dashboard or the API. */
     cancel_at?: number | null;
+    /** Set by Stripe once the subscription has ended. */
+    ended_at?: number | null;
     current_period_end?: number | null;
     customer?: string | { id?: string } | null;
     collection_method?: string | null;
@@ -490,6 +498,24 @@ const endingOf = (sub: StripeSubscriptionLike): { periodEnd: string | null; canc
     };
 };
 
+const secondsToIso = (seconds: number | null | undefined): string | null =>
+    typeof seconds === 'number' && Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : null;
+
+/**
+ * When the subscription actually stopped, and only once it has: Stripe's
+ * ended_at, or -- for an object that lacks it -- the cancel_at it was cancelled
+ * on, which a terminal status confirms happened. Never a scheduled cancellation
+ * (cancel_at on a live subscription) and never a period end: a district's
+ * contract end is derived from this (migration 20261020180500), and the
+ * retention purge counts from that.
+ */
+export const endedAtOf = (sub: StripeSubscriptionLike): string | null => {
+    if (!isTerminalStatus(sub.status)) {
+        return null;
+    }
+    return secondsToIso(sub.ended_at) ?? secondsToIso(sub.cancel_at);
+};
+
 /**
  * The event's own clock, as the row records it. Stripe stamps `created` on every
  * event it sends, so this is the Stripe account's view of when the change
@@ -518,6 +544,7 @@ export const subscriptionRowFrom = (
         cancel_at_period_end: ending.cancelling,
         last_event_created_at: lastEventCreatedAt,
         collection_method: collectionMethodOf(sub),
+        ended_at: endedAtOf(sub),
     };
 };
 

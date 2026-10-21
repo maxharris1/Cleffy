@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
     DISTRICT_PLAN_METADATA,
+    endedAtOf,
     handleStripeEvent,
     isDistrictSubscription,
     SUBSCRIPTION_MISSING,
@@ -255,6 +256,48 @@ describe('an invoice-created district links its billing customer (Codex #61 mino
 });
 
 const read = (...segments: string[]): string => readFileSync(resolve(process.cwd(), ...segments), 'utf8');
+
+describe('the webhook records when a district actually ended (Codex #61 round 2, major 3)', () => {
+    // The district's contract end -- and the retention purge counted from it --
+    // is derived from this and nothing else Stripe sends.
+    const AT = (iso: string) => Date.parse(iso) / 1000;
+
+    it('nothing while the subscription is live, however its cancellation is scheduled', () => {
+        expect(endedAtOf(districtSubscription({ cancel_at_period_end: true }))).toBeNull();
+        expect(endedAtOf(districtSubscription({ cancel_at: AT('2027-10-21T00:00:00Z') }))).toBeNull();
+        expect(
+            endedAtOf(districtSubscription({ status: 'past_due', cancel_at: AT('2027-10-21T00:00:00Z') })),
+        ).toBeNull();
+    });
+
+    it('Stripe’s ended_at once it has ended -- not the scheduled date, not the period end', () => {
+        const sub = districtSubscription({
+            status: 'canceled',
+            cancel_at: AT('2027-10-21T00:00:00Z'),
+            ended_at: AT('2026-10-21T12:00:00Z'),
+            current_period_end: AT('2027-01-01T00:00:00Z'),
+        });
+        expect(endedAtOf(sub)).toBe('2026-10-21T12:00:00.000Z');
+        expect(subscriptionRowFrom(sub, 'owner-1', PRICE_TIERS).ended_at).toBe('2026-10-21T12:00:00.000Z');
+    });
+
+    it('the cancel_at it ended on, when the object lacks ended_at and its status confirms it', () => {
+        const sub = districtSubscription({ status: 'canceled', cancel_at: AT('2026-09-30T00:00:00Z') });
+        expect(endedAtOf(sub)).toBe('2026-09-30T00:00:00.000Z');
+    });
+
+    it('never a billing-period date, even with nothing else to go on', () => {
+        const sub = districtSubscription({ status: 'canceled', current_period_end: AT('2026-07-01T00:00:00Z') });
+        expect(endedAtOf(sub)).toBeNull();
+        expect(
+            endedAtOf(districtSubscription({ status: 'incomplete_expired', ended_at: AT('2026-10-01T00:00:00Z') })),
+        ).toBe('2026-10-01T00:00:00.000Z');
+    });
+
+    it('is passed to the subscription write', () => {
+        expect(read('supabase/functions/stripe-webhook/index.ts')).toMatch(/p_ended_at:\s*row\.ended_at/);
+    });
+});
 
 describe('no Stripe event can reset a seat override', () => {
     const webhookSources = [

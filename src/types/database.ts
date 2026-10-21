@@ -399,6 +399,12 @@ export type SubscriptionRow = {
      * subscription keeps full access for a grace period counted from it.
      */
     past_due_since: string | null;
+    /**
+     * When Stripe says it actually ended (ended_at, or the cancel_at a terminal
+     * status confirms). Null while it has not. A district's contract end is
+     * derived from this, never from a scheduled or period date.
+     */
+    ended_at: string | null;
     created_at: string;
     updated_at: string;
 };

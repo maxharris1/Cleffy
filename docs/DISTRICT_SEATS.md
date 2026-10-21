@@ -136,9 +136,14 @@ an override creates it too. Its `contract_ends_at` is what the retention purge
 (PR #64) counts from: district data is purged 30 days after it, with a 14-day
 export notice first. **Null means never purged.**
 
-- By default it follows Stripe: the scheduled cancel date while one is set, the
-  day the subscription ended once it has, and null again if the district
-  resumes. A redelivered cancellation never moves it later.
+- By default it follows Stripe's **actual** end, and nothing else: null while
+  the subscription has not ended (a cancellation that is only scheduled, past
+  due, or resumed), then the day Stripe says it ended (`ended_at`, or the
+  `cancel_at` it ended on). Never a scheduled date and never a billing-period
+  date: a district that schedules cancellation for next year and then cancels
+  today counts from today, and one cancelled long after its last recorded
+  period does not count from that period. A redelivered cancellation never
+  moves it.
 - An admin can pin it from the contract, which Stripe writes then leave alone:
 
 ```sql

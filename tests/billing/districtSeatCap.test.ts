@@ -239,6 +239,17 @@ describe('the seat-cap migration', () => {
         expect(SQL).toMatch(/\n\s+contract_ends_at timestamptz,\n/);
     });
 
+    it('derives the contract end from the actual end only: never a scheduled date or a period date', () => {
+        const def = definition(SQL, 'district_billing_follow');
+        const derivation = def.slice(def.indexOf('v_end :='), def.indexOf('end;', def.indexOf('v_end :=')));
+        expect(derivation).toMatch(/when s\.status in \('canceled', 'incomplete_expired'\) then/);
+        expect(derivation).toMatch(/coalesce\(\s*s\.ended_at,/);
+        expect(derivation).not.toMatch(/current_period_end|cancel_at_period_end/);
+        expect(read('supabase/migrations', '20261020180400_district_seat_overrides.sql')).toMatch(
+            /ended_at = coalesce\(excluded\.ended_at, subscriptions\.ended_at\)/,
+        );
+    });
+
     it.each([
         'admin_set_district_contract_end',
         'admin_extend_district_grace',
