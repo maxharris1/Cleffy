@@ -5,7 +5,7 @@ import ReactDOM from 'react-dom/client';
 
 import { App } from '@/app/App';
 import { captureAuthUrlError } from '@/features/auth/authUrlError';
-import { monitoringEnabled, setMonitoringUser, startMonitoring } from '@/lib/monitoring';
+import { monitoringEnabled, monitoringUserIdOf, setMonitoringUser, startMonitoring } from '@/lib/monitoring';
 import { registerServiceWorker } from '@/lib/serviceWorker';
 import { installStaleChunkRecovery } from '@/lib/staleChunk';
 import { getSupabase, isSupabaseConfigured } from '@/lib/supabase';
@@ -24,8 +24,9 @@ captureAuthUrlError();
 // VITE_SENTRY_DSN at build time this is a no-op and the SDK is not in the bundle.
 startMonitoring();
 if (monitoringEnabled() && isSupabaseConfigured()) {
-    // Reports carry the account's opaque id and nothing else about who it is.
-    getSupabase().auth.onAuthStateChange((_event, session) => setMonitoringUser(session?.user.id ?? null));
+    // Reports carry the account's opaque id and nothing else about who it is —
+    // and for a roster student, not even that.
+    getSupabase().auth.onAuthStateChange((_event, session) => setMonitoringUser(monitoringUserIdOf(session)));
 }
 
 // Offline support. Not at load on a first visit: see registerServiceWorker.

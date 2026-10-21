@@ -162,3 +162,18 @@ describe('createErrorLogger', () => {
         await expect(hanging('fn', new Error('x'))).resolves.toBeUndefined();
     });
 });
+
+describe('buildErrorRecord — roster students', () => {
+    it('drops every key that would identify a student, opaque ids included', () => {
+        const record = buildErrorRecord('student-provision', new Error('could not flag invited student'), {
+            code: 'unflagged_student',
+            studentUserId: 'su-1',
+            student_user_id: 'su-1',
+            studentId: 'roster-1',
+            username: 'ada_lovelace',
+            teacherId: 't-1',
+        });
+        expect(record.code).toBe('unflagged_student');
+        expect(record.context).toEqual({ teacherId: 't-1' });
+    });
+});

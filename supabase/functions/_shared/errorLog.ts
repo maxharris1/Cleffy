@@ -40,8 +40,14 @@ export interface ErrorRecord {
     at: string;
 }
 
+/**
+ * Context keys never sent anywhere. Content and credentials, and — since a
+ * student is a child or teenager whose teacher made the account — anything
+ * that identifies a roster student, opaque ids included: `studentUserId`,
+ * `studentId` (the roster row), `username`.
+ */
 const DROPPED_KEY =
-    /^(payload|annotations?|strokes?|points|text|text_?body|html_?body|body|password|e-?mail|emails?|parent_?email|student_?email|authorization|cookies?|headers?|access_?token|refresh_?token|token|apikey|api_?key|secret|display_?name)$/i;
+    /^(payload|annotations?|strokes?|points|text|text_?body|html_?body|body|password|e-?mail|emails?|parent_?email|student_?email|student_?(user_?)?id|username|authorization|cookies?|headers?|access_?token|refresh_?token|token|apikey|api_?key|secret|display_?name)$/i;
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const JWT = /\beyJ[\w-]{4,}\.[\w-]{4,}\.[\w-]{4,}/g;
 const BEARER = /\b(Bearer)\s+[^\s"',]+/gi;

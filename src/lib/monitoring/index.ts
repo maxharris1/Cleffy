@@ -35,4 +35,25 @@ export const reportError = (error: unknown, context?: ReportContext): void => mo
 /** Attach (or clear) the signed-in account's opaque id on future reports. */
 export const setMonitoringUser = (id: string | null): void => monitor.setUserId(id);
 
+/** The part of a Supabase session monitoringUserIdOf reads. */
+interface SessionLike {
+    user: { id: string; app_metadata?: Record<string, unknown> };
+}
+
+/**
+ * The id to attach to reports for this session, or null.
+ *
+ * Never a roster student's: a student account belongs to a child or teenager
+ * whose teacher made it, and an error report is no place to be able to pick
+ * one out, opaque id or not. Their reports still arrive, unattributed.
+ * `app_metadata.user_type` is admin-set (student-provision), so it is the
+ * same flag userTypeOf() routes on.
+ */
+export const monitoringUserIdOf = (session: SessionLike | null | undefined): string | null => {
+    if (!session) {
+        return null;
+    }
+    return session.user.app_metadata?.['user_type'] === 'student' ? null : session.user.id;
+};
+
 export const monitoringEnabled = (): boolean => monitor.enabled;

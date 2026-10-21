@@ -39,7 +39,8 @@ export const initSentry = ({ dsn, release, environment }: SentryClientConfig): M
             });
         },
         // An opaque account id lets a report be matched to a support request
-        // without the report itself saying who anyone is.
+        // without the report itself saying who anyone is. Never set for a
+        // roster student (monitoringUserIdOf in ./index.ts passes null).
         setUserId: (id) => Sentry.setUser(id ? { id } : null),
     };
 };
