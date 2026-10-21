@@ -6,12 +6,20 @@
 -- Codex round-2 review of #64, new major 1: the purge must take the students
 -- the district provided -- recorded when they were provisioned -- and nobody
 -- else's, whoever is seated in the district on the day it runs.
+-- Codex round-3 review of #64: that record is positive evidence only. A
+-- student is the district's when the provisioning call named the district and
+-- the teacher owned or was seated in it; a seated teacher's other students are
+-- their own. Legacy rows (from before the record existed) are backfilled only
+-- where the evidence is unambiguous, and left unattributed otherwise.
 --
--- Cast: district A (owner OA) and district B (owner OB), both contracts ended
--- 17 days ago. P is a teacher with a private student p1 who then joins A and
--- provisions p2. L is seated in A, provisions l1, leaves A, then provisions l2.
--- T is seated in B and then in A, and provisions t1. OA provisions oa1. Q is an
--- unrelated teacher with q1. Every student has a mark on P's score.
+-- Cast (T0 = now()): district A (owner OA; studio created T0-30d, a district
+-- since T0-20d) and district B (owner OB; both T0-30d), both contracts ended
+-- 17 days ago. P has a private student p1 (T0-15d), takes a seat in A at
+-- T0-10d, then adds p2 privately and p3 for A. L takes a seat in A at T0-12d,
+-- adds l1 for A, leaves A, then adds l2 privately. T is seated in B (T0-6d) and
+-- then A (T0-5d), and adds t1 for B. OA added oa0 privately at T0-25d (before A
+-- was a district) and oa1 for A. Q is an unrelated teacher with q1. Every
+-- student has a mark on P's score.
 
 begin;
 
@@ -97,23 +105,33 @@ from unnest(array['a1', 'a2', 'a3', 'a4', 'a5', 'a6']) k;
 insert into auth.users (id, aud, role, email, raw_app_meta_data)
 select ('e2000000-0000-4000-8000-0000000000' || k)::uuid, 'authenticated', 'authenticated',
        'ds-' || k || '@students.cleffy.app', '{"user_type":"student"}'::jsonb
-from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7']) k;
--- b1 p1, b2 p2, b3 l1, b4 l2, b5 t1, b6 oa1, b7 q1
+from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'c1', 'c2']) k;
+-- b1 p1, b2 p2, b8 p3, b3 l1, b4 l2, b5 t1, b9 oa0, b6 oa1, b7 q1; c1 and c2 are refusal probes
 
-create function pg_temp.provision (p_key text, p_teacher text, p_created timestamptz default now())
+-- Provisions a roster row the way student-provision does: the district is the
+-- one the call names (null: a private student).
+create function pg_temp.provision (p_key text, p_teacher text, p_created timestamptz, p_district uuid default null)
 returns void language sql as $$
     insert into public.managed_students
         (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at,
-         created_at)
+         created_at, district_studio_id)
     values (('e2000000-0000-4000-8000-0000000005' || p_key)::uuid,
             ('e2000000-0000-4000-8000-0000000000' || p_teacher)::uuid,
             ('e2000000-0000-4000-8000-0000000000' || p_key)::uuid,
-            'Student ' || p_key, null, 'code', 'ds_' || p_key, now(), p_created);
+            'Student ' || p_key, null, 'code', 'ds_' || p_key, now(), p_created, p_district);
 $$;
 
 create function pg_temp.district_of (p_key text) returns uuid language sql as $$
     select district_studio_id from public.managed_students
     where id = ('e2000000-0000-4000-8000-0000000005' || p_key)::uuid;
+$$;
+
+-- plpgsql, so its body is only read when it runs.
+create function pg_temp.decided_by (p_key text) returns text language plpgsql as $$
+begin
+    return (select district_attribution from public.managed_students
+            where id = ('e2000000-0000-4000-8000-0000000005' || p_key)::uuid);
+end;
 $$;
 
 create function pg_temp.gone (p_key text) returns boolean language sql as $$
@@ -128,35 +146,64 @@ create function pg_temp.live (p_key text) returns boolean language sql as $$
                    where id = ('e2000000-0000-4000-8000-0000000005' || p_key)::uuid and archived_at is null);
 $$;
 
--- P's private student, from before P joined any district.
-select pg_temp.provision ('b1', 'a3', now() - interval '1 day');
+-- Turns rows into what a row provisioned before 20261021120800 looks like: no
+-- district, and nothing recorded about the context it was provisioned in.
+create function pg_temp.make_legacy (p_keys text[]) returns boolean language plpgsql as $$
+begin
+    perform set_config('cleffy.district_attribution', 'admin', true);
+    update public.managed_students set district_studio_id = null, district_attribution = 'legacy'
+    where id in (select ('e2000000-0000-4000-8000-0000000005' || k)::uuid from unnest(p_keys) k);
+    perform set_config('cleffy.district_attribution', '', true);
+    return true;
+end;
+$$;
 
-insert into public.studios (id, owner_id, name)
-values ('e2000000-0000-4000-8000-0000000005da', 'e2000000-0000-4000-8000-0000000000a1', 'District A'),
-       ('e2000000-0000-4000-8000-0000000005db', 'e2000000-0000-4000-8000-0000000000a2', 'District B');
+-- The admin correction, as a check's step: a refusal is a failed check, not an
+-- aborted run.
+create function pg_temp.admin_set (p_key text, p_studio uuid) returns boolean language plpgsql as $$
+begin
+    perform public.admin_set_student_district (
+        ('e2000000-0000-4000-8000-0000000005' || p_key)::uuid, p_studio, 'test admin');
+    return true;
+end;
+$$;
 
-insert into public.district_billing (studio_id, contract_ends_at, contract_ends_source, updated_by)
-values ('e2000000-0000-4000-8000-0000000005da', now() - interval '17 days', 'admin', 'test'),
-       ('e2000000-0000-4000-8000-0000000005db', now() - interval '17 days', 'admin', 'test');
+insert into public.studios (id, owner_id, name, created_at)
+values ('e2000000-0000-4000-8000-0000000005da', 'e2000000-0000-4000-8000-0000000000a1', 'District A',
+        now() - interval '30 days'),
+       ('e2000000-0000-4000-8000-0000000005db', 'e2000000-0000-4000-8000-0000000000a2', 'District B',
+        now() - interval '30 days'),
+       ('e2000000-0000-4000-8000-0000000005dc', 'e2000000-0000-4000-8000-0000000000a3', 'P''s own studio',
+        now() - interval '30 days');
+
+-- A's studio is ten days older than its district contract; B's are the same age.
+insert into public.district_billing (studio_id, contract_ends_at, contract_ends_source, updated_by, created_at)
+values ('e2000000-0000-4000-8000-0000000005da', now() - interval '17 days', 'admin', 'test',
+        now() - interval '20 days'),
+       ('e2000000-0000-4000-8000-0000000005db', now() - interval '17 days', 'admin', 'test',
+        now() - interval '30 days');
 
 -- T holds a seat in B first, then one in A.
 insert into public.studio_members (studio_id, user_id, created_at)
-values ('e2000000-0000-4000-8000-0000000005db', 'e2000000-0000-4000-8000-0000000000a5', now() - interval '2 days'),
-       ('e2000000-0000-4000-8000-0000000005da', 'e2000000-0000-4000-8000-0000000000a5', now() - interval '1 day'),
-       ('e2000000-0000-4000-8000-0000000005da', 'e2000000-0000-4000-8000-0000000000a3', now()),
-       ('e2000000-0000-4000-8000-0000000005da', 'e2000000-0000-4000-8000-0000000000a4', now());
+values ('e2000000-0000-4000-8000-0000000005db', 'e2000000-0000-4000-8000-0000000000a5', now() - interval '6 days'),
+       ('e2000000-0000-4000-8000-0000000005da', 'e2000000-0000-4000-8000-0000000000a5', now() - interval '5 days'),
+       ('e2000000-0000-4000-8000-0000000005da', 'e2000000-0000-4000-8000-0000000000a3', now() - interval '10 days'),
+       ('e2000000-0000-4000-8000-0000000005da', 'e2000000-0000-4000-8000-0000000000a4', now() - interval '12 days');
 
-select pg_temp.provision ('b2', 'a3');
-select pg_temp.provision ('b3', 'a4');
-select pg_temp.provision ('b5', 'a5');
-select pg_temp.provision ('b6', 'a1');
-select pg_temp.provision ('b7', 'a6');
+select pg_temp.provision ('b1', 'a3', now() - interval '15 days');
+select pg_temp.provision ('b9', 'a1', now() - interval '25 days');
+select pg_temp.provision ('b2', 'a3', now() - interval '9 days');
+select pg_temp.provision ('b8', 'a3', now() - interval '9 days', 'e2000000-0000-4000-8000-0000000005da');
+select pg_temp.provision ('b3', 'a4', now() - interval '8 days', 'e2000000-0000-4000-8000-0000000005da');
+select pg_temp.provision ('b5', 'a5', now() - interval '1 day', 'e2000000-0000-4000-8000-0000000005db');
+select pg_temp.provision ('b6', 'a1', now() - interval '3 days', 'e2000000-0000-4000-8000-0000000005da');
+select pg_temp.provision ('b7', 'a6', now() - interval '2 days');
 
 -- L leaves A, then provisions l2 as a private teacher.
 delete from public.studio_members
 where studio_id = 'e2000000-0000-4000-8000-0000000005da' and user_id = 'e2000000-0000-4000-8000-0000000000a4';
 
-select pg_temp.provision ('b4', 'a4');
+select pg_temp.provision ('b4', 'a4', now());
 
 insert into public.documents (id, owner_id, title, storage_path)
 values ('e2000000-0000-4000-8000-00000000d001', 'e2000000-0000-4000-8000-0000000000a3', 'Score',
@@ -166,7 +213,7 @@ insert into public.annotations (id, document_id, page, kind, color, payload, cre
 select ('e2000000-0000-4000-8000-0000000a00' || k)::uuid, 'e2000000-0000-4000-8000-00000000d001', 0, 'text',
        '#112233', '{"x":0.3,"y":0.3,"size":0.02,"text":"student work"}',
        ('e2000000-0000-4000-8000-0000000000' || k)::uuid
-from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7']) k;
+from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) k;
 
 -- ===========================================================================
 -- What each roster row recorded when it was provisioned
@@ -177,18 +224,25 @@ select pg_temp.holds (
 );
 
 select pg_temp.holds (
-    'a student provisioned while seated in A belongs to A',
-    $q$select pg_temp.district_of ('b2') = 'e2000000-0000-4000-8000-0000000005da'
-       and pg_temp.district_of ('b3') = 'e2000000-0000-4000-8000-0000000005da'$q$
+    'a seated teacher who names no district provisions a private student',
+    $q$select pg_temp.district_of ('b2') is null and pg_temp.decided_by ('b2') = 'provisioned'
+       and pg_temp.district_of ('b9') is null$q$
 );
 
 select pg_temp.holds (
-    'a district''s owner provisions into their own district',
+    'a student provisioned for A by a teacher seated in A belongs to A',
+    $q$select pg_temp.district_of ('b8') = 'e2000000-0000-4000-8000-0000000005da'
+       and pg_temp.district_of ('b3') = 'e2000000-0000-4000-8000-0000000005da'
+       and pg_temp.decided_by ('b8') = 'provisioned'$q$
+);
+
+select pg_temp.holds (
+    'a district''s owner provisions into their own district when the call names it',
     $q$select pg_temp.district_of ('b6') = 'e2000000-0000-4000-8000-0000000005da'$q$
 );
 
 select pg_temp.holds (
-    'a teacher seated in two districts provisions into the seat held longest (B), not both',
+    'a teacher seated in two districts provisions into the one the call names (B), not both',
     $q$select pg_temp.district_of ('b5') = 'e2000000-0000-4000-8000-0000000005db'$q$
 );
 
@@ -197,16 +251,34 @@ select pg_temp.holds (
     $q$select pg_temp.district_of ('b4') is null and pg_temp.district_of ('b7') is null$q$
 );
 
+select pg_temp.refused (
+    'a teacher cannot provision into a district they are not in',
+    $q$select pg_temp.provision ('c1', 'a6', now(), 'e2000000-0000-4000-8000-0000000005da')$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor into one they have left',
+    $q$select pg_temp.provision ('c1', 'a4', now(), 'e2000000-0000-4000-8000-0000000005da')$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor into a studio that is not a district, their own included',
+    $q$select pg_temp.provision ('c1', 'a3', now(), 'e2000000-0000-4000-8000-0000000005dc')$q$,
+    '42501'
+);
+
 select pg_temp.holds (
-    'the purge''s scope for A is the students A provided, the departed teacher''s included',
+    'the purge''s scope for A is the students provisioned for A, the departed teacher''s included',
     $q$select array_agg(student_user_id order by student_user_id) = array[
-           'e2000000-0000-4000-8000-0000000000b2', 'e2000000-0000-4000-8000-0000000000b3',
-           'e2000000-0000-4000-8000-0000000000b6']::uuid[]
+           'e2000000-0000-4000-8000-0000000000b3', 'e2000000-0000-4000-8000-0000000000b6',
+           'e2000000-0000-4000-8000-0000000000b8']::uuid[]
        from public.retention_district_students ('e2000000-0000-4000-8000-0000000005da')$q$
 );
 
 select pg_temp.holds (
-    'and for B, only the student provisioned under B',
+    'and for B, only the student provisioned for B',
     $q$select array_agg(student_user_id) = array['e2000000-0000-4000-8000-0000000000b5']::uuid[]
        from public.retention_district_students ('e2000000-0000-4000-8000-0000000005db')$q$
 );
@@ -226,26 +298,30 @@ select pg_temp.refused (
 select pg_temp.refused (
     'nor out of one',
     $q$update public.managed_students set district_studio_id = null
+       where id = 'e2000000-0000-4000-8000-0000000005b8'$q$,
+    '42501'
+);
+
+select pg_temp.refused (
+    'nor rewrite how a row was decided',
+    $q$update public.managed_students set district_attribution = 'legacy'
        where id = 'e2000000-0000-4000-8000-0000000005b2'$q$,
     '42501'
 );
 
 select pg_temp.act_as_server ();
 
-insert into auth.users (id, aud, role, email, raw_app_meta_data)
-values ('e2000000-0000-4000-8000-0000000000c1', 'authenticated', 'authenticated', 'ds-c1@students.cleffy.app',
-        '{"user_type":"student"}');
-
-insert into public.managed_students
-    (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at,
-     district_studio_id)
-values ('e2000000-0000-4000-8000-0000000005c1', 'e2000000-0000-4000-8000-0000000000a6',
-        'e2000000-0000-4000-8000-0000000000c1', 'Forged', null, 'code', 'ds_c1', now(),
-        'e2000000-0000-4000-8000-0000000005da');
-
 select pg_temp.holds (
-    'a district supplied on INSERT is ignored: the trigger records the teacher''s own',
-    $q$select pg_temp.district_of ('c1') is null$q$
+    'a new row is always decided at provisioning, whatever the insert says',
+    $q$with i as (
+           insert into public.managed_students
+               (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at,
+                district_attribution)
+           values ('e2000000-0000-4000-8000-0000000005c2', 'e2000000-0000-4000-8000-0000000000a6',
+                   'e2000000-0000-4000-8000-0000000000c2', 'Forged', null, 'code', 'ds_c2', now(), 'backfilled')
+           returning district_attribution, district_studio_id
+       )
+       select district_attribution = 'provisioned' and district_studio_id is null from i$q$
 );
 
 select pg_temp.holds (
@@ -271,6 +347,13 @@ select pg_temp.refused (
 );
 
 select pg_temp.refused (
+    'nor ask whether a teacher may provision into a district',
+    $q$select public.district_provisionable ('e2000000-0000-4000-8000-0000000000a1',
+                                             'e2000000-0000-4000-8000-0000000005da')$q$,
+    '42501'
+);
+
+select pg_temp.refused (
     'nor read the attribution column',
     $q$select district_studio_id from public.managed_students$q$,
     '42501'
@@ -278,19 +361,21 @@ select pg_temp.refused (
 
 select pg_temp.act_as_server ();
 
-select public.admin_set_student_district (
-    'e2000000-0000-4000-8000-0000000005c1', 'e2000000-0000-4000-8000-0000000005db', 'test admin'
+select pg_temp.holds (
+    'the admin correction runs',
+    $q$select pg_temp.admin_set ('c2', 'e2000000-0000-4000-8000-0000000005db')$q$
 );
 
 select pg_temp.holds (
     'the admin correction moves one student, and is logged with who made it',
-    $q$select pg_temp.district_of ('c1') = 'e2000000-0000-4000-8000-0000000005db'
+    $q$select pg_temp.district_of ('c2') = 'e2000000-0000-4000-8000-0000000005db'
+       and pg_temp.decided_by ('c2') = 'admin'
        and exists (select 1 from public.district_retention_log
                    where step = 'attribution_changed' and counts ->> 'actor' = 'test admin'
-                     and counts ->> 'managed_student_id' = 'e2000000-0000-4000-8000-0000000005c1')$q$
+                     and counts ->> 'managed_student_id' = 'e2000000-0000-4000-8000-0000000005c2')$q$
 );
 
-select public.admin_set_student_district ('e2000000-0000-4000-8000-0000000005c1', null, 'test admin');
+select pg_temp.holds ('and moves it back', $q$select pg_temp.admin_set ('c2', null)$q$);
 
 -- ===========================================================================
 -- The backfill for rows provisioned before 20261021120800
@@ -300,28 +385,37 @@ select id, district_studio_id from public.managed_students where id::text like '
 
 grant select on before_backfill to public;
 
--- Pretend p2, l1 and oa1 predate the column.
-set local cleffy.district_attribution = 'admin';
-update public.managed_students set district_studio_id = null
-where id in ('e2000000-0000-4000-8000-0000000005b2', 'e2000000-0000-4000-8000-0000000005b3',
-             'e2000000-0000-4000-8000-0000000005b6');
-set local cleffy.district_attribution = '';
+-- Pretend p1, p3, l1 and oa1 predate the column. p2 does not: it was
+-- provisioned privately by a seated teacher, and stays decided.
+select pg_temp.holds (
+    'legacy rows can be prepared',
+    $q$select pg_temp.make_legacy (array['b1', 'b8', 'b3', 'b6'])$q$
+);
 
 select public.backfill_district_student_attribution ();
 
 select pg_temp.holds (
     'the backfill attributes the owner''s student and a seated teacher''s student created since the seat',
-    $q$select pg_temp.district_of ('b2') = 'e2000000-0000-4000-8000-0000000005da'
-       and pg_temp.district_of ('b6') = 'e2000000-0000-4000-8000-0000000005da'$q$
+    $q$select pg_temp.district_of ('b8') = 'e2000000-0000-4000-8000-0000000005da'
+       and pg_temp.district_of ('b6') = 'e2000000-0000-4000-8000-0000000005da'
+       and pg_temp.decided_by ('b8') = 'backfilled'$q$
 );
 
 select pg_temp.holds (
     'but never a private student from before the seat, nor a departed teacher''s (no record is left)',
-    $q$select pg_temp.district_of ('b1') is null and pg_temp.district_of ('b3') is null$q$
+    $q$select pg_temp.district_of ('b1') is null and pg_temp.district_of ('b3') is null
+       and pg_temp.decided_by ('b1') = 'legacy'$q$
 );
 
-select public.admin_set_student_district (
-    'e2000000-0000-4000-8000-0000000005b3', 'e2000000-0000-4000-8000-0000000005da', 'test admin'
+select pg_temp.holds (
+    'a backfill never revisits a row decided at provisioning, a seated teacher''s private student included',
+    $q$select pg_temp.district_of ('b2') is null and pg_temp.decided_by ('b2') = 'provisioned'
+       and pg_temp.district_of ('b9') is null and pg_temp.decided_by ('b9') = 'provisioned'$q$
+);
+
+select pg_temp.holds (
+    'a human reconciles the departed teacher''s student',
+    $q$select pg_temp.admin_set ('b3', 'e2000000-0000-4000-8000-0000000005da')$q$
 );
 
 select pg_temp.holds (
@@ -344,25 +438,28 @@ select public.retention_district_run (now() + interval '14 days 1 minute');
 select pg_temp.holds (
     'the soft delete archives A''s and B''s students and nobody else',
     $q$select (select count(*) = 4 from public.district_retention_students)
-       and pg_temp.live ('b1') and pg_temp.live ('b4') and pg_temp.live ('b7')
+       and pg_temp.live ('b1') and pg_temp.live ('b2') and pg_temp.live ('b4') and pg_temp.live ('b7')
+       and pg_temp.live ('b9')
        and (select bool_and(archived_at is not null) from public.managed_students
-            where id in ('e2000000-0000-4000-8000-0000000005b2', 'e2000000-0000-4000-8000-0000000005b3',
-                         'e2000000-0000-4000-8000-0000000005b5', 'e2000000-0000-4000-8000-0000000005b6'))$q$
+            where id in ('e2000000-0000-4000-8000-0000000005b3', 'e2000000-0000-4000-8000-0000000005b5',
+                         'e2000000-0000-4000-8000-0000000005b6', 'e2000000-0000-4000-8000-0000000005b8'))$q$
 );
 
 select public.retention_district_run (now() + interval '21 days 2 minutes');
 
 select pg_temp.holds (
     'the hard delete removes the districts'' students, the departed teacher''s l1 included',
-    $q$select pg_temp.gone ('b2') and pg_temp.gone ('b3') and pg_temp.gone ('b5') and pg_temp.gone ('b6')$q$
+    $q$select pg_temp.gone ('b3') and pg_temp.gone ('b5') and pg_temp.gone ('b6') and pg_temp.gone ('b8')$q$
 );
 
 select pg_temp.holds (
-    'and never the teacher''s private students (p1 from before joining, l2 from after leaving), nor Q''s',
-    $q$select pg_temp.live ('b1') and pg_temp.live ('b4') and pg_temp.live ('b7') and pg_temp.live ('c1')
+    'and never a private student (p1 from before joining, p2 added privately while seated, l2 from after leaving, oa0 from before the district), nor Q''s',
+    $q$select pg_temp.live ('b1') and pg_temp.live ('b2') and pg_temp.live ('b4') and pg_temp.live ('b7')
+       and pg_temp.live ('b9') and pg_temp.live ('c2')
        and (select bool_and(deleted_at is null and payload ->> 'text' = 'student work') from public.annotations
-            where created_by in ('e2000000-0000-4000-8000-0000000000b1', 'e2000000-0000-4000-8000-0000000000b4',
-                                 'e2000000-0000-4000-8000-0000000000b7'))$q$
+            where created_by in ('e2000000-0000-4000-8000-0000000000b1', 'e2000000-0000-4000-8000-0000000000b2',
+                                 'e2000000-0000-4000-8000-0000000000b4', 'e2000000-0000-4000-8000-0000000000b7',
+                                 'e2000000-0000-4000-8000-0000000000b9'))$q$
 );
 
 select pg_temp.holds (

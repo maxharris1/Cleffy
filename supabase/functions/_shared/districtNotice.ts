@@ -92,7 +92,7 @@ export const buildDistrictNotice = (row: DistrictNoticeRow): DistrictNoticeMessa
             '',
             `On or after ${purge} we will delete the district's data:`,
             '- the district studio and its teacher seats;',
-            "- the student accounts your district's teachers created, with everything those students drew or wrote on scores and in lesson history, their assignments and their practice notes.",
+            "- the student accounts your district's teachers added for the district, with everything those students drew or wrote on scores and in lesson history, their assignments and their practice notes. Students a teacher added to their own private roster are not part of the district's data and are not deleted.",
             '',
             "Teachers' own Cleffy accounts and the scores they uploaded are theirs and are not deleted.",
             '',

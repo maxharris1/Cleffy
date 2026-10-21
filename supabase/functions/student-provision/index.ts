@@ -3,6 +3,7 @@ import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
 import { readTeacherAttestation, type TeacherAttestation } from '../_shared/consentAge.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { checkDistrictChoice, type DistrictRpc } from '../_shared/districtProvision.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements } from '../_shared/entitlements.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
@@ -71,6 +72,12 @@ import {
  * user_metadata as the same age_gate a self sign-up has, which is what the
  * before_user_created hook checks on the invite path.
  *
+ * DISTRICT. A student belongs to a district only when 'create' names it
+ * (`districtStudioId`) and the teacher owns or holds a seat in it
+ * (../_shared/districtProvision.ts). Naming none provisions a private student,
+ * seated teacher or not; the district's contract-end purge never touches one
+ * (20261021120800_district_student_attribution.sql).
+ *
  * 'delete' is for good: the student's markings are scrubbed (tombstoned, and
  * cut out of lesson-history snapshots — 20261021120200), then the auth user
  * goes, and its cascades take the roster row, assignments and practice notes.
@@ -111,6 +118,8 @@ interface ProvisionBody {
     studentId?: string;
     /** On 'create' and 'restore': see readTeacherAttestation. */
     attestation?: unknown;
+    /** On 'create' only: the district this student is provisioned for. Absent: a private student. */
+    districtStudioId?: unknown;
 }
 
 interface RosterRow {
@@ -226,6 +235,8 @@ interface NewStudent {
     displayName: string;
     parentEmail: string | null;
     attestation: TeacherAttestation;
+    /** Checked by checkDistrictChoice, and again by the roster table's trigger. */
+    districtStudioId: string | null;
 }
 
 /** The account-side record of the attestation: the shape a self sign-up's age screen writes. */
@@ -301,7 +312,7 @@ const undoCreatedStudent = async (admin: SupabaseClient, studentUserId: string):
  * and until it does no sign-in path to the account exists for anyone.
  */
 const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: NewStudent): Promise<Response> => {
-    const { rosterId, displayName, parentEmail, attestation } = spec;
+    const { rosterId, displayName, parentEmail, attestation, districtStudioId } = spec;
     const code = generateLoginCode();
     // Generated codes are already in normalized form, which is exactly what
     // student-claim hashes after normalizeLoginCode() on what the student typed.
@@ -337,6 +348,7 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         auth_method: 'code',
         login_code_hash: loginCodeHash,
         parent_email: parentEmail,
+        district_studio_id: districtStudioId,
         ...attestationColumns(attestation),
     });
     if (insertError) {
@@ -376,7 +388,7 @@ const createEmailStudent = async (
     userId: string,
     spec: NewStudent & { studentEmail: string; redirectTo: string },
 ): Promise<Response> => {
-    const { rosterId, displayName, parentEmail, studentEmail, redirectTo, attestation } = spec;
+    const { rosterId, displayName, parentEmail, studentEmail, redirectTo, attestation, districtStudioId } = spec;
 
     // The invite DOES pass through the before_user_created hook, which refuses
     // a user without a passing age_gate — the teacher's, here.
@@ -426,6 +438,7 @@ const createEmailStudent = async (
         // No code is ever minted on this path, and no username is ever chosen:
         // the state CHECK requires both to stay null for the life of the row.
         parent_email: parentEmail,
+        district_studio_id: districtStudioId,
         ...attestationColumns(attestation),
     });
     if (insertError) {
@@ -494,6 +507,13 @@ const createStudent = async (admin: SupabaseClient, userId: string, body: Provis
         return checked.response;
     }
 
+    // Before any write too: a district the teacher is not in is refused here,
+    // not by the trigger after an account exists.
+    const district = await checkDistrictChoice(admin as unknown as DistrictRpc, userId, body.districtStudioId);
+    if (!district.ok) {
+        return jsonResponse({ error: district.error, code: district.code }, district.status);
+    }
+
     // Before any write, the auth user included: a refused teacher must not be
     // left with an account nothing points at.
     const gate = await checkRosterStock(admin, userId);
@@ -504,7 +524,13 @@ const createStudent = async (admin: SupabaseClient, userId: string, body: Provis
     // Minted here because the roster id names the synthetic auth address on the
     // code path: the account and the row it belongs to share one identifier.
     const rosterId = crypto.randomUUID();
-    const spec: NewStudent = { rosterId, displayName, parentEmail, attestation: checked.attestation };
+    const spec: NewStudent = {
+        rosterId,
+        displayName,
+        parentEmail,
+        attestation: checked.attestation,
+        districtStudioId: district.districtStudioId,
+    };
 
     return method === 'email'
         ? await createEmailStudent(admin, userId, { ...spec, studentEmail, redirectTo })

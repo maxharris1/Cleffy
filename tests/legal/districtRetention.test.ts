@@ -39,7 +39,8 @@ describe('the district export notice', () => {
         expect(subject).toBe("Cleffy will delete Springfield Schools's district data on or after 4 November 2026");
         expect(text).toContain('ended on 30 September 2026');
         expect(text).toContain('On or after 4 November 2026 we will delete');
-        expect(text).toMatch(/student accounts your district's teachers created/);
+        expect(text).toMatch(/student accounts your district's teachers added for the district/);
+        expect(text).toContain('Students a teacher added to their own private roster');
         expect(text).toMatch(
             /Teachers' own Cleffy accounts and the scores they uploaded are theirs and are not deleted/,
         );
@@ -334,21 +335,38 @@ describe('the district purge’s scope (20261021120800)', () => {
         expect(students).not.toMatch(/studio_members|owner_id/);
     });
 
-    it('records the district at provisioning, by trigger, whatever the caller supplies', () => {
+    it('records a district only when provisioning names one the teacher owns or is seated in', () => {
         const trigger = fn('managed_students_district_attribution');
+        // Positive evidence only: the trigger never derives a district from membership.
+        expect(trigger).not.toMatch(/district_studio_for_teacher|:= public\.district/);
         expect(trigger).toMatch(
-            /if tg_op = 'INSERT' then\s+new\.district_studio_id := public\.district_studio_for_teacher \(new\.teacher_id, now\(\)\);/,
+            /if tg_op = 'INSERT' then[\s\S]*?new\.district_attribution := 'provisioned';\s+if new\.district_studio_id is not null\s+and not public\.district_provisionable \(new\.teacher_id, new\.district_studio_id\) then\s+raise exception[^;]*errcode = '42501';/,
         );
+        const provisionable = fn('district_provisionable');
+        expect(provisionable).toMatch(/join public\.studios st on st\.id = b\.studio_id/);
+        expect(provisionable).toMatch(/st\.owner_id = p_teacher/);
+        expect(provisionable).toMatch(/sm\.studio_id = p_studio and sm\.user_id = p_teacher/);
         expect(scope).toMatch(
             /create trigger managed_students_district_attribution before insert or update on public\.managed_students/,
         );
+        expect(scope).toContain("'public.district_provisionable (uuid, uuid)'");
     });
 
-    it('counts only district studios, the owner’s first, then the seat held longest', () => {
-        const rule = fn('district_studio_for_teacher');
-        expect(rule.match(/join public\.district_billing b/g)).toHaveLength(2);
-        expect(rule).toMatch(/sm\.created_at <= p_at/);
-        expect(rule).toMatch(/order by d\.rank, d\.since, d\.studio_id\s+limit 1/);
+    it('marks every pre-existing row legacy without an UPDATE, and every new row provisioned', () => {
+        expect(scope).toMatch(
+            /add column if not exists district_attribution text not null default 'legacy';\s+alter table public\.managed_students\s+alter column district_attribution set default 'provisioned';/,
+        );
+        expect(scope).toMatch(/check \(district_attribution in \('provisioned', 'legacy', 'backfilled', 'admin'\)\)/);
+    });
+
+    it('student-provision asks before any account exists, and writes the checked district on both paths', () => {
+        const provision = read('supabase/functions/student-provision/index.ts');
+        const create = provision.slice(provision.indexOf('const createStudent = async'));
+        const check = create.indexOf('checkDistrictChoice(');
+        expect(check).toBeGreaterThan(-1);
+        expect(create.indexOf('checkRosterStock(')).toBeGreaterThan(check);
+        expect(create.indexOf('createEmailStudent(admin')).toBeGreaterThan(check);
+        expect(provision.match(/district_studio_id: districtStudioId,/g)).toHaveLength(2);
     });
 
     it('refuses to change the record by UPDATE except through the logged admin correction', () => {
@@ -359,18 +377,20 @@ describe('the district purge’s scope (20261021120800)', () => {
         expect(scope).toContain("'public.admin_set_student_district (uuid, uuid, text)'");
     });
 
-    it('backfills only from a seat held since before the student was created, and only unattributed rows', () => {
+    it('backfills legacy rows only, never a row decided at provisioning', () => {
         const backfill = fn('backfill_district_student_attribution');
-        expect(backfill).toMatch(/district_studio_for_teacher \(ms\.teacher_id, ms\.created_at\)/);
-        expect(backfill).toMatch(/where ms\.district_studio_id is null/);
+        expect(backfill).toMatch(/where ms\.district_attribution = 'legacy'/);
+        expect(backfill).toMatch(/district_attribution = 'backfilled'/);
     });
 
     it('is proven against a database for a private roster, a departed teacher and two districts', () => {
         for (const check of [
             'a private student provisioned before the teacher joined a district belongs to no district',
-            'a teacher seated in two districts provisions into the seat held longest (B), not both',
+            'a seated teacher who names no district provisions a private student',
+            'a teacher cannot provision into a district they are not in',
+            "a backfill never revisits a row decided at provisioning, a seated teacher''s private student included",
             "the hard delete removes the districts'' students, the departed teacher''s l1 included",
-            "and never the teacher''s private students (p1 from before joining, l2 from after leaving), nor Q''s",
+            "and never a private student (p1 from before joining, p2 added privately while seated, l2 from after leaving, oa0 from before the district), nor Q''s",
         ]) {
             expect(sqlProof).toContain(check);
         }

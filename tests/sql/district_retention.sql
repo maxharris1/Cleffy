@@ -104,8 +104,9 @@ values
     ('d1000000-0000-4000-8000-0000000000b3', 'authenticated', 'authenticated', 'dr-s3@students.cleffy.app',
      '{"user_type":"student"}');
 
--- The district exists before its students are provisioned: each roster row
--- records the district it was provisioned under (20261021120800).
+-- The district exists before its students are provisioned for it: each roster
+-- row records the district its provisioning named (20261021120800), and only
+-- an owner or a seated teacher may name it.
 insert into public.studios (id, owner_id, name)
 values ('d1000000-0000-4000-8000-0000000005d1', 'd1000000-0000-4000-8000-0000000000a1', 'District S'),
        ('d1000000-0000-4000-8000-0000000005d2', 'd1000000-0000-4000-8000-0000000000a4', 'District N');
@@ -118,14 +119,17 @@ values ('d1000000-0000-4000-8000-0000000005d1', now() - interval '17 days', 'adm
        ('d1000000-0000-4000-8000-0000000005d2', null, null, 'test');
 
 insert into public.managed_students
-    (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at, archived_at)
+    (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at, archived_at,
+     district_studio_id)
 values
     ('d1000000-0000-4000-8000-0000000005b1', 'd1000000-0000-4000-8000-0000000000a1',
-     'd1000000-0000-4000-8000-0000000000b1', 'One', null, 'code', 'dr_one', now(), null),
+     'd1000000-0000-4000-8000-0000000000b1', 'One', null, 'code', 'dr_one', now(), null,
+     'd1000000-0000-4000-8000-0000000005d1'),
     ('d1000000-0000-4000-8000-0000000005b2', 'd1000000-0000-4000-8000-0000000000a2',
-     'd1000000-0000-4000-8000-0000000000b2', 'Two', null, 'code', 'dr_two', now(), now() - interval '60 days'),
+     'd1000000-0000-4000-8000-0000000000b2', 'Two', null, 'code', 'dr_two', now(), now() - interval '60 days',
+     'd1000000-0000-4000-8000-0000000005d1'),
     ('d1000000-0000-4000-8000-0000000005b3', 'd1000000-0000-4000-8000-0000000000a3',
-     'd1000000-0000-4000-8000-0000000000b3', 'Three', null, 'code', 'dr_three', now(), null);
+     'd1000000-0000-4000-8000-0000000000b3', 'Three', null, 'code', 'dr_three', now(), null, null);
 
 insert into public.documents (id, owner_id, title, storage_path)
 values ('d1000000-0000-4000-8000-00000000d001', 'd1000000-0000-4000-8000-0000000000a1', 'Score',
