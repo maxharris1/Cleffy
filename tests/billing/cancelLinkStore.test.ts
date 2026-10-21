@@ -21,8 +21,10 @@ import { FakeResend } from './fakeResend';
  * error log are stand-ins. cancelFlow.test.ts covers the flow with an in-memory
  * store; this is what holds that store to it.
  *
- * Needs the local stack (`npm run cloud:up`), so it is skipped unless both are
- * set -- CI has no database, like tests/sql:
+ * Needs the local stack (`npm run cloud:up`), so the root `npm run test` skips
+ * it unless both are set. CI's supabase-local job boots that stack and runs it
+ * with CLEFFY_REQUIRE_LOCAL_DB=1, which turns a missing setting into a failure
+ * rather than a silent skip:
  *
  *     CLEFFY_LOCAL_SUPABASE_URL=http://127.0.0.1:54421 \
  *     CLEFFY_LOCAL_SERVICE_ROLE_KEY=<SERVICE_ROLE_KEY from `npx supabase status -o env`> \
@@ -33,6 +35,8 @@ import { FakeResend } from './fakeResend';
 
 const URL = process.env.CLEFFY_LOCAL_SUPABASE_URL ?? '';
 const SERVICE_KEY = process.env.CLEFFY_LOCAL_SERVICE_ROLE_KEY ?? '';
+/** Set by CI's supabase-local job: there, a stack that is not configured fails the run. */
+const REQUIRED = process.env.CLEFFY_REQUIRE_LOCAL_DB === '1';
 const HOUR = 60 * 60_000;
 
 const state = vi.hoisted(() => {
@@ -80,7 +84,7 @@ const { drainBillingMailNow } = (await import(/* @vite-ignore */ shared('billing
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 
-describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', () => {
+describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against the real store', () => {
     const realFetch = globalThis.fetch.bind(globalThis);
     let db: SupabaseClient;
     let resend: FakeResend;
@@ -88,6 +92,11 @@ describe.skipIf(!URL || !SERVICE_KEY)('the cancel link against the real store', 
     const rows: string[] = [];
 
     beforeAll(() => {
+        if (!URL || !SERVICE_KEY) {
+            throw new Error(
+                'CLEFFY_REQUIRE_LOCAL_DB is set, but CLEFFY_LOCAL_SUPABASE_URL or CLEFFY_LOCAL_SERVICE_ROLE_KEY is not',
+            );
+        }
         db = createClient(URL, SERVICE_KEY, {
             auth: { persistSession: false, autoRefreshToken: false },
             global: { fetch: realFetch },
