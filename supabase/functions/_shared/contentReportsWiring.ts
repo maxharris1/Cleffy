@@ -12,14 +12,13 @@ import {
 import { logError } from './errorReporting.ts';
 import { LEGAL_OPERATOR } from './legalVersions.ts';
 import { mailLimit } from './mailBudget.ts';
-import { checkRateLimit, clientKey, serviceClient } from './rateLimit.ts';
+import { sendViaResend, type MailSendOutcome } from './mailDelivery.ts';
+import { checkRateLimit, clientKey, refundRateLimit, serviceClient } from './rateLimit.ts';
 
 /**
  * What content-report and content-moderation run against — the Deno half of
  * _shared/contentReports.ts, which holds the control flow and says why.
  */
-
-const RESEND_API = 'https://api.resend.com';
 
 /**
  * The sender: the same verified domain and address as the guest-email codes
@@ -60,6 +59,7 @@ export const common = {
     options: optionsResponse,
     clientKey,
     checkRateLimit,
+    refundRateLimit,
     operator: {
         name: LEGAL_OPERATOR.name,
         postalAddress: LEGAL_OPERATOR.postalAddress,
@@ -115,47 +115,35 @@ export const common = {
     },
 };
 
-export const sendEmail = async (
+export const sendEmail = (
     to: string,
     message: MailMessage,
     options: { bcc?: string; idempotencyKey: string },
-): Promise<'sent' | 'failed' | 'unconfigured'> => {
-    const apiKey = Deno.env.get('RESEND_API_KEY');
-    if (!apiKey) {
-        return 'unconfigured';
-    }
-    try {
-        const res = await fetch(`${RESEND_API}/emails`, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                // Resend sends one email per key for 24 hours: a notice re-claimed
-                // after a crash mid-send is not delivered twice.
-                'Idempotency-Key': options.idempotencyKey,
-            },
-            body: JSON.stringify({
-                from: mailFrom(),
-                to: [to],
-                ...(options.bcc ? { bcc: [options.bcc] } : {}),
-                reply_to: LEGAL_OPERATOR.legalEmail,
-                ...message,
-            }),
-        });
-        if (!res.ok) {
-            // The status and Resend's reason, never the address or the body.
-            logError('content-moderation', new Error(`resend returned ${res.status}`), {
-                code: 'send_failed',
-                detail: (await res.text()).slice(0, 300),
-            });
-            return 'failed';
-        }
-        return 'sent';
-    } catch (err) {
-        logError('content-moderation', err, { code: 'send_failed' });
-        return 'failed';
-    }
-};
+): Promise<MailSendOutcome> =>
+    sendViaResend({
+        apiKey: Deno.env.get('RESEND_API_KEY'),
+        // The outbox row's key (content_notice_outbox/{id}), the same on every
+        // attempt: Resend answers a repeat with the first send's result, so a
+        // notice retried after an unknown outcome is not delivered twice.
+        idempotencyKey: options.idempotencyKey,
+        body: {
+            from: mailFrom(),
+            to: [to],
+            ...(options.bcc ? { bcc: [options.bcc] } : {}),
+            reply_to: LEGAL_OPERATOR.legalEmail,
+            ...message,
+        },
+        // The status and Resend's reason, never the address or the body.
+        onFailure: (status, detail) =>
+            logError(
+                'content-moderation',
+                new Error(`resend ${status === null ? 'unreachable' : `returned ${status}`}`),
+                {
+                    code: 'send_failed',
+                    detail,
+                },
+            ),
+    });
 
 /** A viewer link's score if it exists, or the score a share link (live or not) points at. */
 export const resolveDocument = async (ref: DocumentRef): Promise<string | null> => {
