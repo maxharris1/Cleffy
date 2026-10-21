@@ -1,4 +1,5 @@
 import type * as BillingTerms from './billingTerms.ts';
+import type { MailWindow } from './mailBudget.ts';
 import type { CancellationNotice, PurchaseNotice } from './stripeEvents.ts';
 import type { StripeMode } from './stripeMode.ts';
 
@@ -126,13 +127,25 @@ export interface PurchaseMail extends PurchaseNotice {
 
 export type CancellationMail = CancellationNotice;
 
-export interface ConfirmationDeps {
-    emailOfUser: (userId: string) => Promise<string | null>;
+/** What sending inside a share of the mail budget needs (sendWithinBudget). */
+export interface BudgetedSendDeps {
+    checkRateLimit: (
+        key: string,
+        limit: number,
+        windowMs: number,
+    ) => Promise<{ ok: true } | { ok: false; retryAfterSec: number }>;
+    refundRateLimit: (key: string) => Promise<void>;
+    /** mailLimit('billingConfirmation', …) from mailBudget.ts. */
+    mailBudget: { hour: MailWindow; day: MailWindow };
     sendEmail: (
         to: string,
         message: BillingTerms.BillingEmail,
-        options: { tag: string },
+        options: { replyTo?: string; tag: string },
     ) => Promise<'sent' | 'failed' | 'unconfigured'>;
+}
+
+export interface ConfirmationDeps extends BudgetedSendDeps {
+    emailOfUser: (userId: string) => Promise<string | null>;
     slotForPrice: (priceId: string) => BillingTerms.PlanSlot | null;
     storefrontOrigin: (mode: StripeMode) => string;
     terms: Pick<
@@ -148,8 +161,52 @@ export interface ConfirmationDeps {
     log: (message: string) => void;
 }
 
-const sendOutcome = (sent: 'sent' | 'failed' | 'unconfigured'): Delivery =>
-    sent === 'sent' ? { outcome: 'sent' } : { outcome: 'retry', reason: `resend ${sent}` };
+/** The limiter keys the confirmations' share of the mail budget is counted under. */
+export const CONFIRMATION_BUDGET_KEYS = {
+    hour: 'billing-confirmation:global',
+    day: 'billing-confirmation:global-day',
+} as const;
+
+/**
+ * Sends billing mail inside the confirmations' share of the mail budget
+ * (`billingConfirmation` in mailBudget.ts), so no billing mail goes out past
+ * the project's 60/hour and 300/day (Codex round 2, cross-PR finding 1): the
+ * purchase and cancellation confirmations here, and billing-cancel's refund
+ * request to support. A spent window sends nothing and answers `retry` with
+ * when it reopens -- an outbox row waits for it rather than being dropped.
+ * Whatever was counted is handed back when nothing went out, so a retry is
+ * counted once, when it sends.
+ */
+export const sendWithinBudget = async (
+    deps: BudgetedSendDeps,
+    to: string,
+    message: BillingTerms.BillingEmail,
+    options: { replyTo?: string; tag: string },
+): Promise<Delivery> => {
+    const counted: string[] = [];
+    const handBack = async () => {
+        await Promise.all(counted.map((key) => deps.refundRateLimit(key).catch(() => undefined)));
+    };
+    for (const window of ['hour', 'day'] as const) {
+        const key = CONFIRMATION_BUDGET_KEYS[window];
+        const gate = await deps.checkRateLimit(key, deps.mailBudget[window].limit, deps.mailBudget[window].windowMs);
+        if (!gate.ok) {
+            await handBack();
+            return {
+                outcome: 'retry',
+                reason: 'mail budget spent',
+                afterMs: Math.max(60, gate.retryAfterSec) * 1000,
+            };
+        }
+        counted.push(key);
+    }
+    const sent = await deps.sendEmail(to, message, options);
+    if (sent !== 'sent') {
+        await handBack();
+        return { outcome: 'retry', reason: `resend ${sent}` };
+    }
+    return { outcome: 'sent' };
+};
 
 /**
  * The address, or the answer for a confirmation that has nobody to go to. Read
@@ -203,7 +260,7 @@ export const deliverPurchaseConfirmation = async (deps: ConfirmationDeps, row: O
         termsVersion: mail.termsVersion ?? deps.terms.LEGAL_VERSIONS.terms,
         refundsVersion: mail.refundsVersion ?? deps.terms.LEGAL_VERSIONS.refunds,
     });
-    return sendOutcome(await deps.sendEmail(to, message, { tag: 'purchase_confirmation' }));
+    return sendWithinBudget(deps, to, message, { tag: 'purchase_confirmation' });
 };
 
 export const deliverCancellationConfirmation = async (deps: ConfirmationDeps, row: OutboxRow): Promise<Delivery> => {
@@ -219,7 +276,7 @@ export const deliverCancellationConfirmation = async (deps: ConfirmationDeps, ro
         endsAtMs: mail.endsAt ? Date.parse(mail.endsAt) : null,
         origin: deps.storefrontOrigin(row.mode),
     });
-    return sendOutcome(await deps.sendEmail(to, message, { tag: 'cancellation_confirmation' }));
+    return sendWithinBudget(deps, to, message, { tag: 'cancellation_confirmation' });
 };
 
 /** The outbox key for a cancellation: one confirmation per subscription per end date. */

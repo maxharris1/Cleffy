@@ -1,3 +1,4 @@
+import type { ConfirmationDeps } from './billingOutbox.ts';
 import type { CancellableSubscription, CancelLinkDeps } from './cancelFlow.ts';
 import { CANCELLABLE_STATUSES } from './cancelFlow.ts';
 import { mailLimit } from './mailBudget.ts';
@@ -41,6 +42,12 @@ export const cancelSecret = (): string | null =>
 export const cancelLinkMailBudget = (): CancelLinkDeps['mailBudget'] => ({
     hour: mailLimit('billingCancelLink', 'hour', env),
     day: mailLimit('billingCancelLink', 'day', env),
+});
+
+/** The purchase and cancellation confirmations' share (billingOutbox.ts sendWithinBudget). */
+export const confirmationMailBudget = (): ConfirmationDeps['mailBudget'] => ({
+    hour: mailLimit('billingConfirmation', 'hour', env),
+    day: mailLimit('billingConfirmation', 'day', env),
 });
 
 export const userForEmail = async (email: string): Promise<string | null> => {

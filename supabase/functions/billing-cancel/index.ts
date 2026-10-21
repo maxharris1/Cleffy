@@ -1,6 +1,6 @@
 import { cancellableSubscription, sha256Hex } from '../_shared/billingCancelStore.ts';
-import { emailOfUser, enqueueBillingMail, sendBillingEmail } from '../_shared/billingMail.ts';
-import { drainInBackground } from '../_shared/billingMailWorker.ts';
+import { emailOfUser, enqueueBillingMail } from '../_shared/billingMail.ts';
+import { drainInBackground, sendBillingEmailWithinBudget } from '../_shared/billingMailWorker.ts';
 import * as billingTerms from '../_shared/billingTerms.ts';
 import { handleCancel, type LiveSubscription } from '../_shared/cancelFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
@@ -121,7 +121,8 @@ Deno.serve((req) =>
                     metadata: { cancelled_via: 'cleffy_cancel_page' },
                 }),
             ),
-        sendEmail: sendBillingEmail,
+        // The refund request to support, inside the billingConfirmation share.
+        sendEmail: sendBillingEmailWithinBudget,
         terms: billingTerms,
         planNameForPrice: (priceId) => {
             const slot = priceId ? slotForPrice(priceId) : null;

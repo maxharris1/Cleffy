@@ -10,6 +10,7 @@ import {
     type ConfirmationDeps,
     type Delivery,
     deliverCancellationConfirmation,
+    CONFIRMATION_BUDGET_KEYS,
     deliverPurchaseConfirmation,
     drainBillingMail,
     OUTBOX_BATCH,
@@ -20,6 +21,7 @@ import {
     retryDelayMs,
 } from '../../supabase/functions/_shared/billingOutbox';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
+import { LAUNCH_MAIL_SPLIT, mailLimit } from '../../supabase/functions/_shared/mailBudget';
 
 /**
  * The billing mail outbox (Codex findings 3 and 4 on #62), run against an
@@ -223,7 +225,25 @@ describe('the confirmations the outbox sends', () => {
     const confirmation = (overrides: Partial<ConfirmationDeps> = {}) => {
         const sent: Array<{ to: string; subject: string; text: string; tag: string }> = [];
         const logs: string[] = [];
+        // check_edge_rate_limit / refund_edge_rate_limit, modelled: a count per
+        // key against the limit it is asked with.
+        const counts = new Map<string, number>();
         const deps: ConfirmationDeps = {
+            checkRateLimit: async (key, limit) => {
+                const used = counts.get(key) ?? 0;
+                if (used >= limit) {
+                    return { ok: false, retryAfterSec: 120 };
+                }
+                counts.set(key, used + 1);
+                return { ok: true };
+            },
+            refundRateLimit: async (key) => {
+                counts.set(key, Math.max(0, (counts.get(key) ?? 0) - 1));
+            },
+            mailBudget: {
+                hour: mailLimit('billingConfirmation', 'hour'),
+                day: mailLimit('billingConfirmation', 'day'),
+            },
             emailOfUser: async () => 'ada@example.com',
             sendEmail: async (to, message, options) => {
                 sent.push({ to, subject: message.subject, text: message.text, tag: options.tag });
@@ -235,7 +255,7 @@ describe('the confirmations the outbox sends', () => {
             log: (message) => logs.push(message),
             ...overrides,
         };
-        return { deps, sent, logs };
+        return { deps, sent, logs, counts };
     };
     const row = (kind: OutboxRow['kind'], payload: Record<string, unknown>): OutboxRow => ({
         id: 'mail-1',
@@ -286,6 +306,51 @@ describe('the confirmations the outbox sends', () => {
                 reason: `resend ${outcome}`,
             });
         }
+    });
+
+    it('sends inside the billingConfirmation share of the mail budget, and waits when it is spent', async () => {
+        // Codex round 2, cross-PR finding 1: confirmations went out past the
+        // registered 60/300. They are now counted in their own share of it,
+        // and a spent window defers the mail in the outbox rather than
+        // dropping it or sending anyway.
+        const h = confirmation();
+        const hourly = LAUNCH_MAIL_SPLIT.billingConfirmation.hour;
+        for (let sent = 0; sent < hourly; sent += 1) {
+            expect(await deliverPurchaseConfirmation(h.deps, row('purchase_confirmation', { ...PURCHASE }))).toEqual({
+                outcome: 'sent',
+            });
+        }
+        const held = await deliverCancellationConfirmation(
+            h.deps,
+            row('cancellation_confirmation', {
+                userId: 'teacher-1',
+                subscriptionId: 'sub_1',
+                priceId: 'price_academy_annual',
+                endsAt: '2027-01-15T08:00:00.000Z',
+                cancelledAt: '2026-10-21T08:00:00.000Z',
+            }),
+        );
+        expect(held).toEqual({ outcome: 'retry', reason: 'mail budget spent', afterMs: 120_000 });
+        expect(h.sent).toHaveLength(hourly);
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour)).toBe(hourly);
+        // Not counted against the day for a mail that did not go out.
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.day)).toBe(hourly);
+    });
+
+    it('hands back what it counted when the send fails, so the retry is counted once', async () => {
+        const h = confirmation({ sendEmail: async () => 'failed' });
+        expect(await deliverPurchaseConfirmation(h.deps, row('purchase_confirmation', { ...PURCHASE }))).toEqual({
+            outcome: 'retry',
+            reason: 'resend failed',
+        });
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.hour)).toBe(0);
+        expect(h.counts.get(CONFIRMATION_BUDGET_KEYS.day)).toBe(0);
+    });
+
+    it('spends nothing on a confirmation with nobody to go to', async () => {
+        const h = confirmation({ emailOfUser: async () => null });
+        await deliverPurchaseConfirmation(h.deps, row('purchase_confirmation', { ...PURCHASE }));
+        expect(h.counts.size).toBe(0);
     });
 
     it('waits for configuration, rather than giving up, on a price it does not know', async () => {
@@ -340,6 +405,23 @@ describe('the outbox wiring', () => {
         expect(webhook).toContain('drainInBackground()');
         // No send in the webhook itself any more.
         expect(webhook).not.toContain('sendBillingEmail');
+    });
+
+    it('sends every billing mail through a share of the mail budget', () => {
+        // The only callers of Resend's send in the billing functions:
+        // confirmations and the refund request go through sendWithinBudget
+        // (billingConfirmation), the cancel link through its own share
+        // (billingCancelLink, cancelFlow.ts deliverCancelLink).
+        const worker = read('supabase/functions/_shared/billingMailWorker.ts');
+        expect(worker).toContain('mailBudget: confirmationMailBudget()');
+        expect(worker).toContain('mailBudget: cancelLinkMailBudget()');
+        expect(read('supabase/functions/_shared/billingCancelStore.ts')).toContain(
+            "mailLimit('billingConfirmation', 'hour', env)",
+        );
+        const cancel = read('supabase/functions/billing-cancel/index.ts');
+        expect(cancel).toContain('sendEmail: sendBillingEmailWithinBudget');
+        expect(cancel).not.toContain('sendBillingEmail,');
+        expect(read('supabase/functions/_shared/cancelFlow.ts')).toMatch(/billing-cancel:global/);
     });
 
     it('has a retry path the cron can reach, behind a shared secret', () => {

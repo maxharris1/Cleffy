@@ -2,6 +2,7 @@ import {
     cancellableSubscription,
     cancelLinkMailBudget,
     cancelSecret,
+    confirmationMailBudget,
     newToken,
     saveToken,
     sha256Hex,
@@ -9,6 +10,7 @@ import {
 } from './billingCancelStore.ts';
 import { emailOfUser, sendBillingEmail, storefrontOrigin } from './billingMail.ts';
 import {
+    type BudgetedSendDeps,
     deliverCancellationConfirmation,
     deliverPurchaseConfirmation,
     type ConfirmationDeps,
@@ -17,6 +19,7 @@ import {
     type DrainSummary,
     OUTBOX_LEASE,
     type OutboxRow,
+    sendWithinBudget,
 } from './billingOutbox.ts';
 import * as billingTerms from './billingTerms.ts';
 import { type CancelLinkDeps, type CancelLinkRequest, deliverCancelLink } from './cancelFlow.ts';
@@ -53,14 +56,34 @@ const admin = () => {
     return client;
 };
 
-const confirmationDeps: ConfirmationDeps = {
-    emailOfUser,
+const budgetedSendDeps = (): BudgetedSendDeps => ({
+    checkRateLimit,
+    refundRateLimit,
+    mailBudget: confirmationMailBudget(),
     sendEmail: sendBillingEmail,
+});
+
+/**
+ * Billing mail sent from a request rather than the outbox (billing-cancel's
+ * refund request to support), inside the same budget share as the
+ * confirmations. A spent window reads as a failed send, which the cancel page
+ * already answers by telling the buyer to write to support themselves.
+ */
+export const sendBillingEmailWithinBudget = async (
+    to: string,
+    message: billingTerms.BillingEmail,
+    options: { replyTo?: string; tag: string },
+): Promise<'sent' | 'failed'> =>
+    (await sendWithinBudget(budgetedSendDeps(), to, message, options)).outcome === 'sent' ? 'sent' : 'failed';
+
+const confirmationDeps = (): ConfirmationDeps => ({
+    ...budgetedSendDeps(),
+    emailOfUser,
     slotForPrice,
     storefrontOrigin,
     terms: billingTerms,
     log: (message) => console.log(message),
-};
+});
 
 const cancelLinkDeps = (): CancelLinkDeps => ({
     checkRateLimit,
@@ -81,9 +104,9 @@ const cancelLinkDeps = (): CancelLinkDeps => ({
 const deliver = async (row: OutboxRow): Promise<Delivery> => {
     switch (row.kind) {
         case 'purchase_confirmation':
-            return deliverPurchaseConfirmation(confirmationDeps, row);
+            return deliverPurchaseConfirmation(confirmationDeps(), row);
         case 'cancellation_confirmation':
-            return deliverCancellationConfirmation(confirmationDeps, row);
+            return deliverCancellationConfirmation(confirmationDeps(), row);
         case 'cancel_link':
             return deliverCancelLink(cancelLinkDeps(), row.mode, row.payload as unknown as CancelLinkRequest);
         default:
