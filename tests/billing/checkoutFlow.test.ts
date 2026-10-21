@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
+import { LEGAL_VERSIONS } from '../../supabase/functions/_shared/legalVersions';
 import {
     CHECKOUT_ATTEMPT_STALE_AFTER,
     CHECKOUT_ATTEMPT_STALE_AFTER_MS,
@@ -395,6 +396,7 @@ const harness = (
         slotForPrice: (priceId) =>
             priceId === PRICE ? 'teacherAnnual' : priceId === ACADEMY_PRICE ? 'academyAnnual' : null,
         terms: billingTerms,
+        legalVersions: LEGAL_VERSIONS,
         recordConsent: vi.fn(async (record: ConsentRecord) => {
             if (options.consentFails) {
                 throw new Error('connection reset');
@@ -1512,8 +1514,8 @@ describe('auto-renewal consent, currency and Stripe Tax (launch items 13-17)', (
                 taxInclusive: false,
                 wording: consentFor('teacherAnnual').text,
                 wordingVersion: billingTerms.CONSENT_WORDING_VERSION,
-                termsVersion: billingTerms.LEGAL_VERSIONS.terms,
-                refundPolicyVersion: billingTerms.LEGAL_VERSIONS.refunds,
+                termsVersion: LEGAL_VERSIONS.terms,
+                refundPolicyVersion: LEGAL_VERSIONS.refunds,
                 declaredCountry: 'US',
                 ip: '203.0.113.9',
                 userAgent: null,

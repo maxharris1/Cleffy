@@ -21,6 +21,7 @@ import {
     retryDelayMs,
 } from '../../supabase/functions/_shared/billingOutbox';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
+import { LEGAL_VERSIONS } from '../../supabase/functions/_shared/legalVersions';
 import { LAUNCH_MAIL_SPLIT, mailLimit } from '../../supabase/functions/_shared/mailBudget';
 
 /**
@@ -252,6 +253,7 @@ describe('the confirmations the outbox sends', () => {
             slotForPrice: (priceId) => (priceId === 'price_academy_annual' ? 'academyAnnual' : null),
             storefrontOrigin: () => 'https://cleffy.io',
             terms: billingTerms,
+            legalVersions: LEGAL_VERSIONS,
             log: (message) => logs.push(message),
             ...overrides,
         };
@@ -276,7 +278,7 @@ describe('the confirmations the outbox sends', () => {
         expect(h.sent[0]?.to).toBe('ada@example.com');
         expect(h.sent[0]?.text).toContain('version 2026-10-01-consented');
         expect(h.sent[0]?.text).toContain('version 2026-10-01-refunds-consented');
-        expect(h.sent[0]?.text).not.toContain(billingTerms.LEGAL_VERSIONS.terms);
+        expect(h.sent[0]?.text).not.toContain(LEGAL_VERSIONS.terms);
     });
 
     it('renews at the price the buyer consented to, whatever a promotion took off today', async () => {
@@ -295,7 +297,7 @@ describe('the confirmations the outbox sends', () => {
             h.deps,
             row('purchase_confirmation', { ...PURCHASE, termsVersion: null, refundsVersion: null }),
         );
-        expect(h.sent[0]?.text).toContain(`version ${billingTerms.LEGAL_VERSIONS.terms}`);
+        expect(h.sent[0]?.text).toContain(`version ${LEGAL_VERSIONS.terms}`);
     });
 
     it('waits, rather than giving up, for a send that failed or a Resend key that is missing', async () => {

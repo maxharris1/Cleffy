@@ -22,6 +22,7 @@ import {
     sendWithinBudget,
 } from './billingOutbox.ts';
 import * as billingTerms from './billingTerms.ts';
+import { LEGAL_VERSIONS } from './legalVersions.ts';
 import { type CancelLinkDeps, type CancelLinkRequest, deliverCancelLink } from './cancelFlow.ts';
 import { logError } from './errorReporting.ts';
 import { checkRateLimit, refundRateLimit, serviceClient } from './rateLimit.ts';
@@ -82,6 +83,7 @@ const confirmationDeps = (): ConfirmationDeps => ({
     slotForPrice,
     storefrontOrigin,
     terms: billingTerms,
+    legalVersions: LEGAL_VERSIONS,
     log: (message) => console.log(message),
 });
 

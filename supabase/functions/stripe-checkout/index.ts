@@ -3,6 +3,7 @@ import * as billingTerms from '../_shared/billingTerms.ts';
 import { CHECKOUT_ATTEMPT_STALE_AFTER, handleCheckout } from '../_shared/checkoutFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
+import { LEGAL_VERSIONS } from '../_shared/legalVersions.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import {
     appOrigin,
@@ -90,6 +91,7 @@ Deno.serve((req) =>
         resolvePrice,
         slotForPrice,
         terms: billingTerms,
+        legalVersions: LEGAL_VERSIONS,
         // checkout_consents (migration 20261020120000): kept for at least three
         // years and never cascaded away with the account -- see the migration.
         recordConsent: async (record) => {

@@ -1,4 +1,5 @@
 import type * as BillingTerms from './billingTerms.ts';
+import type { LEGAL_VERSIONS } from './legalVersions.ts';
 import type { MailWindow } from './mailBudget.ts';
 import type { CancellationNotice, PurchaseNotice } from './stripeEvents.ts';
 import type { StripeMode } from './stripeMode.ts';
@@ -155,9 +156,10 @@ export interface ConfirmationDeps extends BudgetedSendDeps {
         | 'PLAN_NAMES'
         | 'PLAN_INTERVALS'
         | 'CURRENCIES'
-        | 'LEGAL_VERSIONS'
         | 'PLAN_PRICES'
     >;
+    /** _shared/legalVersions.ts: what an email names when no consent recorded the versions. */
+    legalVersions: Pick<typeof LEGAL_VERSIONS, 'terms' | 'refunds'>;
     log: (message: string) => void;
 }
 
@@ -257,8 +259,8 @@ export const deliverPurchaseConfirmation = async (deps: ConfirmationDeps, row: O
         // What the buyer agreed to, not what this deployment publishes now
         // (Codex minor 2 on #62): a policy updated between Checkout and
         // completion must not rewrite the version their email names.
-        termsVersion: mail.termsVersion ?? deps.terms.LEGAL_VERSIONS.terms,
-        refundsVersion: mail.refundsVersion ?? deps.terms.LEGAL_VERSIONS.refunds,
+        termsVersion: mail.termsVersion ?? deps.legalVersions.terms,
+        refundsVersion: mail.refundsVersion ?? deps.legalVersions.refunds,
     });
     return sendWithinBudget(deps, to, message, { tag: 'purchase_confirmation' });
 };

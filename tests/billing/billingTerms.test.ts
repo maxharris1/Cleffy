@@ -1,4 +1,7 @@
 // @vitest-environment node
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -9,7 +12,6 @@ import {
     EUR_COUNTRIES,
     formatMoney,
     hasStatutoryWithdrawalRight,
-    LEGAL_VERSIONS,
     MODEL_WITHDRAWAL_FORM,
     PLAN_PRICES,
     PLAN_SLOTS,
@@ -19,6 +21,7 @@ import {
     TRADER,
     withinRefundWindow,
 } from '../../supabase/functions/_shared/billingTerms';
+import { LEGAL_OPERATOR, LEGAL_VERSIONS } from '../../supabase/functions/_shared/legalVersions';
 import { CATALOG_KEYS } from '../../supabase/functions/_shared/stripeMode';
 
 /**
@@ -202,5 +205,33 @@ describe('the refund window', () => {
         expect(withinRefundWindow(0, 14 * day)).toBe(true);
         expect(withinRefundWindow(0, 14 * day + 1)).toBe(false);
         expect(withinRefundWindow(null, 0)).toBe(false);
+    });
+});
+
+describe('the legal versions checkout records', () => {
+    const read = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8');
+
+    it('come from the one server source, not a copy in billingTerms', () => {
+        // Codex cross-PR minor 3: checkout carried a third copy of the policy
+        // versions, so a bump to the published versions left consent records
+        // and confirmation emails naming the old one.
+        expect(read('supabase/functions/_shared/billingTerms.ts')).not.toMatch(/export const LEGAL_VERSIONS/);
+        expect(read('supabase/functions/stripe-checkout/index.ts')).toContain(
+            "import { LEGAL_VERSIONS } from '../_shared/legalVersions.ts';",
+        );
+        expect(read('supabase/functions/stripe-checkout/index.ts')).toContain('legalVersions: LEGAL_VERSIONS');
+        expect(read('supabase/functions/_shared/billingMailWorker.ts')).toContain('legalVersions: LEGAL_VERSIONS');
+        expect(read('supabase/functions/_shared/checkoutFlow.ts')).toContain('deps.legalVersions.terms');
+        expect(LEGAL_VERSIONS.terms).toMatch(/^\d{4}-\d{2}-\d{2}(-draft)?$/);
+        expect(LEGAL_VERSIONS.refunds).toMatch(/^\d{4}-\d{2}-\d{2}(-draft)?$/);
+    });
+
+    it('names the same trader as the legal pages', () => {
+        expect(TRADER.name).toBe(LEGAL_OPERATOR.name);
+        expect(TRADER.legalEmail).toBe(LEGAL_OPERATOR.legalEmail);
+        expect(TRADER.privacyEmail).toBe(LEGAL_OPERATOR.privacyEmail);
+        expect(TRADER.supportEmail).toBe(LEGAL_OPERATOR.supportEmail);
+        expect(TRADER.website).toBe(LEGAL_OPERATOR.website);
+        expect(LEGAL_OPERATOR.postalAddress).toContain(TRADER.addressLines[0]);
     });
 });

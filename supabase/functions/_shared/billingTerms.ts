@@ -74,19 +74,13 @@ export const TRADER = {
 
 export const traderAddress = (): string => TRADER.addressLines.join(', ');
 
-/**
- * The versions of the two policies a buyer agrees to, stored on every consent
- * record and named in the confirmation email.
- *
- * TEMPORARY: Session B (mh/launch-legal-pages) exports the canonical
- * `LEGAL_VERSIONS` from src/features/legal/. It had not landed on `dev` when
- * this was written, so these are stand-ins with the same keys; when it lands,
- * set these to B's values (or import them on the client) and add a sync test.
+/*
+ * The policy versions a buyer agrees to are NOT restated here: checkout and the
+ * confirmation email read them from _shared/legalVersions.ts, the one server
+ * source the legal pages also publish from (src/features/legal/legalVersions.ts
+ * is held equal to it by legalVersions.test.ts). They arrive through `deps`, so
+ * this file stays import-free.
  */
-export const LEGAL_VERSIONS = {
-    terms: '2026-10-20-draft',
-    refunds: '2026-10-20-draft',
-} as const;
 
 /** Bumped whenever autoRenewalConsentText changes shape, so old records stay interpretable. */
 export const CONSENT_WORDING_VERSION = 'auto-renewal-v1';

@@ -1,4 +1,5 @@
 import type * as BillingTerms from './billingTerms.ts';
+import type { LEGAL_VERSIONS } from './legalVersions.ts';
 import type { StripeMode } from './stripeMode.ts';
 import type * as StripeEvents from './stripeEvents.ts';
 
@@ -364,7 +365,6 @@ export type CheckoutTermsDeps = Pick<
     | 'purchaseTermsFor'
     | 'autoRenewalConsentText'
     | 'checkoutSubmitMessage'
-    | 'LEGAL_VERSIONS'
     | 'CONSENT_WORDING_VERSION'
 >;
 
@@ -372,6 +372,8 @@ export type CheckoutTermsDeps = Pick<
 export const purchaseKey = (priceId: string, currency: BillingTerms.Currency): string => `${priceId}|${currency}`;
 
 export interface CheckoutDeps {
+    /** _shared/legalVersions.ts: the policy versions a consent records. */
+    legalVersions: Pick<typeof LEGAL_VERSIONS, 'terms' | 'refunds'>;
     json: (body: unknown, status?: number) => Response;
     options: () => Response;
     clientKey: (req: Request) => string;
@@ -552,8 +554,8 @@ const openSessionUnderLock = async (
                 taxInclusive: purchase.terms.taxInclusive,
                 wording: purchase.consentText,
                 wordingVersion: deps.terms.CONSENT_WORDING_VERSION,
-                termsVersion: deps.terms.LEGAL_VERSIONS.terms,
-                refundPolicyVersion: deps.terms.LEGAL_VERSIONS.refunds,
+                termsVersion: deps.legalVersions.terms,
+                refundPolicyVersion: deps.legalVersions.refunds,
                 declaredCountry: purchase.country,
                 ip: deps.clientKey(req) === 'unknown' ? null : deps.clientKey(req),
                 userAgent: req.headers.get('User-Agent')?.slice(0, 512) ?? null,
