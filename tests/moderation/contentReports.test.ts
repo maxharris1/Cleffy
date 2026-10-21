@@ -8,8 +8,8 @@ import { REPEAT_INFRINGER_STRIKES, STRIKE_WINDOW_MONTHS } from '@/features/moder
 import {
     CONTENT_REPORT_LIMITS,
     REPEAT_INFRINGER_STRIKES as SERVER_STRIKES,
+    CONTENT_NOTICE_OUTBOX,
     STRIKE_WINDOW_MONTHS as SERVER_WINDOW,
-    contentNoticeIdempotencyKey,
     documentRefFromUrl,
     handleContentModeration,
     handleContentNotices,
@@ -170,6 +170,7 @@ const commonDeps = (outbox: ReturnType<typeof fakeOutbox>, sent: Sent[]) => ({
     clientKey: () => '203.0.113.9',
     checkRateLimit: async () => ({ ok: true }) as const,
     refundRateLimit: async () => undefined,
+    idempotencyKey: resendIdempotencyKey,
     sendEmail: async (
         to: string,
         message: { subject: string; text: string },
@@ -982,11 +983,18 @@ describe('the mail budget across uncertain sends (unknown keeps, a definite reje
         // Attempt-independent: Resend answers the repeat with the first send's
         // result, so a notice that did go out the first time is not sent twice.
         expect(keys).toEqual([`content-notice-outbox-${id}`, `content-notice-outbox-${id}`]);
-        expect(keys[0]).toBe(contentNoticeIdempotencyKey(id));
-        expect(keys[0]).toBe(resendIdempotencyKey('content-notice-outbox', id));
+        expect(keys[0]).toBe(resendIdempotencyKey(CONTENT_NOTICE_OUTBOX, id));
         expect(outbox.rows[0]?.status).toBe('sent');
         // Two attempts, two reservations kept: an over-count, never an under-count.
         expect(limiter.used(HOUR)).toBe(2);
+    });
+
+    it('takes the key from resendDelivery’s resendIdempotencyKey, not a copy of its format', async () => {
+        const { id, keys, deps } = setup([ok()]);
+        const idempotencyKey = vi.fn((outbox: string, rowId: string) => `via-helper:${outbox}:${rowId}`);
+        expect(await run({ ...deps, idempotencyKey })).toMatchObject({ sent: 1 });
+        expect(idempotencyKey).toHaveBeenCalledWith(CONTENT_NOTICE_OUTBOX, id);
+        expect(keys).toEqual([`via-helper:content-notice-outbox:${id}`]);
     });
 
     it('a window that refuses hands back what the other window reserved', async () => {

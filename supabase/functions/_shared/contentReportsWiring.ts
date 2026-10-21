@@ -12,7 +12,7 @@ import {
 import { logError } from './errorReporting.ts';
 import { LEGAL_OPERATOR } from './legalVersions.ts';
 import { mailLimit } from './mailBudget.ts';
-import { sendViaResend, type ResendResult } from './resendDelivery.ts';
+import { resendIdempotencyKey, sendViaResend, type ResendResult } from './resendDelivery.ts';
 import { checkRateLimit, clientKey, refundRateLimit, serviceClient } from './rateLimit.ts';
 
 /**
@@ -60,6 +60,7 @@ export const common = {
     clientKey,
     checkRateLimit,
     refundRateLimit,
+    idempotencyKey: resendIdempotencyKey,
     operator: {
         name: LEGAL_OPERATOR.name,
         postalAddress: LEGAL_OPERATOR.postalAddress,

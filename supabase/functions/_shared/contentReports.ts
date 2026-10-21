@@ -566,6 +566,12 @@ export interface CommonDeps {
         message: MailMessage,
         options: { bcc?: string; idempotencyKey: string },
     ) => Promise<ResendResult>;
+    /**
+     * `_shared/resendDelivery.ts`'s resendIdempotencyKey, passed in because
+     * this file takes no runtime imports. A notice's key is
+     * (CONTENT_NOTICE_OUTBOX, its outbox row id): the row's, never the attempt's.
+     */
+    idempotencyKey: (outbox: string, rowId: string) => string;
     /** Hand back one use of a checkRateLimit bucket (refund_edge_rate_limit); best effort. */
     refundRateLimit: (key: string) => Promise<void>;
     /** Each sender's mail budget. */
@@ -581,14 +587,6 @@ export interface CommonDeps {
 
 /** The outbox name in a notice's Idempotency-Key (content_notice_outbox). */
 export const CONTENT_NOTICE_OUTBOX = 'content-notice-outbox';
-
-/**
- * A notice's Idempotency-Key: its outbox row, never the attempt.
- * resendDelivery's resendIdempotencyKey(CONTENT_NOTICE_OUTBOX, id), written
- * out because this file takes no runtime imports;
- * tests/moderation/contentReports.test.ts holds the two together.
- */
-export const contentNoticeIdempotencyKey = (noticeId: string): string => `${CONTENT_NOTICE_OUTBOX}-${noticeId}`;
 
 /**
  * Whether a send's budget reservation goes back: only when it was certainly
@@ -682,7 +680,7 @@ export const deliverNotices = async (
         }
         const sent = await deps.sendEmail(notice.recipient, message, {
             ...(notice.bccLegal ? { bcc: deps.operator.legalEmail } : {}),
-            idempotencyKey: contentNoticeIdempotencyKey(notice.id),
+            idempotencyKey: deps.idempotencyKey(CONTENT_NOTICE_OUTBOX, notice.id),
         });
         // Kept unless the mail definitely did not go out: an unknown outcome
         // may have spent it, and the retry (same key) cannot send it twice.
