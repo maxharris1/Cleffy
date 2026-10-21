@@ -6,8 +6,9 @@
 -- 20261020180700_read_only_seats_storage.sql,
 -- 20261020180800_read_only_seats_live_ink.sql,
 -- 20261020180900_district_paying_status.sql,
--- 20261020181000_district_contract_end_clamp.sql and
--- 20261020181100_read_only_seats_grace_deadline.sql, in order, TWICE on top of a
+-- 20261020181000_district_contract_end_clamp.sql,
+-- 20261020181100_read_only_seats_grace_deadline.sql and
+-- 20261020181200_district_contract_end_automatic_retry.sql, in order, TWICE on top of a
 -- database that already has them, inside one transaction ending in ROLLBACK,
 -- then checks that the second run changed nothing it should not: every table,
 -- column, index, trigger, constraint, policy and cron job exists once, the
@@ -89,7 +90,7 @@ select
     (select seat_limit from public.studio_seat_overrides where studio_id = 'd1900000-0000-4000-8000-00000000c001') as seat_limit;
 
 -- ===========================================================================
--- Apply all three, twice
+-- Apply them all, twice
 -- ===========================================================================
 \ir ../../supabase/migrations/20261020180400_district_seat_overrides.sql
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
@@ -99,6 +100,7 @@ select
 \ir ../../supabase/migrations/20261020180900_district_paying_status.sql
 \ir ../../supabase/migrations/20261020181000_district_contract_end_clamp.sql
 \ir ../../supabase/migrations/20261020181100_read_only_seats_grace_deadline.sql
+\ir ../../supabase/migrations/20261020181200_district_contract_end_automatic_retry.sql
 
 \ir ../../supabase/migrations/20261020180400_district_seat_overrides.sql
 \ir ../../supabase/migrations/20261020180500_district_seat_cap_and_grace.sql
@@ -108,6 +110,7 @@ select
 \ir ../../supabase/migrations/20261020180900_district_paying_status.sql
 \ir ../../supabase/migrations/20261020181000_district_contract_end_clamp.sql
 \ir ../../supabase/migrations/20261020181100_read_only_seats_grace_deadline.sql
+\ir ../../supabase/migrations/20261020181200_district_contract_end_automatic_retry.sql
 
 reset role;
 
@@ -242,6 +245,17 @@ select pg_temp.holds (
     $q$select pg_get_functiondef('public.district_billing_rederive(uuid)'::regprocedure) like '%greatest(v_end, v_learned)%'
           and pg_get_functiondef('public.admin_set_district_contract_end(uuid, timestamptz, text, text, boolean)'::regprocedure)
               like '%greatest(p_contract_ends_at, v_learned)%'$q$
+);
+
+select pg_temp.holds (
+    'admin_set_district_contract_end is 20261020181200''s (a hand-back clears only an admin pin), service role only',
+    $q$select pg_get_functiondef('public.admin_set_district_contract_end(uuid, timestamptz, text, text, boolean)'::regprocedure)
+              like '%if v_row.contract_ends_source is not distinct from ''admin'' then%'
+          and has_function_privilege('service_role', 'public.admin_set_district_contract_end(uuid, timestamptz, text, text, boolean)', 'execute')
+          and not has_function_privilege('authenticated', 'public.admin_set_district_contract_end(uuid, timestamptz, text, text, boolean)', 'execute')
+          and not has_function_privilege('anon', 'public.admin_set_district_contract_end(uuid, timestamptz, text, text, boolean)', 'execute')
+          and (select p.proconfig = array['search_path=public'] from pg_proc p
+               where p.oid = 'public.admin_set_district_contract_end(uuid, timestamptz, text, text, boolean)'::regprocedure)$q$
 );
 
 -- ===========================================================================

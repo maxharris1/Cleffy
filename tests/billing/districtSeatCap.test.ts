@@ -183,6 +183,7 @@ const read = (...segments: string[]): string => readFileSync(resolve(process.cwd
 const SQL = read('supabase/migrations', MIGRATION);
 const PAYING_MIGRATION = '20261020180900_district_paying_status.sql';
 const CLAMP_MIGRATION = '20261020181000_district_contract_end_clamp.sql';
+const RETRY_MIGRATION = '20261020181200_district_contract_end_automatic_retry.sql';
 
 const latestDefining = (fn: string): string => {
     const pattern = new RegExp(`create\\s+or\\s+replace\\s+function\\s+public\\.${fn}\\s*\\(`, 'i');
@@ -235,7 +236,7 @@ describe('the seat-cap migration', () => {
     // and keeps that learned-at time for the same reported date.
     it('clamps every contract end to when Cleffy learned of it', () => {
         expect(latestDefining('district_billing_rederive')).toBe(CLAMP_MIGRATION);
-        expect(latestDefining('admin_set_district_contract_end')).toBe(CLAMP_MIGRATION);
+        expect(latestDefining('admin_set_district_contract_end')).toBe(RETRY_MIGRATION);
         const clamp = read('supabase/migrations', CLAMP_MIGRATION);
         const rederive = definition(clamp, 'district_billing_rederive');
         expect(rederive).toMatch(/v_stored := greatest\(v_end, v_learned\);/);
@@ -243,9 +244,22 @@ describe('the seat-cap migration', () => {
             /v_row\.contract_end_reported_at is not distinct from v_end\s+and v_row\.contract_end_learned_at is not null then\s+v_learned := v_row\.contract_end_learned_at;/,
         );
         expect(rederive).toMatch(/set contract_ends_at = v_stored,/);
-        const admin = definition(clamp, 'admin_set_district_contract_end');
+        const admin = definition(read('supabase/migrations', RETRY_MIGRATION), 'admin_set_district_contract_end');
         expect(admin).toMatch(/set contract_ends_at = greatest\(p_contract_ends_at, v_learned\),/);
         expect(admin).not.toMatch(/set contract_ends_at = p_contract_ends_at,/);
+    });
+
+    it('hands the contract end back to Stripe without restarting retention on a retry', () => {
+        const admin = definition(read('supabase/migrations', RETRY_MIGRATION), 'admin_set_district_contract_end');
+        // Only an admin pin is handed over, and it keeps its learned-at time.
+        expect(admin).toMatch(/if v_row\.contract_ends_source is not distinct from 'admin' then\s+--/);
+        expect(admin).toMatch(
+            /contract_end_learned_at = case when b\.contract_ends_at is null then null else b\.contract_end_learned_at end,/,
+        );
+        // Nothing clears the learned-at time unconditionally before re-deriving.
+        expect(admin).not.toMatch(
+            /if p_automatic then\s+update public\.district_billing b\s+set contract_ends_at = null/,
+        );
     });
 
     it('counts the grace period the TypeScript specification does', () => {

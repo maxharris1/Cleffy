@@ -1576,6 +1576,152 @@ select pg_temp.holds (
              'Back to Stripe', true) as r) x$q$
 );
 
+-- Codex round-5 review of #61, new minor 1 (migration 20261020181200): the
+-- hand-back cleared the learned-at time on every call, so repeating it once
+-- the district already followed Stripe learned the same end again, now, and
+-- moved the end and #64's purge later each time. Repeated after time has
+-- passed, it now changes nothing -- and writes nothing to the log.
+select pg_temp.act_as_server ();
+
+select pg_temp.learned_earlier ('d1600000-0000-4000-8000-00000000c009', interval '4 hours');
+
+select set_config('d16.billing_log_mark', (select coalesce(max(id), 0)::text from public.district_billing_log), true);
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'the same hand-back, repeated hours later once the district follows Stripe: the end and its learned-at time stay',
+    $q$select (r ->> 'contract_ends_at')::timestamptz = now() - interval '4 hours'
+          and (r ->> 'contract_end_learned_at')::timestamptz = now() - interval '4 hours'
+          and (r ->> 'contract_end_reported_at')::timestamptz = now() - interval '60 days'
+          and r ->> 'contract_ends_source' = 'stripe'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009', null, 'test',
+             'Back to Stripe (retry)', true) as r) x$q$
+);
+
+select pg_temp.holds (
+    'and so does the retention deadline: the purge is still 30 days after the end first learned',
+    $q$select contract_ends_at + interval '30 days' = now() - interval '4 hours' + interval '30 days'
+          and contract_end_learned_at = now() - interval '4 hours'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c009'$q$
+);
+
+select pg_temp.holds (
+    'the repeated hand-back writes nothing at all (no log row)',
+    $q$select not exists (
+           select 1 from public.district_billing_log l
+           where l.studio_id = 'd1600000-0000-4000-8000-00000000c009'
+             and l.id > current_setting('d16.billing_log_mark')::bigint
+       )$q$
+);
+
+select pg_temp.holds (
+    'nor does the hourly sweep after it',
+    $q$select public.reconcile_district_seats () >= 0
+          and (select contract_ends_at = now() - interval '4 hours' and contract_end_learned_at = now() - interval '4 hours'
+               from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c009')$q$
+);
+
+-- A real hand-back (the record pinned by an admin) still derives the end from
+-- Stripe again; when Stripe's date is the very date the pin held, the earlier
+-- learned-at time stands -- it never moves later for the same end.
+select pg_temp.holds (
+    'an admin pins Stripe''s own date',
+    $q$select r ->> 'contract_ends_source' = 'admin'
+          and (r ->> 'contract_end_reported_at')::timestamptz = now() - interval '60 days'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009',
+             now() - interval '60 days', 'test', 'Contract #9 term, as Stripe has it') as r) x$q$
+);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.learned_earlier ('d1600000-0000-4000-8000-00000000c009', interval '5 hours');
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'handed back with Stripe reporting that same date: re-derived, the earlier learned-at time kept',
+    $q$select r ->> 'contract_ends_source' = 'stripe'
+          and (r ->> 'contract_end_reported_at')::timestamptz = now() - interval '60 days'
+          and (r ->> 'contract_end_learned_at')::timestamptz = now() - interval '5 hours'
+          and (r ->> 'contract_ends_at')::timestamptz = now() - interval '5 hours'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009', null, 'test',
+             'Back to Stripe, same date', true) as r) x$q$
+);
+
+select pg_temp.holds (
+    'an admin pins a different date, a year out',
+    $q$select r ->> 'contract_ends_source' = 'admin'
+          and (r ->> 'contract_ends_at')::timestamptz = now() + interval '1 year'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009',
+             now() + interval '1 year', 'test', 'Contract #9 renewed again') as r) x$q$
+);
+
+select pg_temp.act_as_server ();
+
+set local session_replication_role = replica;
+
+update public.district_billing set contract_end_learned_at = now() - interval '6 hours'
+where studio_id = 'd1600000-0000-4000-8000-00000000c009';
+
+set local session_replication_role = origin;
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'handed back with Stripe reporting another date: a new end, re-derived and learned now',
+    $q$select r ->> 'contract_ends_source' = 'stripe'
+          and (r ->> 'contract_end_reported_at')::timestamptz = now() - interval '60 days'
+          and (r ->> 'contract_end_learned_at')::timestamptz = now()
+          and (r ->> 'contract_ends_at')::timestamptz = now()
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009', null, 'test',
+             'Back to Stripe, other date', true) as r) x$q$
+);
+
+select pg_temp.holds (
+    'an admin pins "never"',
+    $q$select r ->> 'contract_ends_source' = 'admin' and (r ->> 'contract_ends_at') is null
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009', null, 'test',
+             'Contract #9: keep everything') as r) x$q$
+);
+
+select pg_temp.holds (
+    'handed back from "never": Stripe''s end, learned now',
+    $q$select r ->> 'contract_ends_source' = 'stripe'
+          and (r ->> 'contract_end_reported_at')::timestamptz = now() - interval '60 days'
+          and (r ->> 'contract_end_learned_at')::timestamptz = now()
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009', null, 'test',
+             'Back to Stripe from never', true) as r) x$q$
+);
+
+-- Stripe ended the subscription with no date: a hand-back does not keep the
+-- pin's date as if it were Stripe's.
+select pg_temp.act_as_server ();
+
+set local session_replication_role = replica;
+
+update public.subscriptions set ended_at = null, current_period_end = null
+where stripe_subscription_id = 'sub_d16_late9';
+
+set local session_replication_role = origin;
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'an admin pins a date for a district Stripe ended with no date',
+    $q$select r ->> 'contract_ends_source' = 'admin' and (r ->> 'contract_ends_at') is not null
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009',
+             now() + interval '2 months', 'test', 'Contract #9, Stripe has no date') as r) x$q$
+);
+
+select pg_temp.holds (
+    'handed back, Stripe gives no date: no end is invented from the pin',
+    $q$select r ->> 'contract_ends_source' is null and (r ->> 'contract_ends_at') is null
+          and (r ->> 'contract_end_reported_at') is null and (r ->> 'contract_end_learned_at') is null
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c009', null, 'test',
+             'Back to Stripe, no date', true) as r) x$q$
+);
+
 select pg_temp.act_as_server ();
 
 -- ===========================================================================
