@@ -119,14 +119,25 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
  * the reset budget quietly shrinking.
  */
 export const MAIL_CATEGORY_CAPS = {
-    /** `guest-email-start`: the one-time code a share-link guest proves an address with. */
-    guestEmailCode: { hour: 50, day: 250 },
     /**
-     * `billing-cancel`: the signed-out "cancel my subscription" link. Taken out
-     * of the guest-email share (60/300 before) rather than out of the reserve.
-     * Purchase and cancellation CONFIRMATIONS are not counted here: one goes
-     * out per Stripe event, which no caller can multiply, and a confirmation
-     * the law requires must not be the mail a ceiling drops.
+     * `guest-email-start`: the one-time code a share-link guest proves an
+     * address with -- the guest and automated share. 60/300 until the launch
+     * senders arrived (October 2026); the launch fix pass set it to 35/190 so
+     * that the guest share stays at or under 35/hour and 190/day, and the rest
+     * of the 60/300 discretionary budget (25/110) is held for the legal and
+     * transactional mail: the cancel link below, and the content-report
+     * acknowledgment (10/40) and moderation notice (5/20) that #63 registers
+     * in this same table. All of it comes out of what was the guest share,
+     * never out of the auth reserve.
+     */
+    guestEmailCode: { hour: 35, day: 190 },
+    /**
+     * `billing-cancel`: the signed-out "cancel my subscription" link. A link
+     * this cap holds back is queued in the billing mail outbox and sent when
+     * the window reopens, never refused (Codex finding 4 on #62). Purchase and
+     * cancellation CONFIRMATIONS are not counted here: one goes out per Stripe
+     * event, which no caller can multiply, and a confirmation the law requires
+     * must not be the mail a ceiling holds back.
      */
     billingCancelLink: { hour: 10, day: 50 },
 } as const;

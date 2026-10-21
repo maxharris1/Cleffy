@@ -139,14 +139,31 @@ describe('guest-email derives its ceilings from the budget', () => {
         }
     });
 
-    it('takes its declared ceilings, and shares the old 60/300 with the cancel link', () => {
-        // The ceilings were 60/hour and 300/day before the signed-out cancel
-        // link (billing-cancel) needed a share of its own; that share came out
-        // of these, not out of the auth reserve.
-        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 50, windowMs: MAIL_WINDOW_MS.hour });
-        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 250, windowMs: MAIL_WINDOW_MS.day });
+    it('takes its declared ceilings, and shares the old 60/300 with the legal and transactional mail', () => {
+        // The ceilings were 60/hour and 300/day before the launch senders
+        // needed shares of their own. The fix pass caps the guest share at
+        // 35/190 and holds the other 25/110 for the cancel link here and #63's
+        // two legal senders -- out of these, never out of the auth reserve.
+        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 35, windowMs: MAIL_WINDOW_MS.hour });
+        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 190, windowMs: MAIL_WINDOW_MS.day });
         expect(mailLimit('billingCancelLink', 'hour')).toEqual({ limit: 10, windowMs: MAIL_WINDOW_MS.hour });
         expect(mailLimit('billingCancelLink', 'day')).toEqual({ limit: 50, windowMs: MAIL_WINDOW_MS.day });
+    });
+
+    it('fits the guest share, the cancel link and #63 legal senders inside 60/hour and 300/day', () => {
+        // The combined split agreed between #62 and #63 (fix packet B6/C5):
+        // guest <= 35/190, and the legal + transactional remainder of 25/110 is
+        // the cancel link (10/50) plus the content-report acknowledgment
+        // (10/40) and moderation notice (5/20) #63 adds to this table.
+        const legal = { hour: 10 + 5, day: 40 + 20 };
+        expect(MAIL_CATEGORY_CAPS.guestEmailCode.hour).toBeLessThanOrEqual(35);
+        expect(MAIL_CATEGORY_CAPS.guestEmailCode.day).toBeLessThanOrEqual(190);
+        for (const window of ['hour', 'day'] as const) {
+            const combined = allocatedMailCaps(window) + legal[window];
+            expect(combined, window).toBeLessThanOrEqual(discretionaryMailBudget(window));
+        }
+        expect(discretionaryMailBudget('hour')).toBe(60);
+        expect(discretionaryMailBudget('day')).toBe(300);
     });
 
     it('counts over windows a rate limiter can actually use', () => {
