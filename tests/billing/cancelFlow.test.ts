@@ -241,7 +241,7 @@ const harness = (
         linkToken: async (secret, rowId) => `token-${createHash('sha256').update(`${secret}:${rowId}`).digest('hex')}`,
         userForEmail: vi.fn(async (email: string) => (email === EMAIL ? USER : null)),
         cancellableSubscription,
-        // save_cancel_link_token, modelled: under the row's lease, with the
+        // save_cancel_link_token_v2, modelled: under the row's lease, with the
         // row's expiry, DO NOTHING for a token already saved, and refused --
         // the row settled -- with under 120 s left on the DATABASE's clock,
         // whose count of the seconds left is the answer.
@@ -921,7 +921,7 @@ describe('billing-cancel/index.ts is wiring only', () => {
 
     it('saves a link only through save_cancel_link_token, with the expiry the database fixed (Codex round 4 on #62)', () => {
         const store = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingCancelStore.ts'), 'utf8');
-        expect(store).toContain("rpc('save_cancel_link_token', {");
+        expect(store).toContain("rpc('save_cancel_link_token_v2', {");
         // The upsert that refreshed the expiry on every retry is gone, and so is
         // the per-account cleanup that deleted a spent token while its row
         // could still retry: the store no longer writes the token table at all.
@@ -941,7 +941,7 @@ describe('billing-cancel/index.ts is wiring only', () => {
 
     it("sends only on the database's count of the time left, with the margin it refuses below (Codex round 5 on #62)", () => {
         const migration = readFileSync(
-            resolve(process.cwd(), 'supabase/migrations/20261020160400_cancel_link_tombstones_db_clock.sql'),
+            resolve(process.cwd(), 'supabase/migrations/20261020160500_cancel_link_save_replayable.sql'),
             'utf8',
         );
         expect(CANCEL_LINK_SEND_MARGIN_S).toBe(120);

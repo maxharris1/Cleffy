@@ -99,21 +99,21 @@ update t_ids set hash = repeat('c', 64) where label = 'link';
 
 select pg_temp.chk('10 the lease holder saves the link',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'link'),
-    (select claim from t_ids where label = 'link'), (select hash from t_ids where label = 'link'), pg_temp.u(1))->>'answer' = 'saved'$q$);
+    (select claim from t_ids where label = 'link'), (select hash from t_ids where label = 'link'), pg_temp.u(1)) = 'saved'$q$);
 select pg_temp.chk('11 ... with the row''s expiry and mode, for that row, unused',
 $q$select t.expires_at = o.link_expires_at and t.mode = o.mode and t.outbox_id = o.id and t.used_at is null
    from public.billing_cancel_tokens t join public.billing_mail_outbox o on o.id = t.outbox_id
    where t.token_hash = (select hash from t_ids where label = 'link')$q$);
 select pg_temp.chk('12 a worker without the lease is told so, and saves nothing',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'link'),
-    gen_random_uuid(), repeat('d', 64), pg_temp.u(1))->>'answer' = 'not_held'
+    gen_random_uuid(), repeat('d', 64), pg_temp.u(1)) = 'not_held'
    and not exists (select 1 from public.billing_cancel_tokens where token_hash = repeat('d', 64))$q$);
 
 -- A later attempt at the same row: time has passed (pushed back by the clock,
 -- since now() is fixed inside this transaction), the expiry has not.
 select pg_temp.chk('13 a second save of the same link answers saved',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'link'),
-    (select claim from t_ids where label = 'link'), (select hash from t_ids where label = 'link'), pg_temp.u(1))->>'answer' = 'saved'$q$);
+    (select claim from t_ids where label = 'link'), (select hash from t_ids where label = 'link'), pg_temp.u(1)) = 'saved'$q$);
 select pg_temp.chk('14 ... and leaves the one token exactly as the first save stored it',
 $q$select count(*) = 1 and bool_and(t.expires_at = o.created_at + interval '1 hour')
    from public.billing_cancel_tokens t join public.billing_mail_outbox o on o.id = t.outbox_id
@@ -164,7 +164,7 @@ where id = (select id from t_ids where label = 'late');
 
 select pg_temp.chk('20 a save after the expiry is refused as expired',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'late'),
-    (select claim from t_ids where label = 'late'), (select hash from t_ids where label = 'late'), pg_temp.u(1))->>'answer' = 'expired'$q$);
+    (select claim from t_ids where label = 'late'), (select hash from t_ids where label = 'late'), pg_temp.u(1)) = 'expired'$q$);
 select pg_temp.chk('21 ... and saves nothing',
 $q$select not exists (select 1 from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'late'))$q$);
 select pg_temp.chk('22 the worker settles it expired',
@@ -181,7 +181,7 @@ $q$select not exists (select 1 from public.claim_billing_mail (10, interval '2 m
     where id = (select id from t_ids where label = 'late'))$q$);
 select pg_temp.chk('25 ... and its old lease can neither save nor settle it',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'late'),
-    (select claim from t_ids where label = 'late'), (select hash from t_ids where label = 'late'), pg_temp.u(1))->>'answer' = 'not_held'
+    (select claim from t_ids where label = 'late'), (select hash from t_ids where label = 'late'), pg_temp.u(1)) = 'not_held'
    and not public.settle_billing_mail ((select id from t_ids where label = 'late'), (select claim from t_ids where label = 'late'), 'retry')$q$);
 insert into t_ids (label, id, claim)
 select 'confirmation', id, claim_token from public.billing_mail_outbox
@@ -210,7 +210,7 @@ from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id;
 -- so the row is put back to retry.
 select pg_temp.chk('40 the first attempt saves the link',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'spent'),
-    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1))->>'answer' = 'saved'$q$);
+    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1)) = 'saved'$q$);
 select pg_temp.chk('41 ... Resend''s answer is lost, so the row will retry',
 $q$select public.settle_billing_mail ((select id from t_ids where label = 'spent'),
     (select claim from t_ids where label = 'spent'), 'retry', 'resend unknown: network', interval '1 minute')$q$);
@@ -233,7 +233,7 @@ update t_ids t set claim = c.claim_token
 from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id and t.label = 'spent';
 select pg_temp.chk('45 a retry after the link was used saves it again',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'spent'),
-    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1))->>'answer' = 'saved'$q$);
+    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1)) = 'saved'$q$);
 select pg_temp.chk('46 ... and the link is still spent, at the moment it was spent, with its first expiry',
 $q$select t.used_at = now() and t.expires_at = o.created_at + interval '1 hour'
    from public.billing_cancel_tokens t join public.billing_mail_outbox o on o.id = t.outbox_id
@@ -263,7 +263,7 @@ update t_ids t set claim = c.claim_token
 from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id and t.label = 'spent';
 select pg_temp.chk('51 the delayed retry is refused as expired',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'spent'),
-    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1))->>'answer' = 'expired'$q$);
+    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1)) = 'expired'$q$);
 select pg_temp.chk('52 ... and settled for good',
 $q$select public.settle_billing_mail ((select id from t_ids where label = 'spent'),
     (select claim from t_ids where label = 'spent'), 'expired', 'expired before delivery')$q$);
@@ -282,7 +282,7 @@ $q$select not exists (select 1 from public.claim_billing_mail (10, interval '2 m
     where id = (select id from t_ids where label = 'spent'))$q$);
 select pg_temp.chk('57 ... and its old lease cannot save the link',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'spent'),
-    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1))->>'answer' = 'not_held'$q$);
+    (select claim from t_ids where label = 'spent'), (select hash from t_ids where label = 'spent'), pg_temp.u(1)) = 'not_held'$q$);
 reset role;
 select pg_temp.refused('58 nothing can insert the spent token again: not for its row',
 $q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
@@ -304,7 +304,7 @@ update t_ids t set claim = c.claim_token, hash = repeat('2', 64)
 from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id;
 select pg_temp.chk('61 a link is saved and sent; its row is deleted',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'sent'),
-    (select claim from t_ids where label = 'sent'), (select hash from t_ids where label = 'sent'), pg_temp.u(1))->>'answer' = 'saved'
+    (select claim from t_ids where label = 'sent'), (select hash from t_ids where label = 'sent'), pg_temp.u(1)) = 'saved'
    and public.settle_billing_mail ((select id from t_ids where label = 'sent'), (select claim from t_ids where label = 'sent'), 'sent')$q$);
 select pg_temp.refused('62 a live link cannot be deleted before its expiry',
 $q$delete from public.billing_cancel_tokens where token_hash = (select hash from t_ids where label = 'sent')$q$, '55000');
@@ -328,7 +328,7 @@ update t_ids t set claim = c.claim_token, hash = repeat('3', 64)
 from public.claim_billing_mail (10, interval '2 minutes') c where c.id = t.id;
 select pg_temp.chk('66 a waiting request''s link is saved',
 $q$select public.save_cancel_link_token ((select id from t_ids where label = 'leaving'),
-    (select claim from t_ids where label = 'leaving'), (select hash from t_ids where label = 'leaving'), pg_temp.u(2))->>'answer' = 'saved'$q$);
+    (select claim from t_ids where label = 'leaving'), (select hash from t_ids where label = 'leaving'), pg_temp.u(2)) = 'saved'$q$);
 reset role;
 select pg_temp.chk('67 the account can still be deleted, and its link goes with it',
 $q$with gone as (delete from auth.users where id = pg_temp.u(2) returning 1)
@@ -373,9 +373,9 @@ where t.label = 'race';
 -- `a` saves first and holds its transaction open: the row is locked.
 select extensions.dblink_exec('a', 'begin');
 select pg_temp.chk('30 the first retry saves, holding the row',
-$q$select r.answer->>'answer' = 'saved' from extensions.dblink('a', format('select public.save_cancel_link_token (%L, %L, %L, %L)',
+$q$select r.answer = 'saved' from extensions.dblink('a', format('select public.save_cancel_link_token (%L, %L, %L, %L)',
     (select id from t_ids where label = 'race'), (select claim from t_ids where label = 'race'),
-    (select hash from t_ids where label = 'race'), '11fe0000-5ac0-4000-8000-000000000009')) as r(answer jsonb)$q$);
+    (select hash from t_ids where label = 'race'), '11fe0000-5ac0-4000-8000-000000000009')) as r(answer text)$q$);
 -- `b`, a moment later, saves the same link: it waits for `a`.
 select pg_sleep(0.2);
 select extensions.dblink_send_query('b', format('select public.save_cancel_link_token (%L, %L, %L, %L)',
@@ -386,8 +386,8 @@ select pg_temp.chk('31 the second retry waits on the first, rather than racing i
 $q$select extensions.dblink_is_busy('b') = 1$q$);
 select extensions.dblink_exec('a', 'commit');
 select pg_temp.chk('32 ... and once the first commits, it answers saved too',
-$q$select r.answer->>'answer' = 'saved' from extensions.dblink_get_result('b') as r(answer jsonb)$q$);
-select * from extensions.dblink_get_result('b') as r(answer jsonb);
+$q$select r.answer = 'saved' from extensions.dblink_get_result('b') as r(answer text)$q$);
+select * from extensions.dblink_get_result('b') as r(answer text);
 select pg_temp.chk('33 there is one token, with the expiry the link was asked with',
 $q$select r.n = 1 and r.ok from extensions.dblink('a', format($s$select count(*), bool_and(t.expires_at = o.created_at + interval '1 hour'
        and t.expires_at = o.link_expires_at and t.used_at is null)

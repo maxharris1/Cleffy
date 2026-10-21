@@ -203,8 +203,11 @@ billingCancelStore.ts itself against the same local stack (skipped unless
 `CLEFFY_LOCAL_SUPABASE_URL` and `CLEFFY_LOCAL_SERVICE_ROLE_KEY` are set).
 
 `cancel_link_tombstones.sql` and `cancel_link_db_clock.sql` prove
-`supabase/migrations/20261020160400_cancel_link_tombstones_db_clock.sql` (Codex
-round 5 on #62). The first: a token the cleanup deletes leaves a permanent
+`supabase/migrations/20261020160400_cancel_link_tombstones_db_clock.sql` and
+`20261020160500_cancel_link_save_replayable.sql` (Codex round 5 on #62; the
+second moves the save that answers the seconds left to
+`save_cancel_link_token_v2`, so `save_cancel_link_token` stays `returns text`
+and 20261020160300 still replays). The first: a token the cleanup deletes leaves a permanent
 tombstone (its hash and outbox id, nothing else), and neither a direct insert of
 that hash against a new pending request (the service role may not insert tokens
 at all; the owner is refused by the trigger) nor a request re-created under the

@@ -51,8 +51,8 @@ export const CANCEL_LINK_TTL_MS = 60 * 60_000;
 
 /**
  * The least of a link's hour that must be left, on the DATABASE's clock, for
- * it to be sent (Codex round 5 on #62, decision 30): save_cancel_link_token
- * (migration 20261020160400) refuses below it and answers how many seconds
+ * it to be sent (Codex round 5 on #62, decision 30): save_cancel_link_token_v2
+ * (migrations 20261020160400 and 20261020160500) refuses below it and answers how many seconds
  * are left, and the send is decided on that answer, never on this function's
  * own clock -- which may be behind. What it leaves covers the send itself.
  */
@@ -136,7 +136,7 @@ export interface CancelLinkLease {
     linkExpiresAt: string | null;
 }
 
-/** What saving a link's token answered (save_cancel_link_token). */
+/** What saving a link's token answered (save_cancel_link_token_v2). */
 export interface SaveTokenResult {
     answer:
         /** Stored -- now, or by an earlier attempt at this row, whose expiry and used_at stand. */

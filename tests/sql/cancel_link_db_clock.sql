@@ -1,4 +1,5 @@
--- Behaviour proof for 20261020160400_cancel_link_tombstones_db_clock.sql, the
+-- Behaviour proof for 20261020160400_cancel_link_tombstones_db_clock.sql and
+-- 20261020160500_cancel_link_save_replayable.sql (save_cancel_link_token_v2), the
 -- clock half (Codex round 5 on #62, new major 2; decision 30): whether a
 -- cancel link can still be sent is decided on the database's clock, read
 -- AFTER the row lock is held, with 120 seconds to spare -- and the time left
@@ -44,11 +45,11 @@ begin
 perform set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
 perform set_config('role', 'service_role', true);
 end $f$;
--- save_cancel_link_token's answer as jsonb, kept on the row's t_ids entry.
+-- save_cancel_link_token_v2's answer, kept on the row's t_ids entry.
 create function pg_temp.save(p_label text) returns void language plpgsql as $f$
 declare v jsonb;
 begin
-execute 'select to_jsonb(public.save_cancel_link_token ($1, $2, $3, $4))'
+execute 'select to_jsonb(public.save_cancel_link_token_v2 ($1, $2, $3, $4))'
     into v using (select id from t_ids where label = p_label), (select claim from t_ids where label = p_label),
     (select hash from t_ids where label = p_label), pg_temp.u(1);
 update t_ids set answer = v where label = p_label;
@@ -68,7 +69,7 @@ select pg_temp.as_service();
 insert into t_ids (label, id, hash)
 select l, public.enqueue_billing_mail ('cancel_link', null, 'test', '{"email": "clock@cancellink.test", "origin": "https://cleffy.io"}'),
     pg_temp.random_hash()
-from unnest(array['short', 'ten', 'hour']) l;
+from unnest(array['short', 'ten', 'hour', 'legacy']) l;
 update t_ids t set claim = c.claim_token
 from public.claim_billing_mail (50, interval '2 minutes') c where c.id = t.id;
 -- Brought forward (the one move an expiry allows), from the real clock:
@@ -77,6 +78,8 @@ update public.billing_mail_outbox set link_expires_at = clock_timestamp() + inte
 where id = (select id from t_ids where label = 'short');
 update public.billing_mail_outbox set link_expires_at = clock_timestamp() + interval '600 seconds'
 where id = (select id from t_ids where label = 'ten');
+update public.billing_mail_outbox set link_expires_at = clock_timestamp() + interval '119 seconds'
+where id = (select id from t_ids where label = 'legacy');
 select pg_temp.save('short');
 select pg_temp.save('ten');
 select pg_temp.save('hour');
@@ -102,15 +105,21 @@ select pg_temp.chk('07 a fresh link is saved with its hour, counted on the clock
 $q$select answer->>'answer' = 'saved' and (answer->>'remaining_seconds')::int between 3500 and 3599
    from t_ids where label = 'hour'$q$);
 select pg_temp.chk('08 a worker without the lease is told so, with no time to its name',
-$q$select to_jsonb(public.save_cancel_link_token ((select id from t_ids where label = 'hour'), gen_random_uuid(),
+$q$select to_jsonb(public.save_cancel_link_token_v2 ((select id from t_ids where label = 'hour'), gen_random_uuid(),
     pg_temp.random_hash(), pg_temp.u(1))) = '{"answer": "not_held", "remaining_seconds": 0}'::jsonb$q$);
+select pg_temp.chk('11 the save under its old name, for the previous edge function, is the same save: text, and refused with 119 s left',
+$q$select public.save_cancel_link_token ((select id from t_ids where label = 'legacy'), (select claim from t_ids where label = 'legacy'),
+    (select hash from t_ids where label = 'legacy'), pg_temp.u(1)) = 'expired'
+   and pg_typeof(public.save_cancel_link_token (gen_random_uuid(), gen_random_uuid(), pg_temp.random_hash(), pg_temp.u(1)))::text = 'text'$q$);
+select pg_temp.chk('12 ... and settles the row the same way',
+$q$select status = 'expired' and not (payload ? 'email') from public.billing_mail_outbox where id = (select id from t_ids where label = 'legacy')$q$);
 reset role;
 select pg_temp.chk('09 the margin is 120 seconds, read after the lock, on clock_timestamp()',
 $q$select position('for update' in s) > 0
    and position('clock_timestamp()' in s) > position('for update' in s)
    and position('interval ''120 seconds''' in s) > 0
    and position('now()' in s) = 0
-   from (select prosrc s from pg_proc where oid = 'public.save_cancel_link_token(uuid, uuid, text, uuid)'::regprocedure) p$q$);
+   from (select prosrc s from pg_proc where oid = 'public.save_cancel_link_token_v2(uuid, uuid, text, uuid)'::regprocedure) p$q$);
 select pg_temp.chk('10 the token guard checks expiry on clock_timestamp() too',
 $q$select position('v_expires <= clock_timestamp()' in s) > 0
    from (select prosrc s from pg_proc where oid = 'public.billing_cancel_tokens_lifetime()'::regprocedure) p$q$);
@@ -155,7 +164,7 @@ perform extensions.dblink_exec('b', 'begin');
 perform * from extensions.dblink('b', 'select now()') as x(t timestamptz);
 perform extensions.dblink_exec('a', 'begin');
 perform * from extensions.dblink('a', format('select id from public.billing_mail_outbox where id = %L for update', r.id)) as x(id uuid);
-perform extensions.dblink_send_query('b', format('select to_jsonb(public.save_cancel_link_token (%L, %L, %L, %L))',
+perform extensions.dblink_send_query('b', format('select to_jsonb(public.save_cancel_link_token_v2 (%L, %L, %L, %L))',
     r.id, r.claim, r.hash, 'c10c0000-5ac0-4000-8000-000000000009'));
 perform pg_sleep(p_hold);
 insert into t_results values (p_label || ' b waits on a''s lock', extensions.dblink_is_busy('b') = 1, null);

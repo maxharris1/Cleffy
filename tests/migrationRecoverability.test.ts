@@ -396,3 +396,49 @@ describe('20261020160400_cancel_link_tombstones_db_clock — replays cleanly', (
         expect(sql()).not.toMatch(/cron\.(schedule|unschedule)/i);
     });
 });
+
+/**
+ * 20261020160500 (launch checkout, Codex round 5 on #62) gives the jsonb save
+ * its own name, save_cancel_link_token_v2, and puts save_cancel_link_token
+ * back to `returns text`, so 20261020160300 -- which creates it that way --
+ * replays over a database that has 20261020160400. Dropping the old save IF
+ * EXISTS whatever it returns is what lets this one re-run too. Reconciled by
+ * hand at merge time, like the blocks above.
+ */
+describe('20261020160500_cancel_link_save_replayable — replays cleanly, and lets 20261020160300 replay', () => {
+    const NAME = '20261020160500_cancel_link_save_replayable.sql';
+    const sql = (): string => migrations().find(({ name }) => name === NAME)?.sql ?? '';
+    const sqlOf = (name: string): string => migrations().find((m) => m.name === name)?.sql ?? '';
+
+    it('exists, after 20261020160400 and before #61 district seats', () => {
+        const names = migrations().map(({ name }) => name);
+        expect(names.indexOf(NAME)).toBeGreaterThan(
+            names.indexOf('20261020160400_cancel_link_tombstones_db_clock.sql'),
+        );
+        expect(NAME < '20261020180400').toBe(true);
+    });
+
+    it('only drops the old save and replaces functions', () => {
+        const text = sql();
+        expect([...text.matchAll(/drop\s+function\s+if\s+exists\s+([a-z_.]+)/gi)].map((m) => m[1])).toEqual([
+            'public.save_cancel_link_token',
+        ]);
+        expect(text).not.toMatch(/create\s+(function|table|index|trigger)\s/i);
+        expect(text).not.toMatch(/cron\.(schedule|unschedule)/i);
+    });
+
+    it('leaves save_cancel_link_token returning text, as 20261020160300 creates it', () => {
+        const returns = (text: string): string | undefined =>
+            text.match(
+                /create\s+or\s+replace\s+function\s+public\.save_cancel_link_token\s*\([^)]*\)\s*returns\s+(\w+)/i,
+            )?.[1];
+        expect(returns(sqlOf('20261020160300_cancel_link_token_lifetime.sql'))).toBe('text');
+        expect(returns(sql())).toBe('text');
+        expect(sql()).toMatch(
+            /create\s+or\s+replace\s+function\s+public\.save_cancel_link_token_v2\s*\([^)]*\)\s*returns\s+jsonb/i,
+        );
+        for (const fn of ['save_cancel_link_token', 'save_cancel_link_token_v2']) {
+            expect(sql()).toContain(`grant execute on function public.${fn} (uuid, uuid, text, uuid) to service_role`);
+        }
+    });
+});

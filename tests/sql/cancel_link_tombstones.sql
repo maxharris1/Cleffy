@@ -1,4 +1,5 @@
--- Behaviour proof for 20261020160400_cancel_link_tombstones_db_clock.sql, the
+-- Behaviour proof for 20261020160400_cancel_link_tombstones_db_clock.sql (and
+-- 20261020160500, which moves its save to save_cancel_link_token_v2), the
 -- tombstone half (Codex round 5 on #62, new major 1; decision 29): a cancel
 -- link that was spent or deleted can never come back, whoever writes.
 --
@@ -8,7 +9,7 @@
 --      refused: the service role may not insert tokens at all any more, and
 --      the table's owner, which may, is refused by the tombstone trigger;
 --   3. a request re-created under the deleted row's id (the same HMAC) cannot
---      save that link -- or any other -- through save_cancel_link_token, which
+--      save that link -- or any other -- through save_cancel_link_token_v2, which
 --      settles the row for good instead, and a direct insert for that id is
 --      refused too;
 --   4. an account's deletion tombstones its links as well;
@@ -51,11 +52,11 @@ begin
 perform set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
 perform set_config('role', 'service_role', true);
 end $f$;
--- save_cancel_link_token's answer, whatever shape it comes back in.
+-- save_cancel_link_token_v2's answer (or, before it existed, the old save's).
 create function pg_temp.answer(p_label text, p_hash text default null) returns text language plpgsql as $f$
 declare v jsonb;
 begin
-execute 'select to_jsonb(public.save_cancel_link_token ($1, $2, $3, $4))'
+execute 'select public.save_cancel_link_token_v2 ($1, $2, $3, $4)'
     into v using (select id from t_ids where label = p_label), (select claim from t_ids where label = p_label),
     coalesce(p_hash, (select hash from t_ids where label = p_label)), pg_temp.u(1);
 return coalesce(v->>'answer', v #>> '{}');
@@ -127,7 +128,7 @@ $q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_
            (select id from t_ids where label = 'fresh'))
    on conflict (token_hash) do update set used_at = null$q$, '42501');
 reset role;
--- The table's owner keeps INSERT (save_cancel_link_token runs as it), so the
+-- The table's owner keeps INSERT (the save runs as it), so the
 -- trigger is what stands in its way.
 select pg_temp.refused('13 the table''s owner is refused by the tombstone',
 $q$insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
@@ -197,8 +198,8 @@ select 'leaving', public.enqueue_billing_mail ('cancel_link', null, 'test', '{"e
     repeat('6', 64);
 select pg_temp.claim('leaving');
 select pg_temp.chk('30 a waiting request''s link is saved',
-$q$select to_jsonb(public.save_cancel_link_token ((select id from t_ids where label = 'leaving'),
-    (select claim from t_ids where label = 'leaving'), (select hash from t_ids where label = 'leaving'), pg_temp.u(2)))->>'answer' = 'saved'$q$);
+$q$select public.save_cancel_link_token_v2 ((select id from t_ids where label = 'leaving'),
+    (select claim from t_ids where label = 'leaving'), (select hash from t_ids where label = 'leaving'), pg_temp.u(2))->>'answer' = 'saved'$q$);
 reset role;
 select pg_temp.chk('31 the account is deleted, and its link with it',
 $q$with gone as (delete from auth.users where id = pg_temp.u(2) returning 1) select count(*) = 1 from gone$q$);
@@ -239,12 +240,13 @@ $q$select not has_table_privilege('service_role', 'public.billing_cancel_tokens'
    and has_table_privilege('service_role', 'public.billing_cancel_tokens', 'select')
    and has_table_privilege('service_role', 'public.billing_cancel_tokens', 'update')
    and has_table_privilege('service_role', 'public.billing_cancel_tokens', 'delete')$q$);
-select pg_temp.chk('50 save_cancel_link_token runs as the owner, with search_path pinned, for the service role alone',
-$q$select p.prosecdef and p.proconfig @> array['search_path=""']
+select pg_temp.chk('50 both saves run as the owner, with search_path pinned, for the service role alone',
+$q$select count(*) = 2 and bool_and(p.prosecdef and p.proconfig @> array['search_path=""']
    and has_function_privilege('service_role', p.oid, 'execute')
    and not has_function_privilege('authenticated', p.oid, 'execute')
-   and not has_function_privilege('anon', p.oid, 'execute')
-   from pg_proc p where p.oid = 'public.save_cancel_link_token(uuid, uuid, text, uuid)'::regprocedure$q$);
+   and not has_function_privilege('anon', p.oid, 'execute'))
+   from pg_proc p where p.oid in ('public.save_cancel_link_token_v2(uuid, uuid, text, uuid)'::regprocedure,
+       'public.save_cancel_link_token(uuid, uuid, text, uuid)'::regprocedure)$q$);
 select pg_temp.chk('51 the tombstone triggers: search_path pinned empty, nobody may call them',
 $q$select count(*) = 3 and bool_and(p.proconfig @> array['search_path=""']
     and not has_function_privilege('authenticated', p.oid, 'execute')

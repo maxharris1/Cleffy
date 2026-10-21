@@ -104,8 +104,8 @@ export const cancellableSubscription = async (
 };
 
 /**
- * The link's token, saved through save_cancel_link_token (migrations
- * 20261020160300 and 20261020160400): only by the worker holding the row's
+ * The link's token, saved through save_cancel_link_token_v2 (migrations
+ * 20261020160300, 20261020160400 and 20261020160500): only by the worker holding the row's
  * lease, with the row's own expiry -- set once, when the link was asked for --
  * and INSERT ... ON CONFLICT (token_hash) DO NOTHING, so a retry of the row,
  * or two at once, never moves the expiry an earlier save stored or touches its
@@ -118,7 +118,7 @@ export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, out
     // row was still retrying is how a spent link came back (Codex round 4,
     // major on #62). The cron tick removes a token once it has expired and its
     // row can no longer retry, and the table's trigger allows nothing sooner.
-    const { data, error } = await admin().rpc('save_cancel_link_token', {
+    const { data, error } = await admin().rpc('save_cancel_link_token_v2', {
         p_outbox_id: outboxId,
         p_claim: claimToken,
         p_hash: hash,
@@ -134,7 +134,7 @@ export const saveToken: CancelLinkDeps['saveToken'] = async ({ hash, userId, out
         typeof remaining !== 'number' ||
         !Number.isFinite(remaining)
     ) {
-        throw new Error(`save_cancel_link_token answered ${JSON.stringify(data)}`);
+        throw new Error(`save_cancel_link_token_v2 answered ${JSON.stringify(data)}`);
     }
     return { answer, remainingSeconds: remaining };
 };
