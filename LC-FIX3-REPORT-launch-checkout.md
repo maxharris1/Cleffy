@@ -182,3 +182,22 @@ None. Codex reported no new minors for #62.
 - No UI changes.
 - No migrations.
 - No other session messaged.
+
+## Addendum (20:50 UTC): a later commit on the PR by another session
+
+After this report was written, another session pushed **`78ee399e2d26085d674aca0c8c5fe3cca650e18d`**, "Cancel links: fix the expiry once, when the link is asked for", to `mh/launch-checkout` as a fast-forward. Its commit message says it addresses Codex round 4. It is now the PR head. This session didn't write it and left it as it is.
+
+What it changes in the work above:
+
+- **The `saveToken` upsert is superseded.** It's replaced by a `save_cancel_link_token` RPC (new migration `20261020160300_cancel_link_token_lifetime.sql`, with `scripts/apply-migrations.sql` regenerated in that commit).
+  - The RPC saves only under the outbox row's lease, using the row's own `link_expires_at`, set once at `created_at + 1 hour`.
+  - It inserts with `ON CONFLICT (token_hash) DO NOTHING`, so a retry never moves the expiry or touches `used_at`.
+  - My "retry refreshes the expiry" behaviour, and the local PostgREST upsert check described above, no longer apply.
+  - The cancel-link email now names the expiry time instead of "60 minutes", which keeps it byte-identical across retries. That keeps the idempotency contract intact.
+- **Unchanged by `78ee399`:**
+  - `supabase/functions/_shared/resendDelivery.ts` and `tests/security/resendDelivery.test.ts`, so the blobs and the copy instructions above still hold;
+  - the guest-email files;
+  - `mailBudget.ts` and its test, whose diff against `664ab41c` is still empty.
+- **Merge note:** it adds a migration, so `tests/migrationRecoverability.test.ts` and the `scripts/apply-migrations.sql` reconciliation at merge time now involve one more #62 migration.
+- **Local check on `78ee399`:** `tests/billing`, `resendDelivery`, `guestEmail` and `migrationRecoverability` give 634 passed and 1 skipped. The skipped test is `tests/billing/cancelLinkStore.test.ts`, which needs the local stack.
+- **CI on `78ee399`:** in progress at 20:50 UTC. `supabase-drift`, `omr-service` and Vercel had passed; both `checks` jobs were still running.
