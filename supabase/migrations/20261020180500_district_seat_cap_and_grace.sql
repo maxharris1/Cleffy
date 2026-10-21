@@ -519,6 +519,18 @@ begin
     loop
         v_moved := v_moved + public.reconcile_studio_seats (v_studio);
     end loop;
+
+    -- An admin's pin the clock has just carried into the past, while the owner
+    -- pays, is cleared here (district_billing_rederive): no event marks it.
+    for v_studio in
+        select b.studio_id
+        from public.district_billing b
+        where b.contract_ends_source = 'admin'
+          and b.contract_ends_at <= now()
+        order by b.studio_id
+    loop
+        perform public.district_billing_rederive (v_studio);
+    end loop;
     return v_moved;
 end;
 $$;
@@ -620,7 +632,8 @@ for each row execute function public.studio_members_release_seat ();
 -- purges them, while the seats past 5 go read-only as decisions item 2 says. Derived from scratch on every call, so whatever moved
 -- (a subscription write, the override naming another subscription, an admin
 -- handing the date back to Stripe) leaves the same answer. An admin's pin is
--- the contract's own date and is left alone. Clearing the date is also what
+-- the contract's own date and is left alone, unless it has already passed while
+-- the owner pays (Max, 2026-10-21): then it is cleared and logged. Clearing the date is also what
 -- stops a purge cycle already under way: the retention workflow (#64) cancels
 -- any cycle whose contract end is cleared or moved.
 create or replace function public.district_billing_rederive (p_studio uuid) returns void
@@ -631,9 +644,10 @@ declare
     v_owner uuid;
     v_linked public.subscriptions;
     v_end timestamptz;
+    v_paying boolean;
 begin
     select * into v_row from public.district_billing b where b.studio_id = p_studio for update;
-    if not found or v_row.contract_ends_source = 'admin' then
+    if not found then
         return;
     end if;
 
@@ -643,12 +657,36 @@ begin
     -- Invoicing, is a district that pays (Max, 2026-10-21): #64 never purges
     -- it. Its seats past the cap of 5 are still read-only (decisions item 2);
     -- that is the seat limit's business, not this record's.
-    if not exists (
+    v_paying := exists (
         select 1 from public.subscriptions s
         where s.user_id = v_owner
           and s.tier = 'academy'
           and public.subscription_is_live (s)
-    ) then
+    );
+
+    if v_row.contract_ends_source = 'admin' then
+        -- An admin's pin is the contract's own date and is left alone -- unless
+        -- it has already passed while the owner pays on a live subscription
+        -- (Max, 2026-10-21): a renewal the pin predates, which would otherwise
+        -- have #64 purge a paying district. Cleared and logged, it hands the
+        -- record back to Stripe, which, the owner paying, says no end. A pin
+        -- still in the future, and a pinned "never" (null), stay.
+        if v_paying and v_row.contract_ends_at is not null and v_row.contract_ends_at <= now() then
+            perform set_config('cleffy.district_billing_reason',
+                'admin pin ' || v_row.contract_ends_at::text || ' had passed while the owner pays on a live subscription: cleared',
+                true);
+            update public.district_billing b
+            set contract_ends_at = null,
+                contract_ends_source = null,
+                updated_by = coalesce(nullif(current_setting('cleffy.district_billing_actor', true), ''), 'system'),
+                updated_at = now()
+            where b.studio_id = p_studio;
+            perform set_config('cleffy.district_billing_reason', '', true);
+        end if;
+        return;
+    end if;
+
+    if not v_paying then
         select * into v_linked from public.subscriptions s where s.stripe_subscription_id = v_row.stripe_subscription_id;
         if found and v_linked.status in ('canceled', 'incomplete_expired') then
             -- Stripe's own dates only (Codex round-3 review of #61): ended_at
@@ -935,6 +973,10 @@ begin
             updated_by = trim(p_actor),
             updated_at = now()
         where b.studio_id = p_studio;
+
+        -- A pin already past while the owner pays is cleared (and logged) at
+        -- once, as on any later event; the answer below says so.
+        perform public.district_billing_rederive (p_studio);
     end if;
 
     perform set_config('cleffy.district_billing_actor', '', true);

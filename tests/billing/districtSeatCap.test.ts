@@ -264,15 +264,25 @@ describe('the seat-cap migration', () => {
         // Stripe Invoicing (Max, 2026-10-21), whichever subscription the record
         // or the override still names.
         expect(def).toMatch(
-            /if not exists \(\s*select 1 from public\.subscriptions s\s*where s\.user_id = v_owner\s*and s\.tier = 'academy'\s*and public\.subscription_is_live \(s\)\s*\) then/,
+            /v_paying := exists \(\s*select 1 from public\.subscriptions s\s*where s\.user_id = v_owner\s*and s\.tier = 'academy'\s*and public\.subscription_is_live \(s\)\s*\);[^]*?if not v_paying then/,
         );
         // ...and a card subscription write derives it again, without ever
         // becoming the record's link.
         expect(definition(SQL, 'district_billing_follow')).toMatch(
             /if s\.collection_method is distinct from 'send_invoice' then\s*perform public\.district_billing_rederive \(p_studio\);[^]*?return;\s*end if;/,
         );
-        // An admin's pin is the contract's own date.
-        expect(def).toMatch(/v_row\.contract_ends_source = 'admin' then\s*return;/);
+        // An admin's pin is the contract's own date -- unless it has passed
+        // while the owner pays (Max, 2026-10-21): cleared, with a logged reason.
+        expect(def).toMatch(
+            /if v_row\.contract_ends_source = 'admin' then[^]*?if v_paying and v_row\.contract_ends_at is not null and v_row\.contract_ends_at <= now\(\) then[^]*?cleffy\.district_billing_reason[^]*?set contract_ends_at = null,\s*contract_ends_source = null,[^]*?end if;\s*return;\s*end if;/,
+        );
+        // Checked when a pin is set, and hourly for a pin the clock moves.
+        expect(definition(SQL, 'admin_set_district_contract_end')).toMatch(
+            /contract_ends_source = 'admin',[^]*?perform public\.district_billing_rederive \(p_studio\);/,
+        );
+        expect(definition(SQL, 'reconcile_district_seats')).toMatch(
+            /where b\.contract_ends_source = 'admin'\s*and b\.contract_ends_at <= now\(\)[^]*?perform public\.district_billing_rederive \(v_studio\);/,
+        );
         // Every path that moves the link derives the end again.
         expect(definition(SQL, 'studio_seat_overrides_reconcile')).toMatch(
             /perform public\.district_billing_rederive \(new\.studio_id\)/,

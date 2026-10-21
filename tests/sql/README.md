@@ -165,7 +165,10 @@ district, whose seats past 5 stay read-only), and is null -- so the
 retention purge selects nothing -- as soon as the district pays on a
 replacement subscription, with or without the override moved to it, while a
 replacement not yet paid leaves the old end, and the replacement's own end
-counts once it ends, until an admin pins it (a date, or null for never),
+counts once it ends, until an admin pins it (a date, or null for never) --
+a pinned date already past while the owner pays is cleared and logged, when
+pinned and by the hourly sweep, while a future one and one for a district
+that does not pay stand --
 and an admin can hand it back to Stripe; every billing-record change is logged
 with its actor; and no client role reads the billing record or its log, calls
 the admin or reconcile functions, or writes `kept_active`. It reports

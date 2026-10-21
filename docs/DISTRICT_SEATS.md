@@ -155,7 +155,12 @@ export notice first. **Null means never purged.**
   the new one is active, before anyone moves the seat override. Moving the
   override (or the record) to the new subscription derives the end again from
   it. A cleared or moved end also cancels any retention cycle under way (#64).
-- An admin can pin it from the contract, which Stripe writes then leave alone:
+- An admin can pin it from the contract, which Stripe writes then leave alone.
+  One exception: a pinned date that has already passed while the owner pays on
+  a live Academy subscription (a renewal the pin predates) is cleared and
+  logged, at once when it is pinned or a subscription is written, and by the
+  hourly sweep when the clock carries a future pin past. A pin in the future,
+  and a pinned "never" (null), always stand:
 
 ```sql
 -- Pin a date (or p_contract_ends_at => null for "never purge"):

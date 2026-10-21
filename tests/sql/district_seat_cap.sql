@@ -1050,6 +1050,103 @@ select pg_temp.holds (
 );
 
 -- ===========================================================================
+-- An admin's pin that has passed while the district pays is cleared
+-- ===========================================================================
+-- Max, 2026-10-21. The late district (c003) pays again on sub_d16_late_renewal.
+-- A pinned date already in the past would have #64 purge a paying district, so
+-- it is cleared and logged; a pin in the future stands, and so does a past pin
+-- for a district that does not pay (c006, ended above).
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'an admin pins a date already past while the owner pays: it is cleared at once',
+    $q$select (r ->> 'contract_ends_at') is null and (r ->> 'contract_ends_source') is null
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c003',
+             now() - interval '10 days', 'test', 'Contract #3 term, old') as r) x$q$
+);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.holds (
+    'and the clearing is logged, after the pin, with its reason',
+    $q$select exists (
+           select 1 from public.district_billing_log l
+           where l.studio_id = 'd1600000-0000-4000-8000-00000000c003'
+             and l.old_contract_ends_at = now() - interval '10 days'
+             and l.new_contract_ends_at is null and l.new_contract_ends_source is null
+             and l.reason like 'admin pin % had passed while the owner pays on a live subscription: cleared'
+       )$q$
+);
+
+select pg_temp.holds (
+    'retention selects nothing',
+    $q$select pg_temp.purgeable ('d1600000-0000-4000-8000-00000000c003') = 0$q$
+);
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'a pin dated in the future stands, the owner paying or not',
+    $q$select r ->> 'contract_ends_source' = 'admin' and (r ->> 'contract_ends_at')::timestamptz = now() + interval '1 year'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c003',
+             now() + interval '1 year', 'test', 'Contract #3 term') as r) x$q$
+);
+
+select pg_temp.holds (
+    'a later subscription write leaves the future pin alone',
+    $q$select pg_temp.webhook_write ('sub_d16_late_renewal', 'd1600000-0000-4000-8000-0000000000a3', 'academy',
+           'active', now() + interval '1 year', 'send_invoice', now() - interval '21 minutes') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'a later subscription write leaves the future pin alone: checked after the write',
+    $q$select contract_ends_at = now() + interval '1 year' and contract_ends_source = 'admin'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c003'$q$
+);
+
+-- The clock carries the pin into the past: no event marks it, so the hourly
+-- sweep must. Stand-in for time passing, with every trigger off.
+select pg_temp.act_as_server ();
+
+set local session_replication_role = replica;
+
+update public.district_billing set contract_ends_at = now() - interval '1 day'
+where studio_id = 'd1600000-0000-4000-8000-00000000c003';
+
+set local session_replication_role = origin;
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'the hourly sweep clears a pin the clock moved into the past while the owner pays',
+    $q$select public.reconcile_district_seats () >= 0$q$
+);
+
+select pg_temp.holds (
+    'the hourly sweep clears a pin the clock moved into the past while the owner pays: checked after the sweep',
+    $q$select contract_ends_at is null and contract_ends_source is null
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c003'$q$
+);
+
+select pg_temp.holds (
+    'a past pin for a district that does not pay stands: the contract really ended',
+    $q$select r ->> 'contract_ends_source' = 'admin' and (r ->> 'contract_ends_at')::timestamptz = now() - interval '10 days'
+       from (select public.admin_set_district_contract_end ('d1600000-0000-4000-8000-00000000c006',
+             now() - interval '10 days', 'test', 'Contract #6 term') as r) x$q$
+);
+
+select pg_temp.holds (
+    'and the sweep leaves it',
+    $q$select public.reconcile_district_seats () >= 0$q$
+);
+
+select pg_temp.holds (
+    'and the sweep leaves it: checked after the sweep',
+    $q$select contract_ends_at = now() - interval '10 days' and contract_ends_source = 'admin'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c006'$q$
+);
+
+-- ===========================================================================
 -- Nobody but the admin reaches any of it
 -- ===========================================================================
 select pg_temp.act_as_user ('d1600000-0000-4000-8000-0000000000a1');
