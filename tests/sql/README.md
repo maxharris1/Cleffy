@@ -132,6 +132,34 @@ raises `studios.seat_limit`; and every set, change and clear -- a hand-run
 insert and the cascade from a deleted studio included -- lands in
 `studio_seat_override_log`, which outlives the studio. It reports
 `failures | total` on its last line.
+
+`district_seat_cap.sql` proves
+`supabase/migrations/20261020180500_district_seat_cap_and_grace.sql`: with
+nine teachers seated under a 10-seat district override, lowering it to 6,
+clearing it, a send_invoice invoice past due beyond 30 days, and the district
+moving to ordinary card-paid Academy each leave only the seats inside the new
+limit entitled -- the owner's pick first, then the oldest -- and make the rest
+read-only (`resolve_entitlements` answers tier free, `seat_read_only`, zero on
+everything created and unlimited export; their scores are archived as
+`plan_lapse`, so annotation RLS refuses marks while view and export still
+work, and uploads, un-archiving and new invites are refused), with no score or
+seat deleted; re-setting the override, an admin's grace extension and the
+district paying each restore every seat and every score at once; inside 30
+days past due (`past_due` or `unpaid`, clock from `past_due_since`, which a
+later delivery does not restart) the district keeps full access, its owner
+included, while a card subscription past due gets none; the hourly
+`reconcile_district_seats` catches a grace period that only the clock ended;
+`studio_seat_states` agrees with `studio_seat_is_active`; only the owner picks
+seats (never more than the limit leaves room for, never a non-member) or reads
+their status; removing a read-only teacher releases them to free with their
+scores back up to the free cap; `district_billing.contract_ends_at` follows
+Stripe (the cancel date while one is scheduled, null on resume, the day it
+ended on cancellation, never moved later by a redelivery, untouched by an
+unrelated card subscription) until an admin pins it (a date, or null for never),
+and an admin can hand it back to Stripe; every billing-record change is logged
+with its actor; and no client role reads the billing record or its log, calls
+the admin or reconcile functions, or writes `kept_active`. It reports
+`failures | total` on its last line.
 `edge_rate_limit_refund.sql` proves
 `supabase/migrations/20261011120101_refund_edge_rate_limit.sql`: a refund hands
 back one use of a bucket inside its window (never below zero, never into the

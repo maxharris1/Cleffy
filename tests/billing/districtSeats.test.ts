@@ -78,10 +78,30 @@ describe('the webhook maps a district contract', () => {
         expect(subscriptionRowFrom(sub, 'owner-1', PRICE_TIERS).tier).toBe('free');
     });
 
-    it('to free while it does not entitle: an overdue invoice is past_due', () => {
-        const row = subscriptionRowFrom(districtSubscription({ status: 'past_due' }), 'owner-1', PRICE_TIERS);
-        expect(row.tier).toBe('free');
-        expect(row.collection_method).toBe('send_invoice');
+    it('to Academy while past due or unpaid, so the invoice grace period has a plan to honour', () => {
+        for (const status of ['past_due', 'unpaid']) {
+            const row = subscriptionRowFrom(districtSubscription({ status }), 'owner-1', PRICE_TIERS);
+            expect(row.tier, status).toBe('academy');
+            expect(row.collection_method).toBe('send_invoice');
+        }
+    });
+
+    it('to free once it has ended, whatever the collection method', () => {
+        for (const status of ['canceled', 'incomplete_expired', 'incomplete']) {
+            expect(subscriptionRowFrom(districtSubscription({ status }), 'owner-1', PRICE_TIERS).tier, status).toBe(
+                'free',
+            );
+        }
+    });
+
+    it('to free while a card subscription is past due: card plans get no invoice grace', () => {
+        const card = districtSubscription({
+            status: 'past_due',
+            collection_method: 'charge_automatically',
+            metadata: { user_id: 'owner-1' },
+            items: { data: [{ price: { id: 'price_academy_monthly' } }] },
+        });
+        expect(subscriptionRowFrom(card, 'owner-1', PRICE_TIERS).tier).toBe('free');
     });
 
     it('by its price when that price is in the catalogue', () => {
@@ -251,9 +271,17 @@ describe('the district-seats migration', () => {
         expect(def).toMatch(/s\.user_id\s*=\s*st\.owner_id/i);
         expect(def).toMatch(/s\.collection_method\s*=\s*'send_invoice'/i);
         expect(def).toMatch(/s\.tier\s*=\s*'academy'/i);
-        expect(def).toMatch(/s\.mode\s*=\s*any\s*\(public\.entitling_billing_modes\s*\(\)\)/i);
-        expect(def).toMatch(/s\.status\s+in\s*\('active',\s*'trialing'\)/i);
-        expect(def).toMatch(/current_period_end\s+is\s+null\s+or\s+s\.current_period_end\s*>\s*now\(\)/i);
+        expect(def).toMatch(/public\.subscription_is_live\s*\(s\)/i);
+
+        // Live: the mode filter, active or trialing inside the period -- or
+        // Stripe Invoicing past due inside its grace.
+        const live = definition(latestDefining('subscription_is_live').sql, 'subscription_is_live');
+        expect(live).toMatch(/s\.mode\s*=\s*any\s*\(public\.entitling_billing_modes\s*\(\)\)/i);
+        expect(live).toMatch(/s\.status\s+in\s*\('active',\s*'trialing'\)/i);
+        expect(live).toMatch(/current_period_end\s+is\s+null\s+or\s+s\.current_period_end\s*>\s*now\(\)/i);
+        expect(live).toMatch(
+            /s\.collection_method\s*=\s*'send_invoice'\s+and\s+s\.status\s+in\s*\('past_due',\s*'unpaid'\)/i,
+        );
     });
 
     it.each(['admin_set_studio_seat_override', 'admin_clear_studio_seat_override', 'studio_effective_seat_limit'])(

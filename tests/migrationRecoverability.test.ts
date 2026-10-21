@@ -131,8 +131,14 @@ describe('imslp-sync — the cron job the push has to pause', () => {
      * migration in the pending set re-schedules `omr-sweep` underneath the
      * operator. Pinning the whole map rather than each half means a third job
      * appearing anywhere also has to come through here.
+     *
+     * `district-seat-reconcile` is the third (hourly, from
+     * `20261020180500_district_seat_cap_and_grace.sql`). It needs no pause
+     * either: it does not exist until its own migration commits, it calls only
+     * functions that migration defines, and what it writes (a read-only seat's
+     * plan_lapse archive) is undone by the same restore paths a payment runs.
      */
-    it('and omr-sweep are the only jobs any migration touches', () => {
+    it('and omr-sweep and district-seat-reconcile are the only jobs any migration touches', () => {
         const touched = new Map<string, string[]>();
         for (const { name, sql } of migrations()) {
             for (const match of sql.matchAll(/cron\.(?:schedule|unschedule)\s*\(\s*'([a-z0-9-]+)'/gi)) {
@@ -144,6 +150,7 @@ describe('imslp-sync — the cron job the push has to pause', () => {
             }
         }
         expect(Object.fromEntries([...touched].sort())).toEqual({
+            'district-seat-reconcile': ['20261020180500_district_seat_cap_and_grace.sql'],
             'imslp-sync': ['20260902120000_imslp_category_index.sql'],
             'omr-sweep': ['20260806140000_omr_cron.sql'],
         });

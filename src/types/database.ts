@@ -348,6 +348,13 @@ export type Entitlements = {
      * before 20261009120101, and entitlements cached from them, do not carry it.
      */
     cancel_at_period_end?: boolean;
+    /**
+     * An Academy seat past its studio's limit -- a district override lowered,
+     * cleared or lapsed: tier 'free', source 'studio_member', and limits that
+     * allow viewing and exporting only. Optional because servers before
+     * 20261020180500, and entitlements cached from them, do not carry it.
+     */
+    seat_read_only?: boolean;
     limits: EntitlementLimits;
 };
 
@@ -387,6 +394,11 @@ export type SubscriptionRow = {
      * written before the webhook recorded it.
      */
     collection_method: 'charge_automatically' | 'send_invoice' | null;
+    /**
+     * When the status went past_due/unpaid (server-stamped). A send_invoice
+     * subscription keeps full access for a grace period counted from it.
+     */
+    past_due_since: string | null;
     created_at: string;
     updated_at: string;
 };
@@ -430,6 +442,8 @@ export type StudioMemberRow = {
     studio_id: string;
     user_id: string;
     created_at: string;
+    /** The owner chose this seat to stay active if the studio is ever over its limit. */
+    kept_active: boolean;
 };
 
 /**
@@ -923,6 +937,14 @@ export type Database = {
             };
             studio_seat_limit: {
                 Args: { p_studio: string };
+                Returns: number;
+            };
+            studio_seat_status: {
+                Args: { p_studio: string };
+                Returns: Array<{ user_id: string; kept_active: boolean; active: boolean }>;
+            };
+            studio_set_active_seats: {
+                Args: { p_studio: string; p_members: string[] };
                 Returns: number;
             };
             set_document_page_count: {

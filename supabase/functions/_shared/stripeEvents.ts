@@ -36,6 +36,18 @@ export const shouldArchiveOnStatus = (status: string): boolean => ARCHIVING_STAT
 export const isTerminalStatus = (status: string): boolean => TERMINAL_STATUSES.includes(status);
 
 /**
+ * Past due, but on Stripe Invoicing: a district paying on PO terms keeps full
+ * access for a grace period after the due date (subscription_is_live() in
+ * migration 20261020180500_district_seat_cap_and_grace.sql decides how long),
+ * so its row has to keep naming the plan it pays for. A card subscription in
+ * these statuses still records free, as before.
+ */
+const INVOICE_GRACE_STATUSES = ['past_due', 'unpaid'];
+
+const keepsTierWhilePastDue = (sub: StripeSubscriptionLike): boolean =>
+    collectionMethodOf(sub) === 'send_invoice' && INVOICE_GRACE_STATUSES.includes(sub.status);
+
+/**
  * Whether the buyer already holds a subscription that Checkout would put a
  * SECOND one beside. Checkout always creates a new subscription, so a Personal
  * subscriber who picked Teacher there was billed for both; plan changes and
@@ -499,7 +511,7 @@ export const subscriptionRowFrom = (
     return {
         stripe_subscription_id: sub.id,
         user_id: userId,
-        tier: isEntitlingStatus(sub.status) ? tierOf(sub, priceTiers) : 'free',
+        tier: isEntitlingStatus(sub.status) || keepsTierWhilePastDue(sub) ? tierOf(sub, priceTiers) : 'free',
         status: sub.status,
         price_id: priceId,
         current_period_end: ending.periodEnd,
