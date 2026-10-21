@@ -613,9 +613,11 @@ for each row execute function public.studio_members_release_seat ();
 --
 -- And never while the district pays (major 2): a district renewing on a NEW
 -- subscription -- the old one ended and recorded its end, then the owner signed
--- again -- has a live Stripe Invoicing Academy subscription, and that alone
--- makes the Stripe-derived end null, whichever subscription the record or the
--- override still names. Derived from scratch on every call, so whatever moved
+-- again -- has a live Academy subscription, and that alone makes the
+-- Stripe-derived end null, whichever subscription the record or the override
+-- still names. Card-paid counts as much as Stripe Invoicing (Max, 2026-10-21):
+-- an owner who moved the district to ordinary Academy is paying, so #64 never
+-- purges them, while the seats past 5 go read-only as decisions item 2 says. Derived from scratch on every call, so whatever moved
 -- (a subscription write, the override naming another subscription, an admin
 -- handing the date back to Stripe) leaves the same answer. An admin's pin is
 -- the contract's own date and is left alone. Clearing the date is also what
@@ -637,10 +639,13 @@ begin
 
     select st.owner_id into v_owner from public.studios st where st.id = p_studio;
 
+    -- Any live paid Academy subscription of the owner, card-paid or Stripe
+    -- Invoicing, is a district that pays (Max, 2026-10-21): #64 never purges
+    -- it. Its seats past the cap of 5 are still read-only (decisions item 2);
+    -- that is the seat limit's business, not this record's.
     if not exists (
         select 1 from public.subscriptions s
         where s.user_id = v_owner
-          and s.collection_method = 'send_invoice'
           and s.tier = 'academy'
           and public.subscription_is_live (s)
     ) then
@@ -680,16 +685,22 @@ revoke all on function public.district_billing_rederive (uuid) from authenticate
 -- if it links to nothing yet, or if it is live and the linked one is not (a
 -- renewal on a new subscription). An override, when there is one, decides the
 -- link instead (studio_seat_overrides_reconcile). Then the contract end is
--- derived again.
+-- derived again -- after any of the owner's subscription writes, a card one
+-- included, since a card-paid Academy is a district that pays.
 create or replace function public.district_billing_follow (p_studio uuid, s public.subscriptions) returns void
 language plpgsql security definer
 set search_path = public as $$
 begin
+    perform set_config('cleffy.district_billing_actor', 'stripe', true);
+
+    -- A card subscription never becomes the record's link, but whether the
+    -- owner pays is derived again: a card-paid Academy starting or ending
+    -- moves the contract end (district_billing_rederive).
     if s.collection_method is distinct from 'send_invoice' then
+        perform public.district_billing_rederive (p_studio);
+        perform set_config('cleffy.district_billing_actor', '', true);
         return;
     end if;
-
-    perform set_config('cleffy.district_billing_actor', 'stripe', true);
 
     insert into public.district_billing (studio_id, stripe_subscription_id, updated_by)
     values (p_studio, s.stripe_subscription_id, 'stripe')

@@ -260,10 +260,16 @@ describe('the seat-cap migration', () => {
 
     it('never leaves a paying district purgeable (Codex #61 round 2, major 2)', () => {
         const def = definition(SQL, 'district_billing_rederive');
-        // Any live Stripe Invoicing Academy subscription of the owner clears it,
-        // whichever subscription the record or the override still names.
+        // Any live Academy subscription of the owner clears it, card-paid or
+        // Stripe Invoicing (Max, 2026-10-21), whichever subscription the record
+        // or the override still names.
         expect(def).toMatch(
-            /if not exists \(\s*select 1 from public\.subscriptions s\s*where s\.user_id = v_owner\s*and s\.collection_method = 'send_invoice'\s*and s\.tier = 'academy'\s*and public\.subscription_is_live \(s\)/,
+            /if not exists \(\s*select 1 from public\.subscriptions s\s*where s\.user_id = v_owner\s*and s\.tier = 'academy'\s*and public\.subscription_is_live \(s\)\s*\) then/,
+        );
+        // ...and a card subscription write derives it again, without ever
+        // becoming the record's link.
+        expect(definition(SQL, 'district_billing_follow')).toMatch(
+            /if s\.collection_method is distinct from 'send_invoice' then\s*perform public\.district_billing_rederive \(p_studio\);[^]*?return;\s*end if;/,
         );
         // An admin's pin is the contract's own date.
         expect(def).toMatch(/v_row\.contract_ends_source = 'admin' then\s*return;/);

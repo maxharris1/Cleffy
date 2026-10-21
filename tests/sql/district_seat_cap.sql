@@ -629,11 +629,46 @@ select pg_temp.holds (
     $q$select pg_temp.archived () = '002222200'$q$
 );
 
+-- Max, 2026-10-21: any live paid Academy subscription, card-paid included, is
+-- a district that pays. #64 must never purge it, so the contract end is null
+-- while the card subscription lasts -- and the seats past 5 stay read-only
+-- (checked just above). The card subscription never becomes the link.
 select pg_temp.holds (
-    'the card subscription did not touch the district''s contract end',
-    $q$select contract_ends_at = now() - interval '38 minutes' and stripe_subscription_id = 'sub_d16_district'
+    'a card-paid Academy is a paying district: no contract end, the link unchanged',
+    $q$select contract_ends_at is null and contract_ends_source is null
+          and stripe_subscription_id = 'sub_d16_district'
        from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c001'$q$
 );
+
+select pg_temp.act_as ('service_role');
+
+select pg_temp.holds (
+    'the owner''s card Academy ends too',
+    $q$select pg_temp.webhook_write ('sub_d16_owner_card', 'd1600000-0000-4000-8000-0000000000a1', 'free',
+           'canceled', now() + interval '1 month', 'charge_automatically', now() - interval '36 minutes 45 seconds',
+           false, now() - interval '36 minutes 45 seconds') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'and the district''s own Stripe end comes back: nobody pays now',
+    $q$select contract_ends_at = now() - interval '38 minutes' and contract_ends_source = 'stripe'
+          and stripe_subscription_id = 'sub_d16_district'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c001'$q$
+);
+
+select pg_temp.holds (
+    'a card subscription that is not Academy (Teacher) is not the district paying',
+    $q$select pg_temp.webhook_write ('sub_d16_owner_teacher', 'd1600000-0000-4000-8000-0000000000a1', 'teacher',
+           'active', now() + interval '1 month', 'charge_automatically', now() - interval '36 minutes 30 seconds') = 'written'$q$
+);
+
+select pg_temp.holds (
+    'a card subscription that is not Academy (Teacher) is not the district paying: checked after the write',
+    $q$select contract_ends_at = now() - interval '38 minutes'
+       from public.district_billing where studio_id = 'd1600000-0000-4000-8000-00000000c001'$q$
+);
+
+select pg_temp.act_as_server ();
 
 -- ===========================================================================
 -- Releasing a read-only seat

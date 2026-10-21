@@ -159,7 +159,9 @@ the subscription is resumed or past due; on cancellation Stripe's `ended_at`
 omits it (the migration deployed before the new webhook), Stripe's
 `current_period_end`; with neither, nothing is invented: the record keeps what
 it had, null included, and a warning is logged -- never the event's time or
-now(); never moved by a redelivery; untouched by an unrelated card subscription), and is null -- so the
+now(); never moved by a redelivery; untouched by a card subscription that is
+not Academy), and is null while the owner has a card-paid Academy (a paying
+district, whose seats past 5 stay read-only), and is null -- so the
 retention purge selects nothing -- as soon as the district pays on a
 replacement subscription, with or without the override moved to it, while a
 replacement not yet paid leaves the old end, and the replacement's own end

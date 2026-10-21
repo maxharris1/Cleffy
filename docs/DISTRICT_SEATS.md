@@ -139,13 +139,18 @@ export notice first. **Null means never purged.**
 - By default it follows Stripe's **actual** end, and nothing else: null while
   the subscription has not ended (a cancellation that is only scheduled, past
   due, or resumed), then the day Stripe says it ended (`ended_at`, or the
-  `cancel_at` it ended on). Never a scheduled date and never a billing-period
-  date: a district that schedules cancellation for next year and then cancels
-  today counts from today, and one cancelled long after its last recorded
-  period does not count from that period. A redelivered cancellation never
-  moves it.
+  `cancel_at` it ended on). Never a scheduled date: a district that schedules
+  cancellation for next year and then cancels today counts from today. Only
+  when Stripe gave no `ended_at` (a cancellation recorded by the webhook from
+  before this PR, during the migrations-first rollout) does it take the
+  subscription's `current_period_end`. With neither date nothing is invented:
+  the record keeps what it had (null included) and Postgres logs a warning
+  naming the studio, never the event's time or `now()`. A redelivered
+  cancellation never moves it.
 - **A paying district is never purgeable.** While the owner has any live
-  Stripe Invoicing Academy subscription, the Stripe-derived end is null. So a
+  Academy subscription, card-paid or Stripe Invoicing, the Stripe-derived end
+  is null. A district moved to ordinary card-paid Academy is still paying, so
+  #64 never purges it, though its seats past 5 go read-only as above. So a
   district that renews on a new subscription clears its old end the moment
   the new one is active, before anyone moves the seat override. Moving the
   override (or the record) to the new subscription derives the end again from
