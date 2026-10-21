@@ -9,6 +9,7 @@ import { ForgotPasswordPage } from '../../src/features/auth/ForgotPasswordPage';
 import { LoginPage } from '../../src/features/auth/LoginPage';
 import { RegisterPage } from '../../src/features/auth/RegisterPage';
 import { resetTurnstileLoaderForTests, type TurnstileRenderOptions } from '../../src/features/auth/turnstile';
+import { passAgeScreen } from '../../src/test/ageScreen';
 
 /**
  * Sign-up with email confirmation ON, end to end through the pages — the state
@@ -83,7 +84,7 @@ const withTurnstile = () => {
 const EMAIL = 'teacher@example.com';
 const PASSWORD = 'letters4ever';
 
-const renderRegister = () =>
+const renderRegister = async () => {
     render(
         <MemoryRouter initialEntries={['/register']}>
             <Routes>
@@ -92,6 +93,9 @@ const renderRegister = () =>
             </Routes>
         </MemoryRouter>,
     );
+    // Past the age screen: these tests are about the form behind it.
+    await passAgeScreen();
+};
 
 const renderLogin = () =>
     render(
@@ -126,7 +130,7 @@ describe('after signing up with confirmation on', () => {
         // else in the app calls it, so nothing else assumed otherwise.
         signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: true });
         const user = userEvent.setup();
-        renderRegister();
+        await renderRegister();
         await signUp(user);
 
         expect(await screen.findByRole('heading', { name: 'Check your email' })).toBeInTheDocument();
@@ -142,7 +146,7 @@ describe('after signing up with confirmation on', () => {
         // locally — so this change cannot have broken the dev loop.
         signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: false });
         const user = userEvent.setup();
-        renderRegister();
+        await renderRegister();
         await signUp(user);
 
         expect(await screen.findByText('library')).toBeInTheDocument();
@@ -151,7 +155,7 @@ describe('after signing up with confirmation on', () => {
     it('can send the confirmation email again, and says so once, from the sign-up screen', async () => {
         signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: true });
         const user = userEvent.setup();
-        renderRegister();
+        await renderRegister();
         await signUp(user);
 
         await user.click(await screen.findByRole('button', { name: 'Send the email again' }));
@@ -175,7 +179,7 @@ describe('after signing up with confirmation on', () => {
             new AuthApiError('Email address is invalid', 422, 'email_address_invalid'),
         );
         const user = userEvent.setup();
-        renderRegister();
+        await renderRegister();
         await signUp(user);
         await user.click(await screen.findByRole('button', { name: 'Send the email again' }));
 
@@ -189,7 +193,7 @@ describe('after signing up with confirmation on', () => {
             new AuthApiError('Request rate limit reached', 429, 'over_request_rate_limit'),
         );
         const second = userEvent.setup();
-        renderRegister();
+        await renderRegister();
         await signUp(second);
         await second.click(await screen.findByRole('button', { name: 'Send the email again' }));
 
@@ -253,7 +257,7 @@ describe('the resend with Turnstile on', () => {
      */
     const resendFrom = async (user: ReturnType<typeof userEvent.setup>, rendered: TurnstileRenderOptions[]) => {
         signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: true });
-        renderRegister();
+        await renderRegister();
         await waitFor(() => expect(rendered).toHaveLength(1));
         rendered[0]!.callback('cf-signup-token');
         await signUp(user);

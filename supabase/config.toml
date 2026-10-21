@@ -355,9 +355,16 @@ max_frequency = "5s"
 # inactivity_timeout = "8h"
 
 # This hook runs before a new user is created and allows developers to reject the request based on the incoming user object.
-# [auth.hook.before_user_created]
-# enabled = true
-# uri = "pg-functions://postgres/auth/before-user-created-hook"
+#
+# ON for the local stack: public.hook_before_user_created
+# (migrations/20261021120000_consent_age.sql) refuses any new user — sign-up,
+# share-link guest, or a student-provision create/invite — whose user_metadata
+# lacks an age_gate at or above the consent age for its country. OFF for
+# [remotes.dev] below until Max switches it on in the dashboard, so the branch
+# deploy never flips a hosted auth setting by itself.
+[auth.hook.before_user_created]
+enabled = true
+uri = "pg-functions://postgres/public/hook_before_user_created"
 
 # This hook runs before a token is issued and allows you to add additional claims based on the authentication method used.
 # [auth.hook.custom_access_token]
@@ -605,6 +612,12 @@ additional_redirect_urls = [
   "https://dev.cleffy.io/update-password",
   "http://localhost:5173",
 ]
+
+# The consent-age Auth hook (see [auth.hook.before_user_created] above) is a
+# hosted setting and Max's to switch on, after the build that sends age_gate is
+# live on dev.cleffy.io — an older build would have every sign-up refused.
+[remotes.dev.auth.hook.before_user_created]
+enabled = false
 
 # Seeding is off on purpose. seed.sql creates teacher@cleffy.local and
 # student@cleffy.local with the password `cleffy-local-test`, which is written

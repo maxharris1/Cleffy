@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 
 import { forgetLocalSession, requestAccountDeletion } from '@/features/account/accountDeletion';
+import type { AgeGate } from '@/features/auth/ageCheck';
+import { AgeScreen } from '@/features/auth/AgeScreen';
 import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/features/auth/session';
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { isTurnstileEnabled } from '@/features/auth/turnstile';
@@ -42,6 +44,11 @@ export const JoinPage = () => {
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [linkCheck, setLinkCheck] = useState<LinkCheck>('checking');
+    /**
+     * The age screen's outcome, asked only of a visitor about to become a
+     * guest: one already signed in is redeemed with the account they have.
+     */
+    const [ageGate, setAgeGate] = useState<AgeGate | null>(null);
     /**
      * The Turnstile token for the anonymous sign-in below, or null on a build
      * with no site key — which is every build today, and why this page is
@@ -115,7 +122,7 @@ export const JoinPage = () => {
             setError('Enter your name so collaborators know who you are.');
             return;
         }
-        if (!token || submitting) {
+        if (!token || submitting || !ageGate) {
             return;
         }
         if (captchaRequired && !captchaToken) {
@@ -133,7 +140,7 @@ export const JoinPage = () => {
             return;
         }
         try {
-            await signInAnonymouslyWithName(trimmed, captchaToken);
+            await signInAnonymouslyWithName(trimmed, captchaToken, ageGate);
             createdGuestRef.current = true;
         } catch (err) {
             setSubmitting(false);
@@ -157,6 +164,11 @@ export const JoinPage = () => {
     const registered = isRegisteredSession(session) && !guestDiscarded;
     const escapeTo = registered ? '/library' : '/';
     const escapeLabel = registered ? 'Go to the library' : 'Back to home';
+
+    // After the link check, so a dead link is reported without asking anyone's age.
+    if (!shownError && !busy && !ageGate) {
+        return <AgeScreen purpose="join" onPass={setAgeGate} />;
+    }
 
     return (
         <BrandShell

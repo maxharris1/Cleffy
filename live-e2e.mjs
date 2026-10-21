@@ -254,6 +254,12 @@ student.on('console', (m) => {
     if (['warning', 'error'].includes(m.type())) console.log('[student console]', m.text().slice(0, 160));
 });
 await student.goto(shareUrl.replace(/^https?:\/\/[^/]+/, APP));
+// The age screen (src/features/auth/AgeScreen.tsx) comes before the name.
+await student.waitForSelector('select#age-country', { timeout: 20000 });
+await student.selectOption('select#age-country', 'US');
+await student.selectOption('select#age-month', '1');
+await student.selectOption('select#age-year', '1990');
+await student.getByRole('button', { name: 'Continue', exact: true }).click();
 await student.waitForSelector('input#name', { timeout: 20000 });
 await student.fill('input#name', 'Sharon');
 await student.getByRole('button', { name: 'Join', exact: true }).click();
