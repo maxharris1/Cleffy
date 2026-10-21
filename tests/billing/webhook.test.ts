@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { cancellationMailKey } from '../../supabase/functions/_shared/billingOutbox';
 import {
     duplicateUndoStateOf,
     EDGE_FUNCTION_WALL_CLOCK_MS,
@@ -272,21 +273,30 @@ class FakeStore implements WebhookStore {
             this.events.delete(id);
         }
     };
+    /**
+     * The durable outbox, modelled: a notice is written down once per Stripe
+     * object (enqueue_billing_mail's unique key), so a redelivery queues
+     * nothing new.
+     */
     purchases: PurchaseNotice[] = [];
     cancellations: CancellationNotice[] = [];
-    /** Makes the next notice throw, as a Resend outage would. */
+    /** Makes recording a notice throw, as the consent write or the outbox insert failing would. */
     noticeFails = false;
-    notifyPurchase = async (notice: PurchaseNotice) => {
+    recordPurchaseNotice = async (notice: PurchaseNotice) => {
         if (this.noticeFails) {
-            throw new Error('resend returned 500');
+            throw new Error('could not queue the purchase_confirmation mail: connection reset');
         }
-        this.purchases.push(notice);
+        if (!this.purchases.some((queued) => queued.sessionId === notice.sessionId)) {
+            this.purchases.push(notice);
+        }
     };
-    notifyCancellation = async (notice: CancellationNotice) => {
+    recordCancellationNotice = async (notice: CancellationNotice) => {
         if (this.noticeFails) {
-            throw new Error('resend returned 500');
+            throw new Error('could not queue the cancellation_confirmation mail: connection reset');
         }
-        this.cancellations.push(notice);
+        if (!this.cancellations.some((queued) => cancellationMailKey(queued) === cancellationMailKey(notice))) {
+            this.cancellations.push(notice);
+        }
     };
     log = (message: string) => {
         this.logs.push(message);
@@ -526,16 +536,55 @@ describe('stripe event handling', () => {
             expect(store.purchases).toHaveLength(1);
         });
 
-        it('still acknowledges the purchase when the confirmation cannot be sent', async () => {
-            // The subscription is written; failing the event would only ask
-            // Stripe to redeliver a purchase that has already been applied.
+        it('fails the event, not the mail, when the confirmation cannot be written down', async () => {
+            // Codex finding 3 on #62: this used to be a log line and a 200, so
+            // the event was marked done with the consent incomplete and the
+            // confirmation unsent, and the redelivery exited as a duplicate.
             store.noticeFails = true;
-            const result = await handleStripeEvent(paidCheckout(), store, PRICE_TIERS);
+            const failed = await handleStripeEvent(paidCheckout(), store, PRICE_TIERS);
 
-            expect(result.status).toBe(200);
-            expect(store.subscriptions.get('sub_9')).toMatchObject({ user_id: 'teacher-9', status: 'active' });
-            expect(store.logs.some((line) => line.startsWith('ALERT') && line.includes('notice not sent'))).toBe(true);
+            expect(failed.status).toBe(500);
+            expect(failed.body).toMatchObject({ error: 'notice_not_recorded', retry: true });
+            expect(store.logs.some((line) => line.startsWith('ALERT') && line.includes('notice not recorded'))).toBe(
+                true,
+            );
+            // Not done: the claim is released, so Stripe's redelivery is
+            // processed rather than skipped as a duplicate.
+            expect(store.released).toContain('evt_checkout_paid');
+            expect(store.events.get('evt_checkout_paid')).toBeUndefined();
+
+            // The redelivery re-applies the same purchase -- harmlessly -- and
+            // this time the notice is recorded, once.
+            store.noticeFails = false;
+            const redelivered = await handleStripeEvent(paidCheckout(), store, PRICE_TIERS);
+
+            expect(redelivered.status).toBe(200);
             expect(store.events.get('evt_checkout_paid')?.status).toBe('done');
+            expect(store.subscriptions.get('sub_9')).toMatchObject({ user_id: 'teacher-9', status: 'active' });
+            expect(store.purchases).toHaveLength(1);
+            expect(store.purchases[0]).toMatchObject({ sessionId: 'cs_9', consentId: 'consent-1' });
+        });
+
+        it('fails a scheduled cancellation whose confirmation cannot be written down, then records it once', async () => {
+            store.remote.set('sub_1', {
+                id: 'sub_1',
+                status: 'active',
+                customer: 'cus_1',
+                cancel_at_period_end: true,
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+                metadata: { user_id: 'teacher-1' },
+            });
+            store.noticeFails = true;
+            const failed = await handleStripeEvent(scheduled({ cancel_at_period_end: false }), store, PRICE_TIERS);
+            expect(failed.status).toBe(500);
+            expect(store.events.get('evt_cancel')).toBeUndefined();
+
+            store.noticeFails = false;
+            await handleStripeEvent(scheduled({ cancel_at_period_end: false }), store, PRICE_TIERS);
+            await handleStripeEvent(scheduled({ cancel_at_period_end: false }), store, PRICE_TIERS);
+            expect(store.cancellations).toHaveLength(1);
+            expect(store.events.get('evt_cancel')?.status).toBe('done');
         });
 
         it('sends nothing for a duplicate purchase the unique index refused', async () => {

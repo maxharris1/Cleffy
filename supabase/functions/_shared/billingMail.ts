@@ -1,3 +1,4 @@
+import type { OutboxKind } from './billingOutbox.ts';
 import type { BillingEmail } from './billingTerms.ts';
 import { logError } from './errorReporting.ts';
 import { serviceClient } from './rateLimit.ts';
@@ -5,8 +6,8 @@ import type { StripeMode } from './stripe.ts';
 
 /**
  * The Deno half of the billing emails (billingTerms.ts builds them): sending
- * through Resend, sending each confirmation at most once, and finding the
- * address and storefront to write to.
+ * through Resend, writing mail into the durable outbox (billingOutbox.ts), and
+ * finding the address and storefront to write to.
  */
 
 const RESEND_API = 'https://api.resend.com';
@@ -54,32 +55,30 @@ export const sendBillingEmail = async (
     }
 };
 
-export type NoticeKind = 'purchase_confirmation' | 'cancellation_confirmation';
-
 /**
- * Takes the one-time right to send a notice (billing_notices' primary key), or
- * answers false because it has already been taken. Throws when the table cannot
- * be reached, so the caller sends nothing rather than possibly twice.
+ * Writes a mail into billing_mail_outbox (migration 20261020160200), once per
+ * (kind, dedupeKey); billingMailWorker.ts sends it. Throws when it cannot be
+ * written, so the caller fails the event or the request rather than losing it.
  */
-export const claimNotice = async (kind: NoticeKind, objectId: string): Promise<boolean> => {
+export const enqueueBillingMail = async (
+    kind: OutboxKind,
+    dedupeKey: string | null,
+    mode: StripeMode,
+    payload: Record<string, unknown>,
+): Promise<void> => {
     const admin = serviceClient();
     if (!admin) {
         throw new Error('Billing is not configured');
     }
-    const { error } = await admin.from('billing_notices').insert({ kind, stripe_object_id: objectId });
-    if (!error) {
-        return true;
+    const { error } = await admin.rpc('enqueue_billing_mail', {
+        p_kind: kind,
+        p_dedupe_key: dedupeKey,
+        p_mode: mode,
+        p_payload: payload,
+    });
+    if (error) {
+        throw new Error(`could not queue the ${kind} mail: ${error.message}`);
     }
-    if (error.code === '23505') {
-        return false;
-    }
-    throw new Error(`could not claim the ${kind} notice: ${error.message}`);
-};
-
-/** Gives a claim back when the mail did not go out, so a later delivery may try again. */
-export const releaseNotice = async (kind: NoticeKind, objectId: string): Promise<void> => {
-    const admin = serviceClient();
-    await admin?.from('billing_notices').delete().eq('kind', kind).eq('stripe_object_id', objectId);
 };
 
 /** The account's sign-in address, or null (deleted, or an account with none). */

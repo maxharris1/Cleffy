@@ -1,9 +1,8 @@
 -- Behaviour proof for 20261020160000_checkout_consents_and_self_service_cancel.sql:
 -- the service role records a checkout consent and links it to its session;
--- no client role can read or write consents, cancel tokens or billing notices;
+-- no client role can read or write consents or cancel tokens;
 -- a consent younger than three years cannot be removed, by anyone; deleting the
--- account keeps the consent and only clears its user_id; billing_notices
--- refuses a second confirmation for the same Stripe object; and
+-- account keeps the consent and only clears its user_id; and
 -- billing_user_for_email answers the service role alone, never for a guest.
 --
 -- Runs inside one transaction and ROLLS BACK -- nothing persists. Same harness
@@ -93,13 +92,9 @@ delete from auth.users where id = pg_temp.u(3);
 select pg_temp.chk('13 deleting the account keeps the consent and clears only its user_id', $q$select user_id is null and stripe_customer_id = 'cus_3'
     from public.checkout_consents where id = pg_temp.u(8)$q$);
 
--- ---- billing_notices: one confirmation per Stripe object
+-- billing_notices (checks 20-21, 53) was replaced by billing_mail_outbox in
+-- 20261020160200; its de-duplication is proved in launch_checkout_fixes.sql.
 select pg_temp.as_service();
-insert into public.billing_notices (kind, stripe_object_id) values ('purchase_confirmation', 'cs_1');
-select pg_temp.refused('20 a second purchase confirmation for the same session is refused', $q$insert into public.billing_notices (kind, stripe_object_id) values ('purchase_confirmation', 'cs_1')$q$, '23505');
-select pg_temp.chk('21 ... while a cancellation notice for another key goes in', $q$with ins as (
-    insert into public.billing_notices (kind, stripe_object_id) values ('cancellation_confirmation', 'sub_1:2026-11-20') returning 1)
-    select count(*) = 1 from ins$q$);
 
 -- ---- billing_cancel_tokens
 select pg_temp.chk('30 the service role stores a hashed token', $q$with ins as (
@@ -125,7 +120,6 @@ select pg_temp.as_user(1);
 select pg_temp.refused('50 a buyer cannot read their consents', $q$select count(*) from public.checkout_consents$q$, '42501');
 select pg_temp.refused('51 ... or write one', $q$insert into public.checkout_consents (user_id, mode, stripe_customer_id, price_id, plan_slot, currency, amount_minor, renewal_interval, tax_inclusive, wording, wording_version, terms_version, refund_policy_version, declared_country) values (pg_temp.u(1), 'test', 'c', 'p', 's', 'usd', 1, 'month', false, 'w', 'v', 'v', 'v', 'US')$q$, '42501');
 select pg_temp.refused('52 ... or read cancel tokens', $q$select count(*) from public.billing_cancel_tokens$q$, '42501');
-select pg_temp.refused('53 ... or billing notices', $q$select count(*) from public.billing_notices$q$, '42501');
 select pg_temp.refused('54 ... or look up an address', $q$select public.billing_user_for_email('buyer@consenttest.test')$q$, '42501');
 reset role;
 select pg_temp.as_anon();
@@ -133,8 +127,8 @@ select pg_temp.refused('55 anon cannot read consents', $q$select count(*) from p
 select pg_temp.refused('56 ... or look up an address', $q$select public.billing_user_for_email('buyer@consenttest.test')$q$, '42501');
 reset role;
 
-select pg_temp.chk('60 RLS is on for all three tables', $q$select bool_and(c.relrowsecurity) from pg_class c
-    where c.oid in ('public.checkout_consents'::regclass, 'public.billing_cancel_tokens'::regclass, 'public.billing_notices'::regclass)$q$);
+select pg_temp.chk('60 RLS is on for both tables', $q$select bool_and(c.relrowsecurity) from pg_class c
+    where c.oid in ('public.checkout_consents'::regclass, 'public.billing_cancel_tokens'::regclass)$q$);
 select pg_temp.chk('61 the delete guard: search_path pinned empty, nobody may call it', $q$select p.proconfig @> array['search_path=""']
     and not has_function_privilege('authenticated', p.oid, 'execute')
     and not has_function_privilege('anon', p.oid, 'execute')

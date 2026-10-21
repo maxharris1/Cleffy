@@ -559,6 +559,13 @@ verify_jwt = true
 [functions.billing-cancel]
 verify_jwt = false
 
+# The billing mail outbox's retry path: pg_cron posts here (pg_net has no
+# Supabase JWT), proving itself with the BILLING_OUTBOX_SECRET shared secret.
+# Flow in functions/_shared/billingOutbox.ts.
+# `supabase functions deploy billing-mail-outbox --no-verify-jwt`
+[functions.billing-mail-outbox]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54427

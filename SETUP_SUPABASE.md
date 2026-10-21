@@ -230,6 +230,19 @@ select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp
 select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
 ```
 
+The billing mail outbox (`billing_mail_outbox`, migration 20261020160200)
+uses the same pattern for its retry path. Deploy `billing-mail-outbox`
+(`--no-verify-jwt`), set `BILLING_OUTBOX_SECRET` as an Edge secret, and store
+the function URL and that same secret in Vault. `billing_mail_outbox_tick` then
+POSTs every minute while mail is due. Until both are set, purchase and
+cancellation confirmations and cancel links still go out right after they are
+queued, but a failed send is not retried:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/billing-mail-outbox', 'billing_outbox_url');
+select vault.create_secret('<same value as BILLING_OUTBOX_SECRET>', 'billing_outbox_secret');
+```
+
 Chip browse reads the live `public.imslp_works` snapshot: one row per IMSLP
 work with the array of taxonomy categories it belongs to. Refresh ticks write
 `imslp_works_building` and only promote after a category walk completes, so a

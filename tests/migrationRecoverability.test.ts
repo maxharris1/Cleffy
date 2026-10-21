@@ -132,7 +132,7 @@ describe('imslp-sync — the cron job the push has to pause', () => {
      * operator. Pinning the whole map rather than each half means a third job
      * appearing anywhere also has to come through here.
      */
-    it('and omr-sweep are the only jobs any migration touches', () => {
+    it('and omr-sweep (and the billing mail outbox) are the only jobs any migration touches', () => {
         const touched = new Map<string, string[]>();
         for (const { name, sql } of migrations()) {
             for (const match of sql.matchAll(/cron\.(?:schedule|unschedule)\s*\(\s*'([a-z0-9-]+)'/gi)) {
@@ -143,7 +143,11 @@ describe('imslp-sync — the cron job the push has to pause', () => {
                 );
             }
         }
+        // `billing-mail-outbox` (launch checkout fix pass) is safe to schedule
+        // mid-push: its tick only tidies its own table and posts nowhere until
+        // the Vault secrets exist, which are created after the push.
         expect(Object.fromEntries([...touched].sort())).toEqual({
+            'billing-mail-outbox': ['20261020160200_billing_mail_outbox.sql'],
             'imslp-sync': ['20260902120000_imslp_category_index.sql'],
             'omr-sweep': ['20260806140000_omr_cron.sql'],
         });

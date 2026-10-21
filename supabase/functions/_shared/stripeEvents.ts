@@ -363,14 +363,22 @@ export interface WebhookStore {
     settleDuplicateUndo: (subscriptionId: string, state: DuplicateUndoState, undone: DuplicateUndo) => Promise<void>;
     /**
      * After a checkout is applied: completes its consent record (subscription id,
-     * billing country) and sends the purchase confirmation email, once per
-     * session. May throw; the handler logs it and still acknowledges the event,
-     * because the purchase itself HAS been applied and a retry would only risk
-     * applying it again.
+     * billing country) and writes the purchase confirmation into the durable
+     * outbox (billing_mail_outbox), once per session -- the mail itself goes out
+     * after the response, and is retried there until it does.
+     *
+     * Throws when either write fails, and the handler then fails the EVENT
+     * (Codex finding 3 on #62): the old rule -- log it, acknowledge anyway --
+     * marked the event done with the consent incomplete and the confirmation
+     * unsent, and Stripe's redelivery then exited as a duplicate, so nothing
+     * ever tried again. Failing it is safe because every step before this one is
+     * idempotent: the redelivery re-applies the same subscription row (equal
+     * event stamps pass the stale-event guard), re-completes the same consent
+     * and finds the confirmation already queued.
      */
-    notifyPurchase: (notice: PurchaseNotice) => Promise<void>;
-    /** After a cancellation is scheduled: the cancellation confirmation email, once. Same failure rule. */
-    notifyCancellation: (notice: CancellationNotice) => Promise<void>;
+    recordPurchaseNotice: (notice: PurchaseNotice) => Promise<void>;
+    /** After a cancellation is scheduled: the cancellation confirmation, queued once. Same failure rule. */
+    recordCancellationNotice: (notice: CancellationNotice) => Promise<void>;
     log: (message: string) => void;
 }
 
@@ -545,18 +553,27 @@ export const purchaseNoticeFrom = (
 };
 
 /**
- * Runs a notice and swallows its failure into a log line. A notice is what
- * follows an APPLIED write: failing the event for it would ask Stripe to
- * redeliver a purchase we have already recorded, and the email is not worth
- * that risk. The ALERT prefix is what the error log watches for.
+ * Records a notice durably, or fails the event so Stripe delivers it again
+ * (Codex finding 3 on #62). A notice follows an APPLIED write, and re-applying
+ * that write is harmless (see `recordPurchaseNotice`), whereas acknowledging an
+ * event whose consent completion or confirmation was never written down loses
+ * them for good: the redelivery would be a duplicate. Answers null when the
+ * notice is recorded, else the retry to answer with.
  */
-const bestEffortNotice = async (store: WebhookStore, event: StripeEventLike, send: () => Promise<void>) => {
+const recordNotice = async (
+    store: WebhookStore,
+    event: StripeEventLike,
+    record: () => Promise<void>,
+): Promise<WebhookResult | null> => {
     try {
-        await send();
+        await record();
+        return null;
     } catch (err) {
         store.log(
-            `ALERT ${event.type} ${event.id}: notice not sent: ${err instanceof Error ? err.message : String(err)}`,
+            `ALERT ${event.type} ${event.id}: notice not recorded, asking Stripe to redeliver: ` +
+                (err instanceof Error ? err.message : String(err)),
         );
+        return retryLater(store, event, 'notice_not_recorded');
     }
 };
 
@@ -946,7 +963,10 @@ const dispatchStripeEvent = async (
                 }
                 const notice = purchaseNoticeFrom(event, session, sub, userId);
                 if (notice) {
-                    await bestEffortNotice(store, event, () => store.notifyPurchase(notice));
+                    const unrecorded = await recordNotice(store, event, () => store.recordPurchaseNotice(notice));
+                    if (unrecorded) {
+                        return unrecorded;
+                    }
                 }
                 return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
             });
@@ -1037,7 +1057,10 @@ const dispatchStripeEvent = async (
                 }
                 if (isCancellationScheduled(event, current)) {
                     const notice = cancellationNoticeFrom(event, current, userId);
-                    await bestEffortNotice(store, event, () => store.notifyCancellation(notice));
+                    const unrecorded = await recordNotice(store, event, () => store.recordCancellationNotice(notice));
+                    if (unrecorded) {
+                        return unrecorded;
+                    }
                 }
                 return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
             });
