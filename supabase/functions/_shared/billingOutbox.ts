@@ -120,6 +120,8 @@ export interface PurchaseMail extends PurchaseNotice {
     /** From the consent record; null falls back to the versions this deployment publishes. */
     termsVersion: string | null;
     refundsVersion: string | null;
+    /** The consent's amount_minor: the regular price each renewal charges. */
+    recurringAmountMinor: number | null;
 }
 
 export type CancellationMail = CancellationNotice;
@@ -141,6 +143,7 @@ export interface ConfirmationDeps {
         | 'PLAN_INTERVALS'
         | 'CURRENCIES'
         | 'LEGAL_VERSIONS'
+        | 'PLAN_PRICES'
     >;
     log: (message: string) => void;
 }
@@ -186,6 +189,11 @@ export const deliverPurchaseConfirmation = async (deps: ConfirmationDeps, row: O
         currency,
         amountTotalMinor: mail.amountTotalMinor,
         amountTaxMinor: mail.amountTaxMinor,
+        // What the buyer consented to renew at, else this deployment's price
+        // for the plan; distinct from today's charge, which a promotion code
+        // may have discounted.
+        recurringAmountMinor: mail.recurringAmountMinor ?? deps.terms.PLAN_PRICES[slot][currency],
+        amountDiscountMinor: mail.amountDiscountMinor ?? null,
         renewsAtMs: mail.renewsAt ? Date.parse(mail.renewsAt) : null,
         purchasedAtMs: Date.parse(mail.purchasedAt),
         origin: deps.storefrontOrigin(row.mode),

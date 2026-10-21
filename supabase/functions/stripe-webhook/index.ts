@@ -474,12 +474,12 @@ Deno.serve(async (req) => {
                       .from('checkout_consents')
                       .update(completion)
                       .eq('id', notice.consentId)
-                      .select('terms_version, refund_policy_version')
+                      .select('terms_version, refund_policy_version, amount_minor')
                 : await admin
                       .from('checkout_consents')
                       .update(completion)
                       .eq('checkout_session_id', notice.sessionId)
-                      .select('terms_version, refund_policy_version');
+                      .select('terms_version, refund_policy_version, amount_minor');
             if (linked.error) {
                 throw new Error(`could not complete the consent for ${notice.sessionId}: ${linked.error.message}`);
             }
@@ -495,6 +495,7 @@ Deno.serve(async (req) => {
                 ...notice,
                 termsVersion: consent?.terms_version ?? null,
                 refundsVersion: consent?.refund_policy_version ?? null,
+                recurringAmountMinor: typeof consent?.amount_minor === 'number' ? consent.amount_minor : null,
             };
             await enqueueBillingMail('purchase_confirmation', notice.sessionId, mode, { ...mail });
         },

@@ -392,6 +392,13 @@ export interface PurchaseEmailInput {
     amountTotalMinor: number;
     /** The tax inside that total (session.total_details.amount_tax), when Stripe says. */
     amountTaxMinor: number | null;
+    /**
+     * The plan's regular price per interval -- what each renewal charges once
+     * any promotion is over (the consent's amount_minor). Null when unknown.
+     */
+    recurringAmountMinor: number | null;
+    /** A promotion code's discount on today's charge (session.total_details.amount_discount). */
+    amountDiscountMinor: number | null;
     /** When it next renews (seconds → ms), when known. */
     renewsAtMs: number | null;
     purchasedAtMs: number;
@@ -411,18 +418,33 @@ export const purchaseConfirmationEmail = (input: PurchaseEmailInput): BillingEma
               ? ' (VAT included)'
               : '';
     const cancelUrl = `${input.origin}${BILLING_PATHS.cancel}`;
+    const discounted = input.amountDiscountMinor !== null && input.amountDiscountMinor > 0;
+    const renewalPrice =
+        input.recurringAmountMinor !== null
+            ? `${formatMoney(input.recurringAmountMinor, input.currency)} ${intervalPhrase(input.interval)} ` +
+              `(${taxPhrase(input.currency)})`
+            : "the plan's regular price";
     const paragraphs = [
         `Thank you for subscribing to Cleffy ${input.planName}.`,
         [
             `Plan: ${input.planName}, billed ${input.interval === 'month' ? 'monthly' : 'yearly'}`,
             `Charged today: ${total}${tax}`,
+            discounted
+                ? `Discount applied today: ${formatMoney(input.amountDiscountMinor ?? 0, input.currency)}`
+                : null,
             `Purchased: ${formatUtc(input.purchasedAtMs)}`,
             input.renewsAtMs !== null ? `Next renewal: ${formatUtcDate(input.renewsAtMs)}` : null,
         ]
             .filter((line): line is string => line !== null)
             .join('\n'),
-        `Your subscription renews automatically every ${input.interval} at the same price, charged to the ` +
-            'payment method you used today, until you cancel. There is no minimum term.',
+        `Your subscription renews automatically every ${input.interval} at ${renewalPrice}, charged to the ` +
+            'payment method you used today, until you cancel. There is no minimum term.' +
+            // Codex minor 1 on #62: "at the same price" was wrong whenever a
+            // promotion code discounted the first charge.
+            (discounted
+                ? ' Today’s charge includes a promotional discount, which applies only for as long as your ' +
+                  'promotion code states; after that, each renewal is charged at the regular price above.'
+                : ''),
         `To cancel, visit ${cancelUrl} (no sign-in needed) or use "Manage billing" on your Account page. ` +
             'Cancelling stops the next renewal; you keep access until the end of the period you have paid for.',
         REFUND_SUMMARY,

@@ -107,7 +107,7 @@ export interface StripeCheckoutSessionLike {
     /** What was charged, tax included, in minor units of `currency`. */
     amount_total?: number | null;
     currency?: string | null;
-    total_details?: { amount_tax?: number | null } | null;
+    total_details?: { amount_tax?: number | null; amount_discount?: number | null } | null;
     /** The billing address Checkout collected (billing_address_collection: required). */
     customer_details?: { address?: { country?: string | null } | null } | null;
     created?: number | null;
@@ -241,6 +241,8 @@ export interface PurchaseNotice {
     currency: string | null;
     amountTotalMinor: number | null;
     amountTaxMinor: number | null;
+    /** A promotion code's discount on that total, when there was one. */
+    amountDiscountMinor: number | null;
     /** When it next renews -- the end of the period just paid for. */
     renewsAt: string | null;
     purchasedAt: string;
@@ -544,6 +546,8 @@ export const purchaseNoticeFrom = (
         currency: session.currency?.toLowerCase() ?? null,
         amountTotalMinor: typeof session.amount_total === 'number' ? session.amount_total : null,
         amountTaxMinor: typeof session.total_details?.amount_tax === 'number' ? session.total_details.amount_tax : null,
+        amountDiscountMinor:
+            typeof session.total_details?.amount_discount === 'number' ? session.total_details.amount_discount : null,
         renewsAt: periodEnd === null ? null : new Date(periodEnd * 1000).toISOString(),
         purchasedAt:
             eventStampOf(event) ??

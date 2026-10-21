@@ -125,8 +125,10 @@ const PURCHASE: PurchaseMail = {
     amountTaxMinor: 335,
     renewsAt: '2027-01-15T08:00:00.000Z',
     purchasedAt: '2026-10-21T08:00:00.000Z',
+    amountDiscountMinor: null,
     termsVersion: '2026-10-01-consented',
     refundsVersion: '2026-10-01-refunds-consented',
+    recurringAmountMinor: 55000,
 };
 
 describe('draining the billing mail outbox', () => {
@@ -255,6 +257,16 @@ describe('the confirmations the outbox sends', () => {
         expect(h.sent[0]?.text).toContain('version 2026-10-01-consented');
         expect(h.sent[0]?.text).toContain('version 2026-10-01-refunds-consented');
         expect(h.sent[0]?.text).not.toContain(billingTerms.LEGAL_VERSIONS.terms);
+    });
+
+    it('renews at the price the buyer consented to, whatever a promotion took off today', async () => {
+        const h = confirmation();
+        await deliverPurchaseConfirmation(
+            h.deps,
+            row('purchase_confirmation', { ...PURCHASE, amountTotalMinor: 1050, amountDiscountMinor: 52_950 }),
+        );
+        expect(h.sent[0]?.text).toContain('at €550 per year (VAT included)');
+        expect(h.sent[0]?.text).toContain('Discount applied today: €529.50');
     });
 
     it('falls back to the published versions when no consent was found', async () => {

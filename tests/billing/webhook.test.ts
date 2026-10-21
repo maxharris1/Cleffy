@@ -524,6 +524,7 @@ describe('stripe event handling', () => {
                     currency: 'eur',
                     amountTotalMinor: 2100,
                     amountTaxMinor: 335,
+                    amountDiscountMinor: null,
                     renewsAt: new Date(1_800_000_000 * 1000).toISOString(),
                     purchasedAt: new Date(EVENT_CREATED * 1000).toISOString(),
                 },

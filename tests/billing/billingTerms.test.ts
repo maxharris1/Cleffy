@@ -121,11 +121,40 @@ describe('the purchase confirmation email', () => {
         currency: 'gbp',
         amountTotalMinor: 1800,
         amountTaxMinor: 300,
+        recurringAmountMinor: 1800,
+        amountDiscountMinor: null,
         renewsAtMs: Date.parse('2026-11-20T12:00:00Z'),
         purchasedAtMs: Date.parse('2026-10-20T12:00:00Z'),
         origin: 'https://cleffy.io',
         termsVersion: LEGAL_VERSIONS.terms,
         refundsVersion: LEGAL_VERSIONS.refunds,
+    });
+
+    it('states the regular renewal price beside what was charged today', () => {
+        expect(email.text).toContain('renews automatically every month at £18 per month (VAT included)');
+        expect(email.text).not.toContain('at the same price');
+        expect(email.text).not.toContain('promotional discount');
+    });
+
+    it('does not promise a discounted price will renew (Codex minor 1 on #62)', () => {
+        const discounted = purchaseConfirmationEmail({
+            planName: 'Teacher',
+            interval: 'month',
+            currency: 'usd',
+            amountTotalMinor: 950,
+            amountTaxMinor: null,
+            recurringAmountMinor: 1900,
+            amountDiscountMinor: 950,
+            renewsAtMs: null,
+            purchasedAtMs: Date.parse('2026-10-20T12:00:00Z'),
+            origin: 'https://cleffy.io',
+            termsVersion: LEGAL_VERSIONS.terms,
+            refundsVersion: LEGAL_VERSIONS.refunds,
+        });
+        expect(discounted.text).toContain('Charged today: $9.50');
+        expect(discounted.text).toContain('Discount applied today: $9.50');
+        expect(discounted.text).toContain('at $19 per month (plus any applicable sales tax)');
+        expect(discounted.text).toContain('each renewal is charged at the regular price above');
     });
 
     it('carries everything item 18 lists', () => {
