@@ -12,7 +12,7 @@ import {
 import { logError } from './errorReporting.ts';
 import { LEGAL_OPERATOR } from './legalVersions.ts';
 import { mailLimit } from './mailBudget.ts';
-import { sendViaResend, type MailSendOutcome } from './mailDelivery.ts';
+import { sendViaResend, type ResendResult } from './resendDelivery.ts';
 import { checkRateLimit, clientKey, refundRateLimit, serviceClient } from './rateLimit.ts';
 
 /**
@@ -115,35 +115,34 @@ export const common = {
     },
 };
 
-export const sendEmail = (
+export const sendEmail = async (
     to: string,
     message: MailMessage,
     options: { bcc?: string; idempotencyKey: string },
-): Promise<MailSendOutcome> =>
-    sendViaResend({
+): Promise<ResendResult> => {
+    const result = await sendViaResend({
         apiKey: Deno.env.get('RESEND_API_KEY'),
-        // The outbox row's key (content_notice_outbox/{id}), the same on every
+        // The outbox row's key (content-notice-outbox-{id}), the same on every
         // attempt: Resend answers a repeat with the first send's result, so a
         // notice retried after an unknown outcome is not delivered twice.
         idempotencyKey: options.idempotencyKey,
-        body: {
+        email: {
             from: mailFrom(),
             to: [to],
             ...(options.bcc ? { bcc: [options.bcc] } : {}),
             reply_to: LEGAL_OPERATOR.legalEmail,
             ...message,
         },
-        // The status and Resend's reason, never the address or the body.
-        onFailure: (status, detail) =>
-            logError(
-                'content-moderation',
-                new Error(`resend ${status === null ? 'unreachable' : `returned ${status}`}`),
-                {
-                    code: 'send_failed',
-                    detail,
-                },
-            ),
     });
+    if (result.outcome !== 'sent' && result.reason !== 'unconfigured') {
+        // The outcome, status and Resend's reason, never the address or the body.
+        logError('content-moderation', new Error(`resend ${result.outcome}: ${result.reason}`), {
+            code: 'send_failed',
+            detail: result.errorName ?? result.detail ?? '',
+        });
+    }
+    return result;
+};
 
 /** A viewer link's score if it exists, or the score a share link (live or not) points at. */
 export const resolveDocument = async (ref: DocumentRef): Promise<string | null> => {

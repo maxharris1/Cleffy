@@ -33,10 +33,10 @@ import {
 } from '../../supabase/functions/_shared/contentReports';
 import { MAIL_CATEGORY_CAPS, MAIL_WINDOW_MS } from '../../supabase/functions/_shared/mailBudget';
 import {
-    outboxIdempotencyKey,
-    refundsMailBudget,
-    type MailSendOutcome,
-} from '../../supabase/functions/_shared/mailDelivery';
+    resendIdempotencyKey,
+    sendViaResend,
+    type ResendResult,
+} from '../../supabase/functions/_shared/resendDelivery';
 
 const OPERATOR = {
     name: 'Cleffy LLC',
@@ -182,7 +182,7 @@ const commonDeps = (outbox: ReturnType<typeof fakeOutbox>, sent: Sent[]) => ({
             bcc: options.bcc,
             idempotencyKey: options.idempotencyKey,
         });
-        return 'sent' as const;
+        return { outcome: 'sent', reason: 'sent', status: 200, id: 'email-1' } as ResendResult;
     },
     mailBudgets: BUDGETS,
     claimNotices: outbox.claimNotices,
@@ -312,7 +312,7 @@ describe('content-report', () => {
                 to: 'ada@example.com',
                 subject: 'We received your report CR-0000000001',
                 bcc: 'legal@cleffy.io',
-                idempotencyKey: 'content_notice_outbox/notice-1',
+                idempotencyKey: 'content-notice-outbox-notice-1',
             }),
         ]);
         expect(outbox.rows[0]).toMatchObject({ status: 'sent', outcomes: [{ outcome: 'sent', retryAfterSec: null }] });
@@ -398,7 +398,9 @@ describe('content-report', () => {
     });
 
     it('keeps a notice whose send failed, for the retry', async () => {
-        const { deps, outbox } = reportDeps({ sendEmail: async () => 'unknown' });
+        const { deps, outbox } = reportDeps({
+            sendEmail: async () => ({ outcome: 'unknown', reason: 'timeout', status: null }),
+        });
         const res = await handleContentReport(post(copyrightBody()), deps);
         expect(res.status).toBe(201);
         expect(await res.json()).toMatchObject({ acknowledged: false, delivery: 'failed' });
@@ -881,8 +883,16 @@ describe('the mail budget across uncertain sends (unknown keeps, a definite reje
     const HOUR = 'mail:content-report-ack:hour';
     const DAY = 'mail:content-report-ack:day';
 
-    /** One acknowledgment in the outbox, a counting limiter, and a send that answers `outcomes` in turn. */
-    const setup = (outcomes: MailSendOutcome[]) => {
+    type Answer = Response | Error;
+    const ok = () => new Response(JSON.stringify({ id: 'email-1' }), { status: 200 });
+    const status = (code: number, name = 'error') => new Response(JSON.stringify({ name }), { status: code });
+
+    /**
+     * One acknowledgment in the outbox and a counting limiter, delivered
+     * through the shared resendDelivery.sendViaResend against a fake Resend
+     * that answers `answers` in turn (an Error is a fetch that threw).
+     */
+    const setup = (answers: Answer[], apiKey: string | null = 're_test') => {
         const outbox = fakeOutbox();
         const id = outbox.enqueue({
             sender: 'content-report-ack',
@@ -899,81 +909,102 @@ describe('the mail budget across uncertain sends (unknown keeps, a definite reje
         });
         const limiter = countingLimiter();
         const keys: string[] = [];
-        const answers = [...outcomes];
+        const queue = [...answers];
+        const fakeFetch = (async (_url: string, init: RequestInit) => {
+            keys.push((init.headers as Record<string, string>)['Idempotency-Key']!);
+            const answer = queue.shift() ?? ok();
+            if (answer instanceof Error) {
+                throw answer;
+            }
+            return answer;
+        }) as unknown as typeof fetch;
         const sent: Sent[] = [];
         const deps: ContentNoticesDeps = {
             ...commonDeps(outbox, sent),
             checkRateLimit: limiter.checkRateLimit,
             refundRateLimit: limiter.refundRateLimit,
-            sendEmail: async (_to, _message, options) => {
-                keys.push(options.idempotencyKey);
-                return answers.shift() ?? 'sent';
-            },
+            sendEmail: (to, message, options) =>
+                sendViaResend({
+                    apiKey: apiKey ?? undefined,
+                    idempotencyKey: options.idempotencyKey,
+                    email: { from: 'Cleffy <legal@cleffy.io>', to: [to], ...message },
+                    fetch: fakeFetch,
+                }),
             authorized: async () => true,
         };
         return { outbox, id, limiter, keys, deps };
     };
     const run = async (deps: ContentNoticesDeps) => (await handleContentNotices(post({}), deps)).json();
 
-    it.each(['unknown'] as const)(
-        'an %s outcome (timeout, network error, 5xx) keeps the reservation and the notice',
-        async (outcome) => {
-            const { outbox, limiter, deps } = setup([outcome]);
+    it.each([
+        ['a network error', new TypeError('fetch failed')],
+        ['a timeout', Object.assign(new Error('timed out'), { name: 'TimeoutError' })],
+        ['a 5xx', status(503)],
+        ['a 409 (the same key still in flight)', status(409, 'concurrent_idempotent_requests')],
+        ['a 2xx with no email id', new Response('{}', { status: 200 })],
+    ] as Array<[string, Answer]>)('%s is unknown: the reservation and the notice are kept', async (_what, answer) => {
+        const { outbox, limiter, deps } = setup([answer]);
+        expect(await run(deps)).toMatchObject({ sent: 0, failed: 1 });
+        // It may have gone out: the budget stays spent.
+        expect(limiter.used(HOUR)).toBe(1);
+        expect(limiter.used(DAY)).toBe(1);
+        // And it is still owed, for the retry.
+        expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'failed' }] });
+    });
+
+    it.each([
+        ['a 422 validation error', status(422, 'validation_error')],
+        ['a 403', status(403)],
+        ['a 429 (refused before anything was accepted)', status(429, 'rate_limit_exceeded')],
+    ] as Array<[string, Answer]>)(
+        '%s is a definite rejection: the reservation goes back in every window',
+        async (_what, answer) => {
+            const { outbox, limiter, deps } = setup([answer]);
             expect(await run(deps)).toMatchObject({ sent: 0, failed: 1 });
-            // It may have gone out: the budget stays spent.
-            expect(limiter.used(HOUR)).toBe(1);
-            expect(limiter.used(DAY)).toBe(1);
-            // And it is still owed, for the retry.
+            expect(limiter.used(HOUR)).toBe(0);
+            expect(limiter.used(DAY)).toBe(0);
             expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'failed' }] });
         },
     );
 
-    it('a definite rejection (4xx) hands the reservation back, in every window', async () => {
-        const { outbox, limiter, deps } = setup(['rejected']);
-        expect(await run(deps)).toMatchObject({ sent: 0, failed: 1 });
-        expect(limiter.used(HOUR)).toBe(0);
-        expect(limiter.used(DAY)).toBe(0);
-        expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'failed' }] });
-    });
-
-    it('no API key (no request made) hands it back too', async () => {
-        const { limiter, deps } = setup(['unconfigured']);
+    it('no API key (no request made) hands it back too, and says unconfigured', async () => {
+        const { limiter, keys, deps } = setup([], null);
         expect(await run(deps)).toMatchObject({ unconfigured: 1 });
+        expect(keys).toEqual([]);
         expect(limiter.used(HOUR)).toBe(0);
         expect(limiter.used(DAY)).toBe(0);
     });
 
     it('the retry after an unknown outcome sends with the same Idempotency-Key, derived from the outbox row', async () => {
-        const { outbox, id, limiter, keys, deps } = setup(['unknown', 'sent']);
-        await run(deps);
+        const { outbox, id, limiter, keys, deps } = setup([new TypeError('connection reset'), ok()]);
+        expect(await run(deps)).toMatchObject({ failed: 1 });
         expect(await run(deps)).toMatchObject({ sent: 1 });
         // Attempt-independent: Resend answers the repeat with the first send's
         // result, so a notice that did go out the first time is not sent twice.
-        expect(keys).toEqual([`content_notice_outbox/${id}`, `content_notice_outbox/${id}`]);
+        expect(keys).toEqual([`content-notice-outbox-${id}`, `content-notice-outbox-${id}`]);
         expect(keys[0]).toBe(contentNoticeIdempotencyKey(id));
-        expect(keys[0]).toBe(outboxIdempotencyKey('content_notice_outbox', id));
+        expect(keys[0]).toBe(resendIdempotencyKey('content-notice-outbox', id));
         expect(outbox.rows[0]?.status).toBe('sent');
         // Two attempts, two reservations kept: an over-count, never an under-count.
         expect(limiter.used(HOUR)).toBe(2);
     });
 
     it('a window that refuses hands back what the other window reserved', async () => {
-        const { outbox, limiter, deps } = setup(['sent']);
+        const { outbox, limiter, keys, deps } = setup([]);
         // The day is spent; the hour is not.
         for (let i = 0; i < MAIL_CATEGORY_CAPS.contentReportAck.day; i += 1) {
             await limiter.checkRateLimit(DAY, MAIL_CATEGORY_CAPS.contentReportAck.day, MAIL_WINDOW_MS.day);
         }
         expect(await run(deps)).toMatchObject({ sent: 0, queued: 1 });
+        expect(keys).toEqual([]);
         expect(limiter.used(HOUR)).toBe(0);
         expect(outbox.rows[0]).toMatchObject({ status: 'pending', outcomes: [{ outcome: 'deferred' }] });
     });
 
-    it('decides refunds exactly as the shared mail-delivery contract does', () => {
-        for (const outcome of ['sent', 'rejected', 'unknown', 'unconfigured'] as const) {
-            expect(refundsNoticeBudget(outcome), outcome).toBe(refundsMailBudget(outcome));
-        }
-        expect(refundsMailBudget('unknown')).toBe(false);
-        expect(refundsMailBudget('sent')).toBe(false);
-        expect(refundsMailBudget('rejected')).toBe(true);
+    it('refunds on rejected only', () => {
+        const result = (outcome: ResendResult['outcome']): ResendResult => ({ outcome, reason: outcome, status: null });
+        expect(refundsNoticeBudget(result('rejected'))).toBe(true);
+        expect(refundsNoticeBudget(result('unknown'))).toBe(false);
+        expect(refundsNoticeBudget(result('sent'))).toBe(false);
     });
 });
