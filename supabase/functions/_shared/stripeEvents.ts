@@ -650,6 +650,42 @@ const finishPendingDuplicateUndo = async (
 };
 
 /**
+ * A district is billed through Stripe Invoicing, so no Checkout ever links its
+ * customer to the owner. Without the link, stripe-portal answers no_customer
+ * for the owner's own billing (Codex review of #61, minor 1). The subscription
+ * write vouches for the owner: a district subscription is attributed by the
+ * metadata an admin set, and the marking is not something a customer can set.
+ *
+ * An unmapped customer is linked to the owner, which replaces any older
+ * customer the owner had in this Stripe account. That is the right account for
+ * their portal now, and the runbook has them cancel any card plan first. A
+ * customer already mapped to SOMEONE ELSE is left alone and logged, because a
+ * mapping is never moved off another user on a subscription's say-so.
+ */
+const linkDistrictCustomer = async (
+    store: WebhookStore,
+    sub: StripeSubscriptionLike,
+    userId: string,
+): Promise<void> => {
+    const customerId = idOf(sub.customer);
+    if (!customerId || !isDistrictSubscription(sub)) {
+        return;
+    }
+    const mapped = await store.userIdForCustomer(customerId);
+    if (mapped === userId) {
+        return;
+    }
+    if (mapped !== null) {
+        store.log(
+            `district subscription ${sub.id}: customer ${customerId} is already linked to another user; ` +
+                `not relinking it to ${userId}`,
+        );
+        return;
+    }
+    await store.linkCustomer(customerId, userId);
+};
+
+/**
  * Writes the row, then brings the score archive in line with it. Both halves
  * read the user's entitlements AFTER the upsert, so they act on every
  * subscription the user holds, not just this one: a lapse while another plan is
@@ -683,6 +719,7 @@ const applySubscription = async (
     if (written.outcome === 'lost_lock') {
         return await leaseLost(store, event, sub.id);
     }
+    await linkDistrictCustomer(store, sub, userId);
     if (shouldArchiveOnStatus(sub.status)) {
         await store.applyFreeTierArchival(userId);
     } else if (isEntitlingStatus(sub.status)) {

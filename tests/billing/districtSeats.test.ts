@@ -117,16 +117,26 @@ describe('the webhook maps a district contract', () => {
 });
 
 /** Just enough of the webhook's store to watch what a district event writes. */
-const storeFor = (remote: StripeSubscriptionLike) => {
+const storeFor = (remote: StripeSubscriptionLike, customers = new Map<string, string>()) => {
     const written: SubscriptionUpsert[] = [];
+    const logs: string[] = [];
     const done = new Set<string>();
     const store: WebhookStore = {
         claimEvent: async (id) => (done.has(id) ? 'done' : 'claimed'),
         markEventDone: async (id) => {
             done.add(id);
         },
-        userIdForCustomer: async () => null,
-        linkCustomer: async () => {},
+        // billing_customers, keyed by customer: what stripe-portal resolves the
+        // owner's customer from.
+        userIdForCustomer: async (customerId) => customers.get(customerId) ?? null,
+        linkCustomer: async (customerId, userId) => {
+            for (const [mapped, user] of customers) {
+                if (user === userId) {
+                    customers.delete(mapped); // one customer per user and mode
+                }
+            }
+            customers.set(customerId, userId);
+        },
         upsertSubscription: async (row) => {
             written.push(row);
             return { outcome: 'written' };
@@ -143,9 +153,11 @@ const storeFor = (remote: StripeSubscriptionLike) => {
         pendingDuplicateUndo: async () => null,
         recordPendingDuplicateUndo: async () => {},
         settleDuplicateUndo: async () => {},
-        log: () => {},
+        log: (message) => {
+            logs.push(message);
+        },
     };
-    return { store, written };
+    return { store, written, customers, logs };
 };
 
 const event = (id: string, type: string, object: unknown): StripeEventLike => ({
@@ -191,6 +203,54 @@ describe('a send_invoice subscription grants entitlement through the webhook', (
 
         expect(result.status).toBe(200);
         expect(written.at(-1)).toMatchObject({ tier: 'academy', collection_method: 'send_invoice' });
+    });
+});
+
+/** stripe-portal's lookup: the customer billing_customers maps the user to. */
+const portalCustomerOf = (customers: Map<string, string>, userId: string): string | null =>
+    [...customers].find(([, user]) => user === userId)?.[0] ?? null;
+
+describe('an invoice-created district links its billing customer (Codex #61 minor 1)', () => {
+    it('so the owner’s billing portal finds the district’s customer', async () => {
+        const sub = districtSubscription();
+        const { store, customers } = storeFor(sub);
+
+        await handleStripeEvent(event('evt_created', 'customer.subscription.created', sub), store, PRICE_TIERS);
+
+        expect(portalCustomerOf(customers, 'owner-1')).toBe('cus_district');
+    });
+
+    it('replacing an older customer of the owner’s own, so the portal opens the district account', async () => {
+        const sub = districtSubscription();
+        const { store, customers } = storeFor(sub, new Map([['cus_old_card', 'owner-1']]));
+
+        await handleStripeEvent(event('evt_created', 'customer.subscription.created', sub), store, PRICE_TIERS);
+
+        expect(portalCustomerOf(customers, 'owner-1')).toBe('cus_district');
+    });
+
+    it('but never moving a customer already linked to someone else', async () => {
+        const sub = districtSubscription();
+        const { store, customers, logs } = storeFor(sub, new Map([['cus_district', 'someone-else']]));
+
+        const result = await handleStripeEvent(
+            event('evt_created', 'customer.subscription.created', sub),
+            store,
+            PRICE_TIERS,
+        );
+
+        expect(result.status).toBe(200);
+        expect(customers.get('cus_district')).toBe('someone-else');
+        expect(logs.some((line) => /already linked to another user/.test(line))).toBe(true);
+    });
+
+    it('and links nothing for a subscription that is not a district', async () => {
+        const card = districtSubscription({ collection_method: 'charge_automatically' });
+        const { store, customers } = storeFor(card);
+
+        await handleStripeEvent(event('evt_created', 'customer.subscription.created', card), store, PRICE_TIERS);
+
+        expect(customers.size).toBe(0);
     });
 });
 
