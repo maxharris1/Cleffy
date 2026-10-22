@@ -1007,6 +1007,17 @@ student who came in meanwhile; a hard-deleted district stays closed. Ends with
 passed; with 20261022130300's `district_deletion_pending()`, 6 of the 12
 failed.
 
+`student_provision_intent_window.sql` proves
+`supabase/migrations/20261022140300_student_provision_intent_window.sql`: the
+email fallback in `student_provision_intents_for()` names only an account
+created inside the intent's window (one minute before `created_at` to
+`expires_at`, inclusive) that no other intent recorded. A crash between the
+Auth create and the attach is still found; a separate signup after the window,
+an account from before it, and another intent's recorded account at the same
+address are not; a recorded account is named as before. Ends with
+`failures | total`. Proven against the local stack on 2026-10-22: all 8 checks
+passed; with 20261022110600's function, 3 of the 8 failed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
