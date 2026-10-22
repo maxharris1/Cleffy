@@ -129,25 +129,46 @@ class Roster {
         }
     }
 
-    /** student-provision's reset: begin_student_code_reset, then the scramble, then the new hash. */
-    beginReset(id: string): 'reserved' | 'busy' {
+    /**
+     * student-provision's reset: reserve_student_code_reset
+     * (20261022110500_student_code_reset_holder.sql), then the scramble, then
+     * complete_student_code_reset. A live hold of either kind refuses, unless
+     * it is this reset's own (its token presented).
+     */
+    beginReset(id: string, token?: string): { status: 'reserved' | 'busy'; reservation?: string } {
         const held = this.held.get(id);
-        if (this.live(held) && held.kind === 'claim') {
-            return 'busy';
+        if (this.live(held)) {
+            if (held.kind === 'reset' && token !== undefined && held.reservation === token) {
+                held.until = this.now + TTL_MS;
+                return { status: 'reserved', reservation: token };
+            }
+            return { status: 'busy' };
         }
+        const reservation = `res-${++this.ids}`;
         this.held.set(id, {
-            reservation: `res-${++this.ids}`,
+            reservation,
             kind: 'reset',
             hash: this.rows.get(id)?.hash ?? null,
             until: this.now + TTL_MS,
         });
-        return 'reserved';
+        return { status: 'reserved', reservation };
     }
 
-    /** The guard trigger on a hash change that is not the claim's own commit. */
+    /** complete_student_code_reset: the holder's new code, or 'lost'. */
+    completeReset(id: string, token: string, hash: string): 'reset' | 'lost' {
+        const held = this.held.get(id);
+        if (!held || held.kind !== 'reset' || held.reservation !== token) {
+            return 'lost';
+        }
+        this.held.delete(id);
+        Object.assign(this.rows.get(id) as Row, { hash, claimed: false });
+        return 'reset';
+    }
+
+    /** The guard trigger on a hash change by any other path: refused under any live hold. */
     writeNewHash(id: string, hash: string): void {
         const held = this.held.get(id);
-        if (this.live(held) && held.kind === 'claim') {
+        if (this.live(held)) {
             throw new Error('student_claim_in_progress');
         }
         this.held.delete(id);
@@ -337,19 +358,21 @@ describe('student-claim against a teacher reset', () => {
         const inFlight = handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
         await paused.arrived;
 
-        expect(roster.beginReset('s1')).toBe('busy');
+        expect(roster.beginReset('s1').status).toBe('busy');
         expect(() => roster.writeNewHash('s1', 'rotated')).toThrow('student_claim_in_progress');
 
         paused.resume();
         expect((await inFlight).status).toBe(200);
-        expect(roster.beginReset('s1')).toBe('reserved');
-        roster.writeNewHash('s1', await hashOf(CODE_B));
+        const reset = roster.beginReset('s1');
+        expect(reset.status).toBe('reserved');
+        expect(roster.completeReset('s1', reset.reservation as string, await hashOf(CODE_B))).toBe('reset');
         expect(roster.held.size).toBe(0);
     });
 
     it('a claim during a reset waits without writing anything; afterwards only the new card works', async () => {
         const { roster, backend, deps } = await setup();
-        expect(roster.beginReset('s1')).toBe('reserved');
+        const reset = roster.beginReset('s1');
+        expect(reset.status).toBe('reserved');
 
         const during = await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
         expect(during.status).toBe(409);
@@ -357,7 +380,7 @@ describe('student-claim against a teacher reset', () => {
         expect(backend.setPassword).not.toHaveBeenCalled();
 
         roster.passwords.set('user-s1', 'scrambled');
-        roster.writeNewHash('s1', await hashOf(CODE_B));
+        expect(roster.completeReset('s1', reset.reservation as string, await hashOf(CODE_B))).toBe('reset');
 
         expect((await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps)).status).toBe(401);
         expect((await handleStudentClaim(claim(CODE_B, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
@@ -371,14 +394,55 @@ describe('student-claim against a teacher reset', () => {
         roster.archive('s1');
         // A reset of the archived student while the stale claim still runs
         // must not scramble before that claim is done.
-        expect(roster.beginReset('s1')).toBe('busy');
+        expect(roster.beginReset('s1').status).toBe('busy');
         paused.resume();
         expect((await inFlight).status).toBe(401);
         expect(backend.signOutSession).toHaveBeenCalledTimes(1);
         expect(roster.rows.get('s1')?.claimed).toBe(false);
         // The lost claim released its own reservation on the way out.
         expect(roster.held.size).toBe(0);
-        expect(roster.beginReset('s1')).toBe('reserved');
+        expect(roster.beginReset('s1').status).toBe('reserved');
+    });
+
+    it('reset, reset, claim: a paused reset cannot scramble the password the student chose from the other card', async () => {
+        // Codex r1 (Part B) finding 2. Reset A reserves and pauses before its
+        // scramble; reset B arrives; the student then claims.
+        const { roster, deps } = await setup();
+        const resetA = roster.beginReset('s1');
+        expect(resetA.status).toBe('reserved');
+
+        // B cannot take A's live reservation over, so it never mints a card.
+        expect(roster.beginReset('s1').status).toBe('busy');
+        expect(roster.beginReset('s1', 'not-a-token').status).toBe('busy');
+        // Nor can anything but A write a code under it.
+        expect(roster.completeReset('s1', 'res-forged', await hashOf(CODE_B))).toBe('lost');
+        expect(() => roster.writeNewHash('s1', 'rotated')).toThrow('student_claim_in_progress');
+        // The student, holding the old card meanwhile, is told to wait.
+        const early = await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
+        expect(early.status).toBe(409);
+
+        // A resumes: scramble, then its new card.
+        roster.passwords.set('user-s1', 'scrambled-by-A');
+        expect(roster.completeReset('s1', resetA.reservation as string, await hashOf(CODE_B))).toBe('reset');
+
+        // The student claims A's card with a password of their own.
+        expect((await handleStudentClaim(claim(CODE_B, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
+        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
+
+        // A stale replay of A's completion finds nothing to write: the
+        // student's password and claim stand.
+        expect(roster.completeReset('s1', resetA.reservation as string, 'hash-late')).toBe('lost');
+        expect(roster.rows.get('s1')).toMatchObject({ claimed: true, username: 'ada_l' });
+        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
+    });
+
+    it('a reset retried by its holder after a partial failure resumes its own hold at once', async () => {
+        const { roster } = await setup();
+        const first = roster.beginReset('s1');
+        // The scramble failed: student-provision answered reset_incomplete with the token.
+        const retry = roster.beginReset('s1', first.reservation);
+        expect(retry).toEqual({ status: 'reserved', reservation: first.reservation });
+        expect(roster.completeReset('s1', first.reservation as string, await hashOf(CODE_B))).toBe('reset');
     });
 });
 

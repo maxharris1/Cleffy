@@ -117,6 +117,11 @@ interface ProvisionBody {
     /** Where the invite / reset link lands. Required on the email path. */
     redirectTo?: string;
     studentId?: string;
+    /**
+     * On 'reset' only: the token a failed reset of this student handed back,
+     * so the same reset resumes its own reservation instead of waiting it out.
+     */
+    resetToken?: unknown;
     /** On 'create' and 'restore': see readTeacherAttestation. */
     attestation?: unknown;
     /** On 'create' only: the district this student is provisioned for. Absent: a private student. */
@@ -308,6 +313,13 @@ const DELETION_PENDING = {
     error: 'This account is being deleted, so no new students can be added.',
     code: 'account_deletion_pending',
 } as const;
+
+/**
+ * What a reset that failed part-way tells the teacher (decision 49 item 5). The
+ * roster UI shows the same words for code 'reset_incomplete'.
+ */
+const RESET_INCOMPLETE_MESSAGE =
+    'The reset did not finish. The student’s current card is held for up to 10 minutes, so it cannot be used meanwhile. Try the reset again.';
 
 /** Whether an insert was refused by the deletion-pending trigger. */
 const isDeletionPending = (error: { code?: string; message?: string } | null): boolean =>
@@ -654,24 +666,55 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
     // (20261022110000_student_claim_reservation.sql). A claim in flight on the
     // current card is about to set its own password; scrambling first would let
     // that write land after ours and survive the reset. So a reset during a
-    // claim waits for it, and a claim during this reset waits for us. Writing
-    // the new code hash below hands the row back.
-    const { data: reservation, error: reserveError } = await admin.rpc('begin_student_code_reset', {
+    // claim waits for it, and a claim during this reset waits for us. The
+    // reservation carries a holder token
+    // (20261022110500_student_code_reset_holder.sql): another reset cannot take
+    // it over while it is live, and only this one can write the new code.
+    const resumeToken = typeof body.resetToken === 'string' && uuidRe.test(body.resetToken) ? body.resetToken : null;
+    const { data: reserved, error: reserveError } = await admin.rpc('reserve_student_code_reset', {
         p_student: row.id,
+        p_reservation: resumeToken,
     });
-    if (reserveError) {
-        console.error(`could not reserve student ${row.id} for a reset: ${reserveError.message}`);
+    if (reserveError || !reserved || typeof reserved !== 'object') {
+        console.error(`could not reserve student ${row.id} for a reset: ${reserveError?.message ?? 'no answer'}`);
         return jsonResponse({ error: 'Could not reset the login code' }, 502);
     }
-    if (reservation === 'busy') {
-        return jsonResponse(
-            {
-                error: 'This student is setting up their account with their current card right now. Try again in a few minutes.',
-                code: 'claim_in_progress',
-            },
-            409,
-        );
+    const reservation = reserved as { status?: string; reservation?: string; kind?: string };
+    if (reservation.status === 'not_found') {
+        return jsonResponse({ error: 'Student not found' }, 404);
     }
+    if (reservation.status !== 'reserved' || !reservation.reservation) {
+        return reservation.kind === 'reset'
+            ? jsonResponse(
+                  {
+                      error: 'Another reset of this student is still finishing. Try again in a few minutes.',
+                      code: 'reset_in_progress',
+                  },
+                  409,
+              )
+            : jsonResponse(
+                  {
+                      error: 'This student is setting up their account with their current card right now. Try again in a few minutes.',
+                      code: 'claim_in_progress',
+                  },
+                  409,
+              );
+    }
+    const resetToken = reservation.reservation;
+
+    // From here a failure keeps the reservation: the password may already be
+    // scrambled, and the old card must not be claimable as if nothing had
+    // happened. It expires after 10 minutes; the token lets this teacher's
+    // retry resume it at once.
+    const incomplete = (): Response =>
+        jsonResponse(
+            {
+                error: RESET_INCOMPLETE_MESSAGE,
+                code: 'reset_incomplete',
+                resetToken,
+            },
+            502,
+        );
 
     // The scramble is what revokes the password the student chose when they
     // claimed. Minting a code without it would leave the OLD password working
@@ -681,7 +724,7 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
     });
     if (scrambleError) {
         console.error(`could not revoke the password for student ${row.id}: ${scrambleError.message}`);
-        return jsonResponse({ error: 'Could not reset the login code' }, 502);
+        return incomplete();
     }
 
     // The other half of the revocation. A new password stops the next sign-in;
@@ -691,29 +734,39 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
     const ended = await endStudentSessions(admin, row.student_user_id);
     if (!ended.ok) {
         console.error(`could not end the sessions of student ${row.id}: ${ended.message}`);
-        return jsonResponse({ error: 'Could not reset the login code' }, 502);
+        return incomplete();
     }
 
     const code = generateLoginCode();
     const loginCodeHash = await hashLoginCode(code);
 
     // Both columns in one statement, because the state CHECK admits no row that
-    // carries only half of them. `username` is deliberately left alone: the claim
-    // overwrites it, so whether to keep the old name is the student's choice and
-    // not something a reset should make for them.
+    // carries only half of them, and only while this reset still holds the row
+    // (complete_student_code_reset). `username` is deliberately left alone: the
+    // claim overwrites it, so whether to keep the old name is the student's
+    // choice and not something a reset should make for them.
     //
     // Nothing here can land the scramble and this update atomically, and the old
     // code exists only as a hash, so a half-applied reset cannot be rolled back
     // either. It IS repairable — running 'reset' again rewrites both — which is
     // why a partial failure is reported loudly instead of handing back a code
     // that may not work.
-    const { error: updateError } = await admin
-        .from('managed_students')
-        .update({ login_code_hash: loginCodeHash, claimed_at: null })
-        .eq('id', row.id);
+    const { data: completed, error: updateError } = await admin.rpc('complete_student_code_reset', {
+        p_student: row.id,
+        p_reservation: resetToken,
+        p_code_hash: loginCodeHash,
+    });
     if (updateError) {
         console.error(`login code hash out of step for student ${row.id}: ${updateError.message}`);
-        return jsonResponse({ error: 'Could not reset the login code' }, 502);
+        return incomplete();
+    }
+    if (completed !== 'reset') {
+        // Our reservation is gone (it ran out and another reset or a claim took
+        // the row): that one's outcome stands, and this card was never written.
+        return jsonResponse(
+            { error: 'This reset took too long and was overtaken. Try the reset again.', code: 'reset_lost' },
+            409,
+        );
     }
 
     // The teacher's reset is the way back for a student someone has been

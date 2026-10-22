@@ -14,7 +14,11 @@
 --   4. expiry: a holder that died is taken over, and its late commit is lost;
 --   5. archive blocks a claim's commit but keeps its reservation until the
 --      claim lets go; release hands back only its own;
---   6. no client role can call any of it or read the table.
+--   6. no client role can call any of it or read the table;
+--   7. (20261022110500_student_code_reset_holder.sql) a reset carries a holder
+--      token: a second reset cannot take a live one over, only the holder
+--      completes or releases it, and the paused reset / reset / claim
+--      interleaving can no longer scramble a password the student just chose.
 --
 -- Runs inside one transaction and ROLLS BACK -- nothing persists. Same harness
 -- and reading as tests/sql/launch_checkout_fixes.sql:
@@ -71,6 +75,19 @@ end if;
 return false;
 end $f$;
 create function pg_temp.res(p_label text) returns uuid language sql as $f$ select reservation from t_res where label = p_label $f$;
+-- A teacher's reset of student `n`, presenting the token remembered under
+-- `p_token` (if any); its own token is remembered under `label`. The status.
+create function pg_temp.reset(p_label text, p_n int, p_token text default null) returns text language plpgsql as $f$
+declare v jsonb;
+begin
+v := public.reserve_student_code_reset (pg_temp.u(200 + p_n), pg_temp.res(p_token));
+if v ->> 'status' = 'reserved' then
+    insert into t_res values (p_label, (v ->> 'reservation')::uuid)
+    on conflict (label) do update set reservation = excluded.reservation;
+end if;
+return v ->> 'status';
+end $f$;
+create function pg_temp.reset_kind(p_n int) returns text language sql as $f$ select public.reserve_student_code_reset (pg_temp.u(200 + p_n)) ->> 'kind' $f$;
 create function pg_temp.status(p_hash text) returns text language sql as $f$ select public.reserve_student_claim (p_hash) ->> 'status' $f$;
 grant execute on all functions in schema pg_temp to anon, authenticated, service_role;
 
@@ -81,10 +98,10 @@ insert into auth.users (id, aud, role, email)
 values (pg_temp.u(1), 'authenticated', 'authenticated', 'claim-teacher@example.invalid');
 insert into auth.users (id, aud, role, email, raw_app_meta_data)
 select pg_temp.u(100 + n), 'authenticated', 'authenticated', 'st-claim-' || n || '@students.cleffy.app', '{"user_type":"student"}'
-from generate_series (1, 7) n;
+from generate_series (1, 9) n;
 insert into public.managed_students (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method)
 select pg_temp.u(200 + n), pg_temp.u(1), pg_temp.u(100 + n), 'Student ' || n, 'hash-' || n, 'code'
-from generate_series (1, 7) n;
+from generate_series (1, 9) n;
 
 select pg_temp.as_service();
 
@@ -143,25 +160,33 @@ $q$select pg_temp.status ('hash-2') = 'not_found'$q$);
 select pg_temp.chk('30 a claim reserves the card',
 $q$select pg_temp.reserve ('3a', 'hash-3')$q$);
 select pg_temp.chk('31 the teacher''s reset is told to wait: it must not scramble a password the claim is setting',
-$q$select public.begin_student_code_reset (pg_temp.u(203)) = 'busy'$q$);
+$q$select pg_temp.reset ('3r', 3) = 'busy' and pg_temp.reset_kind (3) = 'claim'$q$);
 select pg_temp.refused('32 rotating the code under a live claim by any other path is refused',
 $q$update public.managed_students set login_code_hash = 'hash-3-new' where id = pg_temp.u(203)$q$, '55006');
 select pg_temp.chk('33 the claim commits (the card was valid when it was presented)',
 $q$select public.complete_student_claim (pg_temp.u(203), pg_temp.res('3a'), 'hash-3', 'cat_three') = 'claimed'$q$);
 select pg_temp.chk('34 the reset, retried, now goes ahead',
-$q$select public.begin_student_code_reset (pg_temp.u(203)) = 'reserved'$q$);
-update public.managed_students set login_code_hash = 'hash-3-new', claimed_at = null where id = pg_temp.u(203);
-select pg_temp.chk('35 ... and writing the new code hands the row back',
-$q$select not exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(203))$q$);
+$q$select pg_temp.reset ('3r', 3) = 'reserved'$q$);
+select pg_temp.chk('35 ... the holder writes the new code',
+$q$select public.complete_student_code_reset (pg_temp.u(203), pg_temp.res('3r'), 'hash-3-new') = 'reset'$q$);
+select pg_temp.chk('35a ... which hands the row back, Invited with the new card',
+$q$select not exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(203))
+      and (select login_code_hash = 'hash-3-new' and claimed_at is null from public.managed_students where id = pg_temp.u(203))$q$);
 
 -- 3b. The reset first.
 select pg_temp.chk('36 a reset reserves the row before it scrambles',
-$q$select public.begin_student_code_reset (pg_temp.u(204)) = 'reserved'$q$);
+$q$select pg_temp.reset ('4r', 4) = 'reserved'$q$);
 select pg_temp.chk('37 a claim with the card the reset is replacing is told to wait',
 $q$select pg_temp.status ('hash-4') = 'busy'$q$);
-select pg_temp.chk('38 a reset retried after a partial failure takes its own reservation over',
-$q$select public.begin_student_code_reset (pg_temp.u(204)) = 'reserved'$q$);
-update public.managed_students set login_code_hash = 'hash-4-new' where id = pg_temp.u(204);
+select pg_temp.chk('38 a reset retried after a partial failure, with its token, resumes its own reservation',
+$q$with t as (select pg_temp.res('4r') as before)
+   select pg_temp.reset ('4r', 4, '4r') = 'reserved' and pg_temp.res('4r') = (select before from t)$q$);
+select pg_temp.chk('38a ... a reset without that token is told another reset holds the row',
+$q$select pg_temp.reset ('4x', 4) = 'busy' and pg_temp.reset_kind (4) = 'reset'$q$);
+select pg_temp.chk('38b ... and so is one with a wrong token',
+$q$select (public.reserve_student_code_reset (pg_temp.u(204), gen_random_uuid()) ->> 'status') = 'busy'$q$);
+select pg_temp.chk('38c the holder writes the new code',
+$q$select public.complete_student_code_reset (pg_temp.u(204), pg_temp.res('4r'), 'hash-4-new') = 'reset'$q$);
 select pg_temp.chk('39 once the new code is written, the old card selects nothing',
 $q$select pg_temp.status ('hash-4') = 'not_found'$q$);
 select pg_temp.chk('40 ... and the new card can be claimed',
@@ -191,10 +216,11 @@ select pg_temp.chk('55 an expired claim does not block a reset',
 $q$select pg_temp.reserve ('4c', 'hash-6')$q$);
 update public.student_claim_reservations set reserved_until = now() - interval '1 second' where student_id = pg_temp.u(206);
 select pg_temp.chk('56 ... the reset takes the row',
-$q$select public.begin_student_code_reset (pg_temp.u(206)) = 'reserved'$q$);
+$q$select pg_temp.reset ('6r', 6) = 'reserved'$q$);
 select pg_temp.chk('57 ... and the expired claim''s commit is lost',
 $q$select public.complete_student_claim (pg_temp.u(206), pg_temp.res('4c'), 'hash-6', 'fay_six') = 'lost'$q$);
-update public.managed_students set login_code_hash = 'hash-6-new' where id = pg_temp.u(206);
+select pg_temp.chk('58 the reset completes',
+$q$select public.complete_student_code_reset (pg_temp.u(206), pg_temp.res('6r'), 'hash-6-new') = 'reset'$q$);
 
 -- ===========================================================================
 -- 5. Archive and release
@@ -213,12 +239,53 @@ select pg_temp.chk('64 archiving blocks the claim in flight: its commit is lost'
 $q$select public.complete_student_claim (pg_temp.u(207), pg_temp.res('5b'), 'hash-7', 'gus_seven') = 'lost'$q$);
 select pg_temp.chk('65 ... but its reservation stays until it lets go, so a reset of the archived row waits for it',
 $q$select exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(207))
-      and public.begin_student_code_reset (pg_temp.u(207)) = 'busy'$q$);
+      and pg_temp.reset ('7r', 7) = 'busy'$q$);
 select pg_temp.chk('66 an archived student''s card reserves nothing',
 $q$select pg_temp.status ('hash-7') = 'not_found'$q$);
 select pg_temp.chk('67 once the stale claim releases, the reset goes ahead',
 $q$select public.release_student_claim (pg_temp.u(207), pg_temp.res('5b'))
-      and public.begin_student_code_reset (pg_temp.u(207)) = 'reserved'$q$);
+      and pg_temp.reset ('7r', 7) = 'reserved'$q$);
+
+-- ===========================================================================
+-- 7. Reset / reset / claim: a paused reset can never scramble the student's
+--    freshly chosen password (Codex r1 Part B finding 2)
+-- ===========================================================================
+-- Reset A reserves student 8 and pauses before its scramble.
+select pg_temp.chk('80 reset A reserves',
+$q$select pg_temp.reset ('8a', 8) = 'reserved'$q$);
+select pg_temp.chk('81 reset B (another tab) cannot take A''s live reservation over',
+$q$select pg_temp.reset ('8b', 8) = 'busy' and pg_temp.reset_kind (8) = 'reset'$q$);
+select pg_temp.chk('82 ... nor can B write a code or release A''s hold without A''s token',
+$q$select public.complete_student_code_reset (pg_temp.u(208), gen_random_uuid(), 'hash-8-b') = 'lost'
+      and not public.release_student_code_reset (pg_temp.u(208), gen_random_uuid())
+      and exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(208)
+                  and reservation = pg_temp.res('8a'))$q$);
+select pg_temp.chk('83 a claim on the old card waits for A too (so no password is chosen under it)',
+$q$select pg_temp.status ('hash-8') = 'busy'$q$);
+select pg_temp.refused('84 no other path can rotate the code under A''s live reset',
+$q$update public.managed_students set login_code_hash = 'hash-8-sneak' where id = pg_temp.u(208)$q$, '55006');
+select pg_temp.chk('85 A resumes and completes: only now does a new card exist',
+$q$select public.complete_student_code_reset (pg_temp.u(208), pg_temp.res('8a'), 'hash-8-a') = 'reset'$q$);
+select pg_temp.chk('86 the student claims A''s card and commits their own password',
+$q$select pg_temp.reserve ('8c', 'hash-8-a')
+      and public.complete_student_claim (pg_temp.u(208), pg_temp.res('8c'), 'hash-8-a', 'ivy_eight') = 'claimed'$q$);
+select pg_temp.chk('87 A''s late replay of its completion is lost: it writes nothing over the claim',
+$q$select public.complete_student_code_reset (pg_temp.u(208), pg_temp.res('8a'), 'hash-8-a') = 'lost'
+      and (select username = 'ivy_eight' and claimed_at is not null and login_code_hash is null
+           from public.managed_students where id = pg_temp.u(208))$q$);
+-- A reset that crashed: its hold runs out, and a new reset may take the row.
+select pg_temp.chk('88 a reset that died holds the row only until its TTL',
+$q$select pg_temp.reset ('9a', 9) = 'reserved'$q$);
+update public.student_claim_reservations set reserved_until = now() - interval '1 second' where student_id = pg_temp.u(209);
+select pg_temp.chk('89 ... then another reset takes it, under a new token',
+$q$select pg_temp.reset ('9b', 9) = 'reserved' and pg_temp.res('9a') <> pg_temp.res('9b')$q$);
+select pg_temp.chk('89a ... and the dead one can neither complete nor release',
+$q$select public.complete_student_code_reset (pg_temp.u(209), pg_temp.res('9a'), 'hash-9-a') = 'lost'
+      and not public.release_student_code_reset (pg_temp.u(209), pg_temp.res('9a'))$q$);
+select pg_temp.chk('89b the holder may release its hold (and the old card is claimable again)',
+$q$select public.release_student_code_reset (pg_temp.u(209), pg_temp.res('9b')) and pg_temp.status ('hash-9') = 'reserved'$q$);
+select pg_temp.chk('89c the old reset-takeover function is gone',
+$q$select not exists (select 1 from pg_proc where proname = 'begin_student_code_reset' and pronamespace = 'public'::regnamespace)$q$);
 
 -- ===========================================================================
 -- 6. Service role only
@@ -231,7 +298,11 @@ $q$select public.complete_student_claim (gen_random_uuid(), gen_random_uuid(), '
 select pg_temp.refused('72 ... or release one',
 $q$select public.release_student_claim (gen_random_uuid(), gen_random_uuid())$q$, '42501');
 select pg_temp.refused('73 ... or begin a reset',
-$q$select public.begin_student_code_reset (gen_random_uuid())$q$, '42501');
+$q$select public.reserve_student_code_reset (gen_random_uuid())$q$, '42501');
+select pg_temp.refused('73a ... or complete one',
+$q$select public.complete_student_code_reset (gen_random_uuid(), gen_random_uuid(), 'x')$q$, '42501');
+select pg_temp.refused('73b ... or release one',
+$q$select public.release_student_code_reset (gen_random_uuid(), gen_random_uuid())$q$, '42501');
 select pg_temp.refused('74 ... or read the reservations',
 $q$select count(*) from public.student_claim_reservations$q$, '42501');
 select pg_temp.as_anon();

@@ -5,6 +5,7 @@ import {
     attestationFor,
     deleteStudent,
     provisionStudent,
+    RESET_INCOMPLETE_MESSAGE,
     resetStudentAccess,
     restoreStudent,
 } from '@/features/roster/rosterService';
@@ -116,6 +117,42 @@ describe('resetStudentAccess', () => {
     it('reports an emailed link as sent rather than as a card', async () => {
         callEdgeFunction.mockResolvedValue(jsonResponse({ invited: true, studentEmail: 'clara@example.com' }));
         await expect(resetStudentAccess('s1')).resolves.toEqual({ invited: true, studentEmail: 'clara@example.com' });
+    });
+    it('a reset that fails part-way says the card is held for up to 10 minutes, and the retry resumes its hold', async () => {
+        const token = '6f1c2a40-1b2c-4d3e-8f90-0123456789ab';
+        callEdgeFunction.mockResolvedValueOnce(
+            jsonResponse({ error: 'whatever the server said', code: 'reset_incomplete', resetToken: token }, 502),
+        );
+        await expect(resetStudentAccess('s-held')).rejects.toThrow(RESET_INCOMPLETE_MESSAGE);
+        expect(RESET_INCOMPLETE_MESSAGE).toContain('held for up to 10 minutes');
+
+        callEdgeFunction.mockResolvedValueOnce(jsonResponse({ loginCode: 'PQRS-TUVW-XYZ2', username: null }));
+        await expect(resetStudentAccess('s-held')).resolves.toMatchObject({ loginCode: 'PQRS-TUVW-XYZ2' });
+        expect((callEdgeFunction.mock.calls[1] as [string, Record<string, unknown>])[1]).toMatchObject({
+            action: 'reset',
+            studentId: 's-held',
+            resetToken: token,
+        });
+
+        // Done: the next reset of that student starts afresh.
+        callEdgeFunction.mockResolvedValueOnce(jsonResponse({ loginCode: 'AAAA-BBBB-CCCC', username: null }));
+        await resetStudentAccess('s-held');
+        expect((callEdgeFunction.mock.calls[2] as [string, Record<string, unknown>])[1]).not.toHaveProperty(
+            'resetToken',
+        );
+    });
+
+    it('another reset still finishing is reported in the server’s words, with no token sent', async () => {
+        callEdgeFunction.mockResolvedValue(
+            jsonResponse(
+                { error: 'Another reset of this student is still finishing.', code: 'reset_in_progress' },
+                409,
+            ),
+        );
+        await expect(resetStudentAccess('s-other')).rejects.toThrow(
+            'Another reset of this student is still finishing.',
+        );
+        expect(sentPayload()).not.toHaveProperty('resetToken');
     });
 });
 
