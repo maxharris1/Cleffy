@@ -548,3 +548,21 @@ service role's SELECT, and nothing for any client role). Proven against the
 local stack on 2026-10-21 with this branch's migrations: all 12 checks passed,
 and `district_retention.sql` (26), `district_student_scope.sql` (22) and
 `launch_consent.sql` (43) still pass under the narrowed grant.
+
+`district_retention_reattribution.sql` proves
+`supabase/migrations/20261022130000_district_retention_reattribution.sql`
+(launch re-audit, Codex A4): a student the district soft delete listed under
+district A and a human then re-attributed survives A's hard delete with their
+markings -- moved to a private roster or to district B through
+`admin_set_student_district` (which takes them off A's purge list and logs
+`skipped_reattributed` under A, with where they went and who moved them), or
+re-attributed the way the 20261021120800 correction did it, leaving the list
+alone (the hard delete re-checks the roster row's district and account under
+its lock, skips the student, takes them off the list and logs
+`skipped_reattributed` with the count and ids). A list entry naming another
+account than the roster row deletes neither. Controls: an unchanged student,
+and one re-confirmed for A, are still scrubbed and deleted, and the hard
+delete's own counts are unchanged; both functions stay the service role's.
+Like the checkout proofs it ends with `failures | total`. Proven against the
+local stack (PostgreSQL 17.11) on 2026-10-22: all 16 checks passed; against
+the 20261021120700 / 20261021120800 definitions, 9 of the 16 failed.
