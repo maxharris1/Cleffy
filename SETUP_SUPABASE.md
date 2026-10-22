@@ -341,7 +341,6 @@ as unavailable and offers a retry once the service exists.
 **Cutover:** deploy worker dual-mode → sweeper live → `OMR_QUEUE_MODE=pull` →
 confirm drain → remove push path later. Rollback = `OMR_QUEUE_MODE=push`.
 
-
 ## 6. Stripe billing
 
 **The teacher pays; the student never does.** Nobody who plays from a score they
@@ -430,17 +429,24 @@ supabase secrets set \
 ```
 
 Those seven `STRIPE_PRICE_*` names are exactly the seven `priceCatalog()` reads
-in `supabase/functions/_shared/stripeMode.ts`. A name that is unset is simply a price
-that does not exist: it maps to no tier, and checkout refuses it.
+in `supabase/functions/_shared/stripeMode.ts` for test mode; live reads
+`STRIPE_PRICE_LIVE_*`. Today both catalogues are committed (`PUBLISHED_PRICES`)
+and these secrets stay **unset**. An override is all-or-nothing per mode: one
+name set replaces that mode's whole catalogue, and every name left unset is then
+a price that does not exist, which maps to no tier and checkout refuses. DEPLOY.md
+_Go-live 2026-10_ (steps 4 and 9) audits production for leftovers.
 
-| Secret                       | Purpose                                                                     |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `STRIPE_SECRET_KEY`          | Sandbox: creating Checkout/Portal sessions and reading subscriptions        |
-| `STRIPE_WEBHOOK_SECRET`      | Sandbox: verifying the webhook signature — its own value, not the API key   |
-| `STRIPE_SECRET_KEY_LIVE`     | The same, for the live account. Setting it is what puts cleffy.io on live   |
-| `STRIPE_WEBHOOK_SECRET_LIVE` | The live endpoint's signing secret                                          |
-| `STRIPE_PRICE_*`             | The price→tier map. A price id absent from these is refused at checkout     |
-| `APP_URL`                    | Return URL when a caller sent no Origin (a known Origin wins over it)       |
+| Secret                       | Purpose                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| `STRIPE_SECRET_KEY_TEST`     | Sandbox: creating Checkout/Portal sessions and reading subscriptions       |
+| `STRIPE_WEBHOOK_SECRET_TEST` | Sandbox: verifying the webhook signature — its own value, not the API key  |
+| `STRIPE_SECRET_KEY`          | Legacy alias of `STRIPE_SECRET_KEY_TEST`, read only when that is unset     |
+| `STRIPE_WEBHOOK_SECRET`      | Legacy alias of `STRIPE_WEBHOOK_SECRET_TEST`, read only when that is unset |
+| `STRIPE_SECRET_KEY_LIVE`     | The same, for the live account. Setting it is what puts cleffy.io on live  |
+| `STRIPE_WEBHOOK_SECRET_LIVE` | The live endpoint's signing secret                                         |
+| `STRIPE_PRICE_*`             | Optional test-mode override; normally unset (committed catalogue)          |
+| `STRIPE_PRICE_LIVE_*`        | Optional live-mode override; normally unset (committed catalogue)          |
+| `APP_URL`                    | Return URL when a caller sent no Origin (a known Origin wins over it)      |
 
 cleffy.io and dev.cleffy.io share this one project, so the Edge Functions pick
 the account per request from the `Origin` header — live for cleffy.io, sandbox
@@ -451,15 +457,18 @@ keep their pre-split meaning as the **sandbox** pair. See
 `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` are provided
 by the platform — you do not set those.
 
-The client-visible values go in `.env` (see `.env.example`):
-`VITE_STRIPE_PUBLISHABLE_KEY`, the seven `VITE_STRIPE_PRICE_*` ids mirroring the
-secrets above, and `VITE_STRIPE_FOUNDING_OFFER`. Leave them blank to run without
+The client-visible values go in `.env` (see `.env.example`): the seven
+`VITE_STRIPE_PRICE_*` ids mirroring the secrets above, and
+`VITE_STRIPE_FOUNDING_OFFER`. Leave the price ids blank to run without
 billing — the pricing dialog then says so rather than offering buttons that
 cannot work. The dialog considers billing configured once both Personal and both
 Teacher ids are present; the two Academy ids are optional, and an Academy card
 with no id keeps its description but offers no button. Founding is optional
 twice over — it needs its id **and** `VITE_STRIPE_FOUNDING_OFFER=true`, or the
 card is not rendered at all.
+
+`VITE_STRIPE_PUBLISHABLE_KEY`, still in `.env.example`, is unused: no code
+reads it, because checkout redirects to the URL `stripe-checkout` returns.
 
 ### 6c. Deploy the functions
 
@@ -548,13 +557,23 @@ to that header and only its last entry is one a caller cannot choose.
 
 Register the endpoint in Stripe
 ([Developers → Webhooks](https://dashboard.stripe.com/test/webhooks)) pointing at
-`https://<project-ref>.supabase.co/functions/v1/stripe-webhook`, subscribed to:
+`https://<project-ref>.supabase.co/functions/v1/stripe-webhook`, subscribed to
+all nine events it handles (`dispatchStripeEvent` in
+`supabase/functions/_shared/stripeEvents.ts`; DEPLOY.md → _Go-live 2026-10_,
+_Stripe webhook events_):
 
 - `checkout.session.completed`
 - `customer.subscription.created`
 - `customer.subscription.updated`
 - `customer.subscription.deleted`
+- `customer.subscription.paused`
+- `customer.subscription.resumed`
+- `invoice.paid`
+- `invoice.payment_succeeded`
 - `invoice.payment_failed`
+
+There is no `charge.refunded` handler: a refund changes nothing in the app, so a
+refunded subscription must also be cancelled in Stripe (DEPLOY.md → _Refunds_).
 
 ### 6d. Local webhook testing
 
@@ -628,10 +647,10 @@ whichever credential state the method implies.
 **The teacher picks a method per student, at creation, and it is fixed for the
 life of the row** (`auth_method`, `check (auth_method in ('code','email'))`):
 
-| Method    | Choose it for                                  | What the student gets                                                        |
-| --------- | ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| `'code'`  | A young child, or anyone with no email of their own | A printed card. No address is collected, anywhere                        |
-| `'email'` | An older student with their own address, or one whose parent will manage it | An emailed invitation, then an ordinary sign-in |
+| Method    | Choose it for                                                               | What the student gets                             |
+| --------- | --------------------------------------------------------------------------- | ------------------------------------------------- |
+| `'code'`  | A young child, or anyone with no email of their own                         | A printed card. No address is collected, anywhere |
+| `'email'` | An older student with their own address, or one whose parent will manage it | An emailed invitation, then an ordinary sign-in   |
 
 On the **code** path the account is keyed on a synthetic address
 `st-<roster-id>@students.cleffy.app` with **no inbox behind it** — the roster id
@@ -656,12 +675,12 @@ replaced by `action: 'reset'`, never recovered.
 **Four states, and the database admits no others** (the
 `managed_students_claim_state` CHECK in `20260827150000_student_credentials.sql`):
 
-| State            | Row                                                        | Where the student goes  |
-| ---------------- | ---------------------------------------------------------- | ----------------------- |
-| code + Invited   | `login_code_hash` set, `claimed_at` null                    | `student-claim`         |
-| code + Active    | `username` set, `login_code_hash` **null**                  | `student-login`         |
-| email + Invited  | `student_email` set, `claimed_at` null                      | the emailed link        |
-| email + Active   | `student_email` set, `claimed_at` stamped                   | ordinary sign-in        |
+| State           | Row                                        | Where the student goes |
+| --------------- | ------------------------------------------ | ---------------------- |
+| code + Invited  | `login_code_hash` set, `claimed_at` null   | `student-claim`        |
+| code + Active   | `username` set, `login_code_hash` **null** | `student-login`        |
+| email + Invited | `student_email` set, `claimed_at` null     | the emailed link       |
+| email + Active  | `student_email` set, `claimed_at` stamped  | ordinary sign-in       |
 
 "Invited" means the same thing on both paths: the password is a scramble nobody
 has ever seen. Usernames are stored canonical-lowercase, so the plain unique index
