@@ -240,9 +240,29 @@ when the six `retention-*` jobs run:
 - `retention-compact-tombstones` at 04:23 on Sundays.
 
 They are paused as soon as their migration lands (step 11), but the sitting
-must not depend on that pause alone. Allow three to four hours, of which step
-6's session drain takes at least one. The two IMSLP catalog-data migrations
+must not depend on that pause alone. The two IMSLP catalog-data migrations
 alone are ~48 MB.
+
+**How long: read production's `jwt_exp` first (preflight).** Do this before
+choosing the slot. It is read-only:
+
+```bash
+curl -sS "https://api.supabase.com/v1/projects/jibgwgosihadbjgxdsfe/config/auth" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" | jq '{jwt_exp}'
+# a number of seconds; 3600 unless it was changed (jwt_expiry in supabase/config.toml)
+```
+
+Step 6.5.3 waits `jwt_exp` + 5 minutes after the sessions are revoked, and
+6.6 adds 15 minutes of drain. So the freeze alone takes `jwt_exp` + 20 minutes
+before the backup can start, and the slot must be at least that plus about
+two and a half hours for steps 7 to 21. With the default 3600, plan three to
+four hours. If `jwt_exp` is not a number, or is longer than 3600, choose the
+slot from the number you read, and write it in the ops log. Do not shorten
+`jwt_exp` to make the slot fit. Until the wait is over, the freeze rests on
+the maintenance firewall (6.1), the closed sign-ups (6.2), the bans and the
+deleted sessions (6.5). Those refuse every Auth and Edge Function call, but
+PostgREST, Storage and Realtime still accept an old access token until it
+expires. The drain check (6.6) is what proves that no write got through.
 
 **Max's addresses.** Note Max's public IPv4 (`curl -4 https://ifconfig.me`)
 and IPv6 (`curl -6 https://ifconfig.me`, if any), from the machine and network
@@ -262,7 +282,9 @@ supabase migration list --linked       # production's history: expect main's 26 
 ```
 
 - The database password goes in `SUPABASE_DB_PASSWORD` in this shell. Never
-  put it on a command line.
+  put it on a command line. `PROD_DB_URL` (Dashboard → Connect, with that
+  password) is production's connection string for `psql`, which steps 4 to 8
+  use.
 - **`db` commands always take `--linked`.** Never pass `--project-ref` to
   `supabase db push`, `db reset` or `db dump`: the link above is the one place
   the target is set, and it has just been checked. The `functions` and
@@ -299,6 +321,67 @@ On the local stack, a staged copy holding only 30 files made `db push --local --
 answer "Remote migration versions not found in local migrations directory".
 So the CLI reads the staged copy, not the worktree. If a staged push ever says
 that against production, **stop**. Never run the `migration repair` it suggests.
+
+**Listing Stripe, fail-closed.** Steps 4, 6, 8 and 18 read Stripe lists
+directly, and a count or a replay built from them is only evidence if the
+list is complete. Stripe returns at most 100 objects a page, so `stripe_all`
+follows `starting_after` until `has_more` is `false`. It runs in its own
+subshell under `set -euo pipefail`, and writes each page to a temp file
+first. A page passes only with HTTP 200, no `error` key, and a well-formed
+`list` object. Only when every page has passed is the result moved into
+place, in one rename. On any failure (curl, an HTTP error such as 401, 403
+or 429, an `error` body, a malformed page) it prints why, leaves **no**
+output file (an older one of the same name is deleted first), and returns 1.
+So a failed listing can never be read as an empty or a partial list.
+
+`STRIPE_LIVE_KEY` is a live key. Step 4's check needs read access to
+Subscriptions, Checkout Sessions and Events. Step 6.7 also needs write
+access to Checkout Sessions and Subscriptions. Keep it in the shell only,
+and never echo it. Paste this into every shell that runs a step that uses
+it:
+
+```bash
+# stripe_all <out.jsonl> <list> [name=value …]: every object of a Stripe list, one JSON object
+# per line, into <out.jsonl>. Fails closed: on any error it leaves no <out.jsonl> and returns 1.
+stripe_all() (
+  set -euo pipefail
+  out=$1 list=$2
+  shift 2
+  rm -f "$out"
+  tmp=$(mktemp "$out.XXXXXX")
+  page=$(mktemp "$out.page.XXXXXX")
+  trap 'rm -f "$tmp" "$page"' EXIT
+  fail() { echo "stripe_all $list: $* (no $out written)" >&2; exit 1; }
+  args=(--data-urlencode limit=100)
+  for kv in "$@"; do args+=(--data-urlencode "$kv"); done
+  after='' pages=0
+  while :; do
+    req=("${args[@]}")
+    [ -z "$after" ] || req+=(--data-urlencode "starting_after=$after")
+    code=$(curl -sS -G -o "$page" -w '%{http_code}' "https://api.stripe.com/v1/$list" \
+      -H "Authorization: Bearer $STRIPE_LIVE_KEY" "${req[@]}") || fail "curl failed"
+    [ "$code" = 200 ] || fail "HTTP $code: $(jq -c '.error // .' "$page" 2>/dev/null || head -c 300 "$page")"
+    jq -e 'type == "object" and (has("error") | not) and .object == "list"
+           and (.data | type == "array") and (.has_more | type == "boolean")' "$page" >/dev/null \
+      || fail "not a complete list page: $(head -c 300 "$page")"
+    jq -c '.data[]' "$page" >>"$tmp" || fail "could not read the page"
+    pages=$((pages + 1))
+    [ "$(jq -r .has_more "$page")" = true ] || break
+    after=$(jq -r '.data[-1].id // empty' "$page")
+    [ -n "$after" ] || fail "has_more is true on an empty page"
+  done
+  mv -f "$tmp" "$out" || fail "could not move the result into place"
+  echo "stripe_all $list: $(wc -l <"$out" | tr -d ' ') objects in $pages pages -> $out" >&2
+)
+```
+
+Every block that uses it below is itself a subshell under
+`set -euo pipefail`, `( … )`, and ends by printing a line with **`OK`**.
+**If a block does not print its `OK` line, it failed: stop there**, read the
+error, and do not use any file it was meant to write. The subshell keeps a
+failure from closing the shell that holds the sitting's variables. Never
+put `||` or `&&` after the closing `)`: bash then ignores `set -e` inside
+it.
 
 ### 4. Inventory, before the sitting (read-only)
 
@@ -364,6 +447,72 @@ record, these are its settings:
   `AUDIVERIS_BIN`).
 
 None of these is set for this launch (step 9).
+
+**Preflight: `postgres` may create triggers on `storage.objects` (P1).** P1's
+`20261022100800_storage_quota_and_thumbnail_lifecycle.sql` creates two
+triggers on `storage.objects` (`storage_objects_enforce_quota` and
+`thumbnails_record_superseded`), and it lands in step 11's third batch. On
+hosted Supabase, `storage.objects` belongs to `supabase_storage_admin`, so
+check the privilege now, in production's SQL editor:
+
+```sql
+select has_table_privilege('postgres', 'storage.objects', 'TRIGGER') as can_create_storage_triggers;
+-- must be t (confirm after P1)
+```
+
+If it is `f`, **stop**: the sitting does not start. Resolve the hosted
+privilege first (with Supabase support if need be), and run the check again.
+Step 8 checks it once more before the wipe, and step 11 before batch 1.
+
+**Stripe list filters (go-live checklist gate).** The sitting relies on five
+Stripe list filters. Prove each one now, against the live account, with the
+`stripe_all` helper from step 3. Every call is a read. A filter that Stripe
+refuses fails the helper (Stripe answers 400 to a parameter it does not
+know). A filter that Stripe accepts but does not honour is caught by the
+`jq` checks:
+
+```bash
+(
+  set -euo pipefail
+  SINCE=$(($(date +%s) - 7 * 86400)) UNTIL=$(date +%s)
+  TYPES=(checkout.session.completed customer.subscription.created customer.subscription.updated
+    customer.subscription.deleted customer.subscription.paused customer.subscription.resumed
+    invoice.paid invoice.payment_succeeded invoice.payment_failed)
+  T=()
+  for t in "${TYPES[@]}"; do T+=("types[]=$t"); done
+  stripe_all chk-open-sessions.jsonl checkout/sessions status=open
+  jq -e -s 'all(.status == "open")' chk-open-sessions.jsonl >/dev/null \
+    || { echo "status=open is not honoured" >&2; exit 1; }
+  stripe_all chk-sessions.jsonl checkout/sessions "created[gte]=$SINCE"
+  jq -e -s --argjson s "$SINCE" 'all(.created >= $s)' chk-sessions.jsonl >/dev/null \
+    || { echo "created[gte] on Checkout sessions is not honoured" >&2; exit 1; }
+  stripe_all chk-subscriptions.jsonl subscriptions status=all
+  jq -r -s 'group_by(.status) | map("\(.[0].status) \(length)") | .[]' chk-subscriptions.jsonl
+  stripe_all chk-events.jsonl events "created[gte]=$SINCE" "created[lt]=$UNTIL" "${T[@]}"
+  jq -e -s --argjson s "$SINCE" --argjson u "$UNTIL" --args \
+    'all(.created >= $s and .created < $u and (.type | IN($ARGS.positional[])))' \
+    "${TYPES[@]}" <chk-events.jsonl >/dev/null \
+    || { echo "created[gte]/created[lt]/types[] on events is not honoured" >&2; exit 1; }
+  stripe_all chk-undelivered.jsonl events delivery_success=false "created[gte]=$SINCE" "${T[@]}"
+  jq -e -s --argjson s "$SINCE" --args 'all(.created >= $s and (.type | IN($ARGS.positional[])))' \
+    "${TYPES[@]}" <chk-undelivered.jsonl >/dev/null \
+    || { echo "filters with delivery_success=false are not honoured" >&2; exit 1; }
+  echo "Stripe filters OK: $(wc -l <chk-events.jsonl | tr -d ' ') events, $(wc -l <chk-undelivered.jsonl | tr -d ' ') undelivered"
+)
+```
+
+It must end with `Stripe filters OK`. Then check by hand:
+
+- `subscriptions status=all` lists `canceled` ones too, if the account has
+  any. Without `status=all`, Stripe leaves them out;
+- the undelivered count agrees with the live endpoint's failed deliveries
+  for the last 7 days (Developers → Webhooks → the endpoint).
+
+Record the date and the output in the ops log. If any filter fails, the
+sitting does not start: change the runbook's listing first. The safe fallback
+lists without that filter and filters with `jq`. `delivery_success` has no
+such fallback, so its events then come from the endpoint's failed
+deliveries in the Dashboard. Delete the `chk-*` files afterwards.
 
 ### 5. The snapshot (read-only)
 
@@ -470,33 +619,142 @@ recovery_ lists each part's rollback.
 
 5. **Revoke every session**, so that no open tab can write. Do this in three
    parts.
-    1. **Ban every account except Max's** for the freeze. This uses the Auth
-       admin API, and goes through every page of users. A banned account can
-       neither sign in nor refresh a token. Run it in bash, from the worktree.
-       `SERVICE_KEY` is production's `service_role` key: keep it in this
-       shell only, and never echo it.
+    1. **Ban every account except Max's** for the freeze, and record first
+       what each account's ban was. A banned account can neither sign in nor
+       refresh a token. The freeze must not lose a ban that existed before
+       it: an account banned for its own reasons stays banned after an
+       abort. Run these in bash, from the worktree. `SERVICE_KEY` is
+       production's `service_role` key: keep it in this shell only, and
+       never echo it. Max's address is written as Auth stores it, in lower
+       case.
 
         ```bash
         ADMIN=https://jibgwgosihadbjgxdsfe.supabase.co/auth/v1/admin/users
-        MAX_EMAIL='<max's address>'
-        page=1
-        while :; do
-          users=$(curl -sS "$ADMIN?page=$page&per_page=500" -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY")
-          n=$(jq -e '.users | length' <<<"$users") || { echo "$users" >&2; break; }
-          [ "$n" -gt 0 ] || break
-          jq -r --arg max "$MAX_EMAIL" '.users[] | select(.email != $max) | .id' <<<"$users" | while read -r id; do
-            curl -sS -o /dev/null -w "%{http_code} $id\n" -X PUT "$ADMIN/$id" \
-              -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
-              -H 'Content-Type: application/json' -d '{"ban_duration":"876000h"}'
-          done | tee -a freeze-bans.log
-          page=$((page + 1))
-        done
+        MAX_EMAIL='<max-address>'
         ```
 
-        Every line of `freeze-bans.log` must start with `200`. Then
+        **a. Record the original ban state, changing nothing.** The loop
+        reads the Auth admin API page by page, and stops at the first
+        **short** page (fewer than `PER_PAGE` users). It then checks that
+        it saw every account: the number of distinct accounts it listed must
+        equal `select count(*) from auth.users`, Max included. If the
+        counts differ, it writes nothing. If the first page came back
+        shorter than `PER_PAGE` while the count is higher, the server caps
+        the page size: set `PER_PAGE` to the size it returned, and run it
+        again. Otherwise find the account that appeared or vanished, and
+        run it again.
+
+        ```bash
+        (
+          set -euo pipefail
+          PER_PAGE=100
+          tmp=$(mktemp freeze-ban-state.tsv.XXXXXX)
+          rm -f freeze-ban-state.tsv
+          page=1
+          while :; do
+            code=$(curl -sS -o freeze-users-page.json -w '%{http_code}' "$ADMIN?page=$page&per_page=$PER_PAGE" \
+              -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY")
+            [ "$code" = 200 ] && jq -e '.users | type == "array"' freeze-users-page.json >/dev/null \
+              || { echo "users page $page: HTTP $code" >&2; rm -f "$tmp"; exit 1; }
+            # id, original banned_until ("-" if none), email
+            jq -r '.users[] | [.id, (.banned_until // "-"), (.email // "")] | @tsv' freeze-users-page.json >>"$tmp"
+            n=$(jq '.users | length' freeze-users-page.json)
+            [ "$n" -eq "$PER_PAGE" ] || break # a short page is the last one
+            page=$((page + 1))
+          done
+          rm -f freeze-users-page.json
+          seen=$(cut -f1 "$tmp" | sort -u | wc -l | tr -d ' ')
+          rows=$(wc -l <"$tmp" | tr -d ' ')
+          total=$(psql "$PROD_DB_URL" -Atc "select count(*) from auth.users")
+          [ "$seen" -eq "$rows" ] && [ "$seen" -eq "$total" ] \
+            || { echo "listed $rows rows, $seen accounts; auth.users has $total: stop" >&2; rm -f "$tmp"; exit 1; }
+          mv "$tmp" freeze-ban-state.tsv
+          echo "6.5.1a OK: $seen accounts recorded, auth.users = $total"
+        )
+        ```
+
+        **b. Plan, then ban only the accounts the freeze has to ban.** Each
+        account gets one action in `freeze-ban-plan.tsv`:
+        - `max`: Max's account, never banned;
+        - `prebanned`: already banned until more than 24 hours from now, so
+          past the end of the sitting. It is **left unchanged**: not banned
+          again, and not unbanned by any rollback;
+        - `ban`: everyone else. That includes an account whose own ban ends
+          within 24 hours: it gets the maintenance ban, and the rollback
+          gives it back its original end (part c).
+
+        ```bash
+        (
+          set -euo pipefail
+          jq -rR --arg max "$MAX_EMAIL" '
+            split("\t") | {id: .[0], orig: .[1], email: .[2]}
+            | (if .orig == "-" then 0
+               else .orig | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601 end) as $until
+            | (if .email == $max then "max" elif $until > now + 86400 then "prebanned" else "ban" end) as $action
+            | [$action, .id, .orig, .email] | @tsv' freeze-ban-state.tsv >freeze-ban-plan.tsv
+          [ "$(wc -l <freeze-ban-plan.tsv)" -eq "$(wc -l <freeze-ban-state.tsv)" ] || { echo "plan is short" >&2; exit 1; }
+          [ "$(grep -c '^max' freeze-ban-plan.tsv || true)" -le 1 ] || { echo "more than one max row" >&2; exit 1; }
+          : >freeze-bans.log
+          while IFS=$'\t' read -r action id _; do
+            [ "$action" = ban ] || continue
+            code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$ADMIN/$id" \
+              -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
+              -H 'Content-Type: application/json' -d '{"ban_duration":"876000h"}')
+            echo "$code $id" >>freeze-bans.log
+            [ "$code" = 200 ] || { echo "ban $id: HTTP $code, stop" >&2; exit 1; }
+          done <freeze-ban-plan.tsv
+          cut -f1 freeze-ban-plan.tsv | sort | uniq -c
+          echo "6.5.1b OK: $(wc -l <freeze-bans.log | tr -d ' ') maintenance bans"
+        )
+        ```
+
+        It must print its `OK` line, and the `ban` count it prints must
+        equal the number of lines in `freeze-bans.log`. Then
         `select count(*) from auth.users where banned_until is null or banned_until < now()`
-        must be 1 (Max), or 0 if Max has no account. Rollback: the same loop,
-        with `{"ban_duration":"none"}`.
+        must be 1 (Max), or 0 if Max has no account. Keep
+        `freeze-ban-state.tsv`, `freeze-ban-plan.tsv` and `freeze-bans.log`
+        with the backup (step 7). They hold email addresses.
+
+        **c. Rollback (abort only).** It undoes **only** the `ban` rows. An
+        account with no ban before gets `none`. One whose own ban had not
+        yet ended gets back the time it had left. A `prebanned` row is never
+        touched:
+
+        ```bash
+        (
+          set -euo pipefail
+          : >freeze-unbans.log
+          while IFS=$'\t' read -r action id orig _; do
+            [ "$action" = ban ] || continue
+            dur=none
+            if [ "$orig" != - ]; then
+              left=$(jq -n --arg t "$orig" '($t | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) - now | floor')
+              [ "$left" -le 0 ] || dur="${left}s"
+            fi
+            code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$ADMIN/$id" \
+              -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
+              -H 'Content-Type: application/json' -d "{\"ban_duration\":\"$dur\"}")
+            echo "$code $id $dur" >>freeze-unbans.log
+            [ "$code" = 200 ] || { echo "unban $id: HTTP $code, stop" >&2; exit 1; }
+          done <freeze-ban-plan.tsv
+          echo "6.5.1c OK: $(wc -l <freeze-unbans.log | tr -d ' ') maintenance bans undone"
+        )
+        ```
+
+        Then check every account against its recorded state, in `psql`.
+        Zero rows is a pass:
+
+        ```bash
+        psql "$PROD_DB_URL" <<'SQL'
+        create temp table ban_plan (action text, id uuid, orig text, email text);
+        \copy ban_plan from 'freeze-ban-plan.tsv'
+        select p.action, p.id, p.orig, u.banned_until
+        from ban_plan p join auth.users u on u.id = p.id
+        where case when p.orig = '-' or p.orig::timestamptz <= now() then u.banned_until > now()
+                   else u.banned_until is null
+                        or abs(extract(epoch from u.banned_until - p.orig::timestamptz)) > 120 end;
+        SQL
+        ```
 
     2. **Delete every session**, in production's SQL editor. Write down the
        time it returns as **`REVOKE_AT`**:
@@ -564,46 +822,34 @@ recovery_ lists each part's rollback.
 
 7. **Reconcile Stripe directly** (live account), not from the database. It
    comes only after the drain, because before it an open tab could still
-   start a Checkout session. Every Stripe list below is read **to the end**:
-   Stripe returns at most 100 objects a page, so the helper follows
-   `starting_after` until `has_more` is `false`. Run it in bash.
-   `STRIPE_LIVE_KEY` is a live key with read access to Subscriptions,
-   Checkout Sessions and Events, and write access to Checkout Sessions and
-   Subscriptions. Keep it in this shell only, and never echo it.
-
-    ```bash
-    # stripe_all <list> [name=value …]: every object of a Stripe list, one JSON object per line,
-    # following starting_after until has_more is false. Stops on any error.
-    stripe_all() {
-      local list=$1 after='' page
-      shift
-      local args=()
-      for kv in "$@"; do args+=(--data-urlencode "$kv"); done
-      while :; do
-        local paging=(--data-urlencode limit=100)
-        [ -n "$after" ] && paging+=(--data-urlencode "starting_after=$after")
-        page=$(curl -sS -G "https://api.stripe.com/v1/$list" -H "Authorization: Bearer $STRIPE_LIVE_KEY" \
-          "${paging[@]}" "${args[@]}") || return 1
-        jq -e '.object == "list"' <<<"$page" >/dev/null || { jq . <<<"$page" >&2; return 1; }
-        jq -c '.data[]' <<<"$page"
-        [ "$(jq -r .has_more <<<"$page")" = true ] || return 0
-        after=$(jq -r '.data[-1].id' <<<"$page")
-      done
-    }
-    ```
+   start a Checkout session. Every Stripe list below is read **to the end**,
+   and **fails closed**, with the `stripe_all` helper from step 3 (paste it
+   into this shell). Each block must print its `OK` line. If it does not,
+   stop: no count, file or replay from that block is evidence of anything.
 
     1. **Checkout sessions first.** Expire every open one. Expiring them
        before the subscription list means that no purchase can complete after
-       that list is read.
+       that list is read. Each expiry is checked too: HTTP 200 and
+       `status: expired`, or the block stops.
 
         ```bash
-        stripe_all checkout/sessions status=open | jq -r .id > freeze-open-sessions.txt
-        while read -r cs; do
-          curl -sS -X POST "https://api.stripe.com/v1/checkout/sessions/$cs/expire" \
-            -H "Authorization: Bearer $STRIPE_LIVE_KEY" | jq -r '"\(.id) \(.status)"'
-        done < freeze-open-sessions.txt                     # every line ends in "expired"
-        stripe_all checkout/sessions status=open | wc -l    # must be 0
-        stripe_all checkout/sessions "created[gte]=$FREEZE_UNIX" > freeze-sessions.jsonl
+        (
+          set -euo pipefail
+          stripe_all freeze-open-sessions.jsonl checkout/sessions status=open
+          jq -r .id freeze-open-sessions.jsonl >freeze-open-sessions.txt
+          while read -r cs; do
+            code=$(curl -sS -o freeze-expire.json -w '%{http_code}' -X POST \
+              "https://api.stripe.com/v1/checkout/sessions/$cs/expire" -H "Authorization: Bearer $STRIPE_LIVE_KEY")
+            [ "$code" = 200 ] && jq -e '.status == "expired"' freeze-expire.json >/dev/null \
+              || { echo "$cs: HTTP $code $(jq -c '.error // .' freeze-expire.json)" >&2; exit 1; }
+            echo "$cs expired"
+          done <freeze-open-sessions.txt
+          stripe_all freeze-open-after.jsonl checkout/sessions status=open
+          [ ! -s freeze-open-after.jsonl ] || { echo "open Checkout sessions remain" >&2; exit 1; }
+          stripe_all freeze-sessions.jsonl checkout/sessions "created[gte]=$FREEZE_UNIX"
+          echo "6.7.1 OK: $(wc -l <freeze-open-sessions.txt | tr -d ' ') expired, 0 open," \
+            "$(wc -l <freeze-sessions.jsonl | tr -d ' ') sessions since FREEZE_AT"
+        )
         ```
 
         Every session in `freeze-sessions.jsonl` gets a row in the
@@ -615,9 +861,16 @@ recovery_ lists each part's rollback.
     2. **Subscriptions.** Read every one, then keep those that can still bill:
 
         ```bash
-        stripe_all subscriptions status=all > freeze-subscriptions.jsonl
-        jq -r 'select(.status != "canceled" and .status != "incomplete_expired")
-               | [.id, .customer, .status, (.metadata.user_id // "")] | @tsv' freeze-subscriptions.jsonl
+        (
+          set -euo pipefail
+          stripe_all freeze-subscriptions.jsonl subscriptions status=all
+          jq -r 'select(.status != "canceled" and .status != "incomplete_expired")
+                 | [.id, .customer, .status, (.metadata.user_id // "")] | @tsv' \
+            freeze-subscriptions.jsonl >freeze-billing.tsv
+          cat freeze-billing.tsv
+          echo "6.7.2 OK: $(wc -l <freeze-subscriptions.jsonl | tr -d ' ') subscriptions," \
+            "$(wc -l <freeze-billing.tsv | tr -d ' ') can still bill"
+        )
         ```
 
         The wipe removes each one's account, but Stripe keeps billing the
@@ -644,7 +897,11 @@ recovery_ lists each part's rollback.
 
     The disposition is exactly one of these:
     - **applied and verified**: resent in step 18, and the endpoint answered
-      `applied: …`. The row in `public.subscriptions` matches Stripe;
+      `applied: …`. The row in `public.subscriptions` matches Stripe. A
+      resend of an event that was already applied answers
+      `{"received":true,"duplicate":true}` instead. That counts too, once its
+      one `stripe_events` row shows it finished (`status = 'done'`) and the
+      subscription row matches Stripe;
     - **safely irrelevant**: it concerns an account the wipe removed, and
       nothing is left billing. An example is the `customer.subscription.deleted`
       of a subscription cancelled in part 2. Another is a type the webhook
@@ -673,8 +930,9 @@ finer than last night's physical backup (_PITR_ below).
 
 It holds the `public` data, the `auth` and `storage` metadata (`auth.users`,
 `auth.identities`, `storage.objects` and the rest), the schemas, and the
-object list. It does **not** hold the object bytes, unless part 2's optional
-download is done. Even then, they are not checked by any restore.
+object list. It does **not** hold the object bytes. They are not downloaded:
+the data is not material (Max, 2026-10-21), so the database dump and the
+object list are the whole reference.
 
 1. **Dump**, from the worktree. The CLI's default schema dump covers `public`
    and the other user schemas, but it leaves out `auth`, `storage` and
@@ -695,19 +953,12 @@ download is done. Even then, they are not checked by any restore.
 2. **The object list.** This list is the record of what Storage held:
 
     ```bash
-    # PROD_DB_URL: Dashboard → Connect, with the password from SUPABASE_DB_PASSWORD
+    # PROD_DB_URL: step 3
     psql "$PROD_DB_URL" -c "\copy (select bucket_id, name, owner, (metadata->>'size')::bigint as bytes, created_at from storage.objects order by 1, 2) to 'prod-20261022-objects.csv' csv header"
     ```
 
-    Its row count per bucket must equal step 5's per-bucket counts.
-
-    **Optional, for forensics only: the bytes.** Nothing later depends on
-    them. One bucket at a time, then compare the file count and the bytes
-    with the list:
-
-    ```bash
-    supabase storage cp -r ss:///scores ./prod-20261022-storage/scores --linked --experimental
-    ```
+    Its row count per bucket must equal step 5's per-bucket counts. The
+    objects themselves are not downloaded (above).
 
 3. **Check the files.** This proves that the files are complete and
    readable, not that they restore. Count the rows in each `COPY` block of
@@ -730,11 +981,25 @@ download is done. Even then, they are not checked by any restore.
 ### 8. The wipe (irreversible)
 
 **First, check that the freeze still holds.** Take part 6.6's reading
-once more: `writes` must be unchanged. Then
-`stripe_all checkout/sessions status=open | wc -l` must be 0. And the
-subscriptions that can still bill (part 6.7.2's `jq`, run on a fresh
-`stripe_all subscriptions status=all`) must each already have a row in the
-reconciliation table.
+once more: `writes` must be unchanged. Then read Stripe again, fail-closed:
+
+```bash
+(
+  set -euo pipefail
+  stripe_all wipe-open-sessions.jsonl checkout/sessions status=open
+  [ ! -s wipe-open-sessions.jsonl ] || { echo "open Checkout sessions exist: stop" >&2; exit 1; }
+  stripe_all wipe-subscriptions.jsonl subscriptions status=all
+  jq -r 'select(.status != "canceled" and .status != "incomplete_expired") | [.id, .customer, .status] | @tsv' \
+    wipe-subscriptions.jsonl >wipe-billing.tsv
+  cat wipe-billing.tsv
+  echo "8 Stripe OK: 0 open sessions, $(wc -l <wipe-billing.tsv | tr -d ' ') can still bill"
+)
+```
+
+It must print its `OK` line. Each subscription it prints must already have a
+row in the reconciliation table. Then run step 4's `storage.objects`
+privilege check once more: it must still be `t`. If it is not, stop here and
+unfreeze (_Abort and recovery_). Nothing is lost yet.
 
 **Then Max confirms in writing, right here.** With step 5's snapshot, the
 reconciliation table and step 7.3's counts at hand, Max confirms two things
@@ -926,6 +1191,12 @@ pause each destructive or outbound job **as soon as the batch that schedules
 it commits**. Before every batch, run the `test` line from step 3, then
 `--dry-run`. The dry run must list exactly the files named.
 
+**Before batch 1**, run step 4's preflight once more:
+`select has_table_privilege('postgres', 'storage.objects', 'TRIGGER');` must
+return `t`. If it is `f`, stop before applying any migration, and resolve the
+hosted privilege first. P1's storage triggers in batch 3 need it (confirm
+after P1).
+
 Each scheduling migration first unschedules its job by name, then schedules it
 again. A job re-created that way comes back **active**, so a pause only holds
 if no later migration schedules the same job again. None does, at 47e9b38f
@@ -1004,9 +1275,28 @@ or at the P1 to P5 heads named at the top of this section (step 1's
     P1 to P5 schedule any other job, pause it the same way if it deletes data
     or calls out (confirm after P1 to P5).
 
+    **Then confirm that P3's three migrations are recorded remotely, before
+    step 12 deploys any function.** P3's Edge Functions, including
+    `resend-inbound`, `student-provision` and `delete-account`, need the
+    tables and functions these create. In production's SQL editor:
+
+    ```sql
+    select version, name from supabase_migrations.schema_migrations
+    where version in ('20261022110000', '20261022110100', '20261022110200')
+    order by 1;
+    -- exactly 3 rows (confirm after P3):
+    --   20261022110000  student_claim_reservation
+    --   20261022110100  account_deletion_pending
+    --   20261022110200  support_inbound_lease
+    ```
+
+    Fewer than three rows means batch 3 did not apply them. **Do not deploy
+    any function** (step 12). Fix forward as in _Abort and recovery_, and run
+    the check again.
+
 ### 12. Functions by hand, and the buckets
 
-From the worktree, after batch 3:
+From the worktree, after batch 3 and its P3 check (step 11.3):
 
 ```bash
 supabase functions deploy --project-ref jibgwgosihadbjgxdsfe    # all 23; add --use-api if Docker is not running
@@ -1242,7 +1532,7 @@ still off, so no `age_gate` is needed. Then:
 
 ```sql
 insert into public.content_moderators (user_id, note)
-select id, 'Max' from auth.users where email = '<max's address>';
+select id, 'Max' from auth.users where email = '<max-address>';
 ```
 
 Check it after step 16: as Max, `/admin/reports` opens (it calls
@@ -1382,7 +1672,9 @@ recovery_.
 **Re-enable the live webhook, and replay the freeze window.** Use the same
 bash shell as step 6.7, with `stripe_all`, `STRIPE_LIVE_KEY` and
 `FREEZE_UNIX`. Enabling the endpoint replays nothing by itself. Every event
-has to be listed and either resent or given a disposition.
+has to be listed and either resent or given a disposition. Every listing
+fails closed, as in step 6.7: a block that does not print its `OK` line
+proves nothing, so stop and run it again.
 
 1. Stripe (live) → Developers → Webhooks → `we_1U9V8T4eZ6RX0W0glk3BZIOi` →
    **Enable**. Write down the time as **`ENABLE_AT`**, and as a Unix time,
@@ -1396,14 +1688,21 @@ has to be listed and either resent or given a disposition.
 
     ```bash
     TYPES=(checkout.session.completed customer.subscription.created customer.subscription.updated
-           customer.subscription.deleted customer.subscription.paused customer.subscription.resumed
-           invoice.paid invoice.payment_succeeded invoice.payment_failed)
-    T=(); for t in "${TYPES[@]}"; do T+=("types[]=$t"); done
-    stripe_all events "created[gte]=$FREEZE_UNIX" "created[lt]=$ENABLE_UNIX" "${T[@]}" > replay-window.jsonl
-    stripe_all events delivery_success=false "created[gte]=$((FREEZE_UNIX - 259200))" "created[lt]=$FREEZE_UNIX" \
-      "${T[@]}" > replay-outstanding.jsonl
-    cat replay-window.jsonl replay-outstanding.jsonl \
-      | jq -r '[.id, .type, (.data.object.customer // ""), (.created | todate)] | @tsv'
+      customer.subscription.deleted customer.subscription.paused customer.subscription.resumed
+      invoice.paid invoice.payment_succeeded invoice.payment_failed)
+    T=()
+    for t in "${TYPES[@]}"; do T+=("types[]=$t"); done
+    (
+      set -euo pipefail
+      stripe_all replay-window.jsonl events "created[gte]=$FREEZE_UNIX" "created[lt]=$ENABLE_UNIX" "${T[@]}"
+      stripe_all replay-outstanding.jsonl events delivery_success=false \
+        "created[gte]=$((FREEZE_UNIX - 259200))" "created[lt]=$FREEZE_UNIX" "${T[@]}"
+      cat replay-window.jsonl replay-outstanding.jsonl \
+        | jq -r '[.id, .type, (.data.object.customer // ""), (.created | todate)] | @tsv' >replay-events.tsv
+      cat replay-events.tsv
+      echo "18 replay list OK: $(wc -l <replay-window.jsonl | tr -d ' ') in the window," \
+        "$(wc -l <replay-outstanding.jsonl | tr -d ' ') undelivered before it"
+    )
     ```
 
 3. **Give every event a row in the reconciliation table** (step 6.7):
@@ -1419,7 +1718,8 @@ has to be listed and either resent or given a disposition.
       `stripe events resend <evt_…> --webhook-endpoint we_1U9V8T4eZ6RX0W0glk3BZIOi --live`.
       Then read the response body (Webhooks → the endpoint → the delivery).
         - `applied: …`, with a `public.subscriptions` row that matches
-          Stripe: "applied and verified".
+          Stripe: "applied and verified". So is `duplicate: true`, with
+          the checks in step 6.7's table.
         - `ignored: unknown_user`, or any other `ignored: …`: "needs review".
 
     A 2xx alone is never a success.
@@ -1439,13 +1739,33 @@ has to be listed and either resent or given a disposition.
   student. Then add a student **by email**, to an outside mailbox: the invite
   arrives from `noreply@cleffy.io` and lands on `/student/welcome`, where the
   student sets a password and signs in. Delete that student too.
-- **Renewal webhook replay.** Stripe (live) → Events → the purchase's
-  `invoice.paid` → **Resend** to the live endpoint. It answers 2xx, with
-  `applied: invoice_recorded` in the body. It leaves exactly one
-  `stripe_events` row for that event id. Afterwards
-  `subscriptions.current_period_end` still equals the period end Stripe
-  shows. A real renewal cannot happen in the sitting. Step 2's test-clock
-  rehearsal on the `dev` branch is the gate for that.
+- **Renewal webhook replay.** This checks that a resent event is never
+  applied twice.
+    1. **The original delivery applied.** Stripe (live) → Webhooks → the
+       live endpoint → the purchase's `invoice.paid` delivery: it answered
+       2xx with `applied: invoice_recorded` in the body. Before the resend,
+       write down that subscription's `status` and `current_period_end`.
+    2. **Resend it.** Stripe (live) → Events → that `invoice.paid` →
+       **Resend** to the live endpoint. Either answer passes:
+        - 2xx with `{"received":true,"duplicate":true}`. This is the normal
+          answer: part 1's delivery already recorded the event, and a
+          redelivery is never applied twice (`handleStripeEvent`,
+          `supabase/functions/_shared/stripeEvents.ts`);
+        - 2xx with `applied: invoice_recorded`, but only if part 1 found no
+          earlier delivery that succeeded. The resend was then the first to
+          apply it.
+
+        Anything else fails: another `ignored: …`, `409 event_in_flight`, or
+        a 5xx.
+
+    3. **Nothing changed.** `stripe_events` holds exactly one row for that
+       event id, with `status = 'done'`. The subscription's `status` and
+       `current_period_end` are what part 1 wrote down, and the period end
+       still equals the one Stripe shows.
+
+    A real renewal cannot happen in the sitting. Step 2's test-clock
+    rehearsal on the `dev` branch is the gate for that.
+
 - **District invoice and grace.** Not run against live money. Step 2's
   rehearsal on the `dev` branch is the gate. Here, check only that
   `admin_set_studio_seat_override` refuses the throwaway's card subscription
@@ -1462,10 +1782,20 @@ has to be listed and either resent or given a disposition.
 - **Reconcile Stripe once more**, now that part B is done. Every page again:
 
     ```bash
-    stripe_all subscriptions status=all \
-      | jq -r 'select(.status != "canceled" and .status != "incomplete_expired") | [.id, .customer, .status] | @tsv'
-    stripe_all checkout/sessions "created[gte]=$FREEZE_UNIX" | jq -r '[.id, .status, (.customer // "")] | @tsv'
-    stripe_all events "created[gte]=$ENABLE_UNIX" "${T[@]}" | jq -r '[.id, .type] | @tsv'
+    (
+      set -euo pipefail
+      stripe_all final-subscriptions.jsonl subscriptions status=all
+      stripe_all final-sessions.jsonl checkout/sessions "created[gte]=$FREEZE_UNIX"
+      stripe_all final-events.jsonl events "created[gte]=$ENABLE_UNIX" "${T[@]}"
+      echo "-- subscriptions that can still bill"
+      jq -r 'select(.status != "canceled" and .status != "incomplete_expired") | [.id, .customer, .status] | @tsv' \
+        final-subscriptions.jsonl
+      echo "-- Checkout sessions since FREEZE_AT"
+      jq -r '[.id, .status, (.customer // "")] | @tsv' final-sessions.jsonl
+      echo "-- events since ENABLE_AT"
+      jq -r '[.id, .type] | @tsv' final-events.jsonl
+      echo "18 final reconcile OK"
+    )
     ```
 
     - Every subscription that can still bill is either in
@@ -1499,8 +1829,10 @@ already applied (`supabase migration list --linked`), so the next push to
   needs review**;
 - no throwaway account is left.
 
-Accounts banned in step 6.5 were removed by the wipe, so nothing needs to be
-unbanned.
+The wipe removed every old account, the ones step 6.5 banned for the freeze
+and the `prebanned` ones alike. So no maintenance ban is left to undo, and
+6.5.1c's rollback is never run after the wipe. `freeze-ban-plan.tsv` stays
+with the backup, as the record of which old accounts were already banned.
 
 Then:
 
@@ -1576,14 +1908,19 @@ The step 7 backup is for reference and forensics only. Nothing here loads it.
 - **Before the wipe (steps 0 to 7): unfreeze and leave it.** Nothing is lost.
   Undo step 6, part by part:
     1. Disable both firewall rules, then Review Changes → Publish (6.1).
-    2. Unban the accounts: run 6.5.1's loop with `{"ban_duration":"none"}`.
+    2. Undo **only the maintenance bans**: run 6.5.1c's rollback, then its
+       `psql` check (zero rows). It reads `freeze-ban-plan.tsv`. It lifts
+       only the `ban` rows, and gives back the time left on a ban that
+       existed before the freeze. The `prebanned` accounts stay banned
+       exactly as they were. Never unban by looping over every account.
        Deleted sessions do not come back, so people sign in again.
     3. Turn the old cron jobs back on (6.4's rollback).
     4. Set `disable_signup: false` (6.2).
     5. Enable the live webhook (6.3). The old database still has these
        customers, so list the window's events as in step 18 (from
-       `FREEZE_AT` to now), resend them to the endpoint, and give each a
-       row in the reconciliation table. Subscriptions cancelled and Checkout
+       `FREEZE_AT` to now, so `ENABLE_UNIX=$(date +%s)`), with the same
+       fail-closed block, resend them to the endpoint, and give each a row in
+       the reconciliation table. Subscriptions cancelled and Checkout
        sessions expired in 6.7 stay that way: tell those customers.
     6. Leave Deploy to production off until a new date.
 - **After the wipe: fix forward.** The old production is gone. Stay frozen,
