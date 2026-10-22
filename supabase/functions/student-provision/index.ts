@@ -3,6 +3,7 @@ import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
 import { readTeacherAttestation, type TeacherAttestation } from '../_shared/consentAge.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../_shared/deletionPending.ts';
 import { checkDistrictChoice, type DistrictRpc } from '../_shared/districtProvision.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements } from '../_shared/entitlements.ts';
@@ -1150,6 +1151,18 @@ Deno.serve(async (req) => {
     }
 
     const userId = auth.caller.userId;
+
+    // Nothing in a roster changes while its teacher's account is being deleted
+    // (../_shared/deletionPending.ts): every action here writes with the service
+    // role, much of it to Auth, where no database trigger can refuse it.
+    const pending = await accountDeletionPending(admin, userId);
+    if (!pending.ok) {
+        console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+        return jsonResponse({ error: 'Could not check your account. Please try again.' }, 502);
+    }
+    if (pending.pending) {
+        return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
+    }
 
     try {
         switch (body.action) {

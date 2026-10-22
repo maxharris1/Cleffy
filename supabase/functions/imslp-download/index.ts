@@ -1,5 +1,6 @@
 import { requireUser } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import {
     checkRateLimit,
@@ -225,6 +226,18 @@ Deno.serve(async (req) => {
     const admin = serviceClient();
     if (!admin) {
         return jsonResponse({ error: 'Server misconfigured' }, 500);
+    }
+
+    // A score imported into an account being deleted would outlive the sweep
+    // (../_shared/deletionPending.ts). Asked before any quota, pacing slot or
+    // write; the documents trigger stays the backstop.
+    const pending = await accountDeletionPending(admin, userId);
+    if (!pending.ok) {
+        logError('imslp-download', new Error(pending.message), { code: 'deletion_check_failed' });
+        return jsonResponse({ error: 'Could not check your account. Please try again.' }, 502);
+    }
+    if (pending.pending) {
+        return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
     }
 
     const flow = await runImslpImport(
