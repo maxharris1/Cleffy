@@ -1,6 +1,10 @@
 import { requireUser } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../_shared/deletionPending.ts';
+import {
+    ACCOUNT_DELETION_PENDING,
+    accountDeletionPending,
+    DELETION_CHECK_UNAVAILABLE,
+} from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import {
     checkRateLimit,
@@ -234,7 +238,7 @@ Deno.serve(async (req) => {
     const pending = await accountDeletionPending(admin, userId);
     if (!pending.ok) {
         logError('imslp-download', new Error(pending.message), { code: 'deletion_check_failed' });
-        return jsonResponse({ error: 'Could not check your account. Please try again.' }, 502);
+        return jsonResponse(DELETION_CHECK_UNAVAILABLE, 503);
     }
     if (pending.pending) {
         return jsonResponse(ACCOUNT_DELETION_PENDING, 409);

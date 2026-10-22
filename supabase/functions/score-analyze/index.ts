@@ -1,7 +1,11 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../_shared/deletionPending.ts';
+import {
+    ACCOUNT_DELETION_PENDING,
+    accountDeletionPending,
+    DELETION_CHECK_UNAVAILABLE,
+} from '../_shared/deletionPending.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
@@ -110,7 +114,8 @@ Deno.serve(async (req) => {
     // (../_shared/deletionPending.ts).
     const pending = await accountDeletionPending(admin, doc.owner_id as string);
     if (!pending.ok) {
-        return jsonResponse({ ok: false, code: 'service_unreachable' }, 502);
+        console.error(`could not check whether ${doc.owner_id} is being deleted: ${pending.message}`);
+        return jsonResponse({ ok: false, ...DELETION_CHECK_UNAVAILABLE }, 503);
     }
     if (pending.pending) {
         return jsonResponse({ ok: false, ...ACCOUNT_DELETION_PENDING }, 409);

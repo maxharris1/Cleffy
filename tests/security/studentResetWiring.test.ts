@@ -6,7 +6,8 @@ import { describe, expect, it } from 'vitest';
 /**
  * student-provision's code reset (a Deno entry point vitest cannot load)
  * against 20261022110500_student_code_reset_holder.sql and
- * 20261022110700_student_code_reset_worker.sql: the worker in
+ * 20261022110700_student_code_reset_worker.sql (and 20261022110800's
+ * quarantine): the worker in
  * ../_shared/studentCodeReset.ts does the reset (tests/security/studentClaim.test.ts
  * drives its interleavings); the entry point only binds its ports and maps the
  * outcome. tests/sql/student_claim_reservation.sql proves the SQL.
@@ -22,7 +23,7 @@ const worker = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/s
 
 describe('student-provision code reset wiring', () => {
     it('runs the code path through runCodeReset, resuming only with a well-formed token', () => {
-        expect(codePath).toContain('runCodeReset(codeResetPorts(admin)');
+        expect(codePath).toContain('runCodeReset(codeResetPorts(admin, userId)');
         expect(reset).toContain('uuidRe.test(body.resetToken)');
         // No Auth or code write of its own on the code path.
         expect(codePath).not.toContain('updateUserById');
@@ -45,6 +46,33 @@ describe('student-provision code reset wiring', () => {
         }
         expect(ports).toContain('password: generateProvisionPassword()');
         expect(source).not.toContain('begin_student_code_reset');
+        // The session revocation checks the lease in its own transaction.
+        expect(ports).toContain('endStudentSessionsFenced(admin, studentId, lease)');
+        expect(ports).not.toContain('endStudentSessions(admin');
+    });
+
+    it('the scramble carries its worker marker, and only a definite refusal counts as one', () => {
+        const scramble = ports.slice(ports.indexOf('scramblePassword: async'), ports.indexOf('passwordWriteLanded:'));
+        expect(scramble).toContain('password: generateProvisionPassword()');
+        expect(scramble).toContain('app_metadata: { [MARKER_KEY]: lease.worker }');
+        expect(scramble).toContain('definite: definiteRefusal((error as { status?: unknown }).status)');
+        const landed = ports.slice(ports.indexOf('passwordWriteLanded: async'), ports.indexOf('endSessions:'));
+        expect(landed).toContain('admin.auth.admin.getUserById(studentUserId)');
+        expect(landed).toContain('app_metadata?.[MARKER_KEY] === worker');
+    });
+
+    it('an ambiguous password write is quarantined: no report-back unless it is seen to have landed', () => {
+        const run = worker.slice(worker.indexOf('export const runCodeReset'));
+        const failed = run.slice(run.indexOf('if (!scrambled.ok) {'), run.indexOf('const beforeSessions'));
+        expect(failed).toMatch(/if \(scrambled\.definite\) \{\s+return incomplete\(\);/);
+        expect(failed).toMatch(
+            /if \(!\(await landed\(ports, studentUserId, lease\.worker\)\)\) \{\s+return \{ kind: 'unconfirmed'/,
+        );
+        expect(failed.match(/incomplete\(\)/g)).toHaveLength(1);
+        expect(codePath).toContain("code: 'reset_unconfirmed', resetToken: outcome.resetToken");
+        expect(source).toMatch(
+            /RESET_UNCONFIRMED_MESSAGE =\s+'[^']*held for up to 10 minutes\. Try the reset again in a few minutes\./,
+        );
     });
 
     it('the worker fences immediately before each Auth side effect', () => {

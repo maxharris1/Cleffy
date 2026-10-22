@@ -14,6 +14,8 @@ import {
 import {
     BODY_MAX_BYTES,
     CAPTCHA_FAILED,
+    CLAIM_CHECK_UNAVAILABLE,
+    CLAIM_DELETION_PENDING,
     CLAIM_IN_PROGRESS,
     type ClaimReservation,
     handleStudentClaim,
@@ -22,7 +24,12 @@ import {
     type StudentClaimDeps,
     USERNAME_TAKEN,
 } from '../../supabase/functions/student-claim/handler';
-import { type CodeResetPorts, type ResetLease, runCodeReset } from '../../supabase/functions/_shared/studentCodeReset';
+import {
+    type CodeResetPorts,
+    definiteRefusal,
+    type ResetLease,
+    runCodeReset,
+} from '../../supabase/functions/_shared/studentCodeReset';
 import { chunkedJson } from './chunkedBody';
 
 /**
@@ -65,12 +72,16 @@ type ResetStep = Exclude<keyof CodeResetPorts, 'log'>;
 type Step = keyof StudentClaimBackend | ResetStep;
 
 type BeginReset =
-    ({ status: 'reserved' } & ResetLease) | { status: 'busy'; kind: 'reset' | 'claim' } | { status: 'not_found' };
+    | ({ status: 'reserved' } & ResetLease)
+    | { status: 'busy'; kind: 'reset' | 'claim'; worker?: string; epoch?: number }
+    | { status: 'not_found' };
 
 class Roster {
     rows = new Map<string, Row>();
     held = new Map<string, Held>();
     passwords = new Map<string, string>();
+    /** app_metadata.code_reset_worker per account: written with the scramble, in one Auth update. */
+    markers = new Map<string, string>();
     sessions = new Set<string>();
     now = 1_000_000;
     private ids = 0;
@@ -163,6 +174,10 @@ class Roster {
                 Object.assign(held, { worker, epoch, inAuth: false, until: this.now + TTL_MS });
                 return { status: 'reserved', reservation: token, worker, epoch };
             }
+            // 20261022110800: the token's holder is handed the in-flight worker's lease.
+            if (held.kind === 'reset' && token && held.reservation === token && held.worker) {
+                return { status: 'busy', kind: 'reset', worker: held.worker, epoch: held.epoch };
+            }
             return { status: 'busy', kind: held.kind };
         }
         const reservation = `res-${++this.ids}`;
@@ -214,6 +229,22 @@ class Roster {
         return 'reset';
     }
 
+    /** end_student_sessions_fenced: only the current worker of a live hold, past a fence, no claim since. */
+    endResetSessions(id: string, lease: ResetLease): { ok: true } | 'lost' {
+        const held = this.held.get(id);
+        if (!this.live(held) || !held.inAuth || !this.owns(id, lease)) {
+            return 'lost';
+        }
+        this.sessions.clear();
+        return { ok: true };
+    }
+
+    /** The scramble GoTrue applies: a new password and this worker's marker, together. */
+    applyScramble(userId: string, lease: ResetLease): void {
+        this.passwords.set(userId, `scramble-${++this.ids}`);
+        this.markers.set(userId, lease.worker);
+    }
+
     /** stop_student_code_reset_worker: the hold stays; a retry may take a new lease. */
     stopResetWorker(id: string, lease: ResetLease): void {
         const held = this.held.get(id);
@@ -238,18 +269,19 @@ class Roster {
         let cards = 0;
         return {
             reserveReset: vi.fn(step('reserveReset', (id: string, token: string | null) => this.beginReset(id, token))),
+            deletionPending: vi.fn(step('deletionPending', () => 'clear' as const)),
             fence: vi.fn(step('fence', (id: string, lease: ResetLease) => this.fenceReset(id, lease))),
             scramblePassword: vi.fn(
-                step('scramblePassword', (userId: string) => {
-                    this.passwords.set(userId, `scramble-${++this.ids}`);
+                step('scramblePassword', (userId: string, lease: ResetLease) => {
+                    this.applyScramble(userId, lease);
                     return { ok: true as const };
                 }),
             ),
+            passwordWriteLanded: vi.fn(
+                step('passwordWriteLanded', (userId: string, worker: string) => this.markers.get(userId) === worker),
+            ),
             endSessions: vi.fn(
-                step('endSessions', () => {
-                    this.sessions.clear();
-                    return { ok: true as const };
-                }),
+                step('endSessions', (id: string, lease: ResetLease) => this.endResetSessions(id, lease)),
             ),
             mintCode: vi.fn(
                 step('mintCode', async () => {
@@ -292,6 +324,7 @@ class Roster {
             readAuthUser: vi.fn(
                 step('readAuthUser', (userId: string) => ({ email: `${userId}@students.test`, userType: 'student' })),
             ),
+            teacherDeletionPending: vi.fn(step('teacherDeletionPending', () => 'clear' as const)),
             usernameTakenByOther: vi.fn(
                 step('usernameTakenByOther', (username: string, id: string) =>
                     [...this.rows.values()].some((r) => r.id !== id && r.username === username),
@@ -550,7 +583,7 @@ describe('student-claim against a teacher reset', () => {
         // token T; two retries then present T at once.
         const { roster, deps } = await setup();
         const ports = roster.resetPorts();
-        ports.scramblePassword.mockResolvedValueOnce({ ok: false, message: 'auth unavailable' });
+        ports.scramblePassword.mockResolvedValueOnce({ ok: false, message: 'weak password', definite: true });
         const first = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
         expect(first.kind).toBe('incomplete');
         const token = (first as { resetToken: string }).resetToken;
@@ -642,7 +675,7 @@ describe('student-claim against a teacher reset', () => {
     it('a worker that reported back lets the retry resume its hold at once', async () => {
         const { roster } = await setup();
         const ports = roster.resetPorts();
-        ports.scramblePassword.mockResolvedValueOnce({ ok: false, message: 'auth unavailable' });
+        ports.scramblePassword.mockResolvedValueOnce({ ok: false, message: 'weak password', definite: true });
         const first = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
         expect(first).toMatchObject({ kind: 'incomplete' });
         const token = (first as { resetToken: string }).resetToken;
@@ -666,6 +699,201 @@ describe('student-claim against a teacher reset', () => {
         expect(await resetA).toEqual({ kind: 'lost' });
         expect(ports.scramblePassword).not.toHaveBeenCalled();
         expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
+    });
+});
+
+describe('a reset whose password write comes back ambiguous (Codex r3 on #70)', () => {
+    const input = (resumeToken: string | null = null) => ({ studentId: 's1', studentUserId: 'user-s1', resumeToken });
+
+    /**
+     * The scramble's error returns locally while the request is still on its
+     * way: nothing is written now, and `land()` is the remote write committing
+     * later -- the password and the worker's marker together.
+     */
+    const ambiguousScramble = (roster: Roster, ports: ReturnType<Roster['resetPorts']>) => {
+        let land = () => undefined as void;
+        ports.scramblePassword.mockImplementationOnce(async (userId: string, lease: ResetLease) => {
+            land = () => roster.applyScramble(userId, lease);
+            return { ok: false, message: 'error sending request: connection reset' };
+        });
+        return { land: () => land() };
+    };
+
+    it('the error returns, the write commits later: a retry and a claim both wait until it is confirmed', async () => {
+        const { roster, deps } = await setup();
+        const ports = roster.resetPorts();
+        const remote = ambiguousScramble(roster, ports);
+
+        // A: the error comes back; the immediate re-read finds no marker yet.
+        const a = await runCodeReset(ports, input());
+        expect(a.kind).toBe('unconfirmed');
+        const token = (a as { resetToken: string }).resetToken;
+        // Quarantined: A did not report back, so it still counts as inside its Auth call.
+        expect(ports.stopWorker).not.toHaveBeenCalled();
+        expect(roster.held.get('s1')).toMatchObject({ reservation: token, inAuth: true });
+
+        // A retry with the token waits; so does a claim of the old card.
+        expect(await runCodeReset(ports, input(token))).toEqual({ kind: 'busy', holder: 'reset' });
+        const early = await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
+        expect(early.status).toBe(409);
+        expect(await early.json()).toMatchObject({ code: 'claim_in_progress' });
+        expect(ports.scramblePassword).toHaveBeenCalledTimes(1);
+
+        // A's write commits at Auth now, after its error came back.
+        remote.land();
+
+        // The next retry sees A's marker: A's write has landed and nothing of
+        // it is in flight. It reports A back, takes a newer lease, completes.
+        const b = await runCodeReset(ports, input(token));
+        expect(b).toEqual({ kind: 'reset', code: CODE_B });
+        expect(ports.stopWorker).toHaveBeenCalledTimes(1);
+        expect(ports.scramblePassword).toHaveBeenCalledTimes(2);
+
+        // The student claims B's card; their password stands, A has nothing left to land.
+        expect((await handleStudentClaim(claim(CODE_B, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
+        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
+        expect(roster.rows.get('s1')).toMatchObject({ claimed: true, username: 'ada_l' });
+    });
+
+    it('the error returns, the write commits later, never confirmed: both wait until the hold runs out', async () => {
+        const { roster, deps } = await setup();
+        const ports = roster.resetPorts();
+        const remote = ambiguousScramble(roster, ports);
+        // The Auth user cannot be re-read at all, so nothing ever confirms the write.
+        ports.passwordWriteLanded.mockRejectedValue(new Error('auth unavailable'));
+
+        const a = await runCodeReset(ports, input());
+        expect(a.kind).toBe('unconfirmed');
+        const token = (a as { resetToken: string }).resetToken;
+        remote.land();
+
+        // Up to the last moment of the hold, a retry and a claim both wait.
+        roster.now += TTL_MS - 1;
+        expect(await runCodeReset(ports, input(token))).toEqual({ kind: 'busy', holder: 'reset' });
+        expect((await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps)).status).toBe(409);
+        expect(ports.stopWorker).not.toHaveBeenCalled();
+
+        // The server-side limit passes: the old card is claimable again, and
+        // A's write landed long before the student's password.
+        roster.now += 2;
+        expect((await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
+        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
+    });
+
+    it('the worker re-reads straight after the error, and carries on when its write did land', async () => {
+        const { roster } = await setup();
+        const ports = roster.resetPorts();
+        ports.scramblePassword.mockImplementationOnce(async (userId: string, lease: ResetLease) => {
+            roster.applyScramble(userId, lease);
+            return { ok: false, message: 'upstream request timeout' };
+        });
+        expect(await runCodeReset(ports, input())).toEqual({ kind: 'reset', code: CODE_B });
+        expect(ports.passwordWriteLanded).toHaveBeenCalledTimes(1);
+        expect(ports.endSessions).toHaveBeenCalledTimes(1);
+        expect(ports.stopWorker).not.toHaveBeenCalled();
+        expect(roster.held.size).toBe(0);
+    });
+
+    it('a throw from the password write is ambiguous too', async () => {
+        const { roster } = await setup();
+        const ports = roster.resetPorts();
+        ports.scramblePassword.mockRejectedValueOnce(new TypeError('fetch failed'));
+        expect((await runCodeReset(ports, input())).kind).toBe('unconfirmed');
+        expect(ports.stopWorker).not.toHaveBeenCalled();
+        expect(roster.held.get('s1')?.inAuth).toBe(true);
+    });
+
+    it('only a definite 4xx refusal reports back at once', async () => {
+        const { roster } = await setup();
+        const ports = roster.resetPorts();
+        ports.scramblePassword.mockResolvedValueOnce({ ok: false, message: 'weak password', definite: true });
+        const a = await runCodeReset(ports, input());
+        expect(a.kind).toBe('incomplete');
+        expect(ports.passwordWriteLanded).not.toHaveBeenCalled();
+        expect(ports.stopWorker).toHaveBeenCalledTimes(1);
+        const token = (a as { resetToken: string }).resetToken;
+        expect(await runCodeReset(ports, input(token))).toEqual({ kind: 'reset', code: CODE_B });
+
+        for (const status of [400, 401, 403, 404, 409, 422, 429]) {
+            expect(definiteRefusal(status), String(status)).toBe(true);
+        }
+        for (const status of [408, 500, 502, 503, 504, 0, undefined, null, '400']) {
+            expect(definiteRefusal(status), String(status)).toBe(false);
+        }
+    });
+
+    it('a worker fenced out after its last fence ends no sessions: the revocation checks the lease itself', async () => {
+        const { roster, deps } = await setup();
+        const ports = roster.resetPorts();
+        ports.scramblePassword.mockResolvedValueOnce({ ok: false, message: 'weak password', definite: true });
+        const x = await runCodeReset(ports, input());
+        const token = (x as { resetToken: string }).resetToken;
+
+        // A passes both fences and pauses on its way into the session revocation.
+        const pausedInSessions = roster.pause('endSessions');
+        const retryA = runCodeReset(ports, input(token));
+        await pausedInSessions.arrived;
+
+        // B with the token: A is inside an Auth call, but A's scramble is seen
+        // to have landed, so B reports A back and takes over.
+        const retryB = await runCodeReset(ports, input(token));
+        expect(retryB).toEqual({ kind: 'reset', code: CODE_B });
+        expect((await handleStudentClaim(claim(CODE_B, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
+        const studentSessions = new Set(roster.sessions);
+        expect(studentSessions.size).toBe(1);
+
+        // A's delayed revocation runs now and ends nothing.
+        pausedInSessions.resume();
+        expect(await retryA).toEqual({ kind: 'lost' });
+        expect(roster.sessions).toEqual(studentSessions);
+        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
+    });
+});
+
+describe('deletion checks right before the Auth writes (decision 61)', () => {
+    it('reset: a teacher being deleted gets no Auth write; an unanswered check hands the token back', async () => {
+        const { roster } = await setup();
+        const ports = roster.resetPorts();
+        ports.deletionPending.mockResolvedValueOnce('pending');
+        expect(await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null })).toEqual({
+            kind: 'deletion_pending',
+        });
+        expect(ports.fence).not.toHaveBeenCalled();
+        expect(ports.scramblePassword).not.toHaveBeenCalled();
+
+        roster.held.clear();
+        ports.deletionPending.mockRejectedValueOnce(new Error('rpc down'));
+        const unknown = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
+        expect(unknown.kind).toBe('deletion_unknown');
+        expect(ports.scramblePassword).not.toHaveBeenCalled();
+        // Reported back, so the token resumes at once.
+        const token = (unknown as { resetToken: string }).resetToken;
+        expect(await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: token })).toEqual({
+            kind: 'reset',
+            code: CODE_B,
+        });
+    });
+
+    it('claim: the card of a teacher being deleted sets no password, and an unanswered check is a 503', async () => {
+        const { roster, backend, deps } = await setup();
+        backend.teacherDeletionPending.mockResolvedValueOnce('pending');
+        const pending = await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
+        expect(pending.status).toBe(409);
+        expect(await pending.json()).toEqual(CLAIM_DELETION_PENDING);
+        expect(backend.teacherDeletionPending).toHaveBeenCalledWith('s1');
+
+        backend.teacherDeletionPending.mockResolvedValueOnce('unknown');
+        const unknown = await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
+        expect(unknown.status).toBe(503);
+        expect(await unknown.json()).toEqual(CLAIM_CHECK_UNAVAILABLE);
+        expect(CLAIM_CHECK_UNAVAILABLE.error).toMatch(/try again/i);
+
+        expect(backend.setPassword).not.toHaveBeenCalled();
+        expect(backend.releaseClaim).toHaveBeenCalledTimes(2);
+        expect(roster.held.size).toBe(0);
+        const order = (fn: ReturnType<typeof vi.fn>) => fn.mock.invocationCallOrder.at(-1) ?? Infinity;
+        expect((await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
+        expect(order(backend.teacherDeletionPending)).toBeLessThan(order(backend.setPassword));
     });
 });
 

@@ -200,6 +200,17 @@ export const CHECKOUT_DELETION_PENDING = {
     code: 'account_deletion_pending',
 } as const;
 
+/**
+ * Whether the buyer's account is being deleted could not be checked
+ * (deletionPending.ts's DELETION_CHECK_UNAVAILABLE): refused as a 503, a retry
+ * prompt, since nothing was started (decision 60(b)).
+ */
+export const CHECKOUT_DELETION_CHECK_UNAVAILABLE = {
+    error: 'We could not check your account just now, so checkout did not start. Please try again in a minute.',
+    code: 'deletion_check_unavailable',
+    retryAfterSec: 30,
+} as const;
+
 /** Layer 4: this buyer has paid and we are waiting for Stripe to tell us. */
 /**
  * The auto-renewal checkbox was not ticked, or the request did not say so.
@@ -309,6 +320,8 @@ export type AttemptStart =
     | { ok: false; reason: 'in_flight' }
     /** The lease was refused because the account is being deleted. */
     | { ok: false; reason: 'deletion_pending' }
+    /** Whether the account is being deleted could not be checked; nothing was taken. */
+    | { ok: false; reason: 'deletion_check_failed'; error: unknown }
     | { ok: false; reason: 'error'; error: unknown };
 
 /**
@@ -1043,6 +1056,10 @@ export const handleCheckout = async (req: Request, deps: CheckoutDeps): Promise<
             }
             if (start.reason === 'deletion_pending') {
                 return deps.json(CHECKOUT_DELETION_PENDING, 409);
+            }
+            if (start.reason === 'deletion_check_failed') {
+                deps.logError('deletion_check_failed', start.error);
+                return deps.json(CHECKOUT_DELETION_CHECK_UNAVAILABLE, 503);
             }
             deps.log(`checkout: ${caller.userId} already has an attempt in flight (${mode})`);
             return deps.json(CHECKOUT_IN_PROGRESS, 409);

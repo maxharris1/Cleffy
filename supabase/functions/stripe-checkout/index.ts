@@ -180,7 +180,7 @@ Deno.serve((req) =>
             // below is the in-transaction backstop.
             const pending = await accountDeletionPending(billing(mode).admin, userId);
             if (!pending.ok) {
-                return { ok: false, reason: 'error', error: new Error(pending.message) };
+                return { ok: false, reason: 'deletion_check_failed', error: new Error(pending.message) };
             }
             if (pending.pending) {
                 return { ok: false, reason: 'deletion_pending' };

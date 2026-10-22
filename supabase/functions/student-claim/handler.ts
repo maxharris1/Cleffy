@@ -91,6 +91,23 @@ export const CLAIM_IN_PROGRESS = {
 export const USERNAME_TAKEN = { error: 'That username is taken', code: 'username_taken' } as const;
 
 /**
+ * The card's teacher is deleting their account (account_deletion_pending(),
+ * ../_shared/deletionPending.ts), and the deletion removes this student with
+ * it: nothing is written to the account.
+ */
+export const CLAIM_DELETION_PENDING = {
+    error: 'This card can no longer be set up. Ask your teacher for help.',
+    code: 'account_deletion_pending',
+} as const;
+
+/** That could not be checked. Fails closed, as a retry prompt (decision 60(b)). */
+export const CLAIM_CHECK_UNAVAILABLE = {
+    error: 'We could not check this card just now. Wait a minute, then try again.',
+    code: 'deletion_check_unavailable',
+    retryAfterSec: 30,
+} as const;
+
+/**
  * The cap on the request body: readCappedJson.ts's CONTROL_BODY_MAX_BYTES.
  * Past it the answer is 413 before anything is parsed.
  */
@@ -123,6 +140,8 @@ export interface StudentClaimBackend {
     reserveClaim: (codeHash: string) => Promise<ClaimReservation | null>;
     /** The auth user a roster row points at; null if it cannot be read. */
     readAuthUser: (userId: string) => Promise<{ email: string | null; userType: unknown } | null>;
+    /** account_deletion_pending() for the teacher whose roster row `studentId` is. */
+    teacherDeletionPending: (studentId: string) => Promise<'clear' | 'pending' | 'unknown'>;
     /** Whether a roster row other than `studentId` already has this username. */
     usernameTakenByOther: (username: string, studentId: string) => Promise<boolean>;
     /** auth.admin.updateUserById(password); an error message on failure. */
@@ -283,6 +302,16 @@ export const handleStudentClaim = async (req: Request, deps: StudentClaimDeps): 
     if (await backend.usernameTakenByOther(username, studentId)) {
         await release();
         return json(USERNAME_TAKEN, 409);
+    }
+
+    // Not for a student whose teacher's account is being deleted: the password
+    // write is an Auth write no database trigger can refuse (decision 61).
+    // Check-then-write, like every Edge deletion check; the deletion removes
+    // the account either way.
+    const deletion = await backend.teacherDeletionPending(studentId);
+    if (deletion !== 'clear') {
+        await release();
+        return deletion === 'pending' ? json(CLAIM_DELETION_PENDING, 409) : json(CLAIM_CHECK_UNAVAILABLE, 503);
     }
 
     // The password goes first — and only now, with the row reserved. The

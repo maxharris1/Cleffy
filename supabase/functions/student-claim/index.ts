@@ -1,6 +1,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { accountDeletionPending } from '../_shared/deletionPending.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { passwordProblem, passwordProblemMessage } from '../_shared/passwordPolicy.ts';
@@ -62,6 +63,24 @@ const backend = (): StudentClaimBackend | null => {
                 return null;
             }
             return { email: user.email ?? null, userType: user.app_metadata?.user_type };
+        },
+
+        teacherDeletionPending: async (studentId) => {
+            const { data, error } = await admin
+                .from('managed_students')
+                .select('teacher_id')
+                .eq('id', studentId)
+                .maybeSingle();
+            if (error || !data) {
+                console.error(`could not read the teacher of roster row ${studentId}: ${error?.message ?? 'no row'}`);
+                return 'unknown';
+            }
+            const pending = await accountDeletionPending(admin, data.teacher_id as string);
+            if (!pending.ok) {
+                console.error(`could not check whether ${data.teacher_id} is being deleted: ${pending.message}`);
+                return 'unknown';
+            }
+            return pending.pending ? 'pending' : 'clear';
         },
 
         usernameTakenByOther: async (username, studentId) => {

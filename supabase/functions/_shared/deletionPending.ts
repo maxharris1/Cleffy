@@ -17,7 +17,9 @@
  * -- before its first write, and refuses with 409 while it is pending. The
  * triggers stay the in-transaction backstop.
  *
- * Fails closed: an unanswered check is `ok: false`, and the callers refuse.
+ * Fails closed: an unanswered check is `ok: false`, and the callers refuse --
+ * with a 503 and DELETION_CHECK_UNAVAILABLE, a retry prompt (decision 60(b)),
+ * since nothing was written and the next try usually gets its answer.
  */
 
 export interface PendingRpcClient {
@@ -30,6 +32,13 @@ export type DeletionPendingCheck = { ok: true; pending: boolean } | { ok: false;
 export const ACCOUNT_DELETION_PENDING = {
     error: 'This account is being deleted, so nothing can be added to or changed in it now.',
     code: 'account_deletion_pending',
+} as const;
+
+/** The refusal when the check itself could not be answered: 503, try again shortly. */
+export const DELETION_CHECK_UNAVAILABLE = {
+    error: 'We could not check your account just now, so nothing was changed. Please try again in a minute.',
+    code: 'deletion_check_unavailable',
+    retryAfterSec: 30,
 } as const;
 
 const messageOf = (error: unknown): string =>
