@@ -50,7 +50,7 @@ import { features } from '@/lib/features';
 import { getSupabase } from '@/lib/supabase';
 import { peerColor } from '@/lib/colors';
 import { useLockedPageZoom } from '@/lib/viewportZoom';
-import { AnnotationStore } from '@/sync/annotationStore';
+import { AnnotationStore, settleEdit } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
 import { DocRealtimeChannel, fetchRealtimeTopicEpoch } from '@/sync/realtimeChannel';
 import {
@@ -758,10 +758,10 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
             const key = e.key.toLowerCase();
             if (key === 'z' && !e.shiftKey) {
                 e.preventDefault();
-                void annotationStore.undoLast();
+                settleEdit(annotationStore.undoLast());
             } else if ((key === 'z' && e.shiftKey) || key === 'y') {
                 e.preventDefault();
-                void annotationStore.redoLast();
+                settleEdit(annotationStore.redoLast());
             }
         };
         window.addEventListener('keydown', onKeyDown);
@@ -789,9 +789,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
             // Typed in an editor moved in from the edge: the note goes where it was typed.
             const next = at && typeof edited === 'object' ? { ...edited, x: at.nx, y: at.ny } : edited;
             if (next === 'delete') {
-                void annotationStore.delete(existing.id);
+                settleEdit(annotationStore.delete(existing.id));
             } else if (next !== 'unchanged') {
-                void annotationStore.update(existing.id, { payload: next });
+                settleEdit(annotationStore.update(existing.id, { payload: next }));
             }
             return;
         }
@@ -800,19 +800,26 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         }
         const now = new Date().toISOString();
         const id = crypto.randomUUID();
-        void annotationStore.create({
-            id,
-            docId,
-            page: textIntent.pageIndex,
-            kind: 'text',
-            color: useViewerStore.getState().color,
-            payload: { x: at?.nx ?? textIntent.nx, y: at?.ny ?? textIntent.ny, text: trimmed, size: DEFAULT_TEXT_SIZE },
-            createdBy: null,
-            createdAt: now,
-            updatedAt: now,
-            deletedAt: null,
-            seq: 0,
-        });
+        settleEdit(
+            annotationStore.create({
+                id,
+                docId,
+                page: textIntent.pageIndex,
+                kind: 'text',
+                color: useViewerStore.getState().color,
+                payload: {
+                    x: at?.nx ?? textIntent.nx,
+                    y: at?.ny ?? textIntent.ny,
+                    text: trimmed,
+                    size: DEFAULT_TEXT_SIZE,
+                },
+                createdBy: null,
+                createdAt: now,
+                updatedAt: now,
+                deletedAt: null,
+                seq: 0,
+            }),
+        );
         inkRef.current?.selectTextNote(id, textIntent.pageIndex);
     };
 

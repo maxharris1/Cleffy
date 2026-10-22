@@ -27,6 +27,7 @@ vi.mock('@/sync/signOutSync', async (importOriginal) => {
 });
 
 import { signOut, syncBeforeSignOut } from '@/features/auth/session';
+import { AnnotationStore } from '@/sync/annotationStore';
 import type { Annotation } from '@/types/models';
 
 const CLOUD_DOC = 'c0ffee00-0000-4000-8000-0000000000bb';
@@ -190,6 +191,25 @@ describe('syncBeforeSignOut', () => {
         expect(await syncBeforeSignOut(50)).toEqual({ pending: 1, refused: 0 });
         // Nothing was cleared by asking.
         expect(await getDb().ops.count()).toBe(2);
+    });
+
+    it('counts marks an open viewer could not even write to this device (SF-1)', async () => {
+        const db = getDb();
+        const store = new AnnotationStore(db, CLOUD_DOC);
+        await store.load();
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        try {
+            await store.create(mark('cloud-unsaved', CLOUD_DOC)).catch(() => undefined);
+            // The outbox is empty, so the upload alone would say nothing is at stake.
+            expect(await db.ops.count()).toBe(0);
+            expect(await syncBeforeSignOut(50)).toEqual({ pending: 1, refused: 0 });
+        } finally {
+            full.mockRestore();
+            await store.retryFailedPersist();
+        }
+        expect(await syncBeforeSignOut(50)).toEqual({ pending: 1, refused: 0 });
     });
 
     it('still says which changes are another account’s when the upload fails', async () => {

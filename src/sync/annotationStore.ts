@@ -11,6 +11,39 @@ export interface AnnotationPatch {
     payload?: AnnotationPayload;
 }
 
+/**
+ * Every store with edits it could not write (see `failedPersist`), so sign-out
+ * and export, which read Dexie, can still account for marks that exist only in
+ * a viewer's memory.
+ */
+const storesWithFailures = new Set<AnnotationStore>();
+
+/** Marks, across open scores, whose latest edit is not on this device (see AnnotationStore.hasPersistFailure). */
+export const unsavedMarkCount = (): number => {
+    let count = 0;
+    for (const store of storesWithFailures) {
+        count += store.persistFailureCount;
+    }
+    return count;
+};
+
+/**
+ * The in-memory versions of `docId`'s marks that could not be written —
+ * tombstones included, so an erase that failed to save still leaves the mark
+ * out. Export lays them over the mirror's rows.
+ */
+export const unsavedMarksFor = (docId: string): Annotation[] =>
+    [...storesWithFailures].filter((store) => store.docId === docId).flatMap((store) => store.unsavedAnnotations());
+
+/**
+ * For an edit nobody awaits (a pen-up, an eraser pass): a write that fails is
+ * already flagged (hasPersistFailure) and shown by the viewer's "couldn't be
+ * saved" banner, so it must not also surface as an unhandled rejection.
+ */
+export const settleEdit = (edit: Promise<unknown>): void => {
+    void edit.catch((err: unknown) => console.warn('Could not save a mark on this device', err));
+};
+
 type CommitOp =
     | { type: 'create'; annotation: Annotation }
     | { type: 'update'; annotation: Annotation; prev: Annotation }
@@ -70,6 +103,18 @@ export class AnnotationStore {
     private committing = new Map<string, number>();
     /** whenSaved callers, by id, released once the mark has nothing in `committing` or `unpersisted`. */
     private savedWaiters = new Map<string, Array<() => void>>();
+    /**
+     * Local edits whose mirror + outbox write threw (IndexedDB over quota, a
+     * closed or blocked database), oldest first. They are applied in memory —
+     * drawn, exported (unsavedMarksFor), counted at sign-out — and nowhere
+     * else, so they are held here for retryFailedPersist. A later edit of one
+     * of these marks joins them unwritten, so the outbox never holds a mark's
+     * newer op without the older one it builds on.
+     */
+    private failedOps: CommitOp[] = [];
+    /** The marks in `failedOps` (see hasPersistFailure). */
+    private failedPersist = new Set<string>();
+    private retrying: Promise<boolean> | null = null;
 
     constructor(
         private db: ScribblerDb,
@@ -375,11 +420,14 @@ export class AnnotationStore {
             ops.push({ type: 'create', annotation });
             touched.add(annotation.page);
         }
-        await this.persistMany(ops);
-        for (const page of touched) {
-            this.notifyPage(page);
+        try {
+            await this.persistMany(ops);
+        } finally {
+            for (const page of touched) {
+                this.notifyPage(page);
+            }
+            this.notifyMeta();
         }
-        this.notifyMeta();
         this.onDirty?.(annotations.map((annotation) => annotation.id));
     }
 
@@ -419,7 +467,12 @@ export class AnnotationStore {
         const touchedPages = new Set<number>();
         const rows: LocalAnnotation[] = [];
         for (const remote of remotes) {
-            if (pendingIds.has(remote.id) || this.unpersisted.has(remote.id) || this.foreign.has(remote.id)) {
+            if (
+                pendingIds.has(remote.id) ||
+                this.unpersisted.has(remote.id) ||
+                this.failedPersist.has(remote.id) ||
+                this.foreign.has(remote.id)
+            ) {
                 held.add(remote.id);
                 continue;
             }
@@ -486,6 +539,7 @@ export class AnnotationStore {
                 !pendingIds.has(a.id) &&
                 !this.unpersisted.has(a.id) &&
                 !this.committing.has(a.id) &&
+                !this.failedPersist.has(a.id) &&
                 !this.foreign.has(a.id),
         );
         if (gone.length === 0) {
@@ -565,7 +619,8 @@ export class AnnotationStore {
     /**
      * Resolves once every local edit of this mark made so far is in the
      * outbox, or failed to get there (refused as no longer applying, or its
-     * write threw).
+     * write threw). Resolving is not success: a caller that goes on as if
+     * the edit were saved checks hasPersistFailure first.
      */
     whenSaved(id: string): Promise<void> {
         if (!this.hasUnsavedEdit(id)) {
@@ -579,6 +634,81 @@ export class AnnotationStore {
                 this.savedWaiters.set(id, [resolve]);
             }
         });
+    }
+
+    /**
+     * True while an edit of this mark could not be written to this device
+     * (see `failedOps`): it is drawn, but it is in neither the mirror nor the
+     * outbox, and is lost on reload unless retryFailedPersist succeeds.
+     */
+    hasPersistFailure(id: string): boolean {
+        return this.failedPersist.has(id);
+    }
+
+    /** How many marks have an edit that could not be written (see hasPersistFailure). */
+    get persistFailureCount(): number {
+        return this.failedPersist.size;
+    }
+
+    /** The in-memory versions of the marks with a failed write (see unsavedMarksFor). */
+    unsavedAnnotations(): Annotation[] {
+        return [...this.failedPersist].flatMap((id) => {
+            const annotation = this.byId.get(id);
+            return annotation ? [annotation] : [];
+        });
+    }
+
+    /**
+     * Write the held edits again, oldest first. True once every one is in the
+     * mirror and the outbox — the sync engine is woken for them — and false
+     * if a write failed again, with what was not written still held.
+     * Concurrent calls share one attempt.
+     */
+    retryFailedPersist(): Promise<boolean> {
+        this.retrying ??= this.writeFailed().finally(() => {
+            this.retrying = null;
+        });
+        return this.retrying;
+    }
+
+    private async writeFailed(): Promise<boolean> {
+        const wrote: string[] = [];
+        let ok = true;
+        while (this.failedOps.length > 0) {
+            // Edits held meanwhile only ever join at the end.
+            const chunk = this.failedOps.slice(0, PERSIST_CHUNK);
+            try {
+                await this.writeMany(chunk);
+            } catch (err) {
+                console.warn('Retrying the unsaved marks failed', err);
+                ok = false;
+                break;
+            }
+            this.failedOps.splice(0, chunk.length);
+            wrote.push(...chunk.map((op) => op.annotation.id));
+            this.failedPersist = new Set(this.failedOps.map((op) => op.annotation.id));
+        }
+        if (this.failedOps.length === 0) {
+            storesWithFailures.delete(this);
+        }
+        this.notifyMeta();
+        if (wrote.length > 0) {
+            this.onDirty?.([...new Set(wrote)]);
+        }
+        return ok;
+    }
+
+    /** Hold ops whose write failed, or that queue behind one (see `failedOps`). */
+    private holdFailed(ops: CommitOp[]): void {
+        if (ops.length === 0) {
+            return;
+        }
+        this.failedOps.push(...ops);
+        for (const op of ops) {
+            this.failedPersist.add(op.annotation.id);
+        }
+        storesWithFailures.add(this);
+        this.notifyMeta();
     }
 
     /**
@@ -604,7 +734,7 @@ export class AnnotationStore {
         }));
         const touched = new Set<number>();
         ids.forEach((id, i) => {
-            if (queued.has(id) || this.unpersisted.has(id) || this.foreign.has(id)) {
+            if (queued.has(id) || this.unpersisted.has(id) || this.failedPersist.has(id) || this.foreign.has(id)) {
                 return;
             }
             const row = rows[i];
@@ -729,9 +859,14 @@ export class AnnotationStore {
                 }
             }
             if (commits.length > 0) {
-                await this.persistMany(commits);
-                for (const page of touched) {
-                    this.notifyPage(page);
+                try {
+                    await this.persistMany(commits);
+                } finally {
+                    // Drawn as memory has it either way: a write that failed
+                    // is held for retry, not undone.
+                    for (const page of touched) {
+                        this.notifyPage(page);
+                    }
                 }
                 wrote.push(...commits.map((commit) => commit.annotation.id));
             }
@@ -808,14 +943,20 @@ export class AnnotationStore {
                 try {
                     await ensureDayStartingSnapshot(this.db, this.docId, preEdit);
                 } catch (err) {
-                    // Never written, so never to be waited for (see whenSaved).
+                    // Never written, so never to be waited for (see whenSaved),
+                    // but drawn: held for retry like a failed write.
+                    this.holdFailed([op]);
                     this.releaseUnpersisted([op]);
+                    this.notifyPage(op.annotation.page);
                     throw err;
                 }
             }
-            await this.persistMany([op]);
-            this.notifyPage(op.annotation.page);
-            this.notifyMeta();
+            try {
+                await this.persistMany([op]);
+            } finally {
+                this.notifyPage(op.annotation.page);
+                this.notifyMeta();
+            }
             this.onDirty?.([op.annotation.id]);
             return true;
         }
@@ -857,12 +998,14 @@ export class AnnotationStore {
             this.pushCommitInverse(op);
         }
 
-        // 3. Durable mirror + outbox, atomically.
-        await this.persistMany([op]);
-
-        // 4. Repaint + wake the sync engine.
-        this.notifyPage(annotation.page);
-        this.notifyMeta();
+        // 3. Durable mirror + outbox, atomically. 4. Repaint — memory has the
+        // edit whether or not the write held — and wake the sync engine.
+        try {
+            await this.persistMany([op]);
+        } finally {
+            this.notifyPage(annotation.page);
+            this.notifyMeta();
+        }
         this.onDirty?.([annotation.id]);
         return true;
     }
@@ -932,8 +1075,19 @@ export class AnnotationStore {
      * transaction that starves concurrent readers.
      */
     private async persistMany(ops: CommitOp[]): Promise<void> {
+        // A mark already waiting on a retry: queue behind its held edit.
+        const behind = this.failedPersist.size > 0 ? ops.filter((op) => this.failedPersist.has(op.annotation.id)) : [];
+        const fresh = behind.length > 0 ? ops.filter((op) => !this.failedPersist.has(op.annotation.id)) : ops;
+        let written = 0;
         try {
-            await this.writeMany(ops);
+            this.holdFailed(behind);
+            for (; written < fresh.length; written += PERSIST_CHUNK) {
+                await this.writeMany(fresh.slice(written, written + PERSIST_CHUNK));
+            }
+        } catch (err) {
+            // Chunks before this one committed; this one rolled back whole.
+            this.holdFailed(fresh.slice(written));
+            throw err;
         } finally {
             this.releaseUnpersisted(ops);
         }
@@ -963,27 +1117,24 @@ export class AnnotationStore {
         waiters?.forEach((resolve) => resolve());
     }
 
-    private async writeMany(ops: CommitOp[]): Promise<void> {
-        const CHUNK = 4000;
-        for (let start = 0; start < ops.length; start += CHUNK) {
-            const slice = ops.slice(start, start + CHUNK);
-            const rows: LocalAnnotation[] = slice.map((op) => ({ ...op.annotation, pending: 1 }));
-            const queuedAt = nowIso();
-            const author = this.author;
-            const opRows = slice.map((op): PendingOp => ({
-                docId: this.docId,
-                type: op.type,
-                annotationId: op.annotation.id,
-                annotation: op.annotation,
-                queuedAt,
-                ...(op.type === 'restore' ? { baseDeletedAt: op.baseDeletedAt } : {}),
-                ...(author ? { userId: author } : {}),
-            }));
-            await this.db.transaction('rw', this.db.annotations, this.db.ops, async () => {
-                await this.db.annotations.bulkPut(rows);
-                await this.db.ops.bulkAdd(opRows);
-            });
-        }
+    /** One atomic mirror + outbox write (persistMany chunks to PERSIST_CHUNK). */
+    private async writeMany(slice: CommitOp[]): Promise<void> {
+        const rows: LocalAnnotation[] = slice.map((op) => ({ ...op.annotation, pending: 1 }));
+        const queuedAt = nowIso();
+        const author = this.author;
+        const opRows = slice.map((op): PendingOp => ({
+            docId: this.docId,
+            type: op.type,
+            annotationId: op.annotation.id,
+            annotation: op.annotation,
+            queuedAt,
+            ...(op.type === 'restore' ? { baseDeletedAt: op.baseDeletedAt } : {}),
+            ...(author ? { userId: author } : {}),
+        }));
+        await this.db.transaction('rw', this.db.annotations, this.db.ops, async () => {
+            await this.db.annotations.bulkPut(rows);
+            await this.db.ops.bulkAdd(opRows);
+        });
     }
 
     private pageMap(pageIndex: number): Map<string, Annotation> {
@@ -1009,5 +1160,8 @@ export class AnnotationStore {
 }
 
 const EMPTY_PAGE: ReadonlyMap<string, Annotation> = new Map();
+
+/** Ops per mirror + outbox transaction: one per row is too slow, one per 30k-op import starves readers. */
+const PERSIST_CHUNK = 4000;
 
 const nowIso = (): string => new Date().toISOString();

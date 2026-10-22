@@ -1032,15 +1032,23 @@ export class SyncEngine {
      * to upload, and sign-out says so before it clears them.
      */
     private async drain(): Promise<void> {
-        const { db, docId, getUserId } = this.deps;
+        const { db, docId, getUserId, store } = this.deps;
         this.reconciled = new Set();
+        let heldForRetry: boolean;
         for (;;) {
             if (this.stopped) {
                 return;
             }
             const queued = await db.ops.where('docId').equals(docId).sortBy('opId');
             this.owns = await opOwnerFor(db, docId, getUserId(), queued, this.legacyOwners);
-            const ops = queued.filter(this.owns);
+            const owned = queued.filter(this.owns);
+            // A mark whose newest edit could not be written to this device
+            // (AnnotationStore.hasPersistFailure) waits, queued ops and all:
+            // what is queued is not all the user did to it, so neither a
+            // push nor a reconcile verdict may be based on it. Its retry
+            // queues the rest and wakes this engine.
+            const ops = owned.filter((op) => !store.hasPersistFailure(op.annotationId));
+            heldForRetry = ops.length < owned.length;
             if (ops.length === 0) {
                 break;
             }
@@ -1102,6 +1110,12 @@ export class SyncEngine {
         // worked too: a failed pull means changes made elsewhere have not
         // arrived, which is not "synced", and the retry it scheduled keeps
         // its backoff rather than starting over at the shortest delay.
+        // Nor while marks wait on a write to this device (the viewer's
+        // "couldn't be saved" banner says which).
+        if (heldForRetry) {
+            this.setStatus('error');
+            return;
+        }
         if (navigator.onLine === false) {
             this.setStatus('offline');
             return;
@@ -1202,6 +1216,11 @@ export class SyncEngine {
                 if (store.hasUnsavedEdit(annotationId)) {
                     return 'unsaved' as const;
                 }
+                if (store.hasPersistFailure(annotationId)) {
+                    // The edit it waited for never reached the outbox:
+                    // no verdict without it (see drain).
+                    return 'failed' as const;
+                }
                 const outcome = reconcileWithServer(ops, row);
                 const kept = new Set(outcome.kind === 'send' ? outcome.ops.map((op) => op.opId as number) : []);
                 // Nothing to send, and nothing left queued for the mark by
@@ -1220,6 +1239,10 @@ export class SyncEngine {
                 await adoption?.saved;
                 return { kept, repaint: adoption?.repaint ?? null };
             });
+            if (decided === 'failed') {
+                // Left as queued; the next pass holds the mark back.
+                return true;
+            }
             const repaint = decided !== null && decided !== 'unsaved' ? decided.repaint : null;
             if (repaint) {
                 // Adopted and committed: draw it, and tell the other engines,
