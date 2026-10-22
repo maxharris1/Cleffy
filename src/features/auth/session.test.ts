@@ -305,7 +305,8 @@ describe('signOutKeepingChanges', () => {
         const transaction = stalled.transaction.bind(stalled) as (...args: unknown[]) => Promise<unknown>;
         const stalledWrite = vi
             .spyOn(stalled, 'transaction')
-            .mockImplementation(((...args: unknown[]) => stall.then(() => transaction(...args))) as typeof stalled.transaction);
+            .mockImplementation(((...args: unknown[]) =>
+                stall.then(() => transaction(...args))) as typeof stalled.transaction);
         // Stamping the outbox stalls too.
         stampStall.on = true;
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });

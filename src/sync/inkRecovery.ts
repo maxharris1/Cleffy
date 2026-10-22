@@ -357,12 +357,19 @@ const contentOf = (a: Annotation): string => canonicalJson([a.page, a.kind, a.co
  * The same content as the base (nothing changed since; an echo of this
  * device's own earlier write) or as the held version (already there) is
  * not. A row the server has numbered past the base (seq) is: a collaborator's
- * edit, or another tab's that has uploaded. A row on the same seq with other
- * content is another tab's local edit on the same server version, ordered by
- * this device's own clock. A row numbered below the base is an older copy.
- * A held create has no base: no other version of a new mark can exist.
+ * edit, or another tab's that has uploaded. A mirror row on the same seq
+ * with other content is another tab's local edit on the same server
+ * version, ordered by this device's own clock; a server row on the same seq
+ * is the version the base was made on, or older (`fromServer`). A row
+ * numbered below the base is an older copy. A held create has no base: no
+ * other version of a new mark can exist.
  */
-export const overtakes = (row: Annotation | undefined, base: Annotation | null, latest: Annotation): boolean => {
+export const overtakes = (
+    row: Annotation | undefined,
+    base: Annotation | null,
+    latest: Annotation,
+    fromServer = false,
+): boolean => {
     if (!row || !base) {
         return false;
     }
@@ -373,25 +380,27 @@ export const overtakes = (row: Annotation | undefined, base: Annotation | null, 
     if (row.seq !== base.seq) {
         return row.seq > base.seq;
     }
-    return row.updatedAt > latest.updatedAt;
+    return !fromServer && row.updatedAt > latest.updatedAt;
 };
 
 /**
- * These rows (the mirror's, or the server's) overtook some of the account's
- * held marks: those leave Retry for Export (RecoveryEntry.conflicts), and
- * their ids are returned for the store to draw the newer version.
+ * These rows (the mirror's, or the server's: `fromServer`) overtook some of
+ * the account's held marks: those leave Retry for Export
+ * (RecoveryEntry.conflicts), and their ids are returned for the store to
+ * draw the newer version.
  */
 export const settleOvertaken = (
     userId: string | null,
     docId: string,
     rows: ReadonlyMap<string, Annotation | undefined>,
+    fromServer = false,
 ): string[] => {
     const entry = entryFor(userId, docId);
     if (!entry) {
         return [];
     }
     const overtaken = [...chainsOf(entry.ops)]
-        .filter(([id, { base, latest }]) => overtakes(rows.get(id), base, latest))
+        .filter(([id, { base, latest }]) => overtakes(rows.get(id), base, latest, fromServer))
         .map(([id]) => id);
     moveToConflicts(entry, overtaken);
     return overtaken;
@@ -465,7 +474,8 @@ const heldScores = (): number =>
  */
 const admits = (userId: string | null, docId: string, adding: number): boolean => {
     const entry = entryFor(userId, docId);
-    const holding = !!entry && (entry.ops.length + entry.conflicts.size > 0 || !!entry.startingPoint || entry.refused > 0);
+    const holding =
+        !!entry && (entry.ops.length + entry.conflicts.size > 0 || !!entry.startingPoint || entry.refused > 0);
     if (!holding && heldScores() >= MAX_HELD_SCORES) {
         return false;
     }
@@ -793,7 +803,7 @@ const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: Ret
                 if (!live()) {
                     throw new RecoveryCancelled();
                 }
-                overtaken.push(...settleOvertaken(entry.userId, entry.docId, server));
+                overtaken.push(...settleOvertaken(entry.userId, entry.docId, server, true));
             }
         }
         const owed = owedStartingPoint(entry.userId, entry.docId);

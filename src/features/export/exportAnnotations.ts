@@ -42,7 +42,11 @@ export interface ExportMarks {
  * export: every mark it draws, held ones included. With no viewer open, the
  * held marks alone, and `incomplete` says so.
  */
-export const loadExportMarks = async (docId: string, userId: string | null, pageIndex?: number): Promise<ExportMarks> => {
+export const loadExportMarks = async (
+    docId: string,
+    userId: string | null,
+    pageIndex?: number,
+): Promise<ExportMarks> => {
     const wanted = (a: Annotation) => !a.deletedAt && (pageIndex === undefined || a.page === pageIndex);
     const inkAuthor = isCloudDocId(docId) ? userId : null;
     const kept = conflictMarksFor(inkAuthor, docId).map(asConflict).filter(wanted);
@@ -104,7 +108,10 @@ const marksWord = (n: number): string => (n === 1 ? 'mark' : 'marks');
  * every mark: one that leaves marks out (and which), or that has two
  * versions of some. Null when it is complete and has no conflicts.
  */
-export const exportNotice = ({ incomplete, conflicts }: Pick<ExportMarks, 'incomplete' | 'conflicts'>): string | null => {
+export const exportNotice = ({
+    incomplete,
+    conflicts,
+}: Pick<ExportMarks, 'incomplete' | 'conflicts'>): string | null => {
     const parts: string[] = [];
     if (incomplete) {
         parts.push(
@@ -113,7 +120,9 @@ export const exportNotice = ({ incomplete, conflicts }: Pick<ExportMarks, 'incom
     }
     if (conflicts > 0) {
         parts.push(
-            `${conflicts} of your unsaved ${marksWord(conflicts)} changed elsewhere before ${conflicts === 1 ? 'it' : 'they'} could be saved here: the export has both versions.`,
+            conflicts === 1
+                ? 'One of your unsaved marks changed elsewhere before it could be saved here: the export has both versions.'
+                : `${conflicts} of your unsaved marks changed elsewhere before they could be saved here: the export has both versions.`,
         );
     }
     return parts.length > 0 ? parts.join(' ') : null;

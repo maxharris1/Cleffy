@@ -7,6 +7,7 @@ import {
     conflictCount,
     dismissConflicts,
     HeldInkFull,
+    RecoveryCancelled,
     heldMarkCount,
     heldMarkIds,
     heldMarksFor,
@@ -1129,7 +1130,8 @@ export class AnnotationStore {
                     // Never written, but drawn: held for retry like a failed
                     // write, with the day's starting point it still owes —
                     // or, past the registry's bounds, undone and said so.
-                    const refused = holdOps(this.db, this.docId, [{ op, author }], preEdit);
+                    // Not once its account has signed out: it went with it.
+                    const refused = live() ? holdOps(this.db, this.docId, [{ op, author }], preEdit) : [op];
                     if (refused.length > 0) {
                         this.rollBack([op]);
                     }
@@ -1137,7 +1139,7 @@ export class AnnotationStore {
                     this.notifyPage(op.annotation.page);
                     this.notifyMeta();
                     this.onHeldChange?.();
-                    throw refused.length > 0 ? new HeldInkFull([op], err) : err;
+                    throw !live() ? new RecoveryCancelled() : refused.length > 0 ? new HeldInkFull([op], err) : err;
                 }
             }
             try {
@@ -1168,8 +1170,11 @@ export class AnnotationStore {
                     // Refused, as it always was: the edit never applies and
                     // the mark stays as it is. The viewer still says an edit
                     // could not be saved (refusedEditCount), and its Retry
-                    // writes the starting point.
-                    noteRefusedEdit(this.db, author, this.docId, preEdit);
+                    // writes the starting point. (Not once its account has
+                    // signed out: there is nothing left to say it to.)
+                    if (live()) {
+                        noteRefusedEdit(this.db, author, this.docId, preEdit);
+                    }
                     this.notifyMeta();
                     throw err;
                 }
@@ -1226,7 +1231,11 @@ export class AnnotationStore {
      * (startingPointWritten). Written only while `live` (the edit's account
      * has not signed out since).
      */
-    private async captureStartingPoint(author: string | null, preEdit: Annotation[], live: () => boolean): Promise<void> {
+    private async captureStartingPoint(
+        author: string | null,
+        preEdit: Annotation[],
+        live: () => boolean,
+    ): Promise<void> {
         await ensureDayStartingSnapshot(this.db, this.docId, preEdit, null, live);
         startingPointWritten(author, this.docId);
     }

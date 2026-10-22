@@ -2867,6 +2867,31 @@ describe('SyncEngine after tombstone compaction', () => {
 });
 
 describe('SyncEngine and an edit that could not be written to this device (SF-1)', () => {
+    it('Retry asks the server first: a collaborator’s newer version is neither overridden nor hidden (MAJOR 2)', async () => {
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+        const uploaded = api.rows.get('a1');
+        expect(uploaded).toBeDefined();
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        await store.update('a1', { color: '#ff0000' }).catch(() => undefined);
+        full.mockRestore();
+        // A collaborator recolours it on the server meanwhile.
+        api.rows.set('a1', { ...uploaded!, color: '#00aa00', seq: api.nextSeq++ });
+        engine.start();
+
+        await expect(store.retryFailedPersist()).resolves.toBe(true);
+
+        expect(api.fetchManys).toBeGreaterThan(0);
+        expect(await db.ops.count()).toBe(0);
+        expect(store.conflictCount).toBe(1);
+        // The engine draws the server's version of it.
+        await vi.waitFor(() => expect(store.get('a1')?.color).toBe('#00aa00'));
+        await engine.flush();
+        expect(api.rows.get('a1')?.color).toBe('#00aa00');
+    });
+
     it('holds the mark back, queued ops and all, until a retry writes the rest', async () => {
         const statuses: string[] = [];
         const held = new SyncEngine({

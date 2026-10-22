@@ -12,7 +12,7 @@ vi.mock('@/sync/db', async (importOriginal) => ({
     getDb: () => db,
 }));
 
-import { loadExportAnnotations } from '@/features/export/exportAnnotations';
+import { exportNotice, loadExportAnnotations, loadExportMarks } from '@/features/export/exportAnnotations';
 
 const DOC = 'c0ffee00-0000-4000-8000-0000000000e1';
 const USER = 'user-1';
@@ -177,5 +177,53 @@ describe('loadExportAnnotations and marks this device could not store (SF-1)', (
         full.mockRestore();
 
         expect((await loadExportAnnotations(LOCAL, USER)).map((a) => a.id)).toEqual(['unsaved']);
+    });
+
+    it('an incomplete export says so, naming what is missing: no viewer open and the database unreadable (MAJOR 3)', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const store = await drawAs(USER, stroke('saved'));
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(stroke('unsaved')).catch(() => undefined);
+        full.mockRestore();
+        db.close();
+
+        const marks = await loadExportMarks(DOC, USER);
+
+        expect(marks.annotations.map((a) => a.id)).toEqual(['unsaved']);
+        expect(marks.incomplete).toEqual({ unsaved: 1 });
+        expect(exportNotice(marks)).toMatch(
+            /missing marks.*storage couldn’t be read.*only the 1 unsaved mark.*not the score’s saved marks/,
+        );
+    });
+
+    it('an export made from the open viewer’s memory is complete: no notice', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const store = await drawAs(USER, stroke('saved'));
+        store.attach();
+        db.close();
+
+        const marks = await loadExportMarks(DOC, USER);
+
+        expect(marks.annotations.map((a) => a.id)).toEqual(['saved']);
+        expect(marks.incomplete).toBeNull();
+        expect(exportNotice(marks)).toBeNull();
+    });
+
+    it('newer row already uploaded by another tab: the export has both versions, and says so (MAJOR 2)', async () => {
+        await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });
+        const store = new AnnotationStore(db, DOC);
+        store.setAuthor(USER);
+        await store.load();
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.update('a1', { color: '#ff0000' }).catch(() => undefined);
+        full.mockRestore();
+        const later = new Date(Date.now() + 60_000).toISOString();
+        await db.annotations.put({ ...stroke('a1'), seq: 5, color: '#0000ff', updatedAt: later, pending: 0 });
+
+        const marks = await loadExportMarks(DOC, USER);
+
+        expect(marks.annotations.map((a) => `${a.id}:${a.color}`).sort()).toEqual(['a1:#0000ff', 'a1:unsaved:#ff0000']);
+        expect(marks.conflicts).toBe(1);
+        expect(exportNotice(marks)).toMatch(/One of your unsaved marks changed elsewhere.*both versions/);
     });
 });
