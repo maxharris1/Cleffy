@@ -13,6 +13,7 @@ import { readCachedEntitlements } from '@/features/billing/entitlementsService';
 import { parsePostgrestLimitError, type LimitReachedError } from '@/features/billing/limitErrors';
 import { leaveDocument } from '@/features/share/shareService';
 import { getDb } from '@/sync/db';
+import { forgetDocInk } from '@/sync/inkRecovery';
 import {
     cancelBackgroundPdfCache,
     finishPdfCacheInBackground,
@@ -675,6 +676,9 @@ export const deleteDocument = async (doc: DocumentRow): Promise<DeleteDocumentRe
 export const purgeLocalDocument = async (docId: string): Promise<void> => {
     // A first open's download still finishing would put the PDF back.
     cancelBackgroundPdfCache(docId);
+    // Marks a viewer could not store, held in this tab's memory: the score
+    // is closed for good here, so nothing may draw, export or retry them.
+    forgetDocInk(docId);
     const db = getDb();
     await Promise.all([
         db.pdfCache.delete(docId),

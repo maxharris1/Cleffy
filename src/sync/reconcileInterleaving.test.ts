@@ -303,10 +303,10 @@ const trial = async (random: Random): Promise<Trial> => {
     const internals = engine as unknown as { flushing: boolean; pulling: boolean; retryTimer: unknown };
     // The outbox commit is not over the moment its rows are in: the
     // continuation that releases the edit waits on IndexedDB's answer.
-    const writes = store as unknown as { writeMany(ops: unknown[]): Promise<void> };
+    const writes = store as unknown as { writeMany(...args: unknown[]): Promise<void> };
     const write = writes.writeMany.bind(store);
-    writes.writeMany = async (ops) => {
-        await write(ops);
+    writes.writeMany = async (...args) => {
+        await write(...args);
         await pause(random, 4);
     };
 

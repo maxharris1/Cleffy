@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as DbModule from '@/sync/db';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
+import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import type { Annotation } from '@/types/models';
 
 let db: ScribblerDb;
@@ -45,6 +46,13 @@ const drawAs = async (author: string, ...annotations: Annotation[]) => {
 beforeEach(() => {
     db = new ScribblerDb(`export-${crypto.randomUUID()}`);
 });
+
+afterEach(() => {
+    vi.restoreAllMocks();
+    resetInkRecoveryForTests();
+});
+
+const quotaError = () => new DOMException('The quota has been exceeded.', 'QuotaExceededError');
 
 describe('loadExportAnnotations', () => {
     it('leaves out the marks another account queued on this device, as the viewer does', async () => {
@@ -99,7 +107,75 @@ describe('loadExportAnnotations and marks this device could not store (SF-1)', (
             );
         } finally {
             full.mockRestore();
-            await store.retryFailedPersist();
         }
+    });
+
+    it('leaves out another account’s unsaved marks: A’s failed mark never reaches B’s export (finding 1)', async () => {
+        await db.annotations.put({ ...stroke('shared'), seq: 3, pending: 0 });
+        const asA = await drawAs(USER);
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await asA.create(stroke('a-secret')).catch(() => undefined);
+        await asA.update('shared', { color: '#ff0000' }).catch(() => undefined);
+        full.mockRestore();
+
+        const forB = await loadExportAnnotations(DOC, OTHER);
+
+        expect(new Map(forB.map((a) => [a.id, a.color]))).toEqual(new Map([['shared', '#111111']]));
+        expect((await loadExportAnnotations(DOC, USER)).map((a) => a.id).sort()).toEqual(['a-secret', 'shared']);
+    });
+
+    it('red fails, then blue is stored: the export has blue (finding 2)', async () => {
+        const store = await drawAs(USER, stroke('a1'));
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.update('a1', { color: '#ff0000' }).catch(() => undefined);
+        full.mockRestore();
+        const reopened = await drawAs(USER);
+        await reopened.update('a1', { color: '#0000ff' });
+
+        expect((await loadExportAnnotations(DOC, USER)).map((a) => a.color)).toEqual(['#0000ff']);
+    });
+
+    it('a failed erase does not hide the mark once another tab of this device stored a newer one (finding 2)', async () => {
+        const store = await drawAs(USER, stroke('a1'));
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.delete('a1').catch(() => undefined);
+        full.mockRestore();
+        const later = new Date(Date.now() + 60_000).toISOString();
+        await db.annotations.put({ ...stroke('a1'), color: '#00aa00', updatedAt: later, pending: 1 });
+
+        expect((await loadExportAnnotations(DOC, USER)).map((a) => a.color)).toEqual(['#00aa00']);
+    });
+
+    it('works from memory when the database is closed: the open viewer’s marks, unsaved ones included (finding 3)', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const store = await drawAs(USER, stroke('saved'), stroke('saved-p2', 1));
+        const detach = store.attach();
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(stroke('unsaved')).catch(() => undefined);
+        await store.delete('saved-p2').catch(() => undefined);
+        full.mockRestore();
+
+        db.close();
+        await expect(db.annotations.count()).rejects.toThrow();
+
+        expect((await loadExportAnnotations(DOC, USER)).map((a) => a.id).sort()).toEqual(['saved', 'unsaved']);
+        expect((await loadExportAnnotations(DOC, USER, 1)).map((a) => a.id)).toEqual([]);
+        // Not another account's view of it.
+        expect((await loadExportAnnotations(DOC, OTHER)).map((a) => a.id)).toEqual([]);
+
+        // With the viewer closed, the unsaved marks are still exported.
+        detach();
+        expect((await loadExportAnnotations(DOC, USER)).map((a) => a.id)).toEqual(['unsaved']);
+    });
+
+    it('bakes in a device-only score’s unsaved marks whoever is signed in: its viewer draws for no account', async () => {
+        const LOCAL = 'local-0123456789abcdef';
+        const store = new AnnotationStore(db, LOCAL);
+        await store.load();
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create({ ...stroke('unsaved'), docId: LOCAL }).catch(() => undefined);
+        full.mockRestore();
+
+        expect((await loadExportAnnotations(LOCAL, USER)).map((a) => a.id)).toEqual(['unsaved']);
     });
 });

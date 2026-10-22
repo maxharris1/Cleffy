@@ -233,8 +233,8 @@ const SIGN_OUT_SNAPSHOT_TIMEOUT_MS = 3000;
 export interface SignOutSyncResult {
     /**
      * Annotation changes still not on the server; signing out deletes them.
-     * Includes marks an open viewer could not even write to this device
-     * (AnnotationStore.hasPersistFailure), which exist only in its memory.
+     * Includes marks a viewer could not even write to this device
+     * (inkRecovery), which exist only in this tab's memory.
      */
     pending: number;
     /** Marks whose change the server refused for good while uploading. */
@@ -256,7 +256,7 @@ export interface SignOutSyncResult {
  * at all — and then sign-out cannot clear it either.
  */
 export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): Promise<SignOutSyncResult> => {
-    const { unsavedMarkCount } = await import('@/sync/annotationStore');
+    const { unsavedMarkCount } = await import('@/sync/inkRecovery');
     // Read after the upload: an edit whose write failed is not in the outbox,
     // so the drain's "nothing pending" does not cover it.
     const outbox = await syncOutboxBeforeSignOut(timeoutMs);
@@ -425,12 +425,23 @@ export const signOut = async (): Promise<void> => {
  * kept (0 when the outbox cannot be read).
  */
 export const signOutKeepingChanges = async (): Promise<number> => {
-    const [{ getDb }, { stampOwnCloudOps }] = await Promise.all([import('@/sync/db'), import('@/sync/signOutSync')]);
+    const [{ getDb }, { stampOwnCloudOps }, { retryAccountInk }] = await Promise.all([
+        import('@/sync/db'),
+        import('@/sync/signOutSync'),
+        import('@/sync/inkRecovery'),
+    ]);
     // Before the PDFs (and with them the legacy ownership test) are cleared.
-    return signOutEndedSignIn(async (userId) => ({
-        count: userId ? await stampOwnCloudOps(getDb(), userId).catch(() => 0) : 0,
-        keepCloudAnnotations: true,
-    }));
+    return signOutEndedSignIn(async (userId) => {
+        if (userId) {
+            // Ink this device could not store yet: written now, it is kept
+            // with the rest; still unwritten, it goes with the sign-out.
+            await retryAccountInk(userId);
+        }
+        return {
+            count: userId ? await stampOwnCloudOps(getDb(), userId).catch(() => 0) : 0,
+            keepCloudAnnotations: true,
+        };
+    });
 };
 
 /**
@@ -494,6 +505,12 @@ const signOutEndedSignIn = async (
  * snapshots (signOutKeepingChanges).
  */
 export const clearAccountCachesFromDevice = async ({ keepCloudAnnotations = false } = {}): Promise<void> => {
+    // Marks a viewer could not store, held in this tab's memory: callers ask
+    // first (syncBeforeSignOut counts them), and the next account in this
+    // tab must neither see, export nor retry them. Never in Dexie, so kept
+    // annotations cannot keep them.
+    const { clearAccountInk } = await import('@/sync/inkRecovery');
+    clearAccountInk();
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
     const { clearCloudAnnotationData } = await import('@/sync/signOutSync');
