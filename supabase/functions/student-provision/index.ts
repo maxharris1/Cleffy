@@ -488,16 +488,12 @@ const createStudent = async (admin: SupabaseClient, userId: string, body: Provis
     // Before any account is created: a deletion in progress would refuse the
     // roster row anyway (and the account would be undone), so say so up front.
     // The trigger stays the authority for a deletion that starts after this.
-    const { data: pending, error: pendingError } = await admin
-        .from('account_deletions')
-        .select('user_id')
-        .eq('user_id', userId)
-        .maybeSingle();
+    const { data: pending, error: pendingError } = await admin.rpc('account_deletion_pending', { p_user: userId });
     if (pendingError) {
         console.error(`could not check for a pending deletion of ${userId}: ${pendingError.message}`);
         return jsonResponse({ error: 'Could not create the student account' }, 502);
     }
-    if (pending) {
+    if (pending === true) {
         return jsonResponse(DELETION_PENDING, 409);
     }
 

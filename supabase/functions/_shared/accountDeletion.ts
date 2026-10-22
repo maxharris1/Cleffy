@@ -24,15 +24,20 @@
  *     goes the whole way, password and all.
  *
  *  1b. Mark the deletion PENDING (account_deletions,
- *     20261022110100_account_deletion_pending.sql) before anything else. From
- *     that moment the database refuses any new score or roster row for this
- *     account, whoever inserts it -- another tab, an import, student-provision
- *     -- so steps 3 and 4 clean up a state that can no longer grow. Taking the
- *     marker waits for any such insert already in flight. If this attempt then
- *     deletes nothing (step 2 fails) the marker is cleared and the account is
- *     exactly as it was; if it stops part-way the marker stays, with the
- *     error, so the half-deleted account cannot grow while the person retries;
- *     when the auth user goes, the marker cascades with it.
+ *     20261022110100_account_deletion_pending.sql) before anything else, as an
+ *     ATTEMPT under a lease (20261022110400_account_deletion_attempts.sql).
+ *     From that moment the database refuses any new score or roster row for
+ *     this account, whoever inserts it -- another tab, an import,
+ *     student-provision -- so steps 3 and 4 clean up a state that can no
+ *     longer grow. Taking the marker waits for any such insert already in
+ *     flight. Right before step 3 deletes anything the attempt records that
+ *     destructive cleanup began. If this attempt then deletes nothing (step 2
+ *     fails) it is settled abandoned, and once no attempt is active the marker
+ *     is cleared and the account is exactly as it was -- however many attempts
+ *     there were; a crashed attempt stops restricting when its lease runs out.
+ *     Once cleanup began, the restriction stays until a retry completes, so a
+ *     half-deleted account cannot grow while the person retries; when the auth
+ *     user goes, the marker cascades with it.
  *
  *  2. Stop the money FIRST, and completely, before a single row is touched.
  *     Every subscription the caller has, in every Stripe account (live and
@@ -151,18 +156,32 @@ export interface StripePort {
 
 export interface DeletionPorts {
     /**
-     * begin_account_deletion(): writes (or re-counts) the pending marker, after
-     * any score or roster insert for this account still in flight. Throws on
+     * begin_account_deletion_attempt(): writes (or re-counts) the pending
+     * marker and starts this attempt under a lease, after any score or roster
+     * insert for this account still in flight. Returns the attempt's id, or
+     * null when the account is already gone (nothing to guard). Throws on
      * failure; nothing has been touched then.
      */
-    beginDeletion: (userId: string) => Promise<void>;
+    beginDeletion: (userId: string) => Promise<string | null>;
     /**
-     * settle_account_deletion(): 'abandoned' when this attempt deleted nothing
-     * (the marker is cleared), 'failed' when it stopped part-way (kept, with the
-     * code). Best effort: a marker that cannot be cleared only keeps refusing
-     * new scores until the person retries.
+     * mark_account_deletion_destructive(): records, right before the first
+     * delete, that destructive cleanup began, so the restriction outlives this
+     * attempt. False when the attempt is no longer active (its lease ran out):
+     * it must not start deleting. Throws on failure.
      */
-    settleDeletion: (userId: string, outcome: 'abandoned' | 'failed', code: DeletionFailureCode) => Promise<void>;
+    markDestructive: (userId: string, attempt: string) => Promise<boolean>;
+    /**
+     * settle_account_deletion_attempt(): 'abandoned' when this attempt deleted
+     * nothing, 'failed' when it stopped part-way (the code is recorded). The
+     * marker is cleared once no attempt is active and no cleanup ever began.
+     * Best effort: an unsettled attempt stops restricting when its lease runs out.
+     */
+    settleDeletion: (
+        userId: string,
+        attempt: string,
+        outcome: 'abandoned' | 'failed',
+        code: DeletionFailureCode,
+    ) => Promise<void>;
     billingCustomers: (userId: string) => Promise<StripeCustomerRef[]>;
     storedSubscriptions: (userId: string) => Promise<StoredSubscriptionRef[]>;
     /** Null when no usable key is configured for that account. */
@@ -542,8 +561,9 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
         );
     }
 
+    let attempt: string | null;
     try {
-        await ports.beginDeletion(caller.userId);
+        attempt = await ports.beginDeletion(caller.userId);
     } catch (err) {
         return fail(
             502,
@@ -556,8 +576,11 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
     // From here every failure settles the marker: cleared when nothing was
     // deleted, kept (with its code) when the deletion stopped part-way.
     const settle = async (outcome: 'abandoned' | 'failed', failure: DeletionFailure): Promise<DeletionFailure> => {
+        if (attempt === null) {
+            return failure;
+        }
         try {
-            await ports.settleDeletion(caller.userId, outcome, failure.code);
+            await ports.settleDeletion(caller.userId, attempt, outcome, failure.code);
         } catch (err) {
             ports.log(`could not settle the deletion marker of ${caller.userId} (${outcome}): ${String(err)}`);
         }
@@ -567,6 +590,30 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
     const billing = await cancelBilling(caller.userId, ports);
     if (!billing.ok) {
         return settle('abandoned', billing);
+    }
+
+    // The last moment nothing has been deleted. From here the restriction must
+    // outlive this attempt (a crash part-way leaves a half-deleted account),
+    // so the attempt says so first -- and does not start if it cannot.
+    if (attempt !== null) {
+        let marked = false;
+        let cause: unknown;
+        try {
+            marked = await ports.markDestructive(caller.userId, attempt);
+        } catch (err) {
+            cause = err;
+        }
+        if (!marked) {
+            return settle(
+                'abandoned',
+                fail(
+                    502,
+                    'deletion_unavailable',
+                    'We could not start deleting your data, so nothing has been deleted. Any subscription is cancelled; please try again.',
+                    cause ?? new Error('the deletion attempt is no longer active'),
+                ),
+            );
+        }
     }
 
     let studentsDeleted = 0;
