@@ -71,10 +71,40 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
 - **Merge commit on dev: `225bd64afb5a61502f3308c5018b1df0cceab7cd`**, with parents
   `9b106e0` (dev) and `438ad80`. GitHub shows #62 merged into `dev`.
 
-## 3. #61 `mh/district-seats`: stopped before merge
+## 3. #61 `mh/district-seats`: merged (continuation run)
 
 - Reviewed SHA: `a472674a7d86990642271506bbb8b7c5cc92ac5e`. It was still the head on
-  origin and on GitHub, and it is unchanged. **I pushed nothing to `mh/district-seats`.**
+  origin and on GitHub when the continuation run started.
+- I merged `origin/dev` (`225bd64`) into the branch:
+    - **Conflict-resolution merge commit `8a6022ca72ddd39414e9f53ea1637673d78dc183`**, with
+      parents `a472674` (the reviewed head, first parent) and `225bd64`. Authored by Max
+      Harris. It went to `mh/district-seats` as a fast-forward push.
+    - Conflicted files:
+        - `scripts/apply-migrations.sql`: regenerated with `npm run migrations:mirror`
+          (86 files, 84 mirrored).
+        - `tests/migrationRecoverability.test.ts`: union of the job map, 5 jobs
+          (billing-mail-outbox, content-notice-retry, district-seat-reconcile, imslp-sync,
+          omr-sweep). #62's static block is kept. The `it(...)` title combines both sides'
+          wording.
+    - **Approved stub fix (Cleffy decision 41), in the same merge commit:** in
+      `tests/billing/districtSeats.test.ts`, `storeFor`'s `WebhookStore` literal got two
+      no-op stubs, `recordPurchaseNotice: async () => {},` and
+      `recordCancellationNotice: async () => {},`, following
+      `tests/billing/resubscribe.test.ts`. It is test-only; nothing else was changed.
+- Local checks on `8a6022c`: `lint:check` ✅, `typecheck` ✅ (the earlier TS2739 is gone),
+  `test` ✅ (209 files passed, 5 skipped; 3253 tests passed, 13 skipped), `build` ✅.
+- CI on `8a6022c` (push and pull_request runs, 39698286379 and 39698292176): `checks` ✅,
+  **`supabase-local` ✅**, `supabase-drift` ✅, `omr-service` ✅, Vercel Preview Comments ✅,
+  Supabase Preview skipped. No flake re-runs were needed.
+- Marked ready for review, then merged with `merge_method=merge` (with
+  `expectedHeadSha=8a6022c`) at 2026-10-22 00:16:25Z.
+- **Merge commit on dev: `6adde0551a4a882bfd997e7e2b53770fe806939c`**, with parents
+  `225bd64` (dev) and `8a6022c`. GitHub shows #61 merged into `dev`. Dev's tree equals
+  `8a6022c`'s tree.
+
+### The earlier run's notes on #61 (history)
+
+- **I pushed nothing to `mh/district-seats`** (in the earlier run).
 - I merged `origin/dev` (`225bd64`) into it locally. Only two files conflicted:
     - `scripts/apply-migrations.sql`: regenerated (86 files, 84 mirrored).
     - `tests/migrationRecoverability.test.ts`: union of 5 jobs (billing-mail-outbox,
