@@ -28,6 +28,7 @@ const studio: StudioRow = {
     name: 'District',
     seat_limit: 5,
     created_at: '2026-10-20T00:00:00Z',
+    superseded_at: null,
 };
 
 const seated = (count: number) =>

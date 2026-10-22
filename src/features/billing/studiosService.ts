@@ -21,6 +21,10 @@ export const fetchOwnedStudio = async (ownerId: string): Promise<StudioRow | nul
         .from('studios')
         .select('*')
         .eq('owner_id', ownerId)
+        // One live studio per owner (20261022100300). A superseded one is kept
+        // for the record, and is not always the newer one: the studio a district
+        // is billed on is kept over an older one.
+        .is('superseded_at', null)
         .order('created_at', { ascending: true })
         .limit(1)
         .maybeSingle();
@@ -37,6 +41,11 @@ export const createStudio = async (ownerId: string, name: string): Promise<Studi
         .select()
         .single();
     if (error) {
+        // studios_refuse_second_live raises studio_exists; the unique index
+        // answers for it if two creates race past the trigger.
+        if (error.message.includes('studio_exists') || error.message.includes('studios_one_live_per_owner')) {
+            throw new Error('You already have an academy. Reload the page to see it.');
+        }
         throw new Error(`Could not create studio: ${error.message}`);
     }
     return data;

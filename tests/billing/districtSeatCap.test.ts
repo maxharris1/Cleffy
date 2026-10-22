@@ -184,6 +184,7 @@ const SQL = read('supabase/migrations', MIGRATION);
 const PAYING_MIGRATION = '20261020180900_district_paying_status.sql';
 const CLAMP_MIGRATION = '20261020181000_district_contract_end_clamp.sql';
 const RETRY_MIGRATION = '20261020181200_district_contract_end_automatic_retry.sql';
+const ONE_STUDIO_MIGRATION = '20261022100300_one_studio_per_owner.sql';
 
 const latestDefining = (fn: string): string => {
     const pattern = new RegExp(`create\\s+or\\s+replace\\s+function\\s+public\\.${fn}\\s*\\(`, 'i');
@@ -210,9 +211,16 @@ const grantedTo = (fn: string, role: string): boolean =>
     );
 
 describe('the seat-cap migration', () => {
+    // 20261022100300 (one studio per owner, launch re-audit BL-4) redefines it
+    // with both seat lookups skipping a superseded studio and nothing else
+    // changed, so the cap's properties are checked on whichever is latest.
     it('is the resolve_entitlements() that counts, and gates seats on studio_seat_is_active', () => {
-        expect(latestDefining('resolve_entitlements')).toBe(MIGRATION);
-        const def = definition(SQL, 'resolve_entitlements');
+        const latest = latestDefining('resolve_entitlements');
+        expect([MIGRATION, ONE_STUDIO_MIGRATION]).toContain(latest);
+        const def = definition(read('supabase/migrations', latest), 'resolve_entitlements');
+        if (latest === ONE_STUDIO_MIGRATION) {
+            expect(def.match(/st\.superseded_at\s+is\s+null/gi)).toHaveLength(2);
+        }
         expect(def).toMatch(/public\.studio_seat_is_active\s*\(sm\.studio_id,\s*v_user\)/i);
         expect(def).toMatch(/not\s+public\.studio_seat_is_active/i);
         expect(def).toMatch(/when\s+v_read_only\s+then\s+public\.tier_limits\s*\('student'\)/i);

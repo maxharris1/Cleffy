@@ -436,6 +436,12 @@ export type StudioRow = {
      */
     seat_limit: number;
     created_at: string;
+    /**
+     * Set on all but one of an owner's studios when 20261022100300 made it one
+     * live studio per owner. Server-written only; a superseded studio grants no
+     * seat and takes no invite.
+     */
+    superseded_at: string | null;
 };
 
 export type StudioInsert = {
