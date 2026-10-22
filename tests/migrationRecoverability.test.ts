@@ -202,6 +202,10 @@ describe('imslp-sync — the cron job the push has to pause', () => {
             'omr-sweep': ['20260806140000_omr_cron.sql'],
             'retention-archived-students': retention,
             'retention-compact-tombstones': retention,
+            // The same pattern (launchfix P5): it calls a function its own
+            // migration defines and deletes only a deleted account's strikes
+            // 12 months after the newest under the same key.
+            'retention-content-strikes': ['20261022130100_content_strikes_survive_deletion.sql'],
             'retention-rate-limits': retention,
             'retention-stale-guests': retention,
             'retention-support-messages': retention,

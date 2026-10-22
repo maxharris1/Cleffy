@@ -895,6 +895,74 @@ detached (inside a rolled-back transaction, Realtime stopped),
 in a CI job that starts Realtime and checks that the partition exists (P1's
 every-proof `supabase-local` job does both), not in one that excludes it.
 
+## Launchfix P5: district retention and content strikes
+
+`district_retention_reattribution.sql` proves
+`supabase/migrations/20261022130000_district_retention_reattribution.sql`
+(launch re-audit, Codex A4, and Codex round 1 on #66): a student the district
+soft delete listed under district A and a human then re-attributed survives
+A's hard delete with their markings -- moved to a private roster or to
+district B through `admin_set_student_district` (which takes them off A's
+purge list), or re-attributed the way the 20261021120800 correction did it,
+leaving the list alone (the hard delete re-checks the roster row's district
+and account under its lock, skips the student and takes them off the list). A
+list entry naming another account than the roster row deletes neither. Each
+skip is logged under A as `attribution_changed` with `counts.event =
+'skipped_reattributed'`: no new step, so 20261021120800, which rebuilds the
+step check with its own list, still replays. A student the purge archived
+(not one already archived) is un-archived as part of the re-attribution when
+their teacher's plan has room (`limits.students`, the check student-provision's
+restore makes): T's students, on a Teacher plan, come back at once, from the
+correction and from the hard delete's skip; O's, whose plan has no roster,
+stay archived and the restore is carried over (`district_retention_restores`),
+and district C's renewal, with its owner paying again, un-archives its carried
+student. Controls: an unchanged student, and one re-confirmed for A, are still
+scrubbed and deleted; one T archived before the purge stays archived; the
+hard delete's own counts are unchanged; the functions stay the service role's.
+Like the checkout proofs it ends with `failures | total`. Proven against the
+local stack (PostgreSQL 17.11) on 2026-10-22: all 24 checks passed; against
+the definitions at 00f48a65 (this PR's first revision), 8 of the 24 failed.
+
+`content_strikes_survive_deletion.sql` proves
+`supabase/migrations/20261022130100_content_strikes_survive_deletion.sql`
+(launch re-audit, SF-15, and Codex round 1 on #66): a live account's strikes
+carry no key (whatever the insert says) and count by user; deleting the
+account keeps every strike (user null; date and withdrawal unchanged) and the
+takedown (uploader null), and keys the strikes that still count with version 1,
+hex `hmac-sha256(pepper, lower(btrim(email)))` of the address the account has
+when it is deleted, the pepper being the Vault secret `content_strike_pepper`
+(seeded with a non-secret dev value by `supabase/seed.sql`); withdrawn and
+out-of-window strikes stay unkeyed. Without the pepper, deleting an account
+with a strike to key, and counting while keyed strikes exist, fail closed
+(55000); an account without strikes still deletes. The same address signing
+up again, in any case, inherits the active strike, which
+`apply_content_takedown` and the moderator's takedown list count. An account
+A that changed address, then was deleted, hands nothing to B on its old address,
+and a sign-up on its latest address inherits; an inherited strike stops
+counting at 12 months. `retention_purge_content_strikes()` (daily,
+`retention-content-strikes`) deletes a key's strikes 12 months after its
+newest one, and unkeyed orphans 12 months after they were given, never a live
+account's or a takedown. It re-applies the migration twice with `\ir` (psql
+only). No client reads strikes or calls the functions. It ends with
+`failures | total`. Proven against the local stack (PostgreSQL 17.11) on
+2026-10-22: all 42 checks passed; against the definitions at 00f48a65, 19 of
+the 42 failed.
+
+`migrations_ordered_replay.sql` replays, in filename order, every migration
+from `20261020160300_cancel_link_token_lifetime.sql` to the latest over a
+database that already has them and holds real data: the district retention log
+rows of both skip paths, a carried-over restore, and a deleted account's keyed
+strike with its re-registration (Codex round 1 on #66, minor 1). The earlier
+migrations were never rerunnable (they create tables, policies and triggers
+without IF NOT EXISTS); a fresh install applies everything once, in order. It
+checks that every log row, restore and strike is unchanged, that the step check
+is still 20261021120800's eight steps, that the latest function definitions
+win, that triggers and cron jobs exist once, and that the run still works on
+the replayed data. psql only (`\ir`); ends with `failures | total`. Proven
+against the local stack on 2026-10-22: all 8 checks passed; with a row in the
+step 00f48a65 added, the same replay stopped at 20261021120800 ("check
+constraint district_retention_log_step_check ... is violated by some row").
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
