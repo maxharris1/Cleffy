@@ -67,10 +67,12 @@ jobs:
                   CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
                   CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
                       npx vitest run tests/billing/cancelLinkStore.test.ts
-            - name: Checkout and cancel-link SQL proofs
+            # The P3 edge-hardening proofs (support_inbound_lease,
+            # student_claim_reservation, account_deletion_pending) block too.
+            - name: Checkout, cancel-link and edge-hardening SQL proofs
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-                  for proof in cancel_link_lifetime cancel_link_tombstones cancel_link_db_clock cancel_link_tombstone_race cancel_link_read_db_clock cancel_link_save_after_insert cancel_link_consume_db_clock checkout_consents launch_checkout_fixes; do
+                  for proof in cancel_link_lifetime cancel_link_tombstones cancel_link_db_clock cancel_link_tombstone_race cancel_link_read_db_clock cancel_link_save_after_insert cancel_link_consume_db_clock checkout_consents launch_checkout_fixes support_inbound_lease student_claim_reservation account_deletion_pending; do
                       bash scripts/ci/sql-proof.sh "$DB_URL" "tests/sql/${proof}.sql"
                   done
 

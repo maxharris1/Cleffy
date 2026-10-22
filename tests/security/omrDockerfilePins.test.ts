@@ -46,4 +46,13 @@ describe('OMR Dockerfile download pins', () => {
             }
         }
     });
+
+    it('pins every base image by digest', () => {
+        const froms = instructions.filter((line) => /^FROM\s/.test(line));
+        expect(froms.length).toBeGreaterThan(0);
+        for (const from of froms) {
+            const image = from.split(/\s+/)[1] as string;
+            expect(image, `${from} is not pinned by digest`).toMatch(/^[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}$/);
+        }
+    });
 });
