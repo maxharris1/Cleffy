@@ -1016,6 +1016,29 @@ describe('CloudViewer membership changes', () => {
         expect(purgeLocalDocument).not.toHaveBeenCalled();
     });
 
+    it('follows the score being archived and then restored while the role stays the same', async () => {
+        // The realtime channel asks for a re-check on both (20261022120200).
+        await openAs('editor');
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+        expect(screen.queryByText('Archived')).not.toBeInTheDocument();
+
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else', archived_at: '2026-10-22T08:00:00Z' }));
+        await membershipChanged();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'), { timeout: 5000 });
+        expect(screen.getByText('Archived')).toBeInTheDocument();
+        // Still syncing (the channel keeps waiting for the restore), and no
+        // "your access changed": the role did not change.
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else', archived_at: null }));
+        await membershipChanged();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'), { timeout: 5000 });
+        expect(screen.queryByText('Archived')).not.toBeInTheDocument();
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
     it('offers members the sharing dialog, and leaving purges then returns to the library', async () => {
         const user = userEvent.setup();
         await openAs('viewer');
