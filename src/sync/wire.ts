@@ -158,6 +158,22 @@ export const parseMembershipChange = (payload: unknown): MembershipChange | null
     return parsed.data;
 };
 
+/**
+ * The score moved to its next topic generation (a takedown,
+ * 20261020150100_takedown_realtime_topics): sent on the old doc:{id} and
+ * doc-db:{id}. A hint only, like the membership event — the receiver re-reads
+ * the generation over PostgREST (realtime_topic_epoch) and never acts on the
+ * payload beyond checking it names this score.
+ */
+export const TOPIC_ROTATED_EVENT = 'topic_rotated';
+
+const topicRotatedSchema = z.object({ document_id: z.string().min(1) });
+
+export const parseTopicRotated = (payload: unknown): { document_id: string } | null => {
+    const parsed = topicRotatedSchema.safeParse(payload);
+    return parsed.success ? parsed.data : null;
+};
+
 /** Presence payload tracked per user. */
 export const presenceSchema = z.object({
     userId: z.string().min(1),

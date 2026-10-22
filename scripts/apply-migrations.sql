@@ -9710,6 +9710,3862 @@ revoke all on function public.library_documents (text, timestamptz, text, uuid, 
 revoke all on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) from anon;
 grant execute on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) to authenticated;
 
+-- ===== supabase/migrations/20261020150000_content_moderation.sql =====
+-- Notice and action: reports about scores, takedowns, strikes and a notice log.
+--
+-- The Copyright and Content Policy (/copyright) promises: anyone, signed in or
+-- not, can report a score (the content-report Edge Function writes it here and
+-- emails an acknowledgment); a moderator reviews it and may restrict or remove
+-- the score, which emails the uploader a statement of reasons and the reporter
+-- the outcome (content-moderation); a copyright takedown is a strike against
+-- the uploader; and every report, decision and notice is logged.
+--
+-- Every write goes through the service role, from those two functions. The
+-- browser can only ask whether it is a moderator (is_content_moderator) and,
+-- if it is, read the reports, takedowns and log a page at a time
+-- (moderation_reports, moderation_takedowns, moderation_log). Moderators are granted by hand:
+--
+--     insert into public.content_moderators (user_id, note) values ('<uuid>', 'Max');
+--
+-- Two takedown actions, both reversible, neither deleting anything — a
+-- counter-notice or complaint that succeeds must be able to put the score
+-- back, and content reported as illegal may have to be preserved:
+--
+--   restrict  the score can no longer be shared: everyone but its owner loses
+--             access (members and share links alike), and nobody new can join.
+--   remove    nobody can open it, its owner included. The row, file and
+--             markings stay, out of reach of every client.
+--
+-- Both are enforced in document_role(), which already gates every read and
+-- write a client can make on a score — the documents and annotation policies,
+-- the scores and thumbnails storage policies, joining either realtime topic —
+-- in library_documents(), which lists memberships directly, and in
+-- documents_select, whose owner clause would otherwise still hand an owner the
+-- row of a removed score.
+--
+-- Realtime authorizes a channel when it is joined, not per message, so a
+-- takedown also reaches viewers who already have the score open: the server
+-- stops broadcasting the score's committed changes (doc-db:{id}) while it is
+-- taken down, and tells each viewer who lost access to re-check it (see
+-- "Realtime" below).
+
+-- ---------------------------------------------------------------------------
+-- Moderators
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.content_moderators (
+    user_id uuid primary key references auth.users (id) on delete cascade,
+    added_at timestamptz not null default now(),
+    note text check (note is null or char_length(note) <= 200)
+);
+
+alter table public.content_moderators enable row level security;
+revoke all on table public.content_moderators from anon, authenticated;
+
+create or replace function public.is_content_moderator () returns boolean language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1 from public.content_moderators m where m.user_id = (select auth.uid())
+    );
+$$;
+
+revoke all on function public.is_content_moderator () from public;
+revoke all on function public.is_content_moderator () from anon;
+grant execute on function public.is_content_moderator () to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Reports
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.content_reports (
+    id uuid primary key default gen_random_uuid(),
+    -- What the acknowledgment email and the reporter quote back to us.
+    reference text not null unique default ('CR-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10))),
+    created_at timestamptz not null default now(),
+    kind text not null check (kind in ('copyright', 'illegal')),
+    category text not null check (
+        category in (
+            'copyright',
+            'child_safety',
+            'terrorism',
+            'hate',
+            'violence',
+            'privacy',
+            'fraud',
+            'other'
+        )
+    ),
+    content_url text not null check (char_length(content_url) between 1 and 2000),
+    -- Resolved from content_url when it names a score or a live share link;
+    -- null when it does not (the moderator then finds the score by hand).
+    document_id uuid references public.documents (id) on delete set null,
+    work_description text check (work_description is null or char_length(work_description) <= 4000),
+    explanation text not null check (char_length(explanation) between 1 and 8000),
+    reporter_name text not null check (char_length(reporter_name) between 1 and 200),
+    reporter_email text not null check (char_length(reporter_email) between 3 and 254),
+    reporter_address text check (reporter_address is null or char_length(reporter_address) <= 500),
+    reporter_phone text check (reporter_phone is null or char_length(reporter_phone) <= 50),
+    on_behalf_of text check (on_behalf_of is null or char_length(on_behalf_of) <= 200),
+    -- Set when the reporter was signed in; never trusted from the request body.
+    reporter_user_id uuid references auth.users (id) on delete set null,
+    good_faith boolean not null check (good_faith),
+    -- The DMCA statement "under penalty of perjury" — required for copyright.
+    perjury_statement boolean not null default false,
+    signature text not null check (char_length(signature) between 1 and 200),
+    status text not null default 'received' check (status in ('received', 'actioned', 'rejected')),
+    decided_at timestamptz,
+    decided_by uuid references auth.users (id) on delete set null,
+    decision_note text check (decision_note is null or char_length(decision_note) <= 4000),
+    acknowledged_at timestamptz,
+    check (kind <> 'copyright' or (category = 'copyright' and perjury_statement and work_description is not null)),
+    check (kind <> 'illegal' or category <> 'copyright')
+);
+
+create index if not exists content_reports_created_idx on public.content_reports (created_at desc);
+create index if not exists content_reports_document_idx on public.content_reports (document_id)
+where document_id is not null;
+
+alter table public.content_reports enable row level security;
+revoke all on table public.content_reports from anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Takedowns
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.content_takedowns (
+    id uuid primary key default gen_random_uuid(),
+    -- Set null rather than cascaded: if the uploader deletes the score or their
+    -- account, the record of what was taken down, and the strike, stay.
+    document_id uuid references public.documents (id) on delete set null,
+    report_id uuid references public.content_reports (id) on delete set null,
+    uploader_id uuid references auth.users (id) on delete set null,
+    document_title text,
+    action text not null check (action in ('restrict', 'remove')),
+    ground text not null check (ground in ('copyright', 'illegal', 'terms')),
+    -- The statement of reasons: the law or term relied on, and the facts.
+    legal_basis text not null check (char_length(legal_basis) between 1 and 1000),
+    facts text not null check (char_length(facts) between 1 and 4000),
+    created_at timestamptz not null default now(),
+    created_by uuid references auth.users (id) on delete set null,
+    lifted_at timestamptz,
+    lifted_by uuid references auth.users (id) on delete set null,
+    lift_reason text check (lift_reason is null or char_length(lift_reason) <= 4000)
+);
+
+-- One live takedown per score, and the lookup document_role() makes.
+create unique index if not exists content_takedowns_active_document on public.content_takedowns (document_id)
+where lifted_at is null;
+create index if not exists content_takedowns_uploader_idx on public.content_takedowns (uploader_id);
+
+alter table public.content_takedowns enable row level security;
+revoke all on table public.content_takedowns from anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Strikes (repeat-infringer policy)
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.content_strikes (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid not null references auth.users (id) on delete cascade,
+    takedown_id uuid not null unique references public.content_takedowns (id) on delete cascade,
+    created_at timestamptz not null default now(),
+    voided_at timestamptz,
+    void_reason text
+);
+
+create index if not exists content_strikes_user_idx on public.content_strikes (user_id, created_at desc);
+
+alter table public.content_strikes enable row level security;
+revoke all on table public.content_strikes from anon, authenticated;
+
+-- Strikes that count: not withdrawn, and within the window the policy states
+-- (STRIKE_WINDOW_MONTHS in src/features/moderation/moderationRules.ts).
+create or replace function public.active_content_strikes (p_user uuid) returns integer language sql stable security definer
+set search_path = public as $$
+    select count(*)::int
+    from public.content_strikes s
+    where s.user_id = p_user
+      and s.voided_at is null
+      and s.created_at > now() - interval '12 months';
+$$;
+
+revoke all on function public.active_content_strikes (uuid) from public;
+revoke all on function public.active_content_strikes (uuid) from anon;
+revoke all on function public.active_content_strikes (uuid) from authenticated;
+grant execute on function public.active_content_strikes (uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Notice log
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.content_notice_log (
+    id bigint generated by default as identity primary key,
+    created_at timestamptz not null default now(),
+    report_id uuid references public.content_reports (id) on delete set null,
+    takedown_id uuid references public.content_takedowns (id) on delete set null,
+    event text not null check (
+        event in (
+            'report_received',
+            'report_acknowledged',
+            'report_rejected',
+            'reporter_notified',
+            'takedown',
+            'statement_of_reasons',
+            'takedown_lifted',
+            'uploader_notified_lift'
+        )
+    ),
+    -- The address mailed, for an email event.
+    recipient text,
+    -- queued: put in content_notice_outbox; each attempt then logs how it went.
+    -- skipped: there was no address to send to.
+    delivery text check (delivery is null or delivery in ('queued', 'sent', 'failed', 'unconfigured', 'skipped')),
+    actor_id uuid references auth.users (id) on delete set null,
+    detail jsonb not null default '{}'::jsonb
+);
+
+create index if not exists content_notice_log_created_idx on public.content_notice_log (created_at desc);
+
+alter table public.content_notice_log enable row level security;
+revoke all on table public.content_notice_log from anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Outbox: every notice we owe, kept until it is sent
+-- ---------------------------------------------------------------------------
+-- The acknowledgment (blind-copied to the legal mailbox), the statement of
+-- reasons, the reporter's outcome and the lift notice are promises the
+-- policy makes, and a mail budget or a Resend outage must delay them, never
+-- lose them. So each is written here IN THE SAME TRANSACTION as the report or
+-- decision it is about (the trigger and the three actions below), and the
+-- content-report, content-moderation and content-notices functions deliver
+-- them: claim due rows (a lease, so two deliverers never send one twice),
+-- take a unit of the sender's mail budget, send with the row id as Resend's
+-- idempotency key, and finish the row. Out of budget: back in the queue until
+-- the budget's window reopens, not counted as an attempt. A failed or
+-- unconfigured send: retried with backoff (1 minute doubling, at most 6
+-- hours), indefinitely; the moderation page shows how many are waiting. A
+-- crash mid-send: the lease runs out and the row is claimed again, and the
+-- idempotency key stops Resend sending it twice.
+--
+-- What it sends is rendered at delivery from `payload` by contentReports.ts
+-- (renderNotice), from the facts recorded here: the decision's wording, not
+-- whatever the rows say later. The recipient is resolved now: the reporter's
+-- address, or the uploader's sign-in address from auth.users.
+
+create table if not exists public.content_notice_outbox (
+    id uuid primary key default gen_random_uuid(),
+    created_at timestamptz not null default now(),
+    -- Whose mail budget it spends (MAIL_CATEGORY_CAPS in _shared/mailBudget.ts).
+    sender text not null check (sender in ('content-report-ack', 'moderation-notice')),
+    template text not null check (
+        template in ('report_acknowledgment', 'statement_of_reasons', 'reporter_outcome', 'takedown_lifted')
+    ),
+    -- The content_notice_log event each attempt is logged as.
+    event text not null check (
+        event in ('report_acknowledged', 'statement_of_reasons', 'reporter_notified', 'uploader_notified_lift')
+    ),
+    report_id uuid references public.content_reports (id) on delete set null,
+    takedown_id uuid references public.content_takedowns (id) on delete set null,
+    actor_id uuid references auth.users (id) on delete set null,
+    recipient text not null check (char_length(recipient) between 3 and 320),
+    -- Blind-copy the legal mailbox (the acknowledgment: how a person hears of a report).
+    bcc_legal boolean not null default false,
+    payload jsonb not null,
+    status text not null default 'pending' check (status in ('pending', 'sent')),
+    attempts int not null default 0,
+    next_attempt_at timestamptz not null default now(),
+    claimed_until timestamptz,
+    last_outcome text check (last_outcome is null or last_outcome in ('failed', 'unconfigured', 'deferred')),
+    sent_at timestamptz
+);
+
+create index if not exists content_notice_outbox_due_idx on public.content_notice_outbox (next_attempt_at)
+where status = 'pending';
+
+alter table public.content_notice_outbox enable row level security;
+revoke all on table public.content_notice_outbox from anon, authenticated;
+
+-- Queue one notice and log it as queued. A recipient-less notice (an uploader
+-- with no sign-in address: a guest, a roster student) is logged as skipped,
+-- so the moderator sees it needs following up by hand. Internal.
+create or replace function public.enqueue_content_notice (
+    p_sender text,
+    p_template text,
+    p_event text,
+    p_recipient text,
+    p_bcc_legal boolean,
+    p_payload jsonb,
+    p_report uuid,
+    p_takedown uuid,
+    p_actor uuid
+) returns uuid language plpgsql security definer
+set search_path = public as $$
+declare
+    v_id uuid;
+begin
+    if nullif(btrim(coalesce(p_recipient, '')), '') is null then
+        insert into public.content_notice_log (report_id, takedown_id, event, recipient, delivery, actor_id)
+        values (p_report, p_takedown, p_event, null, 'skipped', p_actor);
+        return null;
+    end if;
+    insert into public.content_notice_outbox (
+        sender, template, event, report_id, takedown_id, actor_id, recipient, bcc_legal, payload
+    ) values (
+        p_sender, p_template, p_event, p_report, p_takedown, p_actor, p_recipient, p_bcc_legal, p_payload
+    ) returning id into v_id;
+    insert into public.content_notice_log (report_id, takedown_id, event, recipient, delivery, actor_id, detail)
+    values (p_report, p_takedown, p_event, p_recipient, 'queued', p_actor, jsonb_build_object('notice_id', v_id));
+    return v_id;
+end;
+$$;
+
+revoke all on function public.enqueue_content_notice (text, text, text, text, boolean, jsonb, uuid, uuid, uuid) from public;
+revoke all on function public.enqueue_content_notice (text, text, text, text, boolean, jsonb, uuid, uuid, uuid) from anon;
+revoke all on function public.enqueue_content_notice (text, text, text, text, boolean, jsonb, uuid, uuid, uuid) from authenticated;
+
+-- The decision time as the emails print it (UTC, ISO 8601).
+create or replace function public.content_notice_time (p_at timestamptz) returns text language sql immutable
+set search_path = public as $$
+    select to_char(p_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+$$;
+
+-- The report is logged and its acknowledgment queued by the insert itself, so
+-- a stored report always has one owed, whatever happens to the request after.
+create or replace function public.content_report_enqueue_ack () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    insert into public.content_notice_log (report_id, event, actor_id, detail)
+    values (new.id, 'report_received', new.reporter_user_id,
+            jsonb_build_object('kind', new.kind, 'category', new.category, 'resolved', new.document_id is not null));
+    perform public.enqueue_content_notice (
+        'content-report-ack',
+        'report_acknowledgment',
+        'report_acknowledged',
+        new.reporter_email,
+        true,
+        jsonb_build_object(
+            'reference', new.reference,
+            'reporterName', new.reporter_name,
+            'category', new.category,
+            'contentUrl', new.content_url,
+            'workDescription', new.work_description,
+            'onBehalfOf', new.on_behalf_of,
+            'explanation', new.explanation
+        ),
+        new.id,
+        null,
+        new.reporter_user_id
+    );
+    return null;
+end;
+$$;
+
+revoke all on function public.content_report_enqueue_ack () from public;
+revoke all on function public.content_report_enqueue_ack () from anon;
+revoke all on function public.content_report_enqueue_ack () from authenticated;
+
+drop trigger if exists content_reports_enqueue_ack on public.content_reports;
+create trigger content_reports_enqueue_ack
+after insert on public.content_reports
+for each row execute function public.content_report_enqueue_ack ();
+
+-- Delivery (service role only). Claim: the due rows, the caller's own first
+-- (`p_first`, the notices its request just queued), each leased for
+-- p_lease_seconds and counted as an attempt.
+create or replace function public.claim_content_notices (
+    p_limit integer default 10,
+    p_first uuid[] default '{}',
+    p_lease_seconds integer default 120
+) returns setof public.content_notice_outbox language plpgsql security definer
+set search_path = public as $$
+begin
+    return query
+    update public.content_notice_outbox o
+    set claimed_until = now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 30)),
+        attempts = o.attempts + 1
+    where o.id in (
+        select c.id
+        from public.content_notice_outbox c
+        where c.status = 'pending'
+          and (c.next_attempt_at <= now() or c.id = any (coalesce(p_first, '{}')))
+          and (c.claimed_until is null or c.claimed_until < now())
+        order by (c.id = any (coalesce(p_first, '{}'))) desc, c.next_attempt_at, c.created_at
+        limit least(greatest(coalesce(p_limit, 10), 1), 50)
+        for update skip locked
+    )
+    returning o.*;
+end;
+$$;
+
+-- Finish a claimed row: sent; failed or unconfigured (retry with backoff,
+-- logged); or deferred because the sender's budget is spent (retry when
+-- p_retry_after_seconds says the window reopens; not an attempt, not logged:
+-- the row's queued entry already says it is owed).
+create or replace function public.finish_content_notice (
+    p_id uuid,
+    p_outcome text,
+    p_retry_after_seconds integer default null
+) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.content_notice_outbox;
+begin
+    if p_outcome not in ('sent', 'failed', 'unconfigured', 'deferred') then
+        raise exception 'unknown outcome: %', p_outcome using errcode = '22023';
+    end if;
+    select * into v_row from public.content_notice_outbox where id = p_id and status = 'pending' for update;
+    if not found then
+        return;
+    end if;
+
+    if p_outcome = 'sent' then
+        update public.content_notice_outbox
+        set status = 'sent', sent_at = now(), claimed_until = null, last_outcome = null
+        where id = p_id;
+        if v_row.template = 'report_acknowledgment' and v_row.report_id is not null then
+            update public.content_reports set acknowledged_at = coalesce(acknowledged_at, now())
+            where id = v_row.report_id;
+        end if;
+    elsif p_outcome = 'deferred' then
+        update public.content_notice_outbox
+        set claimed_until = null,
+            attempts = greatest(attempts - 1, 0),
+            last_outcome = 'deferred',
+            next_attempt_at = now() + make_interval(secs => greatest(coalesce(p_retry_after_seconds, 60), 1))
+        where id = p_id;
+        return;
+    else
+        update public.content_notice_outbox
+        set claimed_until = null,
+            last_outcome = p_outcome,
+            next_attempt_at = now() + coalesce(
+                make_interval(secs => p_retry_after_seconds),
+                least(interval '6 hours', interval '1 minute' * power(2, least(greatest(attempts - 1, 0), 20)))
+            )
+        where id = p_id;
+    end if;
+
+    insert into public.content_notice_log (report_id, takedown_id, event, recipient, delivery, actor_id, detail)
+    values (v_row.report_id, v_row.takedown_id, v_row.event, v_row.recipient, p_outcome, v_row.actor_id,
+            jsonb_build_object('notice_id', p_id, 'attempt', v_row.attempts));
+end;
+$$;
+
+revoke all on function public.claim_content_notices (integer, uuid[], integer) from public;
+revoke all on function public.claim_content_notices (integer, uuid[], integer) from anon;
+revoke all on function public.claim_content_notices (integer, uuid[], integer) from authenticated;
+grant execute on function public.claim_content_notices (integer, uuid[], integer) to service_role;
+
+revoke all on function public.finish_content_notice (uuid, text, integer) from public;
+revoke all on function public.finish_content_notice (uuid, text, integer) from anon;
+revoke all on function public.finish_content_notice (uuid, text, integer) from authenticated;
+grant execute on function public.finish_content_notice (uuid, text, integer) to service_role;
+
+-- The retry when nobody is using either function: every five minutes, if
+-- anything is due, pg_cron pokes content-notices (pg_net + vault, the
+-- omr_sweep pattern). Vault secrets content_notice_url (the function's URL)
+-- and content_notice_secret (= the function's CONTENT_NOTICE_SECRET) are
+-- created out of band (DEPLOY.md); without them the tick is a no-op, and
+-- notices still go out with the next report or moderator action.
+create or replace function public.content_notice_retry_tick () returns void language plpgsql security definer
+set search_path = public, extensions, vault as $$
+declare
+    v_url text;
+    v_secret text;
+begin
+    if not exists (
+        select 1 from public.content_notice_outbox
+        where status = 'pending' and next_attempt_at <= now()
+          and (claimed_until is null or claimed_until < now())
+    ) then
+        return;
+    end if;
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'content_notice_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'content_notice_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'content_notice_retry_tick: vault secrets content_notice_url/content_notice_secret missing — skip';
+        return;
+    end if;
+    perform net.http_post(
+        url := v_url,
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-content-notice-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 10000
+    );
+end;
+$$;
+
+revoke all on function public.content_notice_retry_tick () from public, anon, authenticated;
+grant execute on function public.content_notice_retry_tick () to service_role;
+
+do $$
+begin
+    perform cron.unschedule (jobid) from cron.job where jobname = 'content-notice-retry';
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('content-notice-retry', '*/5 * * * *', $$select public.content_notice_retry_tick ()$$);
+
+-- ---------------------------------------------------------------------------
+-- Actions (service role only: content-moderation calls them after checking
+-- the caller is a moderator, then sends the emails and logs them)
+-- ---------------------------------------------------------------------------
+
+create or replace function public.apply_content_takedown (
+    p_document uuid,
+    p_action text,
+    p_ground text,
+    p_legal_basis text,
+    p_facts text,
+    p_report uuid,
+    p_moderator uuid
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_doc record;
+    v_takedown uuid;
+    v_strikes int := null;
+    v_report record;
+    v_uploader_notice uuid;
+    v_reporter_notice uuid;
+begin
+    select d.id, d.owner_id, d.title into v_doc from public.documents d where d.id = p_document for update;
+    if not found then
+        raise exception 'score not found' using errcode = 'P0002', detail = '{"code":"document_not_found"}';
+    end if;
+    if exists (select 1 from public.content_takedowns t where t.document_id = p_document and t.lifted_at is null) then
+        raise exception 'score already taken down' using errcode = '23505', detail = '{"code":"already_taken_down"}';
+    end if;
+    if p_report is not null and not exists (select 1 from public.content_reports r where r.id = p_report) then
+        raise exception 'report not found' using errcode = 'P0002', detail = '{"code":"report_not_found"}';
+    end if;
+
+    insert into public.content_takedowns (
+        document_id, report_id, uploader_id, document_title, action, ground, legal_basis, facts, created_by
+    ) values (
+        p_document, p_report, v_doc.owner_id, v_doc.title, p_action, p_ground, p_legal_basis, p_facts, p_moderator
+    ) returning id into v_takedown;
+
+    -- Repeat-infringer policy: copyright takedowns count against the uploader.
+    if p_ground = 'copyright' and v_doc.owner_id is not null then
+        insert into public.content_strikes (user_id, takedown_id) values (v_doc.owner_id, v_takedown);
+    end if;
+    if v_doc.owner_id is not null then
+        v_strikes := public.active_content_strikes (v_doc.owner_id);
+    end if;
+
+    if p_report is not null then
+        update public.content_reports
+        set status = 'actioned', decided_at = now(), decided_by = p_moderator,
+            document_id = coalesce(document_id, p_document)
+        where id = p_report;
+    end if;
+
+    insert into public.content_notice_log (report_id, takedown_id, event, actor_id, detail)
+    values (p_report, v_takedown, 'takedown', p_moderator,
+            jsonb_build_object('document_id', p_document, 'action', p_action, 'ground', p_ground));
+
+    -- Viewers who already have the score open: re-check, and lose it.
+    perform public.content_takedown_notify_viewers (p_document, p_action);
+
+    -- The statement of reasons to the uploader, and the outcome to the
+    -- reporter, owed from this commit on (see "Outbox").
+    v_uploader_notice := public.enqueue_content_notice (
+        'moderation-notice', 'statement_of_reasons', 'statement_of_reasons',
+        (select u.email from auth.users u where u.id = v_doc.owner_id),
+        false,
+        jsonb_build_object(
+            'documentTitle', v_doc.title,
+            'action', p_action,
+            'ground', p_ground,
+            'legalBasis', p_legal_basis,
+            'facts', p_facts,
+            'fromReport', p_report is not null,
+            'activeStrikes', v_strikes,
+            'decidedAt', public.content_notice_time (now())
+        ),
+        p_report, v_takedown, p_moderator
+    );
+    if p_report is not null then
+        select r.reference, r.reporter_name, r.reporter_email into v_report
+        from public.content_reports r where r.id = p_report;
+        v_reporter_notice := public.enqueue_content_notice (
+            'moderation-notice', 'reporter_outcome', 'reporter_notified',
+            v_report.reporter_email,
+            false,
+            jsonb_build_object(
+                'reference', v_report.reference,
+                'reporterName', v_report.reporter_name,
+                'decision', 'actioned',
+                'action', p_action
+            ),
+            p_report, v_takedown, p_moderator
+        );
+    end if;
+
+    return jsonb_build_object(
+        'takedown_id', v_takedown,
+        'uploader_id', v_doc.owner_id,
+        'document_title', v_doc.title,
+        'active_strikes', v_strikes,
+        'uploader_notice_id', v_uploader_notice,
+        'reporter_notice_id', v_reporter_notice
+    );
+end;
+$$;
+
+create or replace function public.lift_content_takedown (p_takedown uuid, p_reason text, p_moderator uuid) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row record;
+    v_uploader_notice uuid;
+begin
+    update public.content_takedowns
+    set lifted_at = now(), lifted_by = p_moderator, lift_reason = p_reason
+    where id = p_takedown and lifted_at is null
+    returning id, document_id, uploader_id, document_title, report_id into v_row;
+    if not found then
+        raise exception 'no live takedown' using errcode = 'P0002', detail = '{"code":"takedown_not_found"}';
+    end if;
+
+    -- The policy: a strike is withdrawn when a counter-notice or complaint succeeds.
+    update public.content_strikes
+    set voided_at = now(), void_reason = p_reason
+    where takedown_id = p_takedown and voided_at is null;
+
+    insert into public.content_notice_log (report_id, takedown_id, event, actor_id, detail)
+    values (v_row.report_id, p_takedown, 'takedown_lifted', p_moderator, jsonb_build_object('reason', p_reason));
+
+    v_uploader_notice := public.enqueue_content_notice (
+        'moderation-notice', 'takedown_lifted', 'uploader_notified_lift',
+        (select u.email from auth.users u where u.id = v_row.uploader_id),
+        false,
+        jsonb_build_object('documentTitle', v_row.document_title, 'reason', p_reason),
+        null, p_takedown, p_moderator
+    );
+
+    return jsonb_build_object(
+        'takedown_id', v_row.id,
+        'document_id', v_row.document_id,
+        'uploader_id', v_row.uploader_id,
+        'document_title', v_row.document_title,
+        'report_id', v_row.report_id,
+        'uploader_notice_id', v_uploader_notice
+    );
+end;
+$$;
+
+create or replace function public.reject_content_report (p_report uuid, p_note text, p_moderator uuid) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row record;
+begin
+    update public.content_reports
+    set status = 'rejected', decided_at = now(), decided_by = p_moderator, decision_note = p_note
+    where id = p_report and status = 'received'
+    returning id, reference, reporter_email, reporter_name, content_url into v_row;
+    if not found then
+        raise exception 'no open report' using errcode = 'P0002', detail = '{"code":"report_not_open"}';
+    end if;
+
+    insert into public.content_notice_log (report_id, event, actor_id, detail)
+    values (p_report, 'report_rejected', p_moderator, jsonb_build_object('note', p_note));
+
+    return to_jsonb(v_row) || jsonb_build_object(
+        'reporter_notice_id',
+        public.enqueue_content_notice (
+            'moderation-notice', 'reporter_outcome', 'reporter_notified',
+            v_row.reporter_email,
+            false,
+            jsonb_build_object(
+                'reference', v_row.reference,
+                'reporterName', v_row.reporter_name,
+                'decision', 'rejected',
+                'note', p_note
+            ),
+            p_report, null, p_moderator
+        )
+    );
+end;
+$$;
+
+revoke all on function public.apply_content_takedown (uuid, text, text, text, text, uuid, uuid) from public;
+revoke all on function public.apply_content_takedown (uuid, text, text, text, text, uuid, uuid) from anon;
+revoke all on function public.apply_content_takedown (uuid, text, text, text, text, uuid, uuid) from authenticated;
+grant execute on function public.apply_content_takedown (uuid, text, text, text, text, uuid, uuid) to service_role;
+
+revoke all on function public.lift_content_takedown (uuid, text, uuid) from public;
+revoke all on function public.lift_content_takedown (uuid, text, uuid) from anon;
+revoke all on function public.lift_content_takedown (uuid, text, uuid) from authenticated;
+grant execute on function public.lift_content_takedown (uuid, text, uuid) to service_role;
+
+revoke all on function public.reject_content_report (uuid, text, uuid) from public;
+revoke all on function public.reject_content_report (uuid, text, uuid) from anon;
+revoke all on function public.reject_content_report (uuid, text, uuid) from authenticated;
+grant execute on function public.reject_content_report (uuid, text, uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The moderator's read: reports, takedowns (with each uploader's strike
+-- count) and the notice log, each a page at a time. Refuses everyone else.
+-- ---------------------------------------------------------------------------
+-- Keyset pagination, never a fixed cap: a list that stopped at its newest 200
+-- rows would let an older open report, or an older live takedown and its lift
+-- control, drop out of reach as newer ones arrive. Each call answers
+-- {rows, total, next}: `next` is the cursor for the following page (null on
+-- the last) and `total` counts the whole filtered set, so the page can say how
+-- many are waiting. The filters are the ones a moderator works from: open
+-- reports (oldest first, the queue order) or decided ones, live takedowns or
+-- lifted ones.
+
+-- An earlier draft of this migration had one capped moderation_queue(); no
+-- client calls it any more.
+drop function if exists public.moderation_queue ();
+
+create index if not exists content_reports_status_created_idx on public.content_reports (status, created_at, id);
+create index if not exists content_takedowns_created_idx on public.content_takedowns (created_at desc, id desc);
+
+create or replace function public.moderation_reports (
+    p_status text default 'open',
+    p_after_created_at timestamptz default null,
+    p_after_id uuid default null,
+    p_limit integer default 25
+) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_limit int := least(greatest(coalesce(p_limit, 25), 1), 100);
+    v_open boolean;
+    v_rows jsonb;
+    v_count int;
+    v_total int;
+begin
+    if not public.is_content_moderator () then
+        raise exception 'not a moderator' using errcode = '42501';
+    end if;
+    if p_status not in ('open', 'decided', 'all') then
+        raise exception 'unknown report filter: %', p_status using errcode = '22023';
+    end if;
+    if (p_after_created_at is null) <> (p_after_id is null) then
+        raise exception 'report cursor is incomplete' using errcode = '22023';
+    end if;
+    -- Open reports read oldest first, so the one waiting longest is on top;
+    -- the rest newest first.
+    v_open := p_status = 'open';
+
+    with filtered as (
+        select cr.*
+        from public.content_reports cr
+        where (p_status = 'all'
+               or (p_status = 'open' and cr.status = 'received')
+               or (p_status = 'decided' and cr.status <> 'received'))
+    ),
+    page as (
+        select f.*,
+               row_number() over (
+                   order by
+                       case when v_open then f.created_at end asc,
+                       case when v_open then f.id end asc,
+                       case when not v_open then f.created_at end desc,
+                       case when not v_open then f.id end desc
+               ) as rn
+        from filtered f
+        where p_after_id is null
+           or (v_open and (f.created_at, f.id) > (p_after_created_at, p_after_id))
+           or (not v_open and (f.created_at, f.id) < (p_after_created_at, p_after_id))
+    ),
+    limited as (
+        select * from page where rn <= v_limit + 1
+    )
+    select
+        coalesce((
+            select jsonb_agg(
+                jsonb_build_object(
+                    'id', l.id,
+                    'reference', l.reference,
+                    'created_at', l.created_at,
+                    'kind', l.kind,
+                    'category', l.category,
+                    'content_url', l.content_url,
+                    'document_id', l.document_id,
+                    'document_title', (select d.title from public.documents d where d.id = l.document_id),
+                    'work_description', l.work_description,
+                    'explanation', l.explanation,
+                    'reporter_name', l.reporter_name,
+                    'reporter_email', l.reporter_email,
+                    -- The complete notice as submitted, attestations included.
+                    'reporter_address', l.reporter_address,
+                    'reporter_phone', l.reporter_phone,
+                    'on_behalf_of', l.on_behalf_of,
+                    'reporter_user_id', l.reporter_user_id,
+                    'good_faith', l.good_faith,
+                    'perjury_statement', l.perjury_statement,
+                    'signature', l.signature,
+                    'status', l.status,
+                    'decided_at', l.decided_at,
+                    'decision_note', l.decision_note,
+                    'acknowledged_at', l.acknowledged_at,
+                    'active_takedown_id', (
+                        select t.id from public.content_takedowns t
+                        where t.document_id = l.document_id and t.lifted_at is null
+                    )
+                )
+                order by l.rn
+            )
+            from limited l
+            where l.rn <= v_limit
+        ), '[]'::jsonb),
+        (select count(*)::int from limited)
+    into v_rows, v_count;
+
+    select count(*)::int into v_total
+    from public.content_reports cr
+    where (p_status = 'all'
+           or (p_status = 'open' and cr.status = 'received')
+           or (p_status = 'decided' and cr.status <> 'received'));
+
+    -- The cursor is the last row served; there is none after the last page.
+    return jsonb_build_object(
+        'rows', v_rows,
+        'total', v_total,
+        'next', case when v_count > v_limit
+                     then jsonb_build_object('created_at', v_rows -> (v_limit - 1) -> 'created_at',
+                                             'id', v_rows -> (v_limit - 1) -> 'id')
+                end
+    );
+end;
+$$;
+
+create or replace function public.moderation_takedowns (
+    p_state text default 'active',
+    p_after_created_at timestamptz default null,
+    p_after_id uuid default null,
+    p_limit integer default 25
+) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_limit int := least(greatest(coalesce(p_limit, 25), 1), 100);
+    v_rows jsonb;
+    v_count int;
+    v_total int;
+begin
+    if not public.is_content_moderator () then
+        raise exception 'not a moderator' using errcode = '42501';
+    end if;
+    if p_state not in ('active', 'lifted', 'all') then
+        raise exception 'unknown takedown filter: %', p_state using errcode = '22023';
+    end if;
+    if (p_after_created_at is null) <> (p_after_id is null) then
+        raise exception 'takedown cursor is incomplete' using errcode = '22023';
+    end if;
+
+    with limited as (
+        select ct.*, row_number() over (order by ct.created_at desc, ct.id desc) as rn
+        from public.content_takedowns ct
+        where (p_state = 'all'
+               or (p_state = 'active' and ct.lifted_at is null)
+               or (p_state = 'lifted' and ct.lifted_at is not null))
+          and (p_after_id is null or (ct.created_at, ct.id) < (p_after_created_at, p_after_id))
+        order by ct.created_at desc, ct.id desc
+        limit v_limit + 1
+    )
+    select
+        coalesce((
+            select jsonb_agg(
+                jsonb_build_object(
+                    'id', l.id,
+                    'document_id', l.document_id,
+                    'document_title', l.document_title,
+                    'report_id', l.report_id,
+                    'uploader_id', l.uploader_id,
+                    'action', l.action,
+                    'ground', l.ground,
+                    'legal_basis', l.legal_basis,
+                    'facts', l.facts,
+                    'created_at', l.created_at,
+                    'lifted_at', l.lifted_at,
+                    'lift_reason', l.lift_reason,
+                    'uploader_active_strikes', case when l.uploader_id is null then 0
+                                                    else public.active_content_strikes (l.uploader_id) end
+                )
+                order by l.rn
+            )
+            from limited l
+            where l.rn <= v_limit
+        ), '[]'::jsonb),
+        (select count(*)::int from limited)
+    into v_rows, v_count;
+
+    select count(*)::int into v_total
+    from public.content_takedowns ct
+    where (p_state = 'all'
+           or (p_state = 'active' and ct.lifted_at is null)
+           or (p_state = 'lifted' and ct.lifted_at is not null));
+
+    -- The cursor is the last row served; there is none after the last page.
+    return jsonb_build_object(
+        'rows', v_rows,
+        'total', v_total,
+        'next', case when v_count > v_limit
+                     then jsonb_build_object('created_at', v_rows -> (v_limit - 1) -> 'created_at',
+                                             'id', v_rows -> (v_limit - 1) -> 'id')
+                end
+    );
+end;
+$$;
+
+-- The log, newest first. Its identity id grows with every insert, so it is
+-- the whole cursor.
+create or replace function public.moderation_log (p_before_id bigint default null, p_limit integer default 50) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_limit int := least(greatest(coalesce(p_limit, 50), 1), 200);
+    v_rows jsonb;
+    v_count int;
+begin
+    if not public.is_content_moderator () then
+        raise exception 'not a moderator' using errcode = '42501';
+    end if;
+
+    with limited as (
+        select nl.id, nl.created_at, nl.report_id, nl.takedown_id, nl.event, nl.recipient, nl.delivery,
+               row_number() over (order by nl.id desc) as rn
+        from public.content_notice_log nl
+        where p_before_id is null or nl.id < p_before_id
+        order by nl.id desc
+        limit v_limit + 1
+    )
+    select
+        coalesce((
+            select jsonb_agg(to_jsonb(l) - 'rn' order by l.rn) from limited l where l.rn <= v_limit
+        ), '[]'::jsonb),
+        (select count(*)::int from limited)
+    into v_rows, v_count;
+
+    return jsonb_build_object(
+        'rows', v_rows,
+        'next', case when v_count > v_limit
+                     then jsonb_build_object('id', (v_rows -> (v_limit - 1) ->> 'id')::bigint)
+                end,
+        -- Notices still owed (content_notice_outbox), and how many of those
+        -- last failed or found mail unconfigured rather than waiting on budget.
+        'undelivered', (select count(*)::int from public.content_notice_outbox where status = 'pending'),
+        'failing', (
+            select count(*)::int from public.content_notice_outbox
+            where status = 'pending' and last_outcome in ('failed', 'unconfigured')
+        )
+    );
+end;
+$$;
+
+revoke all on function public.moderation_reports (text, timestamptz, uuid, integer) from public;
+revoke all on function public.moderation_reports (text, timestamptz, uuid, integer) from anon;
+grant execute on function public.moderation_reports (text, timestamptz, uuid, integer) to authenticated;
+
+revoke all on function public.moderation_takedowns (text, timestamptz, uuid, integer) from public;
+revoke all on function public.moderation_takedowns (text, timestamptz, uuid, integer) from anon;
+grant execute on function public.moderation_takedowns (text, timestamptz, uuid, integer) to authenticated;
+
+revoke all on function public.moderation_log (bigint, integer) from public;
+revoke all on function public.moderation_log (bigint, integer) from anon;
+grant execute on function public.moderation_log (bigint, integer) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Enforcement
+-- ---------------------------------------------------------------------------
+
+-- 20261010120300's definition plus the takedown clause: a restricted score
+-- answers its owner only; a removed one answers nobody.
+create or replace function public.document_role (doc uuid) returns text language sql stable security definer
+set search_path = public as $$
+    select dm.role
+    from public.document_members dm
+    where dm.document_id = doc
+      and dm.user_id = (select auth.uid())
+      and not exists (
+          select 1
+          from public.managed_students ms
+          where ms.student_user_id = dm.user_id
+            and public.student_access_revoked ()
+      )
+      and not exists (
+          select 1
+          from public.content_takedowns ct
+          where ct.document_id = doc
+            and ct.lifted_at is null
+            and (ct.action = 'remove' or dm.role <> 'owner')
+      );
+$$;
+
+-- Nobody new joins a taken-down score — not through a share link
+-- (redeem_share_link), a roster assignment, or anything else that adds a
+-- member — so lifting the takedown restores exactly the access it suspended.
+create or replace function public.refuse_members_on_taken_down () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if new.role <> 'owner' and exists (
+        select 1 from public.content_takedowns ct
+        where ct.document_id = new.document_id and ct.lifted_at is null
+    ) then
+        raise exception 'this score is unavailable' using errcode = '42501', detail = '{"code":"content_unavailable"}';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.refuse_members_on_taken_down () from public;
+revoke all on function public.refuse_members_on_taken_down () from anon;
+revoke all on function public.refuse_members_on_taken_down () from authenticated;
+
+drop trigger if exists document_members_refuse_taken_down on public.document_members;
+create trigger document_members_refuse_taken_down
+before insert on public.document_members
+for each row execute function public.refuse_members_on_taken_down ();
+
+create or replace function public.refuse_share_links_on_taken_down () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if exists (
+        select 1 from public.content_takedowns ct
+        where ct.document_id = new.document_id and ct.lifted_at is null
+    ) then
+        raise exception 'this score cannot be shared' using errcode = '42501', detail = '{"code":"content_unavailable"}';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.refuse_share_links_on_taken_down () from public;
+revoke all on function public.refuse_share_links_on_taken_down () from anon;
+revoke all on function public.refuse_share_links_on_taken_down () from authenticated;
+
+drop trigger if exists share_links_refuse_taken_down on public.share_links;
+create trigger share_links_refuse_taken_down
+before insert on public.share_links
+for each row execute function public.refuse_share_links_on_taken_down ();
+
+-- ---------------------------------------------------------------------------
+-- Realtime: cutting off viewers who are already connected
+-- ---------------------------------------------------------------------------
+-- Superseded in part by 20261020150100_takedown_realtime_topics: a takedown
+-- now moves the score to fresh topics, so a client that ignores the hint is
+-- left on a dead doc:{id}, and the owner's devices keep their committed-row
+-- fan-out. What follows is how this migration left it.
+--
+-- document_role() refuses a taken-down score when a channel JOINS, but a
+-- collaborator who joined before the takedown keeps the channel: Realtime does
+-- not re-run the realtime.messages policies per message. Two things close it:
+--
+--  1. The server stops sending the score's committed changes. Every
+--     server-authored event on doc-db:{id} (committed marks, the PDF being
+--     replaced, play-along status) comes from the three trigger functions
+--     below, which now send nothing while the score has a live takedown. A
+--     client that ignores everything we tell it still receives nothing more
+--     on doc-db:{id}. For a restricted score this pauses its owner's live
+--     sync between their own devices too (each still syncs by pulling, on
+--     reconnect and when it comes online); nobody else can be sent its
+--     changes, and a broadcast cannot pick out one recipient.
+--  2. Every viewer who lost access is sent the `membership` hint on
+--     doc:{id}, with role null, the way end_student_sessions does it. The
+--     app re-reads the score and its role over PostgREST, which IS checked
+--     per request, finds neither, closes the score and leaves both channels.
+--     It is only a hint: the client never trusts the payload.
+--
+-- What stays open is doc:{id} itself for a client that ignores the hint: live
+-- ink and presence, which clients send to each other (the server cannot drop
+-- one recipient's copy). It carries in-progress strokes, never the score or
+-- its committed markings, and only while the owner is drawing; Realtime
+-- re-runs the policies when the client refreshes its access token and closes
+-- the channel when that token expires (auth.jwt_expiry, an hour), so a
+-- refused re-check ends it there. tests/sql/content_moderation.sql proves the
+-- rest: no doc-db:{id} message while taken down, the hint to each member who
+-- lost access, a refused re-join on both topics, and broadcasts back on lift.
+
+-- Whether a score has a live takedown. Internal: the triggers below and the
+-- notification call it as their owner; no client can ask it about a score.
+create or replace function public.content_taken_down (doc uuid) returns boolean language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1 from public.content_takedowns ct
+        where ct.document_id = doc and ct.lifted_at is null
+    );
+$$;
+
+revoke all on function public.content_taken_down (uuid) from public;
+revoke all on function public.content_taken_down (uuid) from anon;
+revoke all on function public.content_taken_down (uuid) from authenticated;
+
+-- The membership hint to every member a takedown shuts out: everyone but the
+-- owner for restrict, everyone for remove.
+create or replace function public.content_takedown_notify_viewers (p_document uuid, p_action text) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_user uuid;
+begin
+    for v_user in
+        select dm.user_id
+        from public.document_members dm
+        where dm.document_id = p_document
+          and (p_action = 'remove' or dm.role <> 'owner')
+    loop
+        perform realtime.send(
+            jsonb_build_object(
+                'table', 'document_members',
+                'document_id', p_document,
+                'user_id', v_user,
+                'role', null
+            ),
+            'membership', -- event
+            'doc:' || p_document::text, -- topic
+            true -- private
+        );
+    end loop;
+end;
+$$;
+
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from public;
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from anon;
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from authenticated;
+
+-- 20261007120101's three fan-out functions, unchanged but for the takedown check.
+create or replace function public.broadcast_annotation_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.content_taken_down (new.document_id) then
+        return null;
+    end if;
+    perform realtime.broadcast_changes(
+        'doc-db:' || new.document_id::text, -- topic (receive-only for clients)
+        tg_op,                              -- event name ('INSERT' | 'UPDATE')
+        tg_op,                              -- operation
+        tg_table_name,
+        tg_table_schema,
+        new,
+        old
+    );
+    return null;
+end;
+$$;
+
+create or replace function public.broadcast_document_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.content_taken_down (new.id) then
+        return null;
+    end if;
+    perform realtime.broadcast_changes(
+        'doc-db:' || new.id::text, -- topic (receive-only for clients)
+        tg_op, tg_op, tg_table_name, tg_table_schema, new, old
+    );
+    return null;
+end;
+$$;
+
+create or replace function public.broadcast_score_analysis_changes () returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    if tg_op = 'UPDATE'
+       and old.status is not distinct from new.status
+       and old.progress is not distinct from new.progress then
+        return null;
+    end if;
+    if public.content_taken_down (new.document_id) then
+        return null;
+    end if;
+
+    perform realtime.send(
+        jsonb_build_object(
+            'table', 'score_analyses',
+            'document_id', new.document_id,
+            'status', new.status,
+            'error', new.error,
+            'progress', new.progress,
+            'updated_at', new.updated_at
+        ),
+        'score_analysis', -- event
+        'doc-db:' || new.document_id::text, -- topic (receive-only for clients)
+        true -- private
+    );
+    return null;
+end;
+$$;
+
+revoke all on function public.broadcast_annotation_changes () from public, anon, authenticated;
+revoke all on function public.broadcast_document_changes () from public, anon, authenticated;
+revoke all on function public.broadcast_score_analysis_changes () from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- The owner's own read of a removed score
+-- ---------------------------------------------------------------------------
+-- documents_select (20260802044133) lets an owner read their row without
+-- document_role(), so a removed score's title and storage path stayed one
+-- PostgREST request away from its uploader, and the app, re-checking after
+-- the hint above, would still have found it. The owner clause now stops at a
+-- removal; a restricted score stays readable by its owner, as document_role()
+-- has it. The function answers only about the caller's own scores.
+create or replace function public.owned_document_removed (doc uuid) returns boolean language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1
+        from public.content_takedowns ct
+        join public.documents d on d.id = ct.document_id
+        where ct.document_id = doc
+          and ct.lifted_at is null
+          and ct.action = 'remove'
+          and d.owner_id = (select auth.uid())
+    );
+$$;
+
+revoke all on function public.owned_document_removed (uuid) from public;
+revoke all on function public.owned_document_removed (uuid) from anon;
+grant execute on function public.owned_document_removed (uuid) to authenticated;
+
+-- ALTER, not drop and create: the policy keeps its name, command and role, and
+-- owners never lose their read mid-migration.
+alter policy documents_select on public.documents
+using (
+    (owner_id = (select auth.uid()) and not public.owned_document_removed (id))
+    or public.document_role (id) is not null
+);
+
+-- 20261014120000's library_documents(), unchanged but for the takedown clause:
+-- it lists memberships directly, so document_role() alone would leave a
+-- taken-down score in its members' libraries, failing to open.
+create or replace function public.library_documents (
+    p_sort text default 'recent',
+    p_after_updated_at timestamptz default null,
+    p_after_title text default null,
+    p_after_id uuid default null,
+    p_query text default null,
+    p_tag_id uuid default null,
+    p_favorites_only boolean default false,
+    p_limit integer default 100
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+    v_uid uuid := (select auth.uid());
+    v_sort text := coalesce(p_sort, 'recent');
+    v_limit int := least(greatest(coalesce(p_limit, 100), 1), 200);
+    v_query text := nullif(btrim(coalesce(p_query, '')), '');
+    v_pattern text;
+    v_rows jsonb;
+    v_count int;
+    -- Once per call, not per row: about the caller only.
+    v_revoked boolean := public.student_access_revoked ();
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '42501';
+    end if;
+    if v_sort not in ('recent', 'title') then
+        raise exception 'unknown library sort: %', v_sort using errcode = '22023';
+    end if;
+    -- A half cursor would compare against null and silently return nothing.
+    if p_after_id is not null
+       and ((v_sort = 'recent' and p_after_updated_at is null)
+            or (v_sort = 'title' and p_after_title is null)) then
+        raise exception 'library cursor is incomplete' using errcode = '22023';
+    end if;
+
+    if v_query is not null then
+        -- Titles are short; a pasted paragraph is not a search worth running.
+        -- Escape ilike's own wildcards so "50%" or "op_1" match literally.
+        v_pattern := '%'
+            || replace(replace(replace(left(v_query, 200), '\', '\\'), '%', '\%'), '_', '\_')
+            || '%';
+    end if;
+
+    with visible as (
+        select
+            d.id,
+            d.owner_id,
+            d.title,
+            d.storage_path,
+            d.page_count,
+            d.content_rev,
+            d.thumb_rev,
+            d.created_at,
+            d.updated_at,
+            d.archived_at
+        from public.documents d
+        -- The caller's own scores (documents_owner_id_idx) and memberships
+        -- (document_members_user), collected first and then looked up by
+        -- primary key. Written as `= any (array(...))` rather than a join so
+        -- the planner cannot turn it back into a scan: on a join it hashed the
+        -- candidates and still read every row of documents to apply a title
+        -- search, 31 ms where this takes 2.
+        where d.id = any (array(
+                select o.id
+                from public.documents o
+                where o.owner_id = v_uid
+                union
+                select m.document_id
+                from public.document_members m
+                where m.user_id = v_uid
+                  and not v_revoked
+            ))
+          and (v_pattern is null or d.title ilike v_pattern)
+          -- Taken down (20261020150000): a restricted score lists for its owner
+          -- only, a removed one for nobody — the same answer document_role() gives.
+          and not exists (
+                select 1
+                from public.content_takedowns ct
+                where ct.document_id = d.id
+                  and ct.lifted_at is null
+                  and (ct.action = 'remove' or d.owner_id <> v_uid)
+            )
+          and (
+                p_tag_id is null
+                or exists (
+                    select 1
+                    from public.document_tags dt
+                    join public.library_tags t on t.id = dt.tag_id
+                    where dt.document_id = d.id
+                      and dt.tag_id = p_tag_id
+                      and t.user_id = v_uid
+                )
+            )
+          and (
+                not coalesce(p_favorites_only, false)
+                or exists (
+                    select 1
+                    from public.document_favorites f
+                    where f.document_id = d.id
+                      and f.user_id = v_uid
+                )
+            )
+          and (
+                p_after_id is null
+                or (v_sort = 'recent' and (d.updated_at, d.id) < (p_after_updated_at, p_after_id))
+                or (v_sort = 'title' and (lower(d.title), d.id) > (lower(p_after_title), p_after_id))
+            )
+    ),
+    ordered as (
+        select
+            v.*,
+            row_number() over (
+                order by
+                    case when v_sort = 'title' then lower(v.title) end asc,
+                    case when v_sort = 'title' then v.id end asc,
+                    case when v_sort = 'recent' then v.updated_at end desc,
+                    case when v_sort = 'recent' then v.id end desc
+            ) as rn
+        from visible v
+    ),
+    page as (
+        select * from ordered where rn <= v_limit + 1
+    )
+    select
+        coalesce(
+            (select jsonb_agg(to_jsonb(p) - 'rn' order by p.rn) from page p where p.rn <= v_limit),
+            '[]'::jsonb
+        ),
+        (select count(*)::int from page)
+    into v_rows, v_count;
+
+    return jsonb_build_object(
+        'documents', v_rows,
+        'has_more', v_count > v_limit
+    );
+end;
+$$;
+
+revoke all on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) from public;
+revoke all on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) from anon;
+grant execute on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) to authenticated;
+
+-- ===== supabase/migrations/20261020150100_takedown_realtime_topics.sql =====
+-- Takedown: move a score's realtime onto fresh topics, so nobody it shut out
+-- keeps hearing it.
+--
+-- Realtime authorizes a private channel once, when it JOINS (and again only
+-- when that client refreshes its token), and it has no way to evict one
+-- subscriber. So a collaborator who had a score open when it was restricted
+-- kept doc:{id}: the hint in 20261020150000 asked their app to leave, but a
+-- client that ignored it went on receiving the owner's live ink (the stroke
+-- coordinates of new handwriting) until its token ran out. And because a
+-- broadcast cannot pick out recipients, 20261020150000 also stopped the
+-- committed changes on doc-db:{id} for everyone, the owner's own devices
+-- included: a device that then saw one post-lift mark live jumped its
+-- watermark past every mark it had missed, further back than the pull's
+-- 50-seq overlap could reach (Codex round 2, #63).
+--
+-- Both topics now carry a generation: doc:{id} and doc-db:{id} at generation
+-- 0 (every score until something rotates it, so nothing changes for them),
+-- then doc:{id}:{n} and doc-db:{id}:{n}. The realtime.messages policies admit
+-- a join only on the score's CURRENT generation, and only for a member
+-- document_role() still answers for. A takedown rotates the score:
+--
+--  * Everything the server sends goes to the new topics, which a member the
+--    takedown shut out cannot join — so a restricted score's committed marks
+--    keep reaching its owner's devices (and nobody else), and a removed
+--    score's reach nobody.
+--  * Every client on the old topics is told `topic_rotated` there. The app
+--    re-reads the generation over PostgREST (realtime_topic_epoch, checked
+--    per request) and moves; one the takedown shut out is refused the new
+--    topics, and gets the membership hint as before. The owner's live ink
+--    moves with the owner, so a collaborator still sitting on the old doc:{id}
+--    hears nobody: the topic is dead, whatever that client does.
+--  * A stale client that rejoins the old topics is refused (wrong generation),
+--    which the app already treats as "re-check": it re-reads and moves.
+--
+-- Lifting does not rotate: the owner is already on the current topics, and the
+-- members it restores join them when they next open the score.
+--
+-- tests/sql/content_moderation.sql (checks 73-85, 43b, 47) proves it against
+-- a database; tests/live/takedownRealtime.live.test.ts against the Realtime
+-- server, with a collaborator that ignores every hint;
+-- tests/moderation/takedownRealtime.test.ts keeps the pieces from drifting.
+--
+-- Deploy with the frontend that follows `topic_rotated`
+-- (src/sync/realtimeChannel.ts, fetchTopicEpoch). A tab on the old bundle
+-- stays on generation 0 after a takedown: it receives nothing live (it still
+-- converges by pulling) until it reloads, and an owner's old tab would go on
+-- streaming its live ink there, so ship both together.
+
+-- ---------------------------------------------------------------------------
+-- The generation
+-- ---------------------------------------------------------------------------
+-- One row per score that has ever been rotated; no row is generation 0.
+create table if not exists public.document_realtime_epochs (
+    document_id uuid primary key references public.documents (id) on delete cascade,
+    epoch integer not null check (epoch > 0),
+    rotated_at timestamptz not null default now()
+);
+
+alter table public.document_realtime_epochs enable row level security;
+revoke all on public.document_realtime_epochs from public;
+revoke all on public.document_realtime_epochs from anon;
+revoke all on public.document_realtime_epochs from authenticated;
+
+-- Internal: the policies, the triggers and the RPC below call it as its owner.
+create or replace function public.document_realtime_epoch (doc uuid) returns integer language sql stable security definer
+set search_path = public as $$
+    select coalesce((select e.epoch from public.document_realtime_epochs e where e.document_id = doc), 0);
+$$;
+
+revoke all on function public.document_realtime_epoch (uuid) from public;
+revoke all on function public.document_realtime_epoch (uuid) from anon;
+revoke all on function public.document_realtime_epoch (uuid) from authenticated;
+
+-- The score's current topics. src/sync/realtimeChannel.ts builds the same
+-- names (docTopic / docDbTopic); tests/realtimeTopicsInSync.test.ts keeps them
+-- together.
+create or replace function public.document_live_topic (doc uuid) returns text language sql stable security definer
+set search_path = public as $$
+    select 'doc:' || doc::text || case
+        when public.document_realtime_epoch (doc) = 0 then ''
+        else ':' || public.document_realtime_epoch (doc)::text
+    end;
+$$;
+
+create or replace function public.document_db_topic (doc uuid) returns text language sql stable security definer
+set search_path = public as $$
+    select 'doc-db:' || doc::text || case
+        when public.document_realtime_epoch (doc) = 0 then ''
+        else ':' || public.document_realtime_epoch (doc)::text
+    end;
+$$;
+
+revoke all on function public.document_live_topic (uuid) from public;
+revoke all on function public.document_live_topic (uuid) from anon;
+revoke all on function public.document_live_topic (uuid) from authenticated;
+revoke all on function public.document_db_topic (uuid) from public;
+revoke all on function public.document_db_topic (uuid) from anon;
+revoke all on function public.document_db_topic (uuid) from authenticated;
+
+-- The score a topic names, when it is `{prefix}:{uuid}` (generation 0) or
+-- `{prefix}:{uuid}:{n}` and that is the score's current generation; null for
+-- anything else, including an old generation. Never throws on a foreign topic.
+create or replace function public.realtime_topic_document (topic text, prefix text) returns uuid language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_doc uuid;
+    v_tail text;
+    v_epoch integer := 0;
+begin
+    if topic is null or split_part(topic, ':', 1) <> prefix or split_part(topic, ':', 4) <> '' then
+        return null;
+    end if;
+    begin
+        v_doc := split_part(topic, ':', 2)::uuid;
+    exception when invalid_text_representation then
+        return null;
+    end;
+    v_tail := split_part(topic, ':', 3);
+    if v_tail <> '' then
+        -- Canonical digits only: `:01` or `:1x` name no generation.
+        if v_tail !~ '^[1-9][0-9]{0,8}$' then
+            return null;
+        end if;
+        v_epoch := v_tail::integer;
+    end if;
+    if v_epoch <> public.document_realtime_epoch (v_doc) then
+        return null;
+    end if;
+    return v_doc;
+end;
+$$;
+
+revoke all on function public.realtime_topic_document (text, text) from public;
+revoke all on function public.realtime_topic_document (text, text) from anon;
+revoke all on function public.realtime_topic_document (text, text) from authenticated;
+
+-- 20260801162310's and 20261007120101's topic resolvers, which the
+-- realtime.messages policies call: now the current generation only. The
+-- policies themselves are unchanged.
+create or replace function public.topic_document_role (topic text) returns text language plpgsql stable security definer
+set search_path = public as $$
+declare
+    doc uuid;
+begin
+    if topic not like 'doc:%' then
+        return null;
+    end if;
+    doc := public.realtime_topic_document (topic, 'doc');
+    if doc is null then
+        return null;
+    end if;
+    return public.document_role(doc);
+end;
+$$;
+
+create or replace function public.db_topic_document_role (topic text) returns text language plpgsql stable security definer
+set search_path = public as $$
+declare
+    doc uuid;
+begin
+    if topic not like 'doc-db:%' then
+        return null;
+    end if;
+    doc := public.realtime_topic_document (topic, 'doc-db');
+    if doc is null then
+        return null;
+    end if;
+    return public.document_role(doc);
+end;
+$$;
+
+grant execute on function public.topic_document_role (text) to authenticated;
+revoke all on function public.db_topic_document_role (text) from public;
+revoke all on function public.db_topic_document_role (text) from anon;
+grant execute on function public.db_topic_document_role (text) to authenticated;
+
+-- What the app asks before it joins: the score's generation, for a caller
+-- document_role() answers for, and null for anyone else (it says nothing a
+-- member cannot already see: it only counts takedowns).
+create or replace function public.realtime_topic_epoch (p_document uuid) returns integer language sql stable security definer
+set search_path = public as $$
+    select case
+        when public.document_role (p_document) is not null then public.document_realtime_epoch (p_document)
+    end;
+$$;
+
+revoke all on function public.realtime_topic_epoch (uuid) from public;
+revoke all on function public.realtime_topic_epoch (uuid) from anon;
+grant execute on function public.realtime_topic_epoch (uuid) to authenticated;
+
+-- Move a score to its next generation and tell everyone on the old topics.
+-- Internal: content_takedown_notify_viewers calls it.
+create or replace function public.rotate_document_realtime (p_document uuid) returns integer language plpgsql security definer
+set search_path = public as $$
+declare
+    v_old_live text := public.document_live_topic (p_document);
+    v_old_db text := public.document_db_topic (p_document);
+    v_epoch integer;
+begin
+    insert into public.document_realtime_epochs as e (document_id, epoch)
+    values (p_document, 1)
+    on conflict (document_id) do update set epoch = e.epoch + 1, rotated_at = now()
+    returning e.epoch into v_epoch;
+
+    -- A hint, on both old topics: doc-db:{id} because no client can forge it
+    -- there, doc:{id} because a device whose doc-db channel is down is still
+    -- on it. The app never trusts the payload; it re-reads the generation.
+    perform realtime.send (
+        jsonb_build_object('document_id', p_document),
+        'topic_rotated', -- event
+        v_old_db, -- topic
+        true -- private
+    );
+    perform realtime.send (
+        jsonb_build_object('document_id', p_document),
+        'topic_rotated', -- event
+        v_old_live, -- topic
+        true -- private
+    );
+    return v_epoch;
+end;
+$$;
+
+revoke all on function public.rotate_document_realtime (uuid) from public;
+revoke all on function public.rotate_document_realtime (uuid) from anon;
+revoke all on function public.rotate_document_realtime (uuid) from authenticated;
+
+-- A score with a live takedown from before this migration moves too: its
+-- shut-out members may still sit on generation 0, which the fan-out below
+-- would otherwise start sending to again.
+insert into public.document_realtime_epochs (document_id, epoch)
+select distinct ct.document_id, 1
+from public.content_takedowns ct
+where ct.lifted_at is null
+on conflict (document_id) do nothing;
+
+-- Whether a score has a live REMOVAL (nobody may see it, its owner included).
+-- Internal, like content_taken_down.
+create or replace function public.content_removed (doc uuid) returns boolean language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1 from public.content_takedowns ct
+        where ct.document_id = doc and ct.lifted_at is null and ct.action = 'remove'
+    );
+$$;
+
+revoke all on function public.content_removed (uuid) from public;
+revoke all on function public.content_removed (uuid) from anon;
+revoke all on function public.content_removed (uuid) from authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Takedown: hint, then rotate
+-- ---------------------------------------------------------------------------
+-- apply_content_takedown calls this. The membership hint goes out on the
+-- topic those members are on (the current one), then the score moves.
+create or replace function public.content_takedown_notify_viewers (p_document uuid, p_action text) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_user uuid;
+    v_topic text := public.document_live_topic (p_document);
+begin
+    for v_user in
+        select dm.user_id
+        from public.document_members dm
+        where dm.document_id = p_document
+          and (p_action = 'remove' or dm.role <> 'owner')
+    loop
+        perform realtime.send(
+            jsonb_build_object(
+                'table', 'document_members',
+                'document_id', p_document,
+                'user_id', v_user,
+                'role', null
+            ),
+            'membership', -- event
+            v_topic, -- topic
+            true -- private
+        );
+    end loop;
+    perform public.rotate_document_realtime (p_document);
+end;
+$$;
+
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from public;
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from anon;
+revoke all on function public.content_takedown_notify_viewers (uuid, text) from authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Fan-out: to the current generation
+-- ---------------------------------------------------------------------------
+-- A restricted score's changes go out again — to its owner's devices, the
+-- only clients its current topics admit. A removed one's still go nowhere.
+create or replace function public.broadcast_annotation_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.content_removed (new.document_id) then
+        return null;
+    end if;
+    perform realtime.broadcast_changes(
+        public.document_db_topic (new.document_id), -- doc-db:{id}[:{generation}] (receive-only for clients)
+        tg_op,                                      -- event name ('INSERT' | 'UPDATE')
+        tg_op,                                      -- operation
+        tg_table_name,
+        tg_table_schema,
+        new,
+        old
+    );
+    return null;
+end;
+$$;
+
+create or replace function public.broadcast_document_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.content_removed (new.id) then
+        return null;
+    end if;
+    perform realtime.broadcast_changes(
+        public.document_db_topic (new.id), -- doc-db:{id}[:{generation}] (receive-only for clients)
+        tg_op, tg_op, tg_table_name, tg_table_schema, new, old
+    );
+    return null;
+end;
+$$;
+
+create or replace function public.broadcast_score_analysis_changes () returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    if tg_op = 'UPDATE'
+       and old.status is not distinct from new.status
+       and old.progress is not distinct from new.progress then
+        return null;
+    end if;
+    if public.content_removed (new.document_id) then
+        return null;
+    end if;
+
+    perform realtime.send(
+        jsonb_build_object(
+            'table', 'score_analyses',
+            'document_id', new.document_id,
+            'status', new.status,
+            'error', new.error,
+            'progress', new.progress,
+            'updated_at', new.updated_at
+        ),
+        'score_analysis', -- event
+        public.document_db_topic (new.document_id), -- doc-db:{id}[:{generation}] (receive-only for clients)
+        true -- private
+    );
+    return null;
+end;
+$$;
+
+revoke all on function public.broadcast_annotation_changes () from public, anon, authenticated;
+revoke all on function public.broadcast_document_changes () from public, anon, authenticated;
+revoke all on function public.broadcast_score_analysis_changes () from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Membership hints: to the current generation
+-- ---------------------------------------------------------------------------
+-- 20261007120000's trigger, unchanged but for the topic: after a rotation the
+-- members are on doc:{id}:{n}, and a hint on doc:{id} would reach nobody.
+create or replace function public.broadcast_membership_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.document_members;
+begin
+    if tg_op = 'UPDATE' then
+        if old.role is not distinct from new.role then
+            return null;
+        end if;
+        v_row := new;
+    else
+        v_row := old;
+    end if;
+
+    perform realtime.send(
+        jsonb_build_object(
+            'table', 'document_members',
+            'document_id', v_row.document_id,
+            'user_id', v_row.user_id,
+            -- null: the membership is gone.
+            'role', case when tg_op = 'DELETE' then null else v_row.role end
+        ),
+        'membership', -- event
+        public.document_live_topic (v_row.document_id), -- topic
+        true -- private
+    );
+    return null;
+end;
+$$;
+
+revoke all on function public.broadcast_membership_changes () from public;
+revoke all on function public.broadcast_membership_changes () from anon;
+revoke all on function public.broadcast_membership_changes () from authenticated;
+
+-- 20261010120300's end_student_sessions, unchanged but for the hint's topic.
+create or replace function public.end_student_sessions (p_student uuid) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_ended int;
+    v_doc uuid;
+begin
+    if coalesce(auth.jwt () ->> 'role', '') <> 'service_role' then
+        raise exception 'service role only' using errcode = '42501';
+    end if;
+
+    if not exists (
+        select 1
+        from public.managed_students ms
+        where ms.student_user_id = p_student
+    ) then
+        raise exception 'not a roster student' using errcode = 'P0002';
+    end if;
+
+    -- Tokens first, by user: GoTrue's would cascade from their session, but one
+    -- from before sessions existed has none, and clearing them first does not
+    -- lean on the cascade at all.
+    delete from auth.refresh_tokens
+    where user_id = p_student::text;
+
+    delete from auth.sessions
+    where user_id = p_student;
+
+    get diagnostics v_ended = row_count;
+
+    -- The revocation itself: every access token issued before this moment is
+    -- refused from the next request on (student_access_revoked). The clock,
+    -- not now(), and after the deletes: a refresh that committed while they
+    -- waited on its token's lock minted an access token before this, not
+    -- after the transaction began.
+    update public.managed_students
+    set access_revoked_at = clock_timestamp()
+    where student_user_id = p_student;
+
+    -- The same hint document_members_broadcast sends when a membership ends,
+    -- and read the same way: the viewer re-reads its role over PostgREST, where
+    -- document_role() now answers null. `role` null because, for this caller,
+    -- the membership is as good as gone.
+    for v_doc in
+        select dm.document_id
+        from public.document_members dm
+        where dm.user_id = p_student
+    loop
+        perform realtime.send(
+            jsonb_build_object(
+                'table', 'document_members',
+                'document_id', v_doc,
+                'user_id', p_student,
+                'role', null
+            ),
+            'membership', -- event
+            public.document_live_topic (v_doc), -- topic
+            true -- private
+        );
+    end loop;
+
+    return v_ended;
+end;
+$$;
+
+revoke all on function public.end_student_sessions (uuid) from public;
+revoke all on function public.end_student_sessions (uuid) from anon;
+revoke all on function public.end_student_sessions (uuid) from authenticated;
+grant execute on function public.end_student_sessions (uuid) to service_role;
+
+-- ===== supabase/migrations/20261020160000_checkout_consents_and_self_service_cancel.sql =====
+-- Launch checkout compliance (launch packet items 14, 18, 19).
+--
+-- 1. checkout_consents -- the auto-renewal consent behind every purchase: who,
+--    which Checkout Session / subscription, the EXACT wording they ticked, the
+--    Terms and Refund Policy versions, when, the billing country and the IP.
+--    CA BPC §17602 / NY GBL §527-a want the consent provable; we keep it at
+--    least three years (see the delete guard below).
+--
+--    user_id is ON DELETE SET NULL, not CASCADE: deleting an account must not
+--    delete the proof that its owner agreed to be charged, which is the record
+--    we would need if a charge were ever disputed after the deletion. The row
+--    keeps the Stripe customer and subscription ids, which is enough to find the
+--    payment, and holds no email address.
+--
+-- 2. billing_cancel_tokens -- the signed-out cancel link (/cancel). Only a
+--    SHA-256 of the token is stored; the token itself exists only in the email.
+--
+-- 3. billing_notices -- one row per confirmation email sent, so a webhook
+--    redelivery (or two deliveries of different events about the same
+--    purchase) never mails the customer twice.
+--
+-- 4. billing_user_for_email() -- the cancel flow's lookup from an address to an
+--    account, service role only (the guest_email_taken pattern).
+--
+-- All three tables are service-role only: no client role can read or write
+-- them, and the Edge Functions are the only writers.
+
+-- ---------------------------------------------------------------------------
+-- checkout_consents
+-- ---------------------------------------------------------------------------
+create table public.checkout_consents (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid references auth.users (id) on delete set null,
+    mode text not null check (mode in ('live', 'test')),
+    stripe_customer_id text not null,
+    checkout_session_id text,
+    stripe_subscription_id text,
+    price_id text not null,
+    plan_slot text not null,
+    currency text not null check (currency in ('usd', 'eur', 'gbp')),
+    amount_minor integer not null check (amount_minor >= 0),
+    renewal_interval text not null check (renewal_interval in ('month', 'year')),
+    tax_inclusive boolean not null,
+    -- The sentence the checkbox stood for, byte for byte (billingTerms.ts
+    -- autoRenewalConsentText; stripe-checkout refuses a mismatch).
+    wording text not null check (length(wording) between 1 and 4000),
+    wording_version text not null,
+    terms_version text not null,
+    refund_policy_version text not null,
+    -- The country the buyer chose in the pricing dialog, which set the currency.
+    declared_country text not null check (declared_country ~ '^[A-Z]{2}$'),
+    -- The billing address country Stripe collected, filled in on completion.
+    billing_country text check (billing_country ~ '^[A-Z]{2}$'),
+    ip_address text,
+    user_agent text,
+    consented_at timestamptz not null default now(),
+    completed_at timestamptz
+);
+
+create index checkout_consents_user on public.checkout_consents (user_id);
+create index checkout_consents_session on public.checkout_consents (checkout_session_id);
+create index checkout_consents_subscription on public.checkout_consents (stripe_subscription_id);
+
+-- The retention floor, enforced rather than promised: a retention job written
+-- later (or a hand-run delete) cannot take a consent younger than three years.
+-- Retention past three years is a policy decision for later; nothing purges
+-- these today.
+create or replace function public.checkout_consents_refuse_early_delete () returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+    if old.consented_at > now() - interval '3 years' then
+        raise exception 'checkout consents are kept for at least three years' using errcode = '42501';
+    end if;
+    return old;
+end;
+$$;
+
+revoke all on function public.checkout_consents_refuse_early_delete () from public, anon, authenticated, service_role;
+
+create trigger checkout_consents_refuse_early_delete
+before delete on public.checkout_consents
+for each row execute function public.checkout_consents_refuse_early_delete ();
+
+alter table public.checkout_consents enable row level security;
+
+revoke all on table public.checkout_consents from public, anon, authenticated;
+grant select, insert, update, delete on table public.checkout_consents to service_role;
+
+-- ---------------------------------------------------------------------------
+-- billing_cancel_tokens
+-- ---------------------------------------------------------------------------
+create table public.billing_cancel_tokens (
+    token_hash text primary key check (token_hash ~ '^[0-9a-f]{64}$'),
+    user_id uuid not null references auth.users (id) on delete cascade,
+    mode text not null check (mode in ('live', 'test')),
+    created_at timestamptz not null default now(),
+    expires_at timestamptz not null,
+    used_at timestamptz
+);
+
+create index billing_cancel_tokens_user on public.billing_cancel_tokens (user_id);
+create index billing_cancel_tokens_expires on public.billing_cancel_tokens (expires_at);
+
+alter table public.billing_cancel_tokens enable row level security;
+
+revoke all on table public.billing_cancel_tokens from public, anon, authenticated;
+grant select, insert, update, delete on table public.billing_cancel_tokens to service_role;
+
+-- ---------------------------------------------------------------------------
+-- billing_notices
+-- ---------------------------------------------------------------------------
+create table public.billing_notices (
+    kind text not null check (kind in ('purchase_confirmation', 'cancellation_confirmation')),
+    -- The Checkout Session for a purchase; subscription id + cancel time for a cancellation.
+    stripe_object_id text not null,
+    created_at timestamptz not null default now(),
+    primary key (kind, stripe_object_id)
+);
+
+alter table public.billing_notices enable row level security;
+
+revoke all on table public.billing_notices from public, anon, authenticated;
+grant select, insert, update, delete on table public.billing_notices to service_role;
+
+-- ---------------------------------------------------------------------------
+-- billing_user_for_email
+-- ---------------------------------------------------------------------------
+-- The account an address belongs to, for the signed-out cancel flow. Anonymous
+-- (guest) accounts never match: they have no billing relationship. The caller
+-- answers every request identically whatever this returns, so it is not an
+-- account-existence oracle to the person typing the address.
+create or replace function public.billing_user_for_email (p_email text) returns uuid
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+    v_user uuid;
+begin
+    if coalesce(auth.role (), '') <> 'service_role' then
+        raise exception 'billing_user_for_email is for the service role only' using errcode = '42501';
+    end if;
+    if p_email is null or length(trim(p_email)) = 0 then
+        return null;
+    end if;
+    select u.id into v_user
+    from auth.users u
+    where lower(u.email) = lower(trim(p_email))
+      and coalesce(u.is_anonymous, false) = false
+    limit 1;
+    return v_user;
+end;
+$$;
+
+revoke all on function public.billing_user_for_email (text) from public, anon, authenticated;
+grant execute on function public.billing_user_for_email (text) to service_role;
+
+-- ===== supabase/migrations/20261020160100_checkout_attempt_replay_inputs.sql =====
+-- Replaying a dead checkout attempt's idempotency key with the SAME parameters
+-- (launch compliance fix pass, Codex finding 1 on #62).
+--
+-- Layer 4b of checkoutFlow.ts replays the key an attempt staged and then died
+-- holding, so Stripe answers with the session that attempt opened instead of
+-- making a second one. Stripe only replays a key for a request whose parameters
+-- are IDENTICAL to the first one; a replay with different parameters is refused
+-- with an idempotency error. The checkout consent added with #62 broke that:
+-- every request records a fresh `checkout_consents` row, its id goes into the
+-- session's metadata, so the replay carried a different `consent_id` from the
+-- request it was replaying and Stripe refused it.
+--
+-- So the attempt now stages what the replay has to reproduce, beside the key:
+--
+--   * `consent_id`  -- the consent the original request recorded, which the
+--                      replay reuses rather than recording another;
+--   * `params_hash` -- a SHA-256 of the session parameters (and the consent
+--                      wording) the original request sent. The replay rebuilds
+--                      its parameters and replays the key only if the hash
+--                      matches; anything else -- a changed origin, a reworded
+--                      submit message after a deploy -- mints a fresh key and
+--                      expires the orphan instead (layer 5).
+--
+-- Both are cleared whenever a session is recorded or the key is discarded:
+-- replay only ever applies to a staged key with no session.
+alter table public.checkout_attempts
+    add column if not exists consent_id uuid,
+    add column if not exists params_hash text;
+
+-- The answer gains the two columns, which is a new return type, so the function
+-- is dropped and recreated rather than replaced. Callers that read the four old
+-- columns by name are unaffected by the two new ones.
+drop function if exists public.begin_checkout_attempt (uuid, text, interval);
+
+create or replace function public.begin_checkout_attempt (p_user uuid, p_mode text, p_stale_after interval)
+returns table (
+    holder uuid,
+    attempt_id uuid,
+    price_id text,
+    session_id text,
+    consent_id uuid,
+    params_hash text
+)
+language plpgsql set search_path = public as $$
+declare
+    v_holder uuid := gen_random_uuid();
+    v_row public.checkout_attempts;
+begin
+    insert into public.checkout_attempts as c (user_id, mode, holder, claimed_at, updated_at)
+    values (p_user, p_mode, v_holder, now(), now())
+    on conflict (user_id, mode) do update
+    set holder = v_holder,
+        claimed_at = now(),
+        updated_at = now()
+    where c.holder is null
+       or c.claimed_at < now() - p_stale_after
+    returning * into v_row;
+
+    if not found then
+        return;
+    end if;
+
+    return query
+    select v_holder, v_row.attempt_id, v_row.price_id, v_row.session_id, v_row.consent_id, v_row.params_hash;
+end;
+$$;
+
+-- Staging takes the two new inputs. Defaulted, so a function deployed before
+-- this migration (five named arguments) still stages -- without them, which the
+-- flow reads as "not replayable" and answers with a fresh key.
+drop function if exists public.stage_checkout_attempt (uuid, text, uuid, uuid, text);
+
+create or replace function public.stage_checkout_attempt (
+    p_user uuid,
+    p_mode text,
+    p_holder uuid,
+    p_attempt_id uuid,
+    p_price_id text,
+    p_consent_id uuid default null,
+    p_params_hash text default null
+) returns boolean language plpgsql set search_path = public as $$
+begin
+    update public.checkout_attempts
+    set attempt_id = p_attempt_id,
+        price_id = p_price_id,
+        session_id = null,
+        consent_id = p_consent_id,
+        params_hash = p_params_hash,
+        updated_at = now()
+    where user_id = p_user and mode = p_mode and holder = p_holder;
+
+    return found;
+end;
+$$;
+
+-- Recording a session (or discarding the key) ends any chance of a replay, so
+-- the replay inputs go with it. Same signature, same lease scoping.
+create or replace function public.finish_checkout_attempt (
+    p_user uuid,
+    p_mode text,
+    p_holder uuid,
+    p_attempt_id uuid,
+    p_price_id text,
+    p_session_id text
+) returns boolean language plpgsql set search_path = public as $$
+begin
+    update public.checkout_attempts
+    set holder = null,
+        attempt_id = p_attempt_id,
+        price_id = p_price_id,
+        session_id = p_session_id,
+        consent_id = null,
+        params_hash = null,
+        updated_at = now()
+    where user_id = p_user and mode = p_mode and holder = p_holder;
+
+    return found;
+end;
+$$;
+
+revoke all on function public.begin_checkout_attempt (uuid, text, interval) from public, anon, authenticated;
+revoke all on function public.stage_checkout_attempt (uuid, text, uuid, uuid, text, uuid, text)
+from public, anon, authenticated;
+
+grant execute on function public.begin_checkout_attempt (uuid, text, interval) to service_role;
+grant execute on function public.stage_checkout_attempt (uuid, text, uuid, uuid, text, uuid, text) to service_role;
+
+-- ===== supabase/migrations/20261020160200_billing_mail_outbox.sql =====
+-- A durable outbox for billing mail (launch compliance fix pass, Codex findings
+-- 3 and 4 on #62).
+--
+-- Finding 3: the purchase and cancellation confirmations -- mail the law wants
+-- sent (CA BPC §17602(a)(3), the EU durable-medium confirmation) -- were sent
+-- inline from the webhook and their failure swallowed: a Resend error was a
+-- log line, the event was marked done, and Stripe's redelivery exited as a
+-- duplicate, so nothing ever tried again. An isolate dying after claiming a
+-- notice in `billing_notices` left a claim nobody would ever release.
+--
+-- Finding 4: the signed-out cancel form answered a subscriber differently from
+-- everyone else whenever the mail budget was spent or Resend failed (503 vs
+-- 200), which told anyone typing an address whether it subscribes.
+--
+-- Both are answered by writing the mail down FIRST and sending it after:
+--
+--   * the webhook enqueues the confirmation (idempotently, keyed on the Stripe
+--     object) in the same delivery that applies the purchase, and a failure to
+--     enqueue fails the event so Stripe redelivers it -- the event is never
+--     marked done with its mail unrecorded;
+--   * /cancel enqueues a request for EVERY well-formed address and answers the
+--     same thing for all of them; whether there is a subscription, a budget, or
+--     a working mail provider is decided later, by the worker, where nobody is
+--     waiting on the answer;
+--   * the worker (billing-mail-outbox, poked after each enqueue and by the cron
+--     below) claims due rows under an expiring lease, so a worker that dies
+--     mid-send leaves a row the next tick picks up, never a stuck claim, and
+--     retries with backoff until the mail goes out.
+--
+-- `billing_notices` (20261020160000) did the de-duplication half of this for
+-- the previous webhook, and the outbox's unique (kind, dedupe_key) replaces it
+-- for the new one. It is deliberately KEPT here (see the end of this file).
+--
+-- What a row holds: confirmations carry the user id and what the email says,
+-- never an address (it is read from auth.users at send time, so an address
+-- changed in between gets the mail). A cancel-link request carries the address
+-- that was typed, because that is the lookup it has yet to make; it is deleted
+-- as soon as it is handled, and the cron drops any that are a day old.
+
+create table public.billing_mail_outbox (
+    id uuid primary key default gen_random_uuid(),
+    kind text not null check (kind in ('purchase_confirmation', 'cancellation_confirmation', 'cancel_link')),
+    -- The Checkout Session for a purchase, subscription id + end for a
+    -- cancellation. Null for cancel-link requests, which are not de-duplicated
+    -- here (the worker's per-recipient limit does that).
+    dedupe_key text,
+    mode text not null check (mode in ('live', 'test')),
+    payload jsonb not null,
+    status text not null default 'pending' check (status in ('pending', 'sent')),
+    attempts integer not null default 0,
+    next_attempt_at timestamptz not null default now(),
+    -- The lease a worker holds while it sends. Expires on its own, which is what
+    -- makes a worker dying mid-send recoverable.
+    claim_token uuid,
+    claimed_until timestamptz,
+    last_error text,
+    created_at timestamptz not null default now(),
+    sent_at timestamptz,
+    check ((kind = 'cancel_link') = (dedupe_key is null))
+);
+
+create unique index billing_mail_outbox_dedupe on public.billing_mail_outbox (kind, dedupe_key)
+where dedupe_key is not null;
+
+create index billing_mail_outbox_due on public.billing_mail_outbox (next_attempt_at)
+where status = 'pending';
+
+alter table public.billing_mail_outbox enable row level security;
+
+revoke all on table public.billing_mail_outbox from public, anon, authenticated;
+grant select, insert, update, delete on table public.billing_mail_outbox to service_role;
+
+-- ---------------------------------------------------------------------------
+-- enqueue_billing_mail: write a mail down, once
+-- ---------------------------------------------------------------------------
+-- Idempotent on (kind, dedupe_key): a redelivered event enqueues nothing new,
+-- and answers with the row it already has. Raises rather than answering null on
+-- anything else, so the caller can fail the event instead of losing the mail.
+create or replace function public.enqueue_billing_mail (
+    p_kind text,
+    p_dedupe_key text,
+    p_mode text,
+    p_payload jsonb
+) returns uuid
+language plpgsql
+set search_path = ''
+as $$
+declare
+    v_id uuid;
+begin
+    insert into public.billing_mail_outbox (kind, dedupe_key, mode, payload)
+    values (p_kind, p_dedupe_key, p_mode, p_payload)
+    on conflict (kind, dedupe_key) where dedupe_key is not null do nothing
+    returning id into v_id;
+
+    if v_id is null then
+        select o.id into v_id
+        from public.billing_mail_outbox o
+        where o.kind = p_kind and o.dedupe_key = p_dedupe_key;
+    end if;
+    return v_id;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- claim_billing_mail: lease the rows that are due
+-- ---------------------------------------------------------------------------
+-- SKIP LOCKED so two workers (the poke after an enqueue and the cron tick)
+-- never take the same row; the lease (`claimed_until`) so a worker that dies
+-- holding a row only delays it.
+create or replace function public.claim_billing_mail (p_limit integer, p_lease interval)
+returns setof public.billing_mail_outbox
+language plpgsql
+set search_path = ''
+as $$
+begin
+    return query
+    update public.billing_mail_outbox o
+    set claim_token = gen_random_uuid(),
+        claimed_until = now() + p_lease,
+        attempts = o.attempts + 1
+    where o.id in (
+        select d.id
+        from public.billing_mail_outbox d
+        where d.status = 'pending'
+          and d.next_attempt_at <= now()
+          and (d.claimed_until is null or d.claimed_until < now())
+        order by d.next_attempt_at, d.created_at
+        limit greatest(p_limit, 0)
+        for update skip locked
+    )
+    returning o.*;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- settle_billing_mail: what became of a claimed row
+-- ---------------------------------------------------------------------------
+--   sent   -- a confirmation is kept (status sent) as the record that it went
+--             out and the key that stops a second one; a cancel-link request
+--             is deleted, address and all.
+--   retry  -- the lease goes, the row is due again after p_retry_after.
+--   done   -- handled with nothing to send (an address with no subscription, a
+--             recipient already sent a link): deleted.
+-- Scoped to the claim token, so a worker whose lease expired and was taken
+-- over cannot settle the row out from under the worker that holds it now.
+create or replace function public.settle_billing_mail (
+    p_id uuid,
+    p_claim uuid,
+    p_outcome text,
+    p_error text default null,
+    p_retry_after interval default null
+) returns boolean
+language plpgsql
+set search_path = ''
+as $$
+declare
+    v_kind text;
+begin
+    select o.kind into v_kind
+    from public.billing_mail_outbox o
+    where o.id = p_id and o.claim_token = p_claim
+    for update;
+    if not found then
+        return false;
+    end if;
+
+    if p_outcome = 'sent' and v_kind <> 'cancel_link' then
+        update public.billing_mail_outbox
+        set status = 'sent', sent_at = now(), claim_token = null, claimed_until = null, last_error = null
+        where id = p_id;
+    elsif p_outcome in ('sent', 'done') then
+        delete from public.billing_mail_outbox where id = p_id;
+    elsif p_outcome = 'retry' then
+        update public.billing_mail_outbox
+        set claim_token = null,
+            claimed_until = null,
+            last_error = left(p_error, 500),
+            next_attempt_at = now() + coalesce(p_retry_after, interval '1 minute')
+        where id = p_id;
+    else
+        raise exception 'unknown outcome %', p_outcome using errcode = '22023';
+    end if;
+    return true;
+end;
+$$;
+
+revoke all on function public.enqueue_billing_mail (text, text, text, jsonb) from public, anon, authenticated;
+revoke all on function public.claim_billing_mail (integer, interval) from public, anon, authenticated;
+revoke all on function public.settle_billing_mail (uuid, uuid, text, text, interval) from public, anon, authenticated;
+grant execute on function public.enqueue_billing_mail (text, text, text, jsonb) to service_role;
+grant execute on function public.claim_billing_mail (integer, interval) to service_role;
+grant execute on function public.settle_billing_mail (uuid, uuid, text, text, interval) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The cron tick: housekeeping, then poke the worker if anything is due
+-- ---------------------------------------------------------------------------
+-- The worker is also poked straight after every enqueue (EdgeRuntime.waitUntil
+-- in the functions that enqueue), so this is the retry path: backoff, a budget
+-- window reopening, Resend coming back. Vault secrets billing_outbox_url /
+-- billing_outbox_secret are created out of band (DEPLOY.md); without them the
+-- tick only does its housekeeping, as imslp_sync_tick does.
+create or replace function public.billing_mail_outbox_tick ()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+    v_url text;
+    v_secret text;
+begin
+    -- A sent confirmation is only needed as a de-duplication key while Stripe
+    -- may still redeliver its event (three days); 30 is generous.
+    delete from public.billing_mail_outbox
+    where status = 'sent' and sent_at < now() - interval '30 days';
+    -- A cancel link asked for a day ago is not one anybody is still waiting
+    -- for, and the row holds an address.
+    delete from public.billing_mail_outbox
+    where kind = 'cancel_link' and created_at < now() - interval '1 day';
+
+    if not exists (
+        select 1 from public.billing_mail_outbox
+        where status = 'pending' and next_attempt_at <= now()
+          and (claimed_until is null or claimed_until < now())
+    ) then
+        return;
+    end if;
+
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'billing_outbox_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'billing_outbox_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'billing_mail_outbox_tick: vault secrets billing_outbox_url/billing_outbox_secret missing — skip';
+        return;
+    end if;
+
+    perform net.http_post(
+        url := rtrim(v_url, '/'),
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-billing-outbox-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 5000
+    );
+end;
+$$;
+
+revoke all on function public.billing_mail_outbox_tick () from public, anon, authenticated;
+grant execute on function public.billing_mail_outbox_tick () to service_role;
+
+do $$
+begin
+    perform cron.unschedule (jobid)
+    from cron.job
+    where jobname = 'billing-mail-outbox';
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('billing-mail-outbox', '* * * * *', $$select public.billing_mail_outbox_tick ()$$);
+
+-- ---------------------------------------------------------------------------
+-- billing_notices: kept until the previous webhook has drained
+-- ---------------------------------------------------------------------------
+-- NOT dropped here (Codex round 2, finding 2 on #62). The rollout applies
+-- migrations before it deploys functions, so for a while the PREVIOUS
+-- stripe-webhook runs against this schema. That webhook claims each
+-- confirmation by inserting into billing_notices and sends it inline; had
+-- this migration dropped the table, every such insert would fail, the old
+-- code's best-effort wrapper would swallow it and acknowledge the event, and
+-- the confirmation would reach neither the old path nor this outbox. With the
+-- table kept, the old webhook keeps confirming exactly as it did until the
+-- new one replaces it, and the new one never touches the table.
+--
+-- Removing it is a LATER migration, written and applied only after the new
+-- stripe-webhook is live and Stripe's retry window for events the old one
+-- handled (three days) has passed -- SETUP_SUPABASE.md, "Billing mail rollout".
+
+-- ===== supabase/migrations/20261020160300_cancel_link_token_lifetime.sql =====
+-- A cancel link's lifetime is fixed once, when it is asked for (Codex round 4
+-- on #62, the cancel-link token lifecycle).
+--
+-- The link's token is derived from its billing_mail_outbox row (HMAC of the
+-- row id, billingCancelStore.ts cancelLinkToken), so every retry of the row
+-- mails the same link. Until now every retry also saved that token again with
+-- a FRESH expiry -- an upsert on token_hash that set expires_at to "an hour
+-- from this send". Two retries racing kept whichever wrote last, and a retry
+-- that came after the link had expired, unused, made the same link valid
+-- again for another hour. Worse (Codex's round-4 major): when Resend took a
+-- link but the answer was lost, the customer used it, and the row was still
+-- retrying a day later, the store's cleanup deleted the spent token -- and the
+-- next retry's upsert re-created the SAME token unused, so the spent emailed
+-- link worked again.
+--
+-- Now:
+--
+--   * the expiry is computed once, when the request is written down, and kept
+--     on the outbox row (`link_expires_at`, an hour after `created_at`); it is
+--     never moved later;
+--   * the token is saved only through save_cancel_link_token, by the worker
+--     holding the row's lease, with the row's expiry, and INSERT ... ON
+--     CONFLICT (token_hash) DO NOTHING -- the first save wins, and no retry
+--     rewrites expires_at or used_at;
+--   * a token's expires_at, too, can never be moved later;
+--   * nothing is sent once the expiry has passed: the row is settled
+--     `expired` ("expired before delivery"), keeping no address, and never
+--     claimed again -- an expired link is never emailed;
+--   * a token can never come back. It is only ever inserted for a cancel-link
+--     row still waiting to send, before that row's expiry, with that expiry;
+--     an existing one is never reset (used_at is never cleared); and it is
+--     deleted only once it has expired AND its row can no longer retry (sent,
+--     expired, given up or gone) -- or with its account. A row settled for
+--     good never goes back to pending. So once a token could be gone, nothing
+--     can insert it again: the database refuses it, not just the code.
+--
+-- tests/sql/cancel_link_lifetime.sql proves it, two sessions at once included.
+--
+-- Safe to re-run: every column, index and constraint is guarded, every
+-- function is CREATE OR REPLACE, every trigger is dropped before it is made.
+
+-- ---------------------------------------------------------------------------
+-- billing_mail_outbox.link_expires_at: when a cancel link stops working
+-- ---------------------------------------------------------------------------
+alter table public.billing_mail_outbox add column if not exists link_expires_at timestamptz;
+
+drop trigger if exists billing_mail_outbox_link_lifetime on public.billing_mail_outbox;
+
+-- A request written down before this migration gets the hour it was asked
+-- for, from when it was asked -- not from whenever it is next tried.
+update public.billing_mail_outbox
+set link_expires_at = created_at + interval '1 hour'
+where kind = 'cancel_link' and link_expires_at is null;
+
+alter table public.billing_mail_outbox drop constraint if exists billing_mail_outbox_link_expiry;
+alter table public.billing_mail_outbox
+add constraint billing_mail_outbox_link_expiry check ((kind = 'cancel_link') = (link_expires_at is not null));
+
+-- Set on insert from created_at, whatever the insert says (an hour: cancelFlow.ts
+-- CANCEL_LINK_TTL_MS); afterwards it may only be brought forward, which can
+-- only ever make a link invalid sooner. And a row settled for good (`sent` or
+-- `expired`) is never made pending again, so it is never retried and never
+-- saves its token again.
+create or replace function public.billing_mail_outbox_link_lifetime ()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+    if tg_op = 'INSERT' then
+        new.link_expires_at := case when new.kind = 'cancel_link' then new.created_at + interval '1 hour' end;
+        return new;
+    end if;
+    if new.link_expires_at is distinct from old.link_expires_at
+       and (old.link_expires_at is null or new.link_expires_at is null or new.link_expires_at > old.link_expires_at) then
+        raise exception 'a cancel link''s expiry is set once, when it is asked for'
+            using errcode = '55000';
+    end if;
+    if old.status <> 'pending' and new.status = 'pending' then
+        raise exception 'a billing mail settled for good is never retried'
+            using errcode = '55000';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.billing_mail_outbox_link_lifetime () from public, anon, authenticated, service_role;
+
+create trigger billing_mail_outbox_link_lifetime
+before insert or update on public.billing_mail_outbox
+for each row execute function public.billing_mail_outbox_link_lifetime ();
+
+-- `expired`: a cancel link whose hour ran out before it could be sent. Kept,
+-- without its address, as the record of why nothing went; the tick drops it
+-- with the other day-old cancel-link rows.
+alter table public.billing_mail_outbox drop constraint if exists billing_mail_outbox_status_check;
+alter table public.billing_mail_outbox
+add constraint billing_mail_outbox_status_check check (status in ('pending', 'sent', 'expired'));
+
+-- ---------------------------------------------------------------------------
+-- billing_cancel_tokens.outbox_id: which request a token was mailed for
+-- ---------------------------------------------------------------------------
+alter table public.billing_cancel_tokens add column if not exists outbox_id uuid;
+
+create index if not exists billing_cancel_tokens_outbox on public.billing_cancel_tokens (outbox_id);
+
+drop trigger if exists billing_cancel_tokens_lifetime on public.billing_cancel_tokens;
+
+-- The token table's own guard, whoever writes to it (the save function, the
+-- cancel page spending a link, the tick, an operator):
+--
+--   INSERT -- only for a cancel-link row still waiting to send, before its
+--             expiry; the token takes that expiry, whatever the insert says.
+--   UPDATE -- the link, account, mode and row never change, the expiry only
+--             comes sooner, and used_at, once set, stays set.
+--   DELETE -- only once the token has expired and its row can no longer retry
+--             (it is gone, or settled for good), or once its account is gone
+--             (the cascade from auth.users).
+--
+-- Together: a token that may be gone is past its row's fixed expiry, or its
+-- row cannot retry, and either refuses a new insert -- so a spent link is
+-- never re-created unused. SECURITY DEFINER for the auth.users read only.
+create or replace function public.billing_cancel_tokens_lifetime ()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    v_status text;
+    v_kind text;
+    v_expires timestamptz;
+begin
+    if tg_op = 'INSERT' then
+        select o.status, o.kind, o.link_expires_at into v_status, v_kind, v_expires
+        from public.billing_mail_outbox o
+        where o.id = new.outbox_id;
+        if new.outbox_id is null or v_kind is distinct from 'cancel_link' or v_status is distinct from 'pending'
+           or v_expires <= now() then
+            raise exception 'a cancel link is only saved for its own request, while it waits to send and before it expires'
+                using errcode = '55000';
+        end if;
+        new.expires_at := v_expires;
+        return new;
+    end if;
+
+    if tg_op = 'UPDATE' then
+        if new.token_hash <> old.token_hash
+           or new.user_id <> old.user_id
+           or new.mode <> old.mode
+           or new.outbox_id is distinct from old.outbox_id
+           or new.expires_at > old.expires_at then
+            raise exception 'a saved cancel link keeps its expiry and what it cancels'
+                using errcode = '55000';
+        end if;
+        if old.used_at is not null and new.used_at is distinct from old.used_at then
+            raise exception 'a spent cancel link stays spent'
+                using errcode = '55000';
+        end if;
+        return new;
+    end if;
+
+    -- DELETE
+    if exists (select 1 from auth.users u where u.id = old.user_id)
+       and (old.expires_at > now()
+            or exists (select 1 from public.billing_mail_outbox o where o.id = old.outbox_id and o.status = 'pending')) then
+        raise exception 'a cancel link is kept until it has expired and its request can no longer be retried'
+            using errcode = '55000';
+    end if;
+    return old;
+end;
+$$;
+
+revoke all on function public.billing_cancel_tokens_lifetime () from public, anon, authenticated, service_role;
+
+create trigger billing_cancel_tokens_lifetime
+before insert or update or delete on public.billing_cancel_tokens
+for each row execute function public.billing_cancel_tokens_lifetime ();
+
+-- ---------------------------------------------------------------------------
+-- save_cancel_link_token: the one way a cancel link is saved
+-- ---------------------------------------------------------------------------
+-- Answers:
+--   saved    -- the token is stored (now, or by an earlier attempt at this row,
+--               whose expiry and used_at are left exactly as they were);
+--   expired  -- the row's expiry has passed: nothing is saved, and the caller
+--               must not send but settle the row `expired`;
+--   not_held -- the caller does not hold this row's lease (another worker took
+--               it over, or the row was settled): it must not send.
+-- The row is locked FOR UPDATE, so two saves of one row run one after the
+-- other, and its expiry -- not the caller's clock -- is the token's.
+create or replace function public.save_cancel_link_token (
+    p_outbox_id uuid,
+    p_claim uuid,
+    p_hash text,
+    p_user uuid
+) returns text
+language plpgsql
+set search_path = ''
+as $$
+declare
+    v_mode text;
+    v_expires timestamptz;
+begin
+    select o.mode, o.link_expires_at into v_mode, v_expires
+    from public.billing_mail_outbox o
+    where o.id = p_outbox_id
+      and o.claim_token = p_claim
+      and o.kind = 'cancel_link'
+      and o.status = 'pending'
+    for update;
+    if not found then
+        return 'not_held';
+    end if;
+    if v_expires <= now() then
+        return 'expired';
+    end if;
+
+    insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
+    values (p_hash, p_user, v_mode, v_expires, p_outbox_id)
+    on conflict (token_hash) do nothing;
+    return 'saved';
+end;
+$$;
+
+revoke all on function public.save_cancel_link_token (uuid, uuid, text, uuid) from public, anon, authenticated;
+grant execute on function public.save_cancel_link_token (uuid, uuid, text, uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- settle_billing_mail: and `expired`
+-- ---------------------------------------------------------------------------
+-- As 20261020160200 defines it, plus `expired` for a cancel link whose hour ran
+-- out before it was sent: settled for good -- lease cleared, the address taken
+-- out of the payload, the reason kept -- and, no longer pending, never claimed
+-- again.
+create or replace function public.settle_billing_mail (
+    p_id uuid,
+    p_claim uuid,
+    p_outcome text,
+    p_error text default null,
+    p_retry_after interval default null
+) returns boolean
+language plpgsql
+set search_path = ''
+as $$
+declare
+    v_kind text;
+begin
+    select o.kind into v_kind
+    from public.billing_mail_outbox o
+    where o.id = p_id and o.claim_token = p_claim
+    for update;
+    if not found then
+        return false;
+    end if;
+
+    if p_outcome = 'sent' and v_kind <> 'cancel_link' then
+        update public.billing_mail_outbox
+        set status = 'sent', sent_at = now(), claim_token = null, claimed_until = null, last_error = null
+        where id = p_id;
+    elsif p_outcome in ('sent', 'done') then
+        delete from public.billing_mail_outbox where id = p_id;
+    elsif p_outcome = 'retry' then
+        update public.billing_mail_outbox
+        set claim_token = null,
+            claimed_until = null,
+            last_error = left(p_error, 500),
+            next_attempt_at = now() + coalesce(p_retry_after, interval '1 minute')
+        where id = p_id;
+    elsif p_outcome = 'expired' and v_kind = 'cancel_link' then
+        update public.billing_mail_outbox
+        set status = 'expired',
+            claim_token = null,
+            claimed_until = null,
+            last_error = left(coalesce(p_error, 'expired before delivery'), 500),
+            payload = payload - 'email'
+        where id = p_id;
+    else
+        raise exception 'unknown outcome % for %', p_outcome, v_kind using errcode = '22023';
+    end if;
+    return true;
+end;
+$$;
+
+revoke all on function public.settle_billing_mail (uuid, uuid, text, text, interval) from public, anon, authenticated;
+grant execute on function public.settle_billing_mail (uuid, uuid, text, text, interval) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The cron tick: and the cancel links nothing can use any more
+-- ---------------------------------------------------------------------------
+-- As 20261020160200 defines it, plus the token cleanup that used to run in
+-- billingCancelStore.ts saveToken -- which deleted a spent token while its row
+-- was still retrying, the gap the round-4 major went through. A token goes
+-- only once it has expired and its row can no longer retry (the trigger above
+-- holds every other delete to the same rule).
+create or replace function public.billing_mail_outbox_tick ()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+    v_url text;
+    v_secret text;
+begin
+    -- A sent confirmation is only needed as a de-duplication key while Stripe
+    -- may still redeliver its event (three days); 30 is generous.
+    delete from public.billing_mail_outbox
+    where status = 'sent' and sent_at < now() - interval '30 days';
+    -- A cancel link asked for a day ago is not one anybody is still waiting
+    -- for, and the row holds an address. (Its hour ran out long before.)
+    delete from public.billing_mail_outbox
+    where kind = 'cancel_link' and created_at < now() - interval '1 day';
+    -- Expired cancel links whose request can no longer be retried.
+    delete from public.billing_cancel_tokens t
+    where t.expires_at <= now()
+      and not exists (
+          select 1 from public.billing_mail_outbox o where o.id = t.outbox_id and o.status = 'pending'
+      );
+
+    if not exists (
+        select 1 from public.billing_mail_outbox
+        where status = 'pending' and next_attempt_at <= now()
+          and (claimed_until is null or claimed_until < now())
+    ) then
+        return;
+    end if;
+
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'billing_outbox_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'billing_outbox_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'billing_mail_outbox_tick: vault secrets billing_outbox_url/billing_outbox_secret missing — skip';
+        return;
+    end if;
+
+    perform net.http_post(
+        url := rtrim(v_url, '/'),
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-billing-outbox-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 5000
+    );
+end;
+$$;
+
+revoke all on function public.billing_mail_outbox_tick () from public, anon, authenticated;
+grant execute on function public.billing_mail_outbox_tick () to service_role;
+
+-- ===== supabase/migrations/20261020160400_cancel_link_tombstones_db_clock.sql =====
+-- A spent cancel link never comes back, and whether a link can still be sent
+-- is the database's call, on its own clock (Codex round 5 on #62, new majors
+-- 1 and 2; decisions 29 and 30).
+--
+-- Major 1. 20261020160300 stops a retry reviving a spent link, but once the
+-- cleanup has deleted a token nothing remembered it: the service role could
+-- insert the same hash, unused, against any fresh pending cancel-link row
+-- (the token trigger checked the row, not the hash's history), and a request
+-- re-created under the deleted row's id recreated the same HMAC token
+-- (billingCancelStore.ts cancelLinkToken) through the ordinary save. Now:
+--
+--   * every deleted token leaves a permanent tombstone -- its hash and its
+--     outbox id, and when, nothing else: no user, no address, no mode
+--     (`billing_cancel_token_tombstones`). The cron tick's cleanup writes it in
+--     the statement that deletes the token, and a trigger writes it for every
+--     other delete (an account's, an operator's);
+--   * a token whose hash or outbox id is tombstoned is refused on INSERT by a
+--     trigger, whoever inserts it, the table's owner included;
+--   * save_cancel_link_token refuses a tombstoned hash or outbox id before it
+--     gets that far, and settles the row for good (`expired`, "cancel link
+--     already spent or removed") instead of leaving it to retry; a settled
+--     row is never pending again (20261020160300), so it is refused too;
+--   * the service role may no longer INSERT tokens at all (or TRUNCATE them,
+--     which would skip the tombstones): save_cancel_link_token, now SECURITY
+--     DEFINER, is the one way in. It keeps SELECT, UPDATE (billing-cancel
+--     spends a link) and DELETE (each delete is tombstoned);
+--   * nobody may update, delete or truncate a tombstone. Only the SECURITY
+--     DEFINER functions below write them; the service role may read them.
+--
+-- Major 2. save_cancel_link_token compared the expiry with now() -- the time
+-- its transaction STARTED. A save that began before the expiry and waited on
+-- the row's lock until after it still passed, and the edge function's own
+-- final check, on its own clock, could pass too. Now the save reads
+-- clock_timestamp() after it holds the row's lock, refuses -- and settles the
+-- row `expired`, without its address -- with less than 120 seconds left, and
+-- answers how many seconds are left on that clock. cancelFlow.ts sends on
+-- that answer alone (CANCEL_LINK_SEND_MARGIN_S), never on its own clock. The
+-- token trigger's expiry check reads clock_timestamp() too.
+--
+-- save_cancel_link_token now answers jsonb {answer, remaining_seconds}, so it
+-- is dropped and recreated: a function's result type cannot be replaced. The
+-- edge function that reads it ships in the same PR; until it is deployed the
+-- previous one reads an answer it does not know, throws, and retries the row
+-- -- it never sends on it.
+--
+-- tests/sql/cancel_link_tombstones.sql and tests/sql/cancel_link_db_clock.sql
+-- prove it, the latter with a second session holding the row's lock.
+--
+-- Safe to re-run: the table and index are IF NOT EXISTS, every trigger is
+-- dropped before it is made, every function is CREATE OR REPLACE (the save
+-- dropped first, IF EXISTS), and grants and revokes are idempotent.
+
+-- ---------------------------------------------------------------------------
+-- billing_cancel_token_tombstones: every cancel link that was ever deleted
+-- ---------------------------------------------------------------------------
+create table if not exists public.billing_cancel_token_tombstones (
+    token_hash text primary key,
+    -- Null only for a token saved before 20261020160300 gave tokens a row.
+    outbox_id uuid,
+    deleted_at timestamptz not null default now()
+);
+
+create index if not exists billing_cancel_token_tombstones_outbox on public.billing_cancel_token_tombstones (outbox_id)
+where outbox_id is not null;
+
+alter table public.billing_cancel_token_tombstones enable row level security;
+
+revoke all on table public.billing_cancel_token_tombstones from public, anon, authenticated, service_role;
+grant select on table public.billing_cancel_token_tombstones to service_role;
+
+-- What is kept is kept: no update, delete or truncate, by anyone -- and for
+-- billing_cancel_tokens, no truncate, which would delete tokens without
+-- leaving their tombstones.
+create or replace function public.billing_cancel_link_history_kept ()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+    if tg_table_name = 'billing_cancel_token_tombstones' then
+        raise exception 'a cancel link''s tombstone is permanent'
+            using errcode = '55000';
+    end if;
+    raise exception 'cancel links are deleted one at a time, so each leaves its tombstone'
+        using errcode = '55000';
+end;
+$$;
+
+revoke all on function public.billing_cancel_link_history_kept () from public, anon, authenticated, service_role;
+
+drop trigger if exists billing_cancel_token_tombstones_permanent on public.billing_cancel_token_tombstones;
+create trigger billing_cancel_token_tombstones_permanent
+before update or delete on public.billing_cancel_token_tombstones
+for each row execute function public.billing_cancel_link_history_kept ();
+
+drop trigger if exists billing_cancel_token_tombstones_no_truncate on public.billing_cancel_token_tombstones;
+create trigger billing_cancel_token_tombstones_no_truncate
+before truncate on public.billing_cancel_token_tombstones
+for each statement execute function public.billing_cancel_link_history_kept ();
+
+drop trigger if exists billing_cancel_tokens_no_truncate on public.billing_cancel_tokens;
+create trigger billing_cancel_tokens_no_truncate
+before truncate on public.billing_cancel_tokens
+for each statement execute function public.billing_cancel_link_history_kept ();
+
+-- ---------------------------------------------------------------------------
+-- billing_cancel_tokens: tombstoned on delete, refused on insert
+-- ---------------------------------------------------------------------------
+-- Every delete, whoever makes it -- the tick (which writes the tombstone
+-- itself as well), an account's cascade, an operator. SECURITY DEFINER: none
+-- of them may write the tombstone table themselves.
+create or replace function public.billing_cancel_tokens_tombstone ()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    insert into public.billing_cancel_token_tombstones (token_hash, outbox_id)
+    values (old.token_hash, old.outbox_id)
+    on conflict (token_hash) do nothing;
+    return old;
+end;
+$$;
+
+revoke all on function public.billing_cancel_tokens_tombstone () from public, anon, authenticated, service_role;
+
+drop trigger if exists billing_cancel_tokens_tombstone on public.billing_cancel_tokens;
+create trigger billing_cancel_tokens_tombstone
+after delete on public.billing_cancel_tokens
+for each row execute function public.billing_cancel_tokens_tombstone ();
+
+-- A deleted link's hash, or any token for a deleted link's request, never goes
+-- in again: not through the save, not by the service role (which may not
+-- insert at all), not by the table's owner. SECURITY DEFINER to read the
+-- tombstones, which the inserting role may not.
+create or replace function public.billing_cancel_tokens_not_tombstoned ()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    if exists (
+        select 1 from public.billing_cancel_token_tombstones t
+        where t.token_hash = new.token_hash
+           or (new.outbox_id is not null and t.outbox_id = new.outbox_id)
+    ) then
+        raise exception 'a cancel link that was spent or removed never comes back'
+            using errcode = '55000';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.billing_cancel_tokens_not_tombstoned () from public, anon, authenticated, service_role;
+
+drop trigger if exists billing_cancel_tokens_not_tombstoned on public.billing_cancel_tokens;
+create trigger billing_cancel_tokens_not_tombstoned
+before insert on public.billing_cancel_tokens
+for each row execute function public.billing_cancel_tokens_not_tombstoned ();
+
+-- The token table's own guard, as 20261020160300 defines it, with the
+-- insert's expiry check on the real clock rather than the transaction's.
+create or replace function public.billing_cancel_tokens_lifetime ()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    v_status text;
+    v_kind text;
+    v_expires timestamptz;
+begin
+    if tg_op = 'INSERT' then
+        select o.status, o.kind, o.link_expires_at into v_status, v_kind, v_expires
+        from public.billing_mail_outbox o
+        where o.id = new.outbox_id;
+        if new.outbox_id is null or v_kind is distinct from 'cancel_link' or v_status is distinct from 'pending'
+           or v_expires <= clock_timestamp() then
+            raise exception 'a cancel link is only saved for its own request, while it waits to send and before it expires'
+                using errcode = '55000';
+        end if;
+        new.expires_at := v_expires;
+        return new;
+    end if;
+
+    if tg_op = 'UPDATE' then
+        if new.token_hash <> old.token_hash
+           or new.user_id <> old.user_id
+           or new.mode <> old.mode
+           or new.outbox_id is distinct from old.outbox_id
+           or new.expires_at > old.expires_at then
+            raise exception 'a saved cancel link keeps its expiry and what it cancels'
+                using errcode = '55000';
+        end if;
+        if old.used_at is not null and new.used_at is distinct from old.used_at then
+            raise exception 'a spent cancel link stays spent'
+                using errcode = '55000';
+        end if;
+        return new;
+    end if;
+
+    -- DELETE
+    if exists (select 1 from auth.users u where u.id = old.user_id)
+       and (old.expires_at > now()
+            or exists (select 1 from public.billing_mail_outbox o where o.id = old.outbox_id and o.status = 'pending')) then
+        raise exception 'a cancel link is kept until it has expired and its request can no longer be retried'
+            using errcode = '55000';
+    end if;
+    return old;
+end;
+$$;
+
+revoke all on function public.billing_cancel_tokens_lifetime () from public, anon, authenticated, service_role;
+
+-- All writes of a new token go through save_cancel_link_token.
+revoke insert, truncate on table public.billing_cancel_tokens from public, anon, authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- save_cancel_link_token: on the database's clock, after the lock
+-- ---------------------------------------------------------------------------
+-- Answers {"answer": ..., "remaining_seconds": n}:
+--   saved    -- the token is stored (now, or by an earlier attempt at this row,
+--               whose expiry and used_at are left exactly as they were), with
+--               n >= 120 seconds left: the caller may send, and only then;
+--   expired  -- fewer than 120 seconds are left (n, at most 119, never below
+--               0): nothing is saved, the row is settled `expired` without its
+--               address, and the caller must not send;
+--   spent    -- this link (its hash) or its request (the row id) was deleted
+--               before: nothing is saved, the row is settled `expired`, and
+--               the caller must not send;
+--   not_held -- the caller does not hold this row's lease (another worker took
+--               it over, or the row was settled): it must not send.
+-- The row is locked FOR UPDATE first, so two saves of one row run one after
+-- the other, and the clock is read only once the lock is held: however long
+-- the wait, the time left is the time left now. A row settled here keeps its
+-- lease, so the worker holding it records the outcome as it would have.
+-- SECURITY DEFINER: the service role no longer inserts tokens itself.
+drop function if exists public.save_cancel_link_token (uuid, uuid, text, uuid);
+
+create or replace function public.save_cancel_link_token (
+    p_outbox_id uuid,
+    p_claim uuid,
+    p_hash text,
+    p_user uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    v_mode text;
+    v_expires timestamptz;
+    v_left integer;
+begin
+    select o.mode, o.link_expires_at into v_mode, v_expires
+    from public.billing_mail_outbox o
+    where o.id = p_outbox_id
+      and o.claim_token = p_claim
+      and o.kind = 'cancel_link'
+      and o.status = 'pending'
+    for update;
+    if not found then
+        return jsonb_build_object('answer', 'not_held', 'remaining_seconds', 0);
+    end if;
+
+    if exists (
+        select 1 from public.billing_cancel_token_tombstones t
+        where t.token_hash = p_hash or t.outbox_id = p_outbox_id
+    ) then
+        update public.billing_mail_outbox
+        set status = 'expired', last_error = 'cancel link already spent or removed', payload = payload - 'email'
+        where id = p_outbox_id;
+        return jsonb_build_object('answer', 'spent', 'remaining_seconds', 0);
+    end if;
+
+    -- A token an earlier attempt saved may have had its expiry brought
+    -- forward since; the sooner of the two is the one that counts.
+    v_expires := least(v_expires, (select t.expires_at from public.billing_cancel_tokens t where t.token_hash = p_hash));
+    if v_expires is null
+       or v_expires - clock_timestamp() < interval '120 seconds' then
+        v_left := greatest(0, coalesce(floor(extract(epoch from v_expires - clock_timestamp()))::integer, 0));
+        update public.billing_mail_outbox
+        set status = 'expired', last_error = 'expired before delivery', payload = payload - 'email'
+        where id = p_outbox_id;
+        return jsonb_build_object('answer', 'expired', 'remaining_seconds', v_left);
+    end if;
+    v_left := floor(extract(epoch from v_expires - clock_timestamp()))::integer;
+
+    insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
+    values (p_hash, p_user, v_mode, v_expires, p_outbox_id)
+    on conflict (token_hash) do nothing;
+    return jsonb_build_object('answer', 'saved', 'remaining_seconds', v_left);
+end;
+$$;
+
+revoke all on function public.save_cancel_link_token (uuid, uuid, text, uuid) from public, anon, authenticated;
+grant execute on function public.save_cancel_link_token (uuid, uuid, text, uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The cron tick: and the tombstone, in the statement that deletes the token
+-- ---------------------------------------------------------------------------
+-- As 20261020160300 defines it; the cleanup now writes each deleted token's
+-- tombstone in the same statement (the delete trigger would too -- whichever
+-- lands first, the other does nothing). A tombstone that cannot be written
+-- fails the delete with it.
+create or replace function public.billing_mail_outbox_tick ()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+    v_url text;
+    v_secret text;
+begin
+    -- A sent confirmation is only needed as a de-duplication key while Stripe
+    -- may still redeliver its event (three days); 30 is generous.
+    delete from public.billing_mail_outbox
+    where status = 'sent' and sent_at < now() - interval '30 days';
+    -- A cancel link asked for a day ago is not one anybody is still waiting
+    -- for, and the row holds an address. (Its hour ran out long before.)
+    delete from public.billing_mail_outbox
+    where kind = 'cancel_link' and created_at < now() - interval '1 day';
+    -- Expired cancel links whose request can no longer be retried, each
+    -- leaving its tombstone.
+    with gone as (
+        delete from public.billing_cancel_tokens t
+        where t.expires_at <= now()
+          and not exists (
+              select 1 from public.billing_mail_outbox o where o.id = t.outbox_id and o.status = 'pending'
+          )
+        returning t.token_hash, t.outbox_id
+    )
+    insert into public.billing_cancel_token_tombstones (token_hash, outbox_id)
+    select gone.token_hash, gone.outbox_id from gone
+    on conflict (token_hash) do nothing;
+
+    if not exists (
+        select 1 from public.billing_mail_outbox
+        where status = 'pending' and next_attempt_at <= now()
+          and (claimed_until is null or claimed_until < now())
+    ) then
+        return;
+    end if;
+
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'billing_outbox_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'billing_outbox_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'billing_mail_outbox_tick: vault secrets billing_outbox_url/billing_outbox_secret missing — skip';
+        return;
+    end if;
+
+    perform net.http_post(
+        url := rtrim(v_url, '/'),
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-billing-outbox-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 5000
+    );
+end;
+$$;
+
+revoke all on function public.billing_mail_outbox_tick () from public, anon, authenticated;
+grant execute on function public.billing_mail_outbox_tick () to service_role;
+
+-- ===== supabase/migrations/20261020160500_cancel_link_save_replayable.sql =====
+-- save_cancel_link_token answers text again, so 20261020160300 replays (a
+-- follow-up to 20261020160400, Codex round 5 on #62).
+--
+-- 20261020160400 changed save_cancel_link_token's result from text to jsonb
+-- ({answer, remaining_seconds}) by dropping and recreating it. That left
+-- 20261020160300 unable to replay over a database that has 20261020160400:
+-- its `create or replace function public.save_cancel_link_token (...) returns
+-- text` fails with "cannot change return type of existing function". A
+-- recovery replays migrations over a database that may already hold them
+-- (tests/migrationRecoverability.test.ts), so that is not allowed to fail --
+-- and 20261020160400, already pushed, is not edited.
+--
+-- So the jsonb save gets a name of its own, save_cancel_link_token_v2 (what
+-- billingCancelStore.ts calls), with exactly the body 20261020160400 gave the
+-- save: the row locked FOR UPDATE, clock_timestamp() read after the lock, a
+-- tombstoned hash or outbox id refused (`spent`), under 120 seconds refused
+-- (`expired`, the row settled), the seconds left on the database's clock in
+-- the answer. save_cancel_link_token is put back to `returns text`, as
+-- 20261020160300 made it, answering v2's `answer`: the same save under every
+-- guard, for the previous edge function while the one in this PR deploys (it
+-- does not know `spent`, so it retries -- the row is already settled -- and
+-- never sends on it).
+--
+-- Replaying 20261020160300, 20261020160400 and this one in order now succeeds
+-- and ends here; CI's supabase-local job does exactly that, and
+-- tests/sql/cancel_link_db_clock.sql and cancel_link_tombstones.sql prove v2.
+--
+-- Safe to re-run: the old save is dropped IF EXISTS whatever its result type
+-- (only the argument types name it), and both functions are CREATE OR REPLACE.
+
+drop function if exists public.save_cancel_link_token (uuid, uuid, text, uuid);
+
+-- ---------------------------------------------------------------------------
+-- save_cancel_link_token_v2: on the database's clock, after the lock
+-- ---------------------------------------------------------------------------
+-- Answers {"answer": ..., "remaining_seconds": n}:
+--   saved    -- the token is stored (now, or by an earlier attempt at this row,
+--               whose expiry and used_at are left exactly as they were), with
+--               n >= 120 seconds left: the caller may send, and only then;
+--   expired  -- fewer than 120 seconds are left (n, at most 119, never below
+--               0): nothing is saved, the row is settled `expired` without its
+--               address, and the caller must not send;
+--   spent    -- this link (its hash) or its request (the row id) was deleted
+--               before: nothing is saved, the row is settled `expired`, and
+--               the caller must not send;
+--   not_held -- the caller does not hold this row's lease (another worker took
+--               it over, or the row was settled): it must not send.
+-- The row is locked FOR UPDATE first, so two saves of one row run one after
+-- the other, and the clock is read only once the lock is held: however long
+-- the wait, the time left is the time left now. A row settled here keeps its
+-- lease, so the worker holding it records the outcome as it would have.
+-- SECURITY DEFINER: the service role no longer inserts tokens itself.
+create or replace function public.save_cancel_link_token_v2 (
+    p_outbox_id uuid,
+    p_claim uuid,
+    p_hash text,
+    p_user uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    v_mode text;
+    v_expires timestamptz;
+    v_left integer;
+begin
+    select o.mode, o.link_expires_at into v_mode, v_expires
+    from public.billing_mail_outbox o
+    where o.id = p_outbox_id
+      and o.claim_token = p_claim
+      and o.kind = 'cancel_link'
+      and o.status = 'pending'
+    for update;
+    if not found then
+        return jsonb_build_object('answer', 'not_held', 'remaining_seconds', 0);
+    end if;
+
+    if exists (
+        select 1 from public.billing_cancel_token_tombstones t
+        where t.token_hash = p_hash or t.outbox_id = p_outbox_id
+    ) then
+        update public.billing_mail_outbox
+        set status = 'expired', last_error = 'cancel link already spent or removed', payload = payload - 'email'
+        where id = p_outbox_id;
+        return jsonb_build_object('answer', 'spent', 'remaining_seconds', 0);
+    end if;
+
+    -- A token an earlier attempt saved may have had its expiry brought
+    -- forward since; the sooner of the two is the one that counts.
+    v_expires := least(v_expires, (select t.expires_at from public.billing_cancel_tokens t where t.token_hash = p_hash));
+    if v_expires is null
+       or v_expires - clock_timestamp() < interval '120 seconds' then
+        v_left := greatest(0, coalesce(floor(extract(epoch from v_expires - clock_timestamp()))::integer, 0));
+        update public.billing_mail_outbox
+        set status = 'expired', last_error = 'expired before delivery', payload = payload - 'email'
+        where id = p_outbox_id;
+        return jsonb_build_object('answer', 'expired', 'remaining_seconds', v_left);
+    end if;
+    v_left := floor(extract(epoch from v_expires - clock_timestamp()))::integer;
+
+    insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
+    values (p_hash, p_user, v_mode, v_expires, p_outbox_id)
+    on conflict (token_hash) do nothing;
+    return jsonb_build_object('answer', 'saved', 'remaining_seconds', v_left);
+end;
+$$;
+
+revoke all on function public.save_cancel_link_token_v2 (uuid, uuid, text, uuid) from public, anon, authenticated;
+grant execute on function public.save_cancel_link_token_v2 (uuid, uuid, text, uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- save_cancel_link_token: the same save, answering only its `answer`
+-- ---------------------------------------------------------------------------
+-- `returns text`, as 20261020160300 made it. SECURITY DEFINER like v2, whose
+-- insert it makes.
+create or replace function public.save_cancel_link_token (
+    p_outbox_id uuid,
+    p_claim uuid,
+    p_hash text,
+    p_user uuid
+) returns text
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    return public.save_cancel_link_token_v2 (p_outbox_id, p_claim, p_hash, p_user)->>'answer';
+end;
+$$;
+
+revoke all on function public.save_cancel_link_token (uuid, uuid, text, uuid) from public, anon, authenticated;
+grant execute on function public.save_cancel_link_token (uuid, uuid, text, uuid) to service_role;
+
+-- ===== supabase/migrations/20261020160600_cancel_link_serialized_history.sql =====
+-- A deleted cancel link cannot be put back by a transaction running at the
+-- same time as its deletion (Codex round 6 on #62, the round-5 major 1 still
+-- open; decisions 29 and 34).
+--
+-- 20261020160400 tombstones every deleted token and refuses a tombstoned hash
+-- or outbox id on insert -- but the insert's trigger read the tombstones
+-- without a lock. Transaction A deletes hash H (the tick's cleanup, or an
+-- account's deletion) and writes its tombstone; until A commits, B cannot see
+-- it. B inserts H against a fresh pending request -- or a new hash under A's
+-- outbox id -- finds no tombstone, waits at most on A's deleted row, and once
+-- A commits H is free: the spent link is back, unused. And the outbox id's
+-- tombstone was not unique. Now:
+--
+--   * every path that deletes a token and every path that inserts one takes
+--     the same transaction advisory locks, the token's outbox id first, then
+--     its hash (billing_cancel_link_lock, keys from
+--     billing_cancel_link_lock_key below), and the insert reads the
+--     tombstones only once it holds them. A delete takes them before the row
+--     goes (a BEFORE DELETE trigger, whoever deletes; the tick for all its
+--     rows at once, before its delete), so they are held until its tombstone
+--     commits: an insert of that hash or that outbox id waits for it, and
+--     then sees the tombstone. Under READ COMMITTED every statement reads
+--     afresh, so the read after the wait is current; an insert under any
+--     other isolation level, whose snapshot may predate the delete it waited
+--     for, is refused;
+--   * save_cancel_link_token_v2 takes them too, after the row's lock and
+--     before it reads the tombstones (and its insert's trigger again, which
+--     the transaction already holds);
+--   * the tick takes all of its rows' locks before deleting any: every outbox
+--     id, then every hash, each in key order. Every other path takes one
+--     outbox id and then one hash, so no two paths wait for each other in a
+--     circle;
+--   * an outbox id is tombstoned once (a unique index). A request with two
+--     tokens -- its link saved again after the cancel-link secret was rotated
+--     -- keeps both hashes; the second tombstone just leaves the id out. Any
+--     duplicates already kept keep their hashes, and all but the earliest
+--     lose the id.
+--
+-- The lock keys: hashtextextended('cleffy.billing_cancel_link.<kind>:<value>',
+-- 0), kind `outbox` (the uuid as text) or `hash` (the SHA-256 hex). The
+-- namespace keeps them apart from each other and from any other advisory lock
+-- in this database; a collision only makes two unrelated saves wait for each
+-- other. The same function computes them on every path, so they always agree.
+--
+-- tests/sql/cancel_link_tombstone_race.sql proves it with two sessions racing
+-- a third.
+--
+-- And whether a saved link still works is the database's call too (the
+-- round-5 major 2, still open): read_cancel_link_token, below, answers for a
+-- link only while it is unused and unexpired on clock_timestamp(), and the
+-- cancel page acts on that alone -- the edge function's clock no longer
+-- decides that a link has expired, nor (cancelFlow.ts) refuses a send.
+-- tests/sql/cancel_link_read_db_clock.sql proves the read.
+--
+-- And the seconds left that decide the send are counted as the save's last
+-- step, after its INSERT, which can wait (Codex round 6 on #62, its new
+-- major): see save_cancel_link_token_v2 below.
+--
+-- Safe to re-run: every function is CREATE OR REPLACE, every trigger is
+-- dropped before it is made, the index is IF NOT EXISTS (and the one it
+-- replaces dropped IF EXISTS), the de-duplication changes nothing once there
+-- is nothing to change, and grants and revokes are idempotent.
+
+-- ---------------------------------------------------------------------------
+-- The history locks
+-- ---------------------------------------------------------------------------
+create or replace function public.billing_cancel_link_lock_key (p_kind text, p_value text)
+returns bigint
+language sql
+immutable
+set search_path = ''
+as $$
+    select pg_catalog.hashtextextended('cleffy.billing_cancel_link.' || p_kind || ':' || p_value, 0)
+$$;
+
+revoke all on function public.billing_cancel_link_lock_key (text, text) from public, anon, authenticated, service_role;
+
+-- Held until the transaction ends. Outbox id first, then hash: the one order
+-- every path takes them in.
+create or replace function public.billing_cancel_link_lock (p_outbox_id uuid, p_hash text)
+returns void
+language plpgsql
+set search_path = ''
+as $$
+begin
+    if p_outbox_id is not null then
+        perform pg_catalog.pg_advisory_xact_lock(public.billing_cancel_link_lock_key ('outbox', p_outbox_id::text));
+    end if;
+    if p_hash is not null then
+        perform pg_catalog.pg_advisory_xact_lock(public.billing_cancel_link_lock_key ('hash', p_hash));
+    end if;
+end;
+$$;
+
+revoke all on function public.billing_cancel_link_lock (uuid, text) from public, anon, authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- billing_cancel_token_tombstones: an outbox id once
+-- ---------------------------------------------------------------------------
+-- In one block, under one lock, so no duplicate lands between the clean-up
+-- and the index. The permanence trigger is set aside only for that clean-up,
+-- which keeps every hash.
+do $$
+begin
+    lock table public.billing_cancel_token_tombstones in share row exclusive mode;
+    if exists (
+        select 1 from public.billing_cancel_token_tombstones
+        where outbox_id is not null
+        group by outbox_id
+        having count(*) > 1
+    ) then
+        alter table public.billing_cancel_token_tombstones disable trigger billing_cancel_token_tombstones_permanent;
+        update public.billing_cancel_token_tombstones t
+        set outbox_id = null
+        where t.outbox_id is not null
+          and exists (
+              select 1 from public.billing_cancel_token_tombstones k
+              where k.outbox_id = t.outbox_id
+                and (k.deleted_at, k.token_hash) < (t.deleted_at, t.token_hash)
+          );
+        alter table public.billing_cancel_token_tombstones enable trigger billing_cancel_token_tombstones_permanent;
+    end if;
+    create unique index if not exists billing_cancel_token_tombstones_outbox_once
+    on public.billing_cancel_token_tombstones (outbox_id)
+    where outbox_id is not null;
+    drop index if exists public.billing_cancel_token_tombstones_outbox;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- billing_cancel_tokens: locked on delete, locked before the check on insert
+-- ---------------------------------------------------------------------------
+-- Every delete, whoever makes it (the tick, which already holds them, an
+-- account's cascade, an operator), takes the row's locks before the row goes.
+-- SECURITY DEFINER: the service role, which may delete, may not lock directly.
+create or replace function public.billing_cancel_tokens_delete_lock ()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    perform public.billing_cancel_link_lock (old.outbox_id, old.token_hash);
+    return old;
+end;
+$$;
+
+revoke all on function public.billing_cancel_tokens_delete_lock () from public, anon, authenticated, service_role;
+
+drop trigger if exists billing_cancel_tokens_delete_lock on public.billing_cancel_tokens;
+create trigger billing_cancel_tokens_delete_lock
+before delete on public.billing_cancel_tokens
+for each row execute function public.billing_cancel_tokens_delete_lock ();
+
+-- The tombstone, as 20261020160400 writes it, under the same locks -- and when
+-- the outbox id is already tombstoned (a second token for one request), the
+-- hash alone.
+create or replace function public.billing_cancel_tokens_tombstone ()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    perform public.billing_cancel_link_lock (old.outbox_id, old.token_hash);
+    insert into public.billing_cancel_token_tombstones (token_hash, outbox_id)
+    values (old.token_hash, old.outbox_id)
+    on conflict do nothing;
+    if not found then
+        insert into public.billing_cancel_token_tombstones (token_hash, outbox_id)
+        values (old.token_hash, null)
+        on conflict (token_hash) do nothing;
+    end if;
+    return old;
+end;
+$$;
+
+revoke all on function public.billing_cancel_tokens_tombstone () from public, anon, authenticated, service_role;
+
+-- A deleted link's hash, or any token for a deleted link's request, never goes
+-- in again -- now also not while that deletion is still uncommitted: the
+-- locks first, the tombstones after.
+create or replace function public.billing_cancel_tokens_not_tombstoned ()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    if pg_catalog.current_setting('transaction_isolation') <> 'read committed' then
+        raise exception 'a cancel link is only saved under READ COMMITTED, where its history is read after its locks'
+            using errcode = '55000';
+    end if;
+    perform public.billing_cancel_link_lock (new.outbox_id, new.token_hash);
+    if exists (
+        select 1 from public.billing_cancel_token_tombstones t
+        where t.token_hash = new.token_hash
+           or (new.outbox_id is not null and t.outbox_id = new.outbox_id)
+    ) then
+        raise exception 'a cancel link that was spent or removed never comes back'
+            using errcode = '55000';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.billing_cancel_tokens_not_tombstoned () from public, anon, authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- save_cancel_link_token_v2: the history locks before the history, and the
+-- time left counted last
+-- ---------------------------------------------------------------------------
+-- As 20261020160500 defines it (its answers are unchanged), with two changes.
+--
+-- The locks are taken after the row's and before the tombstones are read.
+--
+-- And the seconds left are counted on clock_timestamp() as the save's last
+-- step, after every statement that can wait (Codex round 6 on #62, its new
+-- major; decision 34). They were counted before the INSERT -- which can wait:
+-- on the account's row (the foreign key's check, while someone holds it FOR
+-- UPDATE), or on another insert of the same hash. A save that counted 121
+-- seconds, waited, and answered 121 had cancelFlow.ts send a link with less
+-- than the margin left, or none. Now, after the INSERT, under 120 seconds
+-- left is refused like any other `expired`: the row settled without its
+-- address, and a token this save inserted made unusable in the same
+-- transaction (its expiry brought forward to now -- the one way it may move
+-- -- so read_cancel_link_token never answers for it; a token an earlier
+-- attempt saved is left as it is, as the check before the INSERT leaves it).
+-- The check before the INSERT stays, so a save already too late inserts
+-- nothing. tests/sql/cancel_link_save_after_insert.sql proves it, a second
+-- session holding the account's row.
+create or replace function public.save_cancel_link_token_v2 (
+    p_outbox_id uuid,
+    p_claim uuid,
+    p_hash text,
+    p_user uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    v_mode text;
+    v_expires timestamptz;
+    v_left integer;
+    v_remaining interval;
+    v_inserted boolean;
+begin
+    select o.mode, o.link_expires_at into v_mode, v_expires
+    from public.billing_mail_outbox o
+    where o.id = p_outbox_id
+      and o.claim_token = p_claim
+      and o.kind = 'cancel_link'
+      and o.status = 'pending'
+    for update;
+    if not found then
+        return jsonb_build_object('answer', 'not_held', 'remaining_seconds', 0);
+    end if;
+
+    perform public.billing_cancel_link_lock (p_outbox_id, p_hash);
+
+    if exists (
+        select 1 from public.billing_cancel_token_tombstones t
+        where t.token_hash = p_hash or t.outbox_id = p_outbox_id
+    ) then
+        update public.billing_mail_outbox
+        set status = 'expired', last_error = 'cancel link already spent or removed', payload = payload - 'email'
+        where id = p_outbox_id;
+        return jsonb_build_object('answer', 'spent', 'remaining_seconds', 0);
+    end if;
+
+    v_expires := least(v_expires, (select t.expires_at from public.billing_cancel_tokens t where t.token_hash = p_hash));
+    if v_expires is null
+       or v_expires - clock_timestamp() < interval '120 seconds' then
+        v_left := greatest(0, coalesce(floor(extract(epoch from v_expires - clock_timestamp()))::integer, 0));
+        update public.billing_mail_outbox
+        set status = 'expired', last_error = 'expired before delivery', payload = payload - 'email'
+        where id = p_outbox_id;
+        return jsonb_build_object('answer', 'expired', 'remaining_seconds', v_left);
+    end if;
+
+    insert into public.billing_cancel_tokens (token_hash, user_id, mode, expires_at, outbox_id)
+    values (p_hash, p_user, v_mode, v_expires, p_outbox_id)
+    on conflict (token_hash) do nothing;
+    v_inserted := found;
+
+    v_expires := least(v_expires, (select t.expires_at from public.billing_cancel_tokens t where t.token_hash = p_hash));
+    v_remaining := v_expires - clock_timestamp();
+    v_left := greatest(0, coalesce(floor(extract(epoch from v_remaining))::integer, 0));
+    if v_remaining is null or v_remaining < interval '120 seconds' then
+        if v_inserted then
+            update public.billing_cancel_tokens
+            set expires_at = least(expires_at, clock_timestamp())
+            where token_hash = p_hash;
+        end if;
+        update public.billing_mail_outbox
+        set status = 'expired', last_error = 'expired before delivery', payload = payload - 'email'
+        where id = p_outbox_id;
+        return jsonb_build_object('answer', 'expired', 'remaining_seconds', v_left);
+    end if;
+    return jsonb_build_object('answer', 'saved', 'remaining_seconds', v_left);
+end;
+$$;
+
+revoke all on function public.save_cancel_link_token_v2 (uuid, uuid, text, uuid) from public, anon, authenticated;
+grant execute on function public.save_cancel_link_token_v2 (uuid, uuid, text, uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The cron tick: every lock first, then the delete
+-- ---------------------------------------------------------------------------
+-- As 20261020160400 defines it, except the cleanup: it takes the locks of
+-- every token it is about to delete -- every outbox id, then every hash, each
+-- in key order -- and only then deletes them, under the same conditions read
+-- again. Each deleted token's tombstone is written by the delete trigger, in
+-- the deleting statement; one that cannot be written fails the delete.
+create or replace function public.billing_mail_outbox_tick ()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+    v_url text;
+    v_secret text;
+    v_hashes text[];
+    v_key bigint;
+begin
+    -- A sent confirmation is only needed as a de-duplication key while Stripe
+    -- may still redeliver its event (three days); 30 is generous.
+    delete from public.billing_mail_outbox
+    where status = 'sent' and sent_at < now() - interval '30 days';
+    -- A cancel link asked for a day ago is not one anybody is still waiting
+    -- for, and the row holds an address. (Its hour ran out long before.)
+    delete from public.billing_mail_outbox
+    where kind = 'cancel_link' and created_at < now() - interval '1 day';
+    -- Expired cancel links whose request can no longer be retried, each
+    -- leaving its tombstone.
+    select array_agg(t.token_hash) into v_hashes
+    from public.billing_cancel_tokens t
+    where t.expires_at <= now()
+      and not exists (
+          select 1 from public.billing_mail_outbox o where o.id = t.outbox_id and o.status = 'pending'
+      );
+    if v_hashes is not null then
+        for v_key in
+            select k.key
+            from (
+                select 1 as rank, public.billing_cancel_link_lock_key ('outbox', t.outbox_id::text) as key
+                from public.billing_cancel_tokens t
+                where t.token_hash = any (v_hashes) and t.outbox_id is not null
+                union
+                select 2, public.billing_cancel_link_lock_key ('hash', h)
+                from unnest(v_hashes) h
+            ) k
+            order by k.rank, k.key
+        loop
+            perform pg_advisory_xact_lock(v_key);
+        end loop;
+        delete from public.billing_cancel_tokens t
+        where t.token_hash = any (v_hashes)
+          and t.expires_at <= now()
+          and not exists (
+              select 1 from public.billing_mail_outbox o where o.id = t.outbox_id and o.status = 'pending'
+          );
+    end if;
+
+    if not exists (
+        select 1 from public.billing_mail_outbox
+        where status = 'pending' and next_attempt_at <= now()
+          and (claimed_until is null or claimed_until < now())
+    ) then
+        return;
+    end if;
+
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'billing_outbox_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'billing_outbox_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'billing_mail_outbox_tick: vault secrets billing_outbox_url/billing_outbox_secret missing — skip';
+        return;
+    end if;
+
+    perform net.http_post(
+        url := rtrim(v_url, '/'),
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-billing-outbox-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 5000
+    );
+end;
+$$;
+
+revoke all on function public.billing_mail_outbox_tick () from public, anon, authenticated;
+grant execute on function public.billing_mail_outbox_tick () to service_role;
+
+-- ---------------------------------------------------------------------------
+-- read_cancel_link_token: whether a link still works, on the database's clock
+-- ---------------------------------------------------------------------------
+-- (Codex round 6 on #62, the round-5 major 2 still open; decisions 30 and
+-- 34.) The cancel page read the token's row and compared its expiry with the
+-- edge function's clock: ahead, it turned away a link the database holds
+-- good; behind, it opened one that had run out. Now the database answers
+-- only for a link that is unused and unexpired on clock_timestamp() --
+-- {"user_id", "mode"} -- and null for anything else, and billing-cancel acts
+-- on that answer alone. The service role only, like the table.
+create or replace function public.read_cancel_link_token (p_hash text)
+returns jsonb
+language sql
+volatile
+set search_path = ''
+as $$
+    select jsonb_build_object('user_id', t.user_id, 'mode', t.mode)
+    from public.billing_cancel_tokens t
+    where t.token_hash = p_hash
+      and t.used_at is null
+      and t.expires_at > pg_catalog.clock_timestamp()
+$$;
+
+revoke all on function public.read_cancel_link_token (text) from public, anon, authenticated;
+grant execute on function public.read_cancel_link_token (text) to service_role;
+
+-- ===== supabase/migrations/20261020160700_cancel_link_consume_db_clock.sql =====
+-- A cancel link is spent only while it is still good on the database's clock,
+-- and spending it is what authorizes everything after it (Codex round 7 on
+-- #62, its major; decisions 27, 38 and 39).
+--
+-- billing-cancel spent a link with an UPDATE that checked only the hash and
+-- that the link was unused. Whether it had expired was asked once, earlier
+-- (read_cancel_link_token, 20261020160600) -- and between that read and the
+-- spend came the account lookups, Stripe's read and Stripe's update, any of
+-- which can outlast the link's hour. A link read a moment before its expiry
+-- was still spent after it, and the spend is what lets the refund request
+-- reach support. The email promises the link works "until <time>"; after
+-- that time it must do nothing. Now:
+--
+--   * consume_cancel_link_token (below) is the one way the cancel page spends
+--     a link. It takes the link's history locks in the order every other path
+--     takes them (billing_cancel_link_lock, 20261020160600: the outbox id,
+--     then the hash), and then spends it in ONE statement, gated on
+--     `used_at is null and expires_at > clock_timestamp()` -- read after any
+--     wait for those locks or the row's. No row back is a refusal, with its
+--     reason: `expired`, `used`, or `not_found`. The service role only;
+--   * cancelFlow.ts spends the link BEFORE any Stripe call or the refund
+--     request, and only a link this function answered `consumed` for goes on
+--     to them. A Stripe failure after the spend leaves the link spent: the
+--     buyer asks for a new one, or cancels from Billing while signed in
+--     (decision 27). An expired or spent link hands nothing back to the
+--     per-recipient count or the mail budget (decision 38);
+--   * the token table's guard (billing_cancel_tokens_lifetime, as
+--     20261020160400 defines it) also refuses ANY update that spends a link
+--     whose expiry has passed on clock_timestamp(), whoever makes it -- the
+--     service role's direct UPDATE included.
+--
+-- tests/sql/cancel_link_consume_db_clock.sql proves it, tests/billing/
+-- cancelLinkStore.test.ts runs the store against it, and tests/billing/
+-- cancelFlow.test.ts holds the flow's order.
+--
+-- Not changed (decision 39): a direct single-row DELETE takes the row before
+-- its trigger takes the history locks, so it can deadlock with the tick, or
+-- with a spend, which take the locks first. Postgres aborts one, nothing is
+-- lost, and no application path deletes a token directly.
+--
+-- Safe to re-run: both functions are CREATE OR REPLACE (the trigger that
+-- calls the guard is 20261020160300's, unchanged), and the grants and revokes
+-- are idempotent.
+
+-- ---------------------------------------------------------------------------
+-- The token table's guard: no spending an expired link
+-- ---------------------------------------------------------------------------
+-- As 20261020160400 defines it, with one more refusal on UPDATE: setting
+-- used_at on a link whose expiry is at or before clock_timestamp(). The
+-- expiry checked is the row's new one, which can only be the same or sooner.
+create or replace function public.billing_cancel_tokens_lifetime ()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    v_status text;
+    v_kind text;
+    v_expires timestamptz;
+begin
+    if tg_op = 'INSERT' then
+        select o.status, o.kind, o.link_expires_at into v_status, v_kind, v_expires
+        from public.billing_mail_outbox o
+        where o.id = new.outbox_id;
+        if new.outbox_id is null or v_kind is distinct from 'cancel_link' or v_status is distinct from 'pending'
+           or v_expires <= clock_timestamp() then
+            raise exception 'a cancel link is only saved for its own request, while it waits to send and before it expires'
+                using errcode = '55000';
+        end if;
+        new.expires_at := v_expires;
+        return new;
+    end if;
+
+    if tg_op = 'UPDATE' then
+        if new.token_hash <> old.token_hash
+           or new.user_id <> old.user_id
+           or new.mode <> old.mode
+           or new.outbox_id is distinct from old.outbox_id
+           or new.expires_at > old.expires_at then
+            raise exception 'a saved cancel link keeps its expiry and what it cancels'
+                using errcode = '55000';
+        end if;
+        if old.used_at is not null and new.used_at is distinct from old.used_at then
+            raise exception 'a spent cancel link stays spent'
+                using errcode = '55000';
+        end if;
+        if old.used_at is null and new.used_at is not null
+           and new.expires_at <= clock_timestamp() then
+            raise exception 'an expired cancel link cannot be spent'
+                using errcode = '55000';
+        end if;
+        return new;
+    end if;
+
+    -- DELETE
+    if exists (select 1 from auth.users u where u.id = old.user_id)
+       and (old.expires_at > now()
+            or exists (select 1 from public.billing_mail_outbox o where o.id = old.outbox_id and o.status = 'pending')) then
+        raise exception 'a cancel link is kept until it has expired and its request can no longer be retried'
+            using errcode = '55000';
+    end if;
+    return old;
+end;
+$$;
+
+revoke all on function public.billing_cancel_tokens_lifetime () from public, anon, authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- consume_cancel_link_token: spent once, and only while still good
+-- ---------------------------------------------------------------------------
+-- Answers {"answer": ...}:
+--   consumed  -- this call spent the link, at used_at, on clock_timestamp();
+--                also {"user_id", "mode", "used_at"}. Only now may the caller
+--                touch Stripe or mail support;
+--   expired   -- unused, but its expiry has passed on clock_timestamp();
+--   used      -- already spent (by this button or another request);
+--   not_found -- no such link (never saved, or deleted and tombstoned).
+-- Nothing is written on a refusal. The outbox id is read first only to take
+-- the locks in their one order; the guard forbids it ever changing, so the
+-- read cannot go stale.
+create or replace function public.consume_cancel_link_token (p_hash text)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+    v_outbox uuid;
+    v_user uuid;
+    v_mode text;
+    v_used timestamptz;
+    v_text text;
+begin
+    select t.outbox_id into v_outbox
+    from public.billing_cancel_tokens t
+    where t.token_hash = p_hash;
+    perform public.billing_cancel_link_lock (v_outbox, p_hash);
+
+    begin
+        update public.billing_cancel_tokens t
+        set used_at = pg_catalog.clock_timestamp()
+        where t.token_hash = p_hash
+          and t.used_at is null
+          and t.expires_at > pg_catalog.clock_timestamp()
+        returning t.user_id, t.mode, t.used_at into v_user, v_mode, v_used;
+    exception when sqlstate '55000' then
+        -- The guard read the clock a moment after the WHERE did, and the
+        -- expiry fell between the two: expired all the same.
+        get stacked diagnostics v_text = message_text;
+        if v_text <> 'an expired cancel link cannot be spent' then
+            raise;
+        end if;
+        return jsonb_build_object('answer', 'expired');
+    end;
+    if v_user is not null then
+        return jsonb_build_object('answer', 'consumed', 'user_id', v_user, 'mode', v_mode, 'used_at', v_used);
+    end if;
+
+    select t.used_at into v_used
+    from public.billing_cancel_tokens t
+    where t.token_hash = p_hash;
+    if not found then
+        return jsonb_build_object('answer', 'not_found');
+    end if;
+    return jsonb_build_object('answer', case when v_used is not null then 'used' else 'expired' end);
+end;
+$$;
+
+revoke all on function public.consume_cancel_link_token (text) from public, anon, authenticated;
+grant execute on function public.consume_cancel_link_token (text) to service_role;
+
 -- ===== supabase/migrations/20261020180400_district_seat_overrides.sql =====
 -- District seats: an admin-set teacher-seat count above the Academy cap of 5,
 -- tied to the district's Stripe Invoicing subscription.

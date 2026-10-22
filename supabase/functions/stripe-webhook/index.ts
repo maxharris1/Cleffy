@@ -1,3 +1,6 @@
+import { enqueueBillingMail } from '../_shared/billingMail.ts';
+import { drainInBackground } from '../_shared/billingMailWorker.ts';
+import { cancellationMailKey, type PurchaseMail } from '../_shared/billingOutbox.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
     type DeletedAccountStripe,
@@ -454,11 +457,61 @@ Deno.serve(async (req) => {
                 console.error(`could not release claim on ${id}: ${error.message}`);
             }
         },
+        recordPurchaseNotice: async (notice) => {
+            // The consent record first: it is the half with legal weight, and it
+            // is idempotent, so a redelivery that gets this far again only
+            // rewrites the same values. Matched by the id stripe-checkout put in
+            // the session metadata, or failing that by the session itself. A
+            // failed write throws, which fails the event so Stripe redelivers it
+            // (Codex finding 3 on #62) -- it used to be a log line and an
+            // acknowledged event, leaving the consent incomplete for good.
+            const completion = {
+                stripe_subscription_id: notice.subscriptionId,
+                checkout_session_id: notice.sessionId,
+                billing_country: notice.billingCountry,
+                completed_at: notice.purchasedAt,
+            };
+            const linked = notice.consentId
+                ? await admin
+                      .from('checkout_consents')
+                      .update(completion)
+                      .eq('id', notice.consentId)
+                      .select('terms_version, refund_policy_version, amount_minor')
+                : await admin
+                      .from('checkout_consents')
+                      .update(completion)
+                      .eq('checkout_session_id', notice.sessionId)
+                      .select('terms_version, refund_policy_version, amount_minor');
+            if (linked.error) {
+                throw new Error(`could not complete the consent for ${notice.sessionId}: ${linked.error.message}`);
+            }
+            const consent = linked.data?.[0] ?? null;
+            if (!consent) {
+                console.log(`ALERT no checkout consent matched ${notice.sessionId} (consent ${notice.consentId})`);
+            }
+
+            // Then the confirmation, written down rather than sent: the worker
+            // sends it after this response and retries it until it goes out.
+            // Keyed on the session, so a redelivery queues nothing new.
+            const mail: PurchaseMail = {
+                ...notice,
+                termsVersion: consent?.terms_version ?? null,
+                refundsVersion: consent?.refund_policy_version ?? null,
+                recurringAmountMinor: typeof consent?.amount_minor === 'number' ? consent.amount_minor : null,
+            };
+            await enqueueBillingMail('purchase_confirmation', notice.sessionId, mode, { ...mail });
+        },
+        recordCancellationNotice: async (notice) => {
+            await enqueueBillingMail('cancellation_confirmation', cancellationMailKey(notice), mode, { ...notice });
+        },
         log: (message) => console.log(message),
     };
 
     try {
         const result = await handleStripeEvent(event, store, priceTiers(mode));
+        // Whatever the event queued goes out after the response; a mail that
+        // does not is retried by the cron (billing-mail-outbox).
+        drainInBackground();
         return jsonResponse(result.body, result.status);
     } catch (err) {
         // The claim is committed the moment it succeeds, so a failure downstream

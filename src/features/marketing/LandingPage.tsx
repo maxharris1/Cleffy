@@ -1,12 +1,17 @@
 import { Link } from 'react-router';
 
 import { RequireGuest } from '@/features/auth/AuthGates';
+import { initialBillingCountry } from '@/features/billing/billingRegion';
+import { CancelSubscriptionLink } from '@/features/billing/CancelSubscriptionLink';
+import { lowestMonthlyPrice } from '@/features/billing/pricing';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { HeroDemo } from '@/features/marketing/HeroDemo';
 import { ProductShowcase } from '@/features/marketing/ProductShowcase';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
+
+import { currencyForCountry } from '../../../supabase/functions/_shared/billingTerms';
 
 const STEPS = [
     {
@@ -48,6 +53,7 @@ const Footer = () => (
             <LocalOpenControl label="Open a score locally" subtle />
         </div>
         <LegalLinks withContact className="mt-4 justify-center sm:justify-start" />
+        <CancelSubscriptionLink className="mt-3 text-center sm:text-left" />
     </footer>
 );
 
@@ -94,7 +100,10 @@ const CloudLanding = () => (
                             </Link>
                             {/* Keep in sync with FREE_LIMITS.cloud_scores (billing/entitlementsService.ts)
                                 and priceFor() (billing/pricing.ts). */}
-                            <p className="text-xs text-stone-500">Free for 3 cloud scores · plans from $7/month</p>
+                            <p className="text-xs text-stone-500">
+                                Free for 3 cloud scores · plans from{' '}
+                                {lowestMonthlyPrice(currencyForCountry(initialBillingCountry()))}/month
+                            </p>
                         </div>
                         <LocalOpenControl label="Or open a PDF locally — no account" subtle />
                         <Link

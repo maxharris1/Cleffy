@@ -134,10 +134,18 @@ export interface StripeSubscriptionLike {
 }
 
 export interface StripeCheckoutSessionLike {
+    id?: string;
     customer?: string | { id?: string } | null;
     subscription?: string | { id?: string } | null;
     client_reference_id?: string | null;
     metadata?: Record<string, string> | null;
+    /** What was charged, tax included, in minor units of `currency`. */
+    amount_total?: number | null;
+    currency?: string | null;
+    total_details?: { amount_tax?: number | null; amount_discount?: number | null } | null;
+    /** The billing address Checkout collected (billing_address_collection: required). */
+    customer_details?: { address?: { country?: string | null } | null } | null;
+    created?: number | null;
 }
 
 export interface StripeInvoiceLike {
@@ -149,7 +157,12 @@ export interface StripeInvoiceLike {
 export interface StripeEventLike {
     id: string;
     type: string;
-    data: { object: unknown };
+    /**
+     * `previous_attributes` is on `*.updated` events only, and holds the old
+     * value of exactly the fields that changed -- which is how a cancellation
+     * being SCHEDULED is told apart from any other update.
+     */
+    data: { object: unknown; previous_attributes?: Record<string, unknown> | null };
     /** Stripe stamps the sending account's mode on every event. */
     livemode?: boolean;
     /**
@@ -248,6 +261,39 @@ export type ClaimOutcome = 'claimed' | 'done' | 'in_flight';
  * that is the whole reason the check lives in the write statement and not
  * beside it.
  */
+/**
+ * A purchase that has just been applied, for the confirmation email and the
+ * consent record (launch packet items 14 and 18).
+ */
+export interface PurchaseNotice {
+    userId: string;
+    sessionId: string;
+    subscriptionId: string;
+    /** checkout_consents.id, from the session metadata stripe-checkout stamped. */
+    consentId: string | null;
+    priceId: string | null;
+    billingCountry: string | null;
+    currency: string | null;
+    amountTotalMinor: number | null;
+    amountTaxMinor: number | null;
+    /** A promotion code's discount on that total, when there was one. */
+    amountDiscountMinor: number | null;
+    /** When it next renews -- the end of the period just paid for. */
+    renewsAt: string | null;
+    purchasedAt: string;
+}
+
+/** A subscription that has just been set to end instead of renewing. */
+export interface CancellationNotice {
+    userId: string;
+    subscriptionId: string;
+    priceId: string | null;
+    /** When access ends. */
+    endsAt: string | null;
+    /** When the cancellation was made (the event's own clock). */
+    cancelledAt: string;
+}
+
 export type SubscriptionWriteOutcome =
     { outcome: 'written' } | { outcome: 'duplicate'; otherSubscriptionId: string | null } | { outcome: 'lost_lock' };
 
@@ -352,6 +398,24 @@ export interface WebhookStore {
     pendingDuplicateUndo: (subscriptionId: string) => Promise<{ userId: string | null } | null>;
     recordPendingDuplicateUndo: (subscriptionId: string, userId: string | null) => Promise<void>;
     settleDuplicateUndo: (subscriptionId: string, state: DuplicateUndoState, undone: DuplicateUndo) => Promise<void>;
+    /**
+     * After a checkout is applied: completes its consent record (subscription id,
+     * billing country) and writes the purchase confirmation into the durable
+     * outbox (billing_mail_outbox), once per session -- the mail itself goes out
+     * after the response, and is retried there until it does.
+     *
+     * Throws when either write fails, and the handler then fails the EVENT
+     * (Codex finding 3 on #62): the old rule -- log it, acknowledge anyway --
+     * marked the event done with the consent incomplete and the confirmation
+     * unsent, and Stripe's redelivery then exited as a duplicate, so nothing
+     * ever tried again. Failing it is safe because every step before this one is
+     * idempotent: the redelivery re-applies the same subscription row (equal
+     * event stamps pass the stale-event guard), re-completes the same consent
+     * and finds the confirmation already queued.
+     */
+    recordPurchaseNotice: (notice: PurchaseNotice) => Promise<void>;
+    /** After a cancellation is scheduled: the cancellation confirmation, queued once. Same failure rule. */
+    recordCancellationNotice: (notice: CancellationNotice) => Promise<void>;
     log: (message: string) => void;
 }
 
@@ -514,6 +578,137 @@ export const endedAtOf = (sub: StripeSubscriptionLike): string | null => {
         return null;
     }
     return secondsToIso(sub.ended_at) ?? secondsToIso(sub.cancel_at);
+};
+
+/**
+ * What /cancel's "Cancel now" needs of Stripe's live subscription
+ * (cancelFlow.ts LiveSubscription), by the same rule the mirror is written
+ * with. billing-cancel used to count ANY `cancel_at` as already cancelling, so
+ * a monthly plan with a cancellation date three months out skipped the Stripe
+ * update and told the buyer "cancelled" while two renewals were still to bill
+ * (Codex round 2, finding 1 on #62). Only `cancel_at_period_end`, or a
+ * `cancel_at` at or before the current period end, stops the next renewal;
+ * anything later is not cancelling yet, and "Cancel now" sets
+ * cancel_at_period_end.
+ */
+export const liveSubscriptionOf = (
+    sub: StripeSubscriptionLike,
+): { status: string; cancelling: boolean; endsAt: string | null } => {
+    const ending = endingOf(sub);
+    return { status: sub.status, cancelling: ending.cancelling, endsAt: ending.periodEnd };
+};
+
+/**
+ * The subscription a cancellation confirmation is owed for, when this event is
+ * one being SET to cancel -- from the portal, from /cancel, or from the
+ * dashboard -- and null for any other update to one that was already
+ * cancelling (or a cancellation being undone).
+ *
+ * Whether it is the transition is read from the EVENT alone: its
+ * `previous_attributes` name the fields that changed with their old values (a
+ * cancel_at_period_end that WAS false, or a cancel_at that WAS null), and its
+ * embedded object is the subscription as that change left it. That is what
+ * makes the confirmation durable across redeliveries (Codex round 2, finding 3
+ * on #62): when recording it fails, Stripe redelivers the same event, and by
+ * then the subscription may have ENDED -- which the live state alone read as
+ * "not cancelling", so the retry was acknowledged with nothing recorded.
+ *
+ * `current` (Stripe's state now) can only veto, and only for the one reason
+ * worth it: a cancellation already undone -- still running, no longer
+ * cancelling -- sends nothing. Ended is the cancellation having happened, and
+ * is confirmed from the event; still cancelling is confirmed from `current`,
+ * the fresher of the two.
+ */
+export const scheduledCancellationOf = (
+    event: StripeEventLike,
+    current: StripeSubscriptionLike,
+): StripeSubscriptionLike | null => {
+    if (event.type !== 'customer.subscription.updated') {
+        return null;
+    }
+    const previous = event.data.previous_attributes ?? null;
+    if (!previous) {
+        return null;
+    }
+    const wasNotCancelling =
+        ('cancel_at_period_end' in previous && previous.cancel_at_period_end === false) ||
+        ('cancel_at' in previous && previous.cancel_at === null);
+    const embedded = event.data.object as StripeSubscriptionLike;
+    if (!wasNotCancelling || !endingOf(embedded).cancelling || isTerminalStatus(embedded.status)) {
+        return null;
+    }
+    if (isTerminalStatus(current.status)) {
+        return embedded;
+    }
+    return endingOf(current).cancelling ? current : null;
+};
+
+export const cancellationNoticeFrom = (
+    event: StripeEventLike,
+    current: StripeSubscriptionLike,
+    userId: string,
+): CancellationNotice => ({
+    userId,
+    subscriptionId: current.id,
+    priceId: priceIdOf(current),
+    endsAt: endingOf(current).periodEnd,
+    cancelledAt: eventStampOf(event) ?? new Date().toISOString(),
+});
+
+export const purchaseNoticeFrom = (
+    event: StripeEventLike,
+    session: StripeCheckoutSessionLike,
+    sub: StripeSubscriptionLike,
+    userId: string,
+): PurchaseNotice | null => {
+    if (!session.id) {
+        return null;
+    }
+    const country = session.customer_details?.address?.country?.trim().toUpperCase() ?? '';
+    const periodEnd = periodEndSecondsOf(sub);
+    return {
+        userId,
+        sessionId: session.id,
+        subscriptionId: sub.id,
+        consentId: session.metadata?.consent_id ?? sub.metadata?.consent_id ?? null,
+        priceId: priceIdOf(sub),
+        billingCountry: /^[A-Z]{2}$/.test(country) ? country : null,
+        currency: session.currency?.toLowerCase() ?? null,
+        amountTotalMinor: typeof session.amount_total === 'number' ? session.amount_total : null,
+        amountTaxMinor: typeof session.total_details?.amount_tax === 'number' ? session.total_details.amount_tax : null,
+        amountDiscountMinor:
+            typeof session.total_details?.amount_discount === 'number' ? session.total_details.amount_discount : null,
+        renewsAt: periodEnd === null ? null : new Date(periodEnd * 1000).toISOString(),
+        purchasedAt:
+            eventStampOf(event) ??
+            (typeof session.created === 'number' ? new Date(session.created * 1000).toISOString() : null) ??
+            new Date().toISOString(),
+    };
+};
+
+/**
+ * Records a notice durably, or fails the event so Stripe delivers it again
+ * (Codex finding 3 on #62). A notice follows an APPLIED write, and re-applying
+ * that write is harmless (see `recordPurchaseNotice`), whereas acknowledging an
+ * event whose consent completion or confirmation was never written down loses
+ * them for good: the redelivery would be a duplicate. Answers null when the
+ * notice is recorded, else the retry to answer with.
+ */
+const recordNotice = async (
+    store: WebhookStore,
+    event: StripeEventLike,
+    record: () => Promise<void>,
+): Promise<WebhookResult | null> => {
+    try {
+        await record();
+        return null;
+    } catch (err) {
+        store.log(
+            `ALERT ${event.type} ${event.id}: notice not recorded, asking Stripe to redeliver: ` +
+                (err instanceof Error ? err.message : String(err)),
+        );
+        return retryLater(store, event, 'notice_not_recorded');
+    }
 };
 
 /**
@@ -936,12 +1131,18 @@ const dispatchStripeEvent = async (
                     return retryLater(store, event, 'subscription_unavailable');
                 }
 
-                return (
-                    (await applySubscription(store, event, sub, userId, priceTiers, holder)) ?? {
-                        status: 200,
-                        body: { received: true, applied: 'subscription_upserted' },
+                const refused = await applySubscription(store, event, sub, userId, priceTiers, holder);
+                if (refused) {
+                    return refused;
+                }
+                const notice = purchaseNoticeFrom(event, session, sub, userId);
+                if (notice) {
+                    const unrecorded = await recordNotice(store, event, () => store.recordPurchaseNotice(notice));
+                    if (unrecorded) {
+                        return unrecorded;
                     }
-                );
+                }
+                return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
             });
         }
 
@@ -1024,12 +1225,19 @@ const dispatchStripeEvent = async (
                     return { status: 200, body: { received: true, ignored: 'terminal_status' } };
                 }
 
-                return (
-                    (await applySubscription(store, event, current, userId, priceTiers, holder)) ?? {
-                        status: 200,
-                        body: { received: true, applied: 'subscription_upserted' },
+                const refused = await applySubscription(store, event, current, userId, priceTiers, holder);
+                if (refused) {
+                    return refused;
+                }
+                const cancelled = scheduledCancellationOf(event, current);
+                if (cancelled) {
+                    const notice = cancellationNoticeFrom(event, cancelled, userId);
+                    const unrecorded = await recordNotice(store, event, () => store.recordCancellationNotice(notice));
+                    if (unrecorded) {
+                        return unrecorded;
                     }
-                );
+                }
+                return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
             });
         }
 

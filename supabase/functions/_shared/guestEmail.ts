@@ -131,6 +131,18 @@ const hmacHex = async (secret: string, message: string): Promise<string> => {
 export const hashGuestEmailCode = (secret: string, userId: string, email: string, code: string): Promise<string> =>
     hmacHex(secret, `guest-email-code\u0000${userId}\u0000${email}\u0000${code}`);
 
+/** The outbox name in a guest code's Resend Idempotency-Key (resendDelivery.ts resendIdempotencyKey). */
+export const GUEST_EMAIL_KEY_OUTBOX = 'guest-email-code';
+
+/**
+ * The id a guest code's send is keyed under at Resend: an HMAC of the guest
+ * and the code's stored hash, so it is the same for every attempt at sending
+ * THIS code and different for every other code, and carries neither the
+ * address nor the code nor the hash guest_email_verifications stores.
+ */
+export const guestEmailSendId = async (secret: string, userId: string, codeHash: string): Promise<string> =>
+    (await hmacHex(secret, `guest-email-send\u0000${userId}\u0000${codeHash}`)).slice(0, 40);
+
 /**
  * The per-recipient rate-limit key, of the mailbox (guestEmailMailbox) rather
  * than the spelling: edge_rate_buckets never holds an address.
@@ -241,6 +253,12 @@ interface CommonDeps {
     logError: (message: string, err?: unknown) => void;
 }
 
+/** One send's result, as resendDelivery.ts sendViaResend places it (declared here: no runtime imports). */
+export interface GuestSendResult {
+    outcome: 'sent' | 'rejected' | 'unknown';
+    reason: string;
+}
+
 export interface GuestEmailStartDeps extends CommonDeps {
     /**
      * Verify the request's Turnstile token (`captchaToken` in the body) —
@@ -265,8 +283,15 @@ export interface GuestEmailStartDeps extends CommonDeps {
     /** Store (replacing any earlier) pending code for the guest; false on failure. */
     savePending: (row: { userId: string; email: string; codeHash: string; expiresAt: string }) => Promise<boolean>;
     deletePending: (userId: string) => Promise<void>;
-    /** 'unconfigured' when the deploy has no mail key. */
-    sendEmail: (to: string, message: GuestEmailMessage) => Promise<'sent' | 'failed' | 'unconfigured'>;
+    /**
+     * Resend, with this send's Idempotency-Key (guestEmailWiring.ts, on
+     * resendDelivery.ts sendViaResend): `sent`, `rejected` (certainly not
+     * sent; reason `unconfigured` when the deploy has no mail key) or
+     * `unknown` (may have been sent).
+     */
+    sendEmail: (to: string, message: GuestEmailMessage, idempotencyKey: string) => Promise<GuestSendResult>;
+    /** resendDelivery.ts resendIdempotencyKey, handed in for the no-runtime-imports reason above. */
+    idempotencyKey: (outbox: string, rowId: string) => string;
     /** Hand back one use of a checkRateLimit bucket (refund_edge_rate_limit); best effort. */
     refundRateLimit: (key: string) => Promise<void>;
     generateCode: () => string;
@@ -408,8 +433,10 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
     // The mailbox's and the project's allowances are for mail that went out.
     // Each is RESERVED here, before the send — so two requests at once cannot
     // both take the last one — and every reservation is handed back if no
-    // mail goes out after all: a later limit refused, the code could not be
-    // stored, or the send failed or is not configured. (The per-IP and
+    // mail CAN have gone out: a later limit refused, the code could not be
+    // stored, or Resend certainly did not send it (refused it, or the deploy
+    // has no mail key). A send Resend may have taken keeps them (see below).
+    // (The per-IP and
     // per-guest limits above stay spent: they count attempts, and are what
     // stops a caller hammering a broken mailer.)
     const reserved: string[] = [];
@@ -454,10 +481,11 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
     }
 
     const code = deps.generateCode();
+    const codeHash = await hashGuestEmailCode(secret, userId, email, code);
     const saved = await deps.savePending({
         userId,
         email,
-        codeHash: await hashGuestEmailCode(secret, userId, email, code),
+        codeHash,
         expiresAt: new Date(deps.now() + GUEST_EMAIL_CODE_TTL_MS).toISOString(),
     });
     if (!saved) {
@@ -465,15 +493,30 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
         return json(GUEST_EMAIL_ERRORS.unavailable, 503);
     }
 
-    const sent = await deps.sendEmail(email, guestEmailMessage(code));
-    if (sent !== 'sent') {
-        // A code nobody received must not stay redeemable, nor count as mail.
+    const sent = await deps.sendEmail(
+        email,
+        guestEmailMessage(code),
+        deps.idempotencyKey(GUEST_EMAIL_KEY_OUTBOX, await guestEmailSendId(secret, userId, codeHash)),
+    );
+    if (sent.outcome === 'sent') {
+        return json({ sent: true, expiresInSec: Math.round(GUEST_EMAIL_CODE_TTL_MS / 1000) });
+    }
+    if (sent.outcome === 'rejected') {
+        // Certainly not sent: a code nobody received must not stay
+        // redeemable, nor count as mail.
         await Promise.all([deps.deletePending(userId), release()]);
-        return sent === 'unconfigured'
+        return sent.reason === 'unconfigured'
             ? json(GUEST_EMAIL_ERRORS.unavailable, 503)
             : json(GUEST_EMAIL_ERRORS.sendFailed, 502);
     }
-    return json({ sent: true, expiresInSec: Math.round(GUEST_EMAIL_CODE_TTL_MS / 1000) });
+    // `unknown`: Resend may have taken it (the connection dropped after the
+    // request, a timeout, a 5xx). Handing the reservations back would let mail
+    // that went out go uncounted -- past the mailbox's limits and the 60/300
+    // ceiling -- so they stay spent, and the code stays redeemable in case it
+    // arrives. The guest is told it did not go, as before: asking again mails
+    // a NEW code under a new key, which replaces this one and is counted anew.
+    deps.logError(`guest-email-start: send outcome unknown (${sent.reason})`);
+    return json(GUEST_EMAIL_ERRORS.sendFailed, 502);
 };
 
 /**

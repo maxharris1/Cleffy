@@ -2,6 +2,7 @@ import { generateGuestEmailCode, handleGuestEmailStart } from '../_shared/guestE
 import { common, deletePending, emailTaken, sendEmail } from '../_shared/guestEmailWiring.ts';
 import { mailLimit } from '../_shared/mailBudget.ts';
 import { refundRateLimit, serviceClient } from '../_shared/rateLimit.ts';
+import { resendIdempotencyKey } from '../_shared/resendDelivery.ts';
 import { verifyTurnstileRequest } from '../_shared/turnstileVerify.ts';
 
 /**
@@ -55,6 +56,7 @@ Deno.serve((req) =>
         },
         deletePending,
         sendEmail,
+        idempotencyKey: resendIdempotencyKey,
         refundRateLimit,
         generateCode: generateGuestEmailCode,
         now: () => Date.now(),

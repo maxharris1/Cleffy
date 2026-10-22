@@ -51,6 +51,21 @@ const AssignmentsPage = lazy(() =>
 // Lazy: the legal pages are long, rarely read, and reached from links only.
 const PrivacyPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.PrivacyPage })));
 const TermsPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.TermsPage })));
+const CancelPage = lazy(() => import('@/features/billing/CancelPage').then((m) => ({ default: m.CancelPage })));
+const RefundPolicyPage = lazy(() =>
+    import('@/features/legal/LegalPage').then((m) => ({ default: m.RefundPolicyPage })),
+);
+const CopyrightPolicyPage = lazy(() =>
+    import('@/features/legal/LegalPage').then((m) => ({ default: m.CopyrightPolicyPage })),
+);
+// Lazy: the content-report form is public and rarely used; the moderation
+// page is for moderators only (the server enforces that, not the route).
+const ReportContentPage = lazy(() =>
+    import('@/features/moderation/ReportContentPage').then((m) => ({ default: m.ReportContentPage })),
+);
+const ModerationPage = lazy(() =>
+    import('@/features/moderation/ModerationPage').then((m) => ({ default: m.ModerationPage })),
+);
 const AccountDeletedPage = lazy(() =>
     import('@/features/account/AccountDeletedPage').then((m) => ({ default: m.AccountDeletedPage })),
 );
@@ -190,6 +205,15 @@ export const AppRoutes = () => {
                         </Suspense>
                     }
                 />
+                {/* Inside the shell group: a moderator is a registered account. */}
+                <Route
+                    path="/admin/reports"
+                    element={
+                        <Suspense fallback={<LoadingText className="mt-10">Loading reports…</LoadingText>}>
+                            <ModerationPage />
+                        </Suspense>
+                    }
+                />
                 {/* Inside the shell group so the redirect still sits behind RequireRegistered. */}
                 <Route path="/settings" element={<SettingsRedirect />} />
             </Route>
@@ -225,6 +249,41 @@ export const AppRoutes = () => {
                 element={
                     <Suspense fallback={<PageFallback label="Loading…" />}>
                         <TermsPage />
+                    </Suspense>
+                }
+            />
+            {/* Public on purpose: cancelling must not need a working sign-in
+                (CA BPC §17602(d)). The emailed one-time link is the credential. */}
+            <Route
+                path="/cancel"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <CancelPage />
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/refunds"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <RefundPolicyPage />
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/copyright"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <CopyrightPolicyPage />
+                    </Suspense>
+                }
+            />
+            {/* Public: a rights holder or anyone else may report a score without an account. */}
+            <Route
+                path="/report"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <ReportContentPage />
                     </Suspense>
                 }
             />

@@ -312,6 +312,38 @@ SECURITY INVOKER and would otherwise answer 42501 before it reached the lease
 check. Proven against PostgreSQL 17.11 on 2026-10-12 (53 checks) and again, with
 the review's additions, on 2026-10-13: all 98 checks passed.
 
+`cancel_link_lifetime.sql` proves
+`supabase/migrations/20261020160300_cancel_link_token_lifetime.sql` (Codex round
+4 on #62): a cancel link's expiry is fixed on its `billing_mail_outbox` row when
+it is asked for and never moved later; its token is saved only through
+`save_cancel_link_token`, under the row's lease, with the row's expiry, and a
+second save — or the upsert the store used to make — changes nothing. Its last
+section is a real race: two dblink sessions save the same link at once, the
+second waits on the first's row lock, and the one token keeps the first save's
+expiry. Because that section needs committed rows it creates its own (fixed
+ids and a fresh hash each run, deleted before and after) and logs in as `postgres`; pass
+`-v peer_password=…` for anything but the local stack. Against hosted
+databases, use only sections 1-2. `tests/billing/cancelLinkStore.test.ts` runs
+billingCancelStore.ts itself against the same local stack (skipped unless
+`CLEFFY_LOCAL_SUPABASE_URL` and `CLEFFY_LOCAL_SERVICE_ROLE_KEY` are set).
+
+`cancel_link_tombstones.sql` and `cancel_link_db_clock.sql` prove
+`supabase/migrations/20261020160400_cancel_link_tombstones_db_clock.sql` and
+`20261020160500_cancel_link_save_replayable.sql` (Codex round 5 on #62; the
+second moves the save that answers the seconds left to
+`save_cancel_link_token_v2`, so `save_cancel_link_token` stays `returns text`
+and 20261020160300 still replays). The first: a token the cleanup deletes leaves a permanent
+tombstone (its hash and outbox id, nothing else), and neither a direct insert of
+that hash against a new pending request (the service role may not insert tokens
+at all; the owner is refused by the trigger) nor a request re-created under the
+deleted row's id can bring the link back; tombstones cannot be updated, deleted
+or truncated. It runs in one transaction and rolls back. The second: the save
+reads `clock_timestamp()` after the row lock, refuses with under 120 s left and
+answers the seconds left; two dblink sessions show a save that waited on the
+lock past the expiry (and from 122 s to under 120) being refused. Like
+`cancel_link_lifetime.sql` it commits its own rows (random ids and hashes,
+deleted again) and takes `-v peer_password=…`.
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's

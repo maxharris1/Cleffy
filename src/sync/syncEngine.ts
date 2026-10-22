@@ -518,6 +518,19 @@ export class SyncEngine {
     private pulling: Promise<void> | null = null;
     /** A pull was asked for while one was in flight; run another after it. */
     private pullAgain = false;
+    /**
+     * Live rows may not move the watermark while this is set. A pull reaches
+     * back only PULL_OVERLAP seqs, so a live row that lands after a stretch
+     * this device never heard (offline, a dropped channel, the score moving
+     * to new realtime topics) would carry the watermark past marks no later
+     * pull could reach. It starts set (the first pull has not run yet), is
+     * set again by noteGap, and is cleared only by a successful pull that
+     * began after the latest gap (see gapGeneration). Live rows are still
+     * applied meanwhile; only the watermark waits.
+     */
+    private watermarkHeld = true;
+    /** Bumped by noteGap; a pull releases the hold only if none came in during it. */
+    private gapGeneration = 0;
     private stopped = false;
     private backoffMs = INITIAL_BACKOFF_MS;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -879,6 +892,17 @@ export class SyncEngine {
         await this.deps.store.load();
         await this.pullSince();
         await this.flush();
+    }
+
+    /**
+     * Committed rows may have gone unheard since the last pull: the realtime
+     * channel re-joined, its committed-row topic was out, or the score moved
+     * to new topics. Holds the watermark against live rows until a pull that
+     * starts after this completes (see watermarkHeld). The caller pulls next.
+     */
+    noteGap(): void {
+        this.gapGeneration += 1;
+        this.watermarkHeld = true;
     }
 
     /**
@@ -1508,7 +1532,8 @@ export class SyncEngine {
         if (this.stopped) {
             return;
         }
-        if (!state || row.seq > state.watermarkSeq) {
+        // Held: the row is applied, but the pull that closes the gap moves the watermark.
+        if (!this.watermarkHeld && (!state || row.seq > state.watermarkSeq)) {
             await db.syncState.put({ docId, watermarkSeq: row.seq });
         }
     }
@@ -1548,6 +1573,9 @@ export class SyncEngine {
 
     private async pullOnce(): Promise<void> {
         const { db, api, docId } = this.deps;
+        // Read before the first request: a gap noted after this pull began
+        // is not covered by it.
+        const gap = this.gapGeneration;
         const state = await db.syncState.get(docId);
         let watermark = state?.watermarkSeq ?? 0;
         let after = Math.max(0, watermark - PULL_OVERLAP);
@@ -1593,6 +1621,9 @@ export class SyncEngine {
         }
         await db.syncState.put({ docId, watermarkSeq: watermark });
         this.lastPullError = null;
+        if (gap === this.gapGeneration) {
+            this.watermarkHeld = false;
+        }
     }
 }
 

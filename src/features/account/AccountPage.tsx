@@ -25,6 +25,7 @@ import { clearCachedEntitlements, loadUsage } from '@/features/billing/entitleme
 import { formatPlanDate, ownSubscriptionOf, planPeriodOf } from '@/features/billing/planStatus';
 import { TIER_LABELS } from '@/features/billing/pricing';
 import { useEntitlements } from '@/features/billing/useEntitlements';
+import { CancelSubscriptionLink } from '@/features/billing/CancelSubscriptionLink';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { features } from '@/lib/features';
@@ -597,6 +598,7 @@ export const AccountPage = () => {
             <DeleteAccountSection session={session} />
 
             <LegalLinks withContact className="mt-10" />
+            <CancelSubscriptionLink className="mt-3" />
 
             {clearOpen ? (
                 <ConfirmDialog

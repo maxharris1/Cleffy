@@ -1113,8 +1113,119 @@ describe('SyncEngine.stop during an in-flight pull', () => {
     });
 });
 
+describe('SyncEngine watermark hold across a gap (takedown topics, #63)', () => {
+    const seed = (from: number, to: number): void => {
+        for (let seq = from; seq <= to; seq += 1) {
+            api.rows.set(`r${seq}`, serverRow(`r${seq}`, { seq }));
+        }
+    };
+    const missing = (from: number, to: number): string[] => {
+        const ids: string[] = [];
+        for (let seq = from; seq <= to; seq += 1) {
+            if (!store.get(`r${seq}`)) {
+                ids.push(`r${seq}`);
+            }
+        }
+        return ids;
+    };
+
+    it('more than 50 marks missed, then a newer one live: the next pull still brings every one', async () => {
+        seed(1, 10);
+        await engine.sync();
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+
+        // The score was restricted and lifted (or the channel moved topics):
+        // the device heard none of the next 60 marks.
+        engine.noteGap();
+        seed(11, 70);
+        // The first mark after the lift arrives live, before the gap-fill pull.
+        api.rows.set('r71', serverRow('r71', { seq: 71 }));
+        await engine.applyServerRow(api.rows.get('r71')!);
+        expect(store.get('r71')).toBeDefined();
+        // It is applied, but does not carry the watermark past the gap.
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+
+        await engine.sync();
+        expect(missing(1, 71)).toEqual([]);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(71);
+
+        // The gap is closed: live rows move the watermark again.
+        api.rows.set('r72', serverRow('r72', { seq: 72 }));
+        await engine.applyServerRow(api.rows.get('r72')!);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(72);
+    });
+
+    it('a device opened with a cached watermark holds it until its first pull', async () => {
+        // Cached from an earlier session, before 60 marks it never saw.
+        await db.syncState.put({ docId: DOC, watermarkSeq: 10 });
+        seed(11, 70);
+        api.rows.set('r71', serverRow('r71', { seq: 71 }));
+        const fresh = new AnnotationStore(db, DOC);
+        const e = new SyncEngine({ db, store: fresh, api, docId: DOC, getUserId: () => USER });
+        // A live mark lands before the first pull has run.
+        await e.applyServerRow(api.rows.get('r71')!);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+        await e.sync();
+        e.stop();
+        for (let seq = 11; seq <= 71; seq += 1) {
+            expect(fresh.get(`r${seq}`), `r${seq}`).toBeDefined();
+        }
+    });
+
+    it('a gap noted while a pull is in flight holds until a pull that started after it', async () => {
+        seed(1, 10);
+        await engine.sync();
+
+        const realFetch = api.fetchSince.bind(api);
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        let calls = 0;
+        api.fetchSince = async (...args: Parameters<FakeApi['fetchSince']>) => {
+            calls += 1;
+            const result = await realFetch(...args);
+            if (calls === 1) {
+                await gate;
+            }
+            return result;
+        };
+        const pullA = engine.pullSince();
+        await vi.waitFor(() => expect(calls).toBe(1));
+        // The topics move while A is in flight; A read the server before it.
+        engine.noteGap();
+        release();
+        await pullA;
+        api.fetchSince = realFetch;
+
+        seed(11, 70);
+        api.rows.set('r71', serverRow('r71', { seq: 71 }));
+        await engine.applyServerRow(api.rows.get('r71')!);
+        // A cannot vouch for the gap, so the watermark is still held.
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+        await engine.pullSince();
+        expect(missing(1, 71)).toEqual([]);
+    });
+
+    it('a failed pull does not release the hold', async () => {
+        seed(1, 10);
+        await engine.sync();
+        engine.noteGap();
+        const realFetch = api.fetchSince.bind(api);
+        api.fetchSince = async () => ({ data: null, error: { message: 'too many requests', kind: 'retry' as const } });
+        await engine.pullSince();
+        api.fetchSince = realFetch;
+        api.rows.set('r80', serverRow('r80', { seq: 80 }));
+        await engine.applyServerRow(api.rows.get('r80')!);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+        engine.stop();
+    });
+});
+
 describe('SyncEngine.applyServerRow (broadcast path)', () => {
     it('applies rows and advances the watermark monotonically', async () => {
+        // Once a pull has run: until then the watermark is held (see the hold below).
+        await engine.pullSince();
         await engine.applyServerRow(serverRow('b1', { page: 4, color: '#123', seq: 9 }));
         expect(store.getPage(4).has('b1')).toBe(true);
         expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(9);
