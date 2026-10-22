@@ -198,6 +198,22 @@ export const provisionStudent = async (displayName: string, opts: ProvisionOptio
 };
 
 /**
+ * What the teacher reads when a reset fails part-way (decision 49 item 5): the
+ * server holds the student's current card for up to 10 minutes, so that card
+ * cannot be used to set up an account until the reset is retried or the hold
+ * runs out.
+ */
+export const RESET_INCOMPLETE_MESSAGE =
+    'The reset did not finish. The student’s current card is held for up to 10 minutes, so it cannot be used meanwhile. Try the reset again.';
+
+/**
+ * The hold a failed reset left, by student: sent with the next reset of that
+ * student so it resumes its own hold (20261022110500_student_code_reset_holder.sql).
+ * In memory only: after a reload the hold simply runs out.
+ */
+const pendingResetTokens = new Map<string, string>();
+
+/**
  * Cuts off however the student gets in today and issues the replacement.
  *
  * One action for both paths because it is one intent — "they cannot get in, fix
@@ -208,10 +224,32 @@ export const provisionStudent = async (displayName: string, opts: ProvisionOptio
  * to a password someone else now knows.
  */
 export const resetStudentAccess = async (studentId: string): Promise<ResetResult> => {
-    const response = await provision({ action: 'reset', studentId, redirectTo: welcomeRedirect() });
+    const resetToken = pendingResetTokens.get(studentId);
+    const response = await provision({
+        action: 'reset',
+        studentId,
+        redirectTo: welcomeRedirect(),
+        ...(resetToken ? { resetToken } : {}),
+    });
     if (!response.ok) {
+        const failure = (await response
+            .clone()
+            .json()
+            .catch(() => ({}))) as { code?: string; resetToken?: unknown };
+        if (failure.code === 'reset_incomplete') {
+            // The server kept the reset's hold on the student's current card;
+            // the token lets the teacher's next try resume it instead of waiting.
+            if (typeof failure.resetToken === 'string') {
+                pendingResetTokens.set(studentId, failure.resetToken);
+            }
+            throw new Error(RESET_INCOMPLETE_MESSAGE);
+        }
+        if (failure.code === 'reset_lost') {
+            pendingResetTokens.delete(studentId);
+        }
         return failFrom(response, 'Could not reset that student’s access.');
     }
+    pendingResetTokens.delete(studentId);
     const body = (await response.json()) as ProvisionBody;
     if (body.invited) {
         if (!body.studentEmail) {

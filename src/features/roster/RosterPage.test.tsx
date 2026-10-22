@@ -384,6 +384,26 @@ describe('RosterPage', () => {
         expect(within(card).getByText('ada_lovelace')).toBeInTheDocument();
     });
 
+    it('tells the teacher a failed reset holds the student’s card for up to 10 minutes', async () => {
+        const user = userEvent.setup();
+        listRoster.mockResolvedValue([
+            student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' }),
+        ]);
+        resetStudentAccess.mockRejectedValue(
+            new Error(
+                'The reset did not finish. The student’s current card is held for up to 10 minutes, so it cannot be used meanwhile. Try the reset again.',
+            ),
+        );
+        renderRoster();
+
+        await pickRowAction(user, 'Reset access…');
+        const confirm = await screen.findByRole('dialog', { name: 'Reset this student’s access?' });
+        await user.click(within(confirm).getByRole('button', { name: 'Reset access' }));
+
+        expect(await screen.findByText(/held for up to 10 minutes/)).toBeInTheDocument();
+        expect(screen.queryByRole('dialog', { name: 'Setup card' })).not.toBeInTheDocument();
+    });
+
     it('takes the confirmation down before the code goes up, however slow the reload is', async () => {
         // The code is shown once and stored as a hash, so the window between
         // issuing it and the roster coming back must not leave a second dialog
