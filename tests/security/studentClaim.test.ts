@@ -22,6 +22,7 @@ import {
     type StudentClaimDeps,
     USERNAME_TAKEN,
 } from '../../supabase/functions/student-claim/handler';
+import { type CodeResetPorts, type ResetLease, runCodeReset } from '../../supabase/functions/_shared/studentCodeReset';
 import { chunkedJson } from './chunkedBody';
 
 /**
@@ -35,6 +36,8 @@ import { chunkedJson } from './chunkedBody';
 const TTL_MS = 600_000;
 const CODE_A = 'ABCD-EFGH-JKMN';
 const CODE_B = 'PQRS-TUVW-XYZ2';
+const CODE_C = 'HJKM-NPQR-STUV';
+const CODE_D = 'WXYZ-2345-6789';
 
 interface Row {
     id: string;
@@ -50,9 +53,19 @@ interface Held {
     kind: 'claim' | 'reset';
     hash: string | null;
     until: number;
+    /** A reset's current worker lease (20261022110700); null once it reported back. */
+    worker?: string | null;
+    epoch?: number;
+    inAuth?: boolean;
+    /** The row's claimed flag when the reset reserved it (no claim since). */
+    claimedSeen?: boolean;
 }
 
-type Step = keyof StudentClaimBackend;
+type ResetStep = Exclude<keyof CodeResetPorts, 'log'>;
+type Step = keyof StudentClaimBackend | ResetStep;
+
+type BeginReset =
+    ({ status: 'reserved' } & ResetLease) | { status: 'busy'; kind: 'reset' | 'claim' } | { status: 'not_found' };
 
 class Roster {
     rows = new Map<string, Row>();
@@ -61,6 +74,7 @@ class Roster {
     sessions = new Set<string>();
     now = 1_000_000;
     private ids = 0;
+    private epochs = 0;
     private gates = new Map<Step, Array<{ arrived: () => void; go: Promise<void> }>>();
 
     add(id: string, hash: string): void {
@@ -130,39 +144,125 @@ class Roster {
     }
 
     /**
-     * student-provision's reset: reserve_student_code_reset
-     * (20261022110500_student_code_reset_holder.sql), then the scramble, then
-     * complete_student_code_reset. A live hold of either kind refuses, unless
-     * it is this reset's own (its token presented).
+     * student-provision's reset, as 20261022110700_student_code_reset_worker.sql
+     * runs it: reserve_student_code_reset hands every attempt its own worker
+     * lease. A live hold of either kind refuses, unless it is this reset's own
+     * (its token presented) and its worker is not inside an Auth call; then the
+     * new lease fences out the old worker.
      */
-    beginReset(id: string, token?: string): { status: 'reserved' | 'busy'; reservation?: string } {
+    beginReset(id: string, token?: string | null): BeginReset {
+        const row = this.rows.get(id);
+        if (!row) {
+            return { status: 'not_found' };
+        }
         const held = this.held.get(id);
+        const worker = `worker-${++this.ids}`;
+        const epoch = ++this.epochs;
         if (this.live(held)) {
-            if (held.kind === 'reset' && token !== undefined && held.reservation === token) {
-                held.until = this.now + TTL_MS;
-                return { status: 'reserved', reservation: token };
+            if (held.kind === 'reset' && token && held.reservation === token && !held.inAuth) {
+                Object.assign(held, { worker, epoch, inAuth: false, until: this.now + TTL_MS });
+                return { status: 'reserved', reservation: token, worker, epoch };
             }
-            return { status: 'busy' };
+            return { status: 'busy', kind: held.kind };
         }
         const reservation = `res-${++this.ids}`;
         this.held.set(id, {
             reservation,
             kind: 'reset',
-            hash: this.rows.get(id)?.hash ?? null,
+            hash: row.hash,
             until: this.now + TTL_MS,
+            worker,
+            epoch,
+            inAuth: false,
+            claimedSeen: row.claimed,
         });
-        return { status: 'reserved', reservation };
+        return { status: 'reserved', reservation, worker, epoch };
     }
 
-    /** complete_student_code_reset: the holder's new code, or 'lost'. */
-    completeReset(id: string, token: string, hash: string): 'reset' | 'lost' {
+    private owns(id: string, lease: ResetLease): boolean {
         const held = this.held.get(id);
-        if (!held || held.kind !== 'reset' || held.reservation !== token) {
+        const row = this.rows.get(id);
+        return Boolean(
+            held &&
+            row &&
+            held.kind === 'reset' &&
+            held.reservation === lease.reservation &&
+            held.worker === lease.worker &&
+            held.epoch === lease.epoch &&
+            row.hash === held.hash &&
+            row.claimed === held.claimedSeen,
+        );
+    }
+
+    /** fence_student_code_reset: 'ok' only for the current worker of a live hold, no claim since. */
+    fenceReset(id: string, lease: ResetLease): 'ok' | 'lost' {
+        const held = this.held.get(id);
+        if (!this.live(held) || !this.owns(id, lease)) {
+            return 'lost';
+        }
+        Object.assign(held, { inAuth: true, until: Math.max(held.until, this.now + TTL_MS) });
+        return 'ok';
+    }
+
+    /** complete_student_code_reset: the current worker's new code, or 'lost'. */
+    completeReset(id: string, lease: ResetLease, hash: string): 'reset' | 'lost' {
+        if (!this.owns(id, lease)) {
             return 'lost';
         }
         this.held.delete(id);
         Object.assign(this.rows.get(id) as Row, { hash, claimed: false });
         return 'reset';
+    }
+
+    /** stop_student_code_reset_worker: the hold stays; a retry may take a new lease. */
+    stopResetWorker(id: string, lease: ResetLease): void {
+        const held = this.held.get(id);
+        if (
+            held?.kind === 'reset' &&
+            held.reservation === lease.reservation &&
+            held.worker === lease.worker &&
+            held.epoch === lease.epoch
+        ) {
+            Object.assign(held, { worker: null, inAuth: false });
+        }
+    }
+
+    /** student-provision's code-reset ports over this roster, each step pausable. */
+    resetPorts(): CodeResetPorts & { [K in ResetStep]: ReturnType<typeof vi.fn> } {
+        const step =
+            <A extends unknown[], R>(name: ResetStep, fn: (...args: A) => R) =>
+            async (...args: A): Promise<Awaited<R>> => {
+                await this.gate(name);
+                return await fn(...args);
+            };
+        let cards = 0;
+        return {
+            reserveReset: vi.fn(step('reserveReset', (id: string, token: string | null) => this.beginReset(id, token))),
+            fence: vi.fn(step('fence', (id: string, lease: ResetLease) => this.fenceReset(id, lease))),
+            scramblePassword: vi.fn(
+                step('scramblePassword', (userId: string) => {
+                    this.passwords.set(userId, `scramble-${++this.ids}`);
+                    return { ok: true as const };
+                }),
+            ),
+            endSessions: vi.fn(
+                step('endSessions', () => {
+                    this.sessions.clear();
+                    return { ok: true as const };
+                }),
+            ),
+            mintCode: vi.fn(
+                step('mintCode', async () => {
+                    const code = [CODE_B, CODE_C, CODE_D][cards++] as string;
+                    return { code, hash: await hashOf(code) };
+                }),
+            ),
+            complete: vi.fn(
+                step('complete', (id: string, lease: ResetLease, hash: string) => this.completeReset(id, lease, hash)),
+            ),
+            stopWorker: vi.fn(step('stopWorker', (id: string, lease: ResetLease) => this.stopResetWorker(id, lease))),
+            log: () => undefined,
+        };
     }
 
     /** The guard trigger on a hash change by any other path: refused under any live hold. */
@@ -180,7 +280,7 @@ class Roster {
         (this.rows.get(id) as Row).archived = true;
     }
 
-    backend(): StudentClaimBackend & { [K in Step]: ReturnType<typeof vi.fn> } {
+    backend(): StudentClaimBackend & { [K in keyof StudentClaimBackend]: ReturnType<typeof vi.fn> } {
         const step =
             <A extends unknown[], R>(name: Step, fn: (...args: A) => R) =>
             async (...args: A): Promise<Awaited<R>> => {
@@ -352,6 +452,13 @@ describe('student-claim: two claims on one card', () => {
 });
 
 describe('student-claim against a teacher reset', () => {
+    const reserved = (r: BeginReset): ResetLease => {
+        if (r.status !== 'reserved') {
+            throw new Error(`expected a reservation, got ${r.status}`);
+        }
+        return r;
+    };
+
     it('a reset during a claim waits; the claim commits; the reset then goes ahead', async () => {
         const { roster, deps } = await setup();
         const paused = roster.pause('signIn');
@@ -363,16 +470,14 @@ describe('student-claim against a teacher reset', () => {
 
         paused.resume();
         expect((await inFlight).status).toBe(200);
-        const reset = roster.beginReset('s1');
-        expect(reset.status).toBe('reserved');
-        expect(roster.completeReset('s1', reset.reservation as string, await hashOf(CODE_B))).toBe('reset');
+        const reset = reserved(roster.beginReset('s1'));
+        expect(roster.completeReset('s1', reset, await hashOf(CODE_B))).toBe('reset');
         expect(roster.held.size).toBe(0);
     });
 
     it('a claim during a reset waits without writing anything; afterwards only the new card works', async () => {
         const { roster, backend, deps } = await setup();
-        const reset = roster.beginReset('s1');
-        expect(reset.status).toBe('reserved');
+        const reset = reserved(roster.beginReset('s1'));
 
         const during = await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
         expect(during.status).toBe(409);
@@ -380,7 +485,7 @@ describe('student-claim against a teacher reset', () => {
         expect(backend.setPassword).not.toHaveBeenCalled();
 
         roster.passwords.set('user-s1', 'scrambled');
-        expect(roster.completeReset('s1', reset.reservation as string, await hashOf(CODE_B))).toBe('reset');
+        expect(roster.completeReset('s1', reset, await hashOf(CODE_B))).toBe('reset');
 
         expect((await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps)).status).toBe(401);
         expect((await handleStudentClaim(claim(CODE_B, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
@@ -406,43 +511,161 @@ describe('student-claim against a teacher reset', () => {
 
     it('reset, reset, claim: a paused reset cannot scramble the password the student chose from the other card', async () => {
         // Codex r1 (Part B) finding 2. Reset A reserves and pauses before its
-        // scramble; reset B arrives; the student then claims.
+        // scramble; reset B (another tab, no token) arrives; the student claims.
         const { roster, deps } = await setup();
-        const resetA = roster.beginReset('s1');
-        expect(resetA.status).toBe('reserved');
+        const ports = roster.resetPorts();
+        const pausedA = roster.pause('fence');
+        const resetA = runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
+        await pausedA.arrived;
 
         // B cannot take A's live reservation over, so it never mints a card.
-        expect(roster.beginReset('s1').status).toBe('busy');
+        expect(await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null })).toEqual({
+            kind: 'busy',
+            holder: 'reset',
+        });
         expect(roster.beginReset('s1', 'not-a-token').status).toBe('busy');
         // Nor can anything but A write a code under it.
-        expect(roster.completeReset('s1', 'res-forged', await hashOf(CODE_B))).toBe('lost');
+        expect(
+            roster.completeReset('s1', { reservation: 'res-forged', worker: 'w', epoch: 99 }, await hashOf(CODE_C)),
+        ).toBe('lost');
         expect(() => roster.writeNewHash('s1', 'rotated')).toThrow('student_claim_in_progress');
         // The student, holding the old card meanwhile, is told to wait.
-        const early = await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
-        expect(early.status).toBe(409);
+        expect((await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps)).status).toBe(409);
 
-        // A resumes: scramble, then its new card.
-        roster.passwords.set('user-s1', 'scrambled-by-A');
-        expect(roster.completeReset('s1', resetA.reservation as string, await hashOf(CODE_B))).toBe('reset');
+        // A resumes: scramble, sessions, then its new card.
+        pausedA.resume();
+        const done = await resetA;
+        expect(done).toEqual({ kind: 'reset', code: CODE_B });
+        expect(ports.scramblePassword).toHaveBeenCalledTimes(1);
 
-        // The student claims A's card with a password of their own.
+        // The student claims A's card with a password of their own; nothing
+        // of A's can land after it.
         expect((await handleStudentClaim(claim(CODE_B, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
         expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
-
-        // A stale replay of A's completion finds nothing to write: the
-        // student's password and claim stand.
-        expect(roster.completeReset('s1', resetA.reservation as string, 'hash-late')).toBe('lost');
         expect(roster.rows.get('s1')).toMatchObject({ claimed: true, username: 'ada_l' });
-        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
     });
 
-    it('a reset retried by its holder after a partial failure resumes its own hold at once', async () => {
+    it('two paused retries of one token: B completes, the student claims, A resumes and does nothing', async () => {
+        // Codex r2 (Part B) MAJOR. A first try fails part-way and hands back
+        // token T; two retries then present T at once.
+        const { roster, deps } = await setup();
+        const ports = roster.resetPorts();
+        ports.scramblePassword.mockResolvedValueOnce({ ok: false, message: 'auth unavailable' });
+        const first = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
+        expect(first.kind).toBe('incomplete');
+        const token = (first as { resetToken: string }).resetToken;
+        // The failed try reported back: its hold stays, its worker is gone.
+        expect(roster.held.get('s1')).toMatchObject({ reservation: token, worker: null, inAuth: false });
+
+        // Retry A takes its lease and pauses right before its password write.
+        const pausedA = roster.pause('fence');
+        const retryA = runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: token });
+        await pausedA.arrived;
+        const leaseA = roster.held.get('s1')?.epoch;
+
+        // Retry B presents the same token: a fresh lease, a newer epoch.
+        const retryB = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: token });
+        expect(retryB).toEqual({ kind: 'reset', code: CODE_B });
+        expect(ports.scramblePassword).toHaveBeenCalledTimes(2); // the failed first try, then B
+        expect(ports.endSessions).toHaveBeenCalledTimes(1);
+        expect(ports.reserveReset.mock.results.map((r) => r.type)).toEqual(['return', 'return', 'return']);
+        expect(leaseA).toBeDefined();
+
+        // The student claims B's card, chooses a password and signs in.
+        const claimed = await handleStudentClaim(claim(CODE_B, 'ada_l', 'Correct1horse'), deps);
+        expect(claimed.status).toBe(200);
+        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
+        const studentSessions = new Set(roster.sessions);
+        expect(studentSessions.size).toBe(1);
+
+        // A resumes: its fence fails, and it touches nothing.
+        pausedA.resume();
+        expect(await retryA).toEqual({ kind: 'lost' });
+        expect(ports.scramblePassword).toHaveBeenCalledTimes(2);
+        expect(ports.endSessions).toHaveBeenCalledTimes(1);
+        expect(ports.complete).toHaveBeenCalledTimes(1);
+        expect(ports.stopWorker).toHaveBeenCalledTimes(1); // the first try's only
+        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
+        expect(roster.sessions).toEqual(studentSessions);
+        expect(roster.rows.get('s1')).toMatchObject({ claimed: true, username: 'ada_l', hash: null });
+    });
+
+    it('a newer lease fences out an older worker while the hold is still live', async () => {
         const { roster } = await setup();
-        const first = roster.beginReset('s1');
-        // The scramble failed: student-provision answered reset_incomplete with the token.
-        const retry = roster.beginReset('s1', first.reservation);
-        expect(retry).toEqual({ status: 'reserved', reservation: first.reservation });
-        expect(roster.completeReset('s1', first.reservation as string, await hashOf(CODE_B))).toBe('reset');
+        const ports = roster.resetPorts();
+        ports.endSessions.mockResolvedValueOnce({ ok: false, message: 'rpc down' });
+        const first = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
+        const token = (first as { resetToken: string }).resetToken;
+
+        // A pauses before its first fence; B takes a newer lease and pauses
+        // inside its own password write.
+        const pausedA = roster.pause('fence');
+        const retryA = runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: token });
+        await pausedA.arrived;
+        const pausedB = roster.pause('scramblePassword');
+        const retryB = runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: token });
+        await pausedB.arrived;
+
+        // A wakes while B is still working: its epoch is stale.
+        pausedA.resume();
+        expect(await retryA).toEqual({ kind: 'lost' });
+        expect(ports.scramblePassword).toHaveBeenCalledTimes(2); // the first try, and B (paused inside it)
+
+        pausedB.resume();
+        expect(await retryB).toEqual({ kind: 'reset', code: CODE_B });
+    });
+
+    it('a retry cannot start behind a worker that may be inside an Auth call', async () => {
+        const { roster } = await setup();
+        const ports = roster.resetPorts();
+        ports.endSessions.mockResolvedValueOnce({ ok: false, message: 'rpc down' });
+        const first = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
+        const token = (first as { resetToken: string }).resetToken;
+
+        // A passed its fence and its password write is on the way to Auth.
+        const pausedA = roster.pause('scramblePassword');
+        const retryA = runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: token });
+        await pausedA.arrived;
+        expect(roster.held.get('s1')?.inAuth).toBe(true);
+
+        // B with the same token is told the reset is still finishing.
+        expect(await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: token })).toEqual({
+            kind: 'busy',
+            holder: 'reset',
+        });
+        expect(ports.scramblePassword).toHaveBeenCalledTimes(2);
+
+        pausedA.resume();
+        expect(await retryA).toEqual({ kind: 'reset', code: CODE_B });
+    });
+
+    it('a worker that reported back lets the retry resume its hold at once', async () => {
+        const { roster } = await setup();
+        const ports = roster.resetPorts();
+        ports.scramblePassword.mockResolvedValueOnce({ ok: false, message: 'auth unavailable' });
+        const first = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
+        expect(first).toMatchObject({ kind: 'incomplete' });
+        const token = (first as { resetToken: string }).resetToken;
+        const retry = await runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: token });
+        expect(retry).toEqual({ kind: 'reset', code: CODE_B });
+        expect(roster.held.size).toBe(0);
+    });
+
+    it('a claim that lands while the hold had run out fences the reset out before any Auth write', async () => {
+        const { roster, deps } = await setup();
+        const ports = roster.resetPorts();
+        const pausedA = roster.pause('fence');
+        const resetA = runCodeReset(ports, { studentId: 's1', studentUserId: 'user-s1', resumeToken: null });
+        await pausedA.arrived;
+        // A's hold runs out (its request stalled past the TTL) and the student
+        // claims the old card meanwhile.
+        roster.now += TTL_MS + 1;
+        expect((await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
+
+        pausedA.resume();
+        expect(await resetA).toEqual({ kind: 'lost' });
+        expect(ports.scramblePassword).not.toHaveBeenCalled();
+        expect(roster.passwords.get('user-s1')).toBe('Correct1horse');
     });
 });
 

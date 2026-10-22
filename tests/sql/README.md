@@ -713,6 +713,19 @@ claim interleaving can no longer scramble the student's chosen password; a
 dead reset is taken over only after its TTL. Proven against the local stack on
 2026-10-22: all 73 checks passed (53 before the fix round).
 
+Since the P3 fix round 2 it also proves
+`20261022110700_student_code_reset_worker.sql`: every reset attempt takes its
+own worker lease (a worker id and a fencing epoch that only goes up), separate
+from the resume token. Two retries of one token (section 8): B completes, the
+student claims, and A -- paused before its password write -- is `lost` at its
+fence, at its completion and at its report-back, so the claim stands; with the
+hold still live a newer lease fences the older worker out; a worker that passed
+a fence (an Auth call may be in flight) can be neither taken over by the same
+token nor released under, until it reports back; and a claim since the
+reservation (after the hold ran out, or a claim commit under it) fences the
+reset out. Proven against the local stack on 2026-10-22: all 99 checks passed
+(73 before fix round 2).
+
 `account_deletion_pending.sql` proves
 `20261022110100_account_deletion_pending.sql` (launchfix P3, SF-13): once
 `begin_account_deletion` has written the marker (holding the account's
