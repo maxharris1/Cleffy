@@ -398,3 +398,15 @@ Merge order per the packet: P2 goes second, after P1, and there is no file overl
 - **Comments:** no review comments. The PR's three comments are two from Vercel and this session's rate-limit note.
 - **This report branch** still sits on the pre-rebase history (`0508174` + report commits). It is a scratch branch and does not need rebasing.
 - **Not re-verified:** as before, this session has not re-run the local checks, the CSP smoke or the ui-check on any head after `0508174`.
+
+## Addendum 6 (13:28 UTC): PR #68 merged into dev
+
+- **Merge:** at 13:25 UTC **maxharris1 marked PR #68 ready for review and merged it into `dev`**.
+    - Merge commit: `e55a148da3b0efe3c8ba117975eea5cc94199a9b` ("Merge pull request #68 from maxharris1/mh/launchfix-p2-client-safety").
+    - Its parent on the PR side is `7c9c350`, the head whose CI is recorded in Addendum 5 (all green).
+- **This session's part:** it did not merge, approve or change the draft state. The merge was Max's.
+- **Subscription:** the PR-activity subscription ended automatically when the PR closed.
+- **Hosted steps still open** (unchanged from above):
+    - Turning Turnstile on (site key and secret together), then running the CSP smoke on that build.
+    - Checking link previews for the cleffy.io og image after deploy.
+- **Open questions** in the main report that the later commits did not settle remain open, in particular #1 (sign-out resolving on server failure) and #5.
