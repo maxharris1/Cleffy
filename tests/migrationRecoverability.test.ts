@@ -172,6 +172,11 @@ describe('imslp-sync — the cron job the push has to pause', () => {
             'retention-rate-limits': retention,
             'retention-stale-guests': retention,
             'retention-support-messages': retention,
+            // Launchfix P3: safe to leave running across a push for the same
+            // reason as content-notice-retry -- it calls a function its own
+            // migration defines, and only pokes resend-inbound while inbound
+            // mail is due and the Vault secrets exist.
+            'support-inbound-retry': ['20261022110200_support_inbound_lease.sql'],
         });
     });
 });
