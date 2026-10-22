@@ -22,14 +22,27 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ARG AUDIVERIS_VERSION=5.6.1
-# Tesseract 3.04 eng — Audiveris runs OCR in legacy mode only.
-ARG TESSDATA_ENG_URL=https://github.com/tesseract-ocr/tessdata/raw/3.04.00/eng.traineddata
-RUN curl -fsSL -o /tmp/audiveris.deb \
+# SHA-256 of the exact bytes this image is built from. A download that does not
+# match fails the build instead of running whatever came back. Bumping
+# AUDIVERIS_VERSION or the tessdata URL means re-pinning: download the file and
+# take `sha256sum`, and compare it with the asset digest GitHub shows on the
+# release (`gh api repos/Audiveris/audiveris/releases/tags/<version>`).
+ARG AUDIVERIS_DEB_SHA256=3f05c33fe65a5fced51718bdafde9ed989528b882cf3297d4c72b588ef04a656
+# Tesseract 3.04 eng — Audiveris runs OCR in legacy mode only. The raw host
+# directly (github.com/<repo>/raw/<tag>/… only redirects here); the tag pins the
+# path, the hash pins the content.
+ARG TESSDATA_ENG_URL=https://raw.githubusercontent.com/tesseract-ocr/tessdata/3.04.00/eng.traineddata
+ARG TESSDATA_ENG_SHA256=c0515c9f1e0c79e1069fcc05c2b2f6a6841fb5e1082d695db160333c1154f06d
+RUN set -eu \
+    && curl -fsSL -o /tmp/audiveris.deb \
         "https://github.com/Audiveris/audiveris/releases/download/${AUDIVERIS_VERSION}/Audiveris-${AUDIVERIS_VERSION}-ubuntu22.04-x86_64.deb" \
+    && echo "${AUDIVERIS_DEB_SHA256}  /tmp/audiveris.deb" | sha256sum -c - \
     && dpkg -x /tmp/audiveris.deb /opt/audiveris-root \
     && rm /tmp/audiveris.deb \
     && mkdir -p /opt/tesseract-ocr/tessdata \
-    && curl -fsSL -o /opt/tesseract-ocr/tessdata/eng.traineddata "${TESSDATA_ENG_URL}"
+    && curl -fsSL -o /tmp/eng.traineddata "${TESSDATA_ENG_URL}" \
+    && echo "${TESSDATA_ENG_SHA256}  /tmp/eng.traineddata" | sha256sum -c - \
+    && mv /tmp/eng.traineddata /opt/tesseract-ocr/tessdata/eng.traineddata
 
 # TESSDATA_PREFIX must name the tessdata FOLDER ITSELF, not its parent. Pointing
 # at the parent (the convention older Tesseract used) makes Audiveris log
