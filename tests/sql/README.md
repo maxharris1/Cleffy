@@ -994,6 +994,19 @@ human moved to another district before the hard delete is untouched. Ends with
 passed; with 20261022140000's run, 4 of the 10 failed (both kept students still
 named the deleted district).
 
+`district_barrier_lifts_on_renewal.sql` proves
+`supabase/migrations/20261022140200_district_barrier_lifts_on_renewal.sql`
+(decision 68(3)'s follow-up): right after a soft-deleted district's renewal,
+with no run since, `district_deletion_pending()` answers no and the service
+role's roster insert goes through; the next run's cancel un-archives the
+purge's students as before and leaves the newly provisioned one alone; a
+district not renewed still refuses; a renewal undone before the run closes the
+barrier again, and the next run's sweep lists, archives and signs out the
+student who came in meanwhile; a hard-deleted district stays closed. Ends with
+`failures | total`. Proven against the local stack on 2026-10-22: all 12 checks
+passed; with 20261022130300's `district_deletion_pending()`, 6 of the 12
+failed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

@@ -2127,6 +2127,20 @@ counts (item 3). Schedule it only when all of these hold:
       `district_busy`, and a correction that raced another is refused with
       `40001`. Both are retried, and roster corrections go through
       `admin_set_student_district()` (step 11.3, decision 69).
+
+    And the launch-fix follow-ups' three, after them, in order:
+    - `20261022140000_district_retention_restore_hand_on` (decision 47's
+      residual): when one district's purge ends while another district's
+      purge lists a student it archived, the restore is handed on to that
+      purge (logged as `restore_handed_on`) instead of being lost.
+    - `20261022140100_district_retention_detach_kept` (decision 68(2)): the
+      hard delete clears `district_studio_id` on the students it keeps (a
+      teacher's restore during the purge week), logged as `detached_kept`.
+      Nothing is deleted.
+    - `20261022140200_district_barrier_lifts_on_renewal` (decision 68(3)): a
+      renewal lifts the provisioning barrier at once; the run's cancel is
+      unchanged.
+
 2. `district-retention-notices` is deployed with `DISTRICT_NOTICE_SECRET`, and
    the Vault pair `district_notice_url` / `district_notice_secret` exists
    (step 14).
@@ -2147,14 +2161,17 @@ Decisions 68 and 69 accept these, once it runs:
 
 - the barrier starts at the soft delete, not at the 14-day notice. During the
   notice the district is still live and may renew;
-- a teacher's restore during the purge still wins (`20261021120700`);
-- a renewal that lifts the barrier takes effect at the next daily run;
+- a teacher's restore during the purge still wins (`20261021120700`); the
+  hard delete then detaches that student from the district
+  (`20261022140100`);
+- a renewal lifts the barrier at once (`20261022140200`); the district's
+  students the purge archived stay archived until the next run's cancel;
 - a correction in flight can make that day's run pass the district over,
   even a soft or hard delete that is due. The next run picks it up.
 
-Follow-ups, not launch steps: the hard delete detaching restored students
-(clearing `district_studio_id`, without deleting them), and lifting the
-barrier at once on a renewal.
+Both follow-ups decision 68 named (the hard delete detaching restored
+students, and lifting the barrier at once on a renewal) are done by the
+launch-fix follow-ups' migrations above.
 
 ### Recovery runbooks: provisioning, deletion, inbound mail (P3)
 
