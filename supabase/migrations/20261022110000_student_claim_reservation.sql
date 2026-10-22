@@ -21,8 +21,11 @@
 -- busy and writes nothing. A teacher's reset takes a reservation of its own
 -- before it scrambles the password (begin_student_code_reset), so a reset and a
 -- claim can never interleave: whichever comes second is told to wait. Archiving
--- clears the reservation (the commit refuses an archived row in any case), and
--- any other change of the code hash refuses while a live claim holds it.
+-- BLOCKS a claim in flight -- its commit refuses an archived row -- but leaves
+-- the reservation until that claim lets go, so a reset of the archived student
+-- (or a new claim after a restore) still waits for the stale claim instead of
+-- racing its password write. Any other change of the code hash refuses while a
+-- live claim holds it.
 --
 -- The TTL is longer than an Edge Function can run (400 s wall clock on the paid
 -- plan), so by the time a reservation expires its holder can no longer be
@@ -222,8 +225,10 @@ grant execute on function public.begin_student_code_reset (uuid, integer) to ser
 -- ---------------------------------------------------------------------------
 -- The guard: what a change to the row does to its reservation.
 -- ---------------------------------------------------------------------------
---  * archived: the reservation is cleared. The claim's commit refuses an
---    archived row anyway, and the archive's ban stops any sign-in.
+--  * archived: nothing here. The claim's commit refuses an archived row, the
+--    archive's ban stops any sign-in, and the reservation stays until its
+--    holder releases it (or it expires), so a reset of the archived row waits
+--    for the claim rather than scrambling before its password write lands.
 --  * the code hash changes other than by the claim's own commit: refused while
 --    a live CLAIM holds the row (so no path can rotate a card under a claim in
 --    flight), otherwise the reservation is cleared -- a reset's own one
@@ -231,10 +236,6 @@ grant execute on function public.begin_student_code_reset (uuid, integer) to ser
 create or replace function public.student_claim_reservation_guard () returns trigger language plpgsql security definer
 set search_path = public as $$
 begin
-    if new.archived_at is not null and old.archived_at is null then
-        delete from public.student_claim_reservations where student_id = new.id;
-        return new;
-    end if;
     if new.login_code_hash is distinct from old.login_code_hash
         and not (old.claimed_at is null and new.claimed_at is not null) then
         if exists (
@@ -256,5 +257,5 @@ revoke all on function public.student_claim_reservation_guard () from public, an
 drop trigger if exists managed_students_claim_reservation_guard on public.managed_students;
 
 create trigger managed_students_claim_reservation_guard
-after update of login_code_hash, archived_at on public.managed_students
+after update of login_code_hash on public.managed_students
 for each row execute function public.student_claim_reservation_guard ();

@@ -121,11 +121,32 @@ $q$select public.settle_account_deletion (pg_temp.u(1), 'failed', 'document_dele
 select pg_temp.chk('22 ... which keeps the marker, with the error',
 $q$select attempts = 2 and last_error = 'document_delete_failed' from public.account_deletions where user_id = pg_temp.u(1)$q$);
 select pg_temp.refused('23 ... so the half-deleted account still cannot grow', pg_temp.doc_sql(106, 1), '55000');
-select pg_temp.ran('24 an attempt that deleted nothing (billing could not be stopped) is abandoned',
+select pg_temp.ran('24 a retry that then deletes nothing (billing could not be stopped) is abandoned',
 $q$select public.settle_account_deletion (pg_temp.u(1), 'abandoned')$q$);
-select pg_temp.chk('25 ... which clears the marker',
+select pg_temp.chk('25 ... but the marker an earlier attempt left stays: the account is half-deleted',
+$q$select attempts = 2 and last_error = 'document_delete_failed' from public.account_deletions where user_id = pg_temp.u(1)$q$);
+-- A fresh account, one attempt, nothing else running.
+reset role;
+delete from public.account_deletions where user_id = pg_temp.u(1);
+select pg_temp.as_service();
+select pg_temp.chk('26a a first attempt begins',
+$q$select public.begin_account_deletion (pg_temp.u(1)) = 1$q$);
+select pg_temp.chk('26b a second tab begins on the same account',
+$q$select public.begin_account_deletion (pg_temp.u(1)) = 2$q$);
+select pg_temp.ran('26c the first tab''s billing fails, and it abandons',
+$q$select public.settle_account_deletion (pg_temp.u(1), 'abandoned')$q$);
+select pg_temp.chk('26d ... which cannot clear the marker the second tab is sweeping under',
+$q$select exists (select 1 from public.account_deletions where user_id = pg_temp.u(1))$q$);
+reset role;
+delete from public.account_deletions where user_id = pg_temp.u(1);
+select pg_temp.as_service();
+select pg_temp.chk('26e a lone first attempt begins',
+$q$select public.begin_account_deletion (pg_temp.u(1)) = 1$q$);
+select pg_temp.ran('26f ... deletes nothing (billing could not be stopped) and abandons',
+$q$select public.settle_account_deletion (pg_temp.u(1), 'abandoned')$q$);
+select pg_temp.chk('26g ... which clears the marker',
 $q$select not exists (select 1 from public.account_deletions where user_id = pg_temp.u(1))$q$);
-select pg_temp.ran('26 ... and the account works as before', pg_temp.student_sql(203, 1, 13));
+select pg_temp.ran('26h ... and the account works as before', pg_temp.student_sql(203, 1, 13));
 select pg_temp.refused('27 an unknown outcome is refused',
 $q$select public.settle_account_deletion (pg_temp.u(1), 'whatever')$q$, '22023');
 

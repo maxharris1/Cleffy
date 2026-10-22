@@ -97,6 +97,8 @@ export interface InboundMessage {
     subject: string | null;
     textBody: string | null;
     htmlBody: string | null;
+    /** An earlier attempt's forward had an unknown outcome and already spent its budget. */
+    budgetHeld: boolean;
 }
 
 export type ClaimAnswer =
@@ -113,12 +115,15 @@ export interface InboundStore {
     /** True when stored; false when this holder no longer holds the row; null on error. */
     saveBody: (id: string, holder: string, text: string | null, html: string | null) => Promise<boolean | null>;
     /** True when recorded; false when this holder no longer holds the row; null on error. */
-    finish: (
-        id: string,
-        holder: string,
-        outcome: FinishOutcome,
-        detail?: { error?: string; retryAfterSec?: number; forwardId?: string },
-    ) => Promise<boolean | null>;
+    finish: (id: string, holder: string, outcome: FinishOutcome, detail?: FinishDetail) => Promise<boolean | null>;
+}
+
+export interface FinishDetail {
+    error?: string;
+    retryAfterSec?: number;
+    forwardId?: string;
+    /** On 'retry': the forward's budget is spent (unknown outcome); the retry must not reserve again. */
+    budgetHeld?: boolean;
 }
 
 export type BudgetReservation = { ok: true; release: () => Promise<void> } | { ok: false; retryAfterSec: number };
@@ -177,10 +182,7 @@ export const processMessage = async (message: InboundMessage, deps: InboundDeps)
     const { id, holder } = message;
     const stored = { stored: id };
 
-    const finish = async (
-        outcome: FinishOutcome,
-        detail?: { error?: string; retryAfterSec?: number; forwardId?: string },
-    ): Promise<boolean> => {
+    const finish = async (outcome: FinishOutcome, detail?: FinishDetail): Promise<boolean> => {
         const done = await store.finish(id, holder, outcome, detail);
         if (done === null) {
             deps.logError('finish_failed', `could not record ${outcome} for inbound ${message.resendEmailId}`);
@@ -234,8 +236,12 @@ export const processMessage = async (message: InboundMessage, deps: InboundDeps)
     }
 
     // 4. The budget, BEFORE the send. Spent: stored as forward_deferred, and the
-    //    retry path forwards it when the window reopens.
-    const budget = await deps.reserveBudget();
+    //    retry path forwards it when the window reopens. A retry of a forward
+    //    whose outcome was unknown already paid: it re-sends with the same key
+    //    (Resend replays rather than mails again) and reserves nothing.
+    const budget: BudgetReservation = message.budgetHeld
+        ? { ok: true, release: async () => undefined }
+        : await deps.reserveBudget();
     if (!budget.ok) {
         deps.logError('budget_deferred', `inbound ${message.resendEmailId} deferred: the forward budget is spent`);
         return (await finish('deferred', { retryAfterSec: budget.retryAfterSec }))
@@ -283,8 +289,13 @@ export const processMessage = async (message: InboundMessage, deps: InboundDeps)
             });
             return { status: 200, body: { ...stored, forwarded: false, reason: 'rate_limited' } };
         }
-        if (sent.reason === 'unconfigured') {
-            await finish('retry', { error: 'forward not configured' });
+        if (sent.reason === 'unconfigured' || sent.status === 401 || sent.status === 403) {
+            // Our configuration, not the message: a missing, revoked or rotated
+            // API key, or a sending domain that is not verified. Retried (and
+            // 5xx, so Resend retries too) rather than recorded as refused, so
+            // fixing the configuration delivers what arrived meanwhile.
+            deps.logError('forward_unconfigured', `forward of ${message.resendEmailId} refused: ${detail}`);
+            await finish('retry', { error: `forward not configured: ${detail}` });
             return { status: 500, body: { error: 'Server misconfigured' } };
         }
         deps.logError('forward_rejected', `forward of ${message.resendEmailId} rejected: ${detail}`);
@@ -296,7 +307,7 @@ export const processMessage = async (message: InboundMessage, deps: InboundDeps)
     // Unknown: it may have gone. The reservation stays spent, and the retry
     // uses the same Idempotency-Key, so Resend replays rather than re-sends.
     deps.logError('forward_unknown', `forward of ${message.resendEmailId}: ${sent.reason}`);
-    await finish('retry', { error: `forward outcome unknown: ${sent.reason}` });
+    await finish('retry', { error: `forward outcome unknown: ${sent.reason}`, budgetHeld: true });
     return { status: 502, body: { ...stored, forwarded: false, reason: 'forward_unknown' } };
 };
 

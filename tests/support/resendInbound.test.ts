@@ -102,6 +102,7 @@ class World {
             subject: row.subject,
             textBody: row.textBody,
             htmlBody: row.htmlBody,
+            budgetHeld: row.budgetHeld,
         };
     }
 
@@ -122,6 +123,7 @@ class World {
                     subject: meta.subject,
                     textBody: null,
                     htmlBody: null,
+                    budgetHeld: false,
                     holder: `holder-${++this.ids}`,
                     status: 'processing',
                     leaseUntil: this.now + LEASE_MS,
@@ -140,6 +142,9 @@ class World {
             }
             if (this.leased(row)) {
                 return { status: 'busy', retryAfterSec: Math.ceil(((row.leaseUntil as number) - this.now) / 1000) };
+            }
+            if (row.nextAttemptAt !== null && row.nextAttemptAt > this.now) {
+                return { status: 'busy', retryAfterSec: Math.ceil((row.nextAttemptAt - this.now) / 1000) };
             }
             Object.assign(row, { holder: `holder-${++this.ids}`, leaseUntil: this.now + LEASE_MS });
             row.attempts += 1;
@@ -177,7 +182,7 @@ class World {
                 id: string,
                 holder: string,
                 outcome: FinishOutcome,
-                detail: { error?: string; retryAfterSec?: number; forwardId?: string } = {},
+                detail: { error?: string; retryAfterSec?: number; forwardId?: string; budgetHeld?: boolean } = {},
             ) => {
                 const row = [...this.rows.values()].find((r) => r.id === id);
                 if (!row || row.holder !== holder) {
@@ -190,9 +195,14 @@ class World {
                         forwardedAt: this.now,
                         forwardError: null,
                         forwardId: detail.forwardId ?? null,
+                        budgetHeld: false,
                     });
                 } else if (outcome === 'stored' || outcome === 'refused') {
-                    Object.assign(row, release, { status: 'completed', forwardError: detail.error ?? null });
+                    Object.assign(row, release, {
+                        status: 'completed',
+                        forwardError: detail.error ?? null,
+                        budgetHeld: false,
+                    });
                 } else if (outcome === 'deferred') {
                     Object.assign(row, release, {
                         status: 'forward_deferred',
@@ -203,6 +213,7 @@ class World {
                 } else {
                     Object.assign(row, release, {
                         forwardError: detail.error ?? null,
+                        budgetHeld: detail.budgetHeld ?? row.budgetHeld,
                         nextAttemptAt: this.now + 60_000 * 2 ** Math.max(row.attempts - 1, 0),
                     });
                 }
@@ -391,6 +402,12 @@ describe('resend-inbound: an interrupted first delivery is resumed', () => {
         expect(world.row()).toMatchObject({ status: 'processing', holder: null });
         expect(world.budget.refunds).toBe(0);
 
+        // A redelivery during the backoff waits, and is not counted.
+        const early = await call(world, deliver());
+        expect(early.status).toBe(503);
+        expect(world.row().attempts).toBe(1);
+
+        world.now += 10 * 60_000;
         const retry = await call(world, deliver());
         expect(retry).toMatchObject({ status: 200, body: { forwarded: true } });
         expect(world.sends.map((s) => s.key)).toEqual([
@@ -398,6 +415,9 @@ describe('resend-inbound: an interrupted first delivery is resumed', () => {
             `${SUPPORT_FORWARD_OUTBOX}-${EMAIL_ID}`,
         ]);
         expect(world.delivered.size).toBe(1);
+        // It already paid: the retry reserved nothing more.
+        expect(world.budget.reserved).toBe(1);
+        expect(world.row().budgetHeld).toBe(false);
     });
 
     it('a body that cannot be fetched answers 502 and is fetched by the next delivery', async () => {
@@ -408,6 +428,7 @@ describe('resend-inbound: an interrupted first delivery is resumed', () => {
         expect(world.row()).toMatchObject({ status: 'processing', forwardError: 'no body yet (fetch 503)' });
         expect(world.sends).toHaveLength(0);
 
+        world.now += 10 * 60_000;
         const second = await call(world, deliver());
         expect(second).toMatchObject({ status: 200, body: { forwarded: true } });
     });
@@ -420,6 +441,7 @@ describe('resend-inbound: an interrupted first delivery is resumed', () => {
         expect(world.sends).toHaveLength(0);
         expect(world.row()).toMatchObject({ status: 'processing', textBody: null });
 
+        world.now += 10 * 60_000;
         const second = await call(world, deliver());
         expect(second).toMatchObject({ status: 200, body: { forwarded: true } });
         expect(world.row().textBody).toBe('Please delete my data.');
@@ -473,6 +495,21 @@ describe('resend-inbound: the mail budget', () => {
         expect(res).toMatchObject({ status: 200, body: { forwarded: false } });
         expect(world.budget.refunds).toBe(1);
         expect(world.row()).toMatchObject({ status: 'completed', forwardError: 'http_422 validation_error' });
+    });
+
+    it('a 401/403 from Resend (key or domain misconfigured) is retried, not refused, and delivers once fixed', async () => {
+        for (const status of [401, 403]) {
+            const world = new World();
+            world.sendResults.push({ outcome: 'rejected', reason: `http_${status}`, status });
+            const res = await call(world, deliver());
+            expect(res.status).toBe(500);
+            expect(world.budget.refunds).toBe(1);
+            expect(world.row()).toMatchObject({ status: 'processing' });
+
+            world.now += 10 * 60_000;
+            const fixed = await call(world, deliver());
+            expect(fixed).toMatchObject({ status: 200, body: { forwarded: true } });
+        }
     });
 
     it('a 429 from Resend hands its reservation back and defers', async () => {

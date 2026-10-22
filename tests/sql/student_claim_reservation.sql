@@ -12,7 +12,8 @@
 --   3. a claim against a teacher's reset, both ways round: whichever comes
 --      second waits, and a rotated code can never be committed with the old one;
 --   4. expiry: a holder that died is taken over, and its late commit is lost;
---   5. archive clears a reservation; release hands back only its own;
+--   5. archive blocks a claim's commit but keeps its reservation until the
+--      claim lets go; release hands back only its own;
 --   6. no client role can call any of it or read the table.
 --
 -- Runs inside one transaction and ROLLS BACK -- nothing persists. Same harness
@@ -208,12 +209,16 @@ $q$select public.release_student_claim (pg_temp.u(207), pg_temp.res('5a'))$q$);
 select pg_temp.chk('63 ... and the card can be reserved again at once',
 $q$select pg_temp.reserve ('5b', 'hash-7')$q$);
 update public.managed_students set archived_at = now() where id = pg_temp.u(207);
-select pg_temp.chk('64 archiving clears the reservation',
-$q$select not exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(207))$q$);
-select pg_temp.chk('65 ... and the holder''s commit is lost',
+select pg_temp.chk('64 archiving blocks the claim in flight: its commit is lost',
 $q$select public.complete_student_claim (pg_temp.u(207), pg_temp.res('5b'), 'hash-7', 'gus_seven') = 'lost'$q$);
+select pg_temp.chk('65 ... but its reservation stays until it lets go, so a reset of the archived row waits for it',
+$q$select exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(207))
+      and public.begin_student_code_reset (pg_temp.u(207)) = 'busy'$q$);
 select pg_temp.chk('66 an archived student''s card reserves nothing',
 $q$select pg_temp.status ('hash-7') = 'not_found'$q$);
+select pg_temp.chk('67 once the stale claim releases, the reset goes ahead',
+$q$select public.release_student_claim (pg_temp.u(207), pg_temp.res('5b'))
+      and public.begin_student_code_reset (pg_temp.u(207)) = 'reserved'$q$);
 
 -- ===========================================================================
 -- 6. Service role only

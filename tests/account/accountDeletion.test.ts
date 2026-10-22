@@ -181,10 +181,13 @@ class FakeWorld {
             },
             settleDeletion: async (userId, outcome, code) => {
                 this.log.push(`settle:${outcome}:${code}`);
+                const marker = this.pending.get(userId);
                 if (outcome === 'abandoned') {
-                    this.pending.delete(userId);
+                    // settle_account_deletion: only a lone first attempt's marker.
+                    if (marker && marker.attempts === 1 && marker.lastError === null) {
+                        this.pending.delete(userId);
+                    }
                 } else {
-                    const marker = this.pending.get(userId);
                     if (marker) {
                         marker.lastError = code;
                     }
@@ -870,5 +873,19 @@ describe('the pending marker (account_deletions)', () => {
         expect(result).toMatchObject({ ok: false, status: 502, code: 'deletion_unavailable' });
         expect(world.log.some((entry) => entry.startsWith('stripe.'))).toBe(false);
         expect(world.documents.has('doc-1')).toBe(true);
+    });
+
+    it('a retry that deletes nothing does not clear the marker an earlier part-way attempt left', async () => {
+        const world = payingTeacher();
+        world.failAuthDelete = true;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: false, code: 'auth_delete_failed' });
+        world.failAuthDelete = false;
+        world.failBillingRead = true;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({
+            ok: false,
+            code: 'billing_cancel_failed',
+        });
+        expect(world.pending.get(TEACHER)).toMatchObject({ attempts: 2, lastError: 'auth_delete_failed' });
+        expect(() => world.addDocument('after-abandoned-retry', TEACHER)).toThrow('account_deletion_pending');
     });
 });

@@ -18,6 +18,9 @@ import { type BudgetReservation, handleResendInbound, type InboundMessage, type 
 
 const RESEND_API = 'https://api.resend.com';
 
+/** The retry batch's lease: RETRY_BATCH messages, each a fetch and a send of up to RESEND_TIMEOUT_MS. */
+const RETRY_BATCH_LEASE_SECONDS = 600;
+
 const env = (name: string): string | undefined => Deno.env.get(name);
 
 /**
@@ -61,6 +64,7 @@ const toMessage = (row: Record<string, unknown>, holder: string): InboundMessage
     subject: typeof row['subject'] === 'string' ? row['subject'] : null,
     textBody: typeof row['text_body'] === 'string' ? row['text_body'] : null,
     htmlBody: typeof row['html_body'] === 'string' ? row['html_body'] : null,
+    budgetHeld: row['budget_held'] === true || row['forward_budget_held'] === true,
 });
 
 const store = (): InboundStore | null => {
@@ -94,7 +98,12 @@ const store = (): InboundStore | null => {
             return { status: 'claimed', message: toMessage(row, String(row['holder'])) };
         },
         claimDue: async (limit) => {
-            const { data, error } = await admin.rpc('claim_due_support_messages', { p_limit: limit });
+            // A lease long enough for the whole batch: it is processed one
+            // message after another, each up to a fetch and a send.
+            const { data, error } = await admin.rpc('claim_due_support_messages', {
+                p_limit: limit,
+                p_lease_seconds: RETRY_BATCH_LEASE_SECONDS,
+            });
             if (error) {
                 console.error(`claim_due_support_messages failed: ${error.message}`);
                 return null;
@@ -124,6 +133,7 @@ const store = (): InboundStore | null => {
                 p_error: detail.error ?? null,
                 p_retry_after_seconds: detail.retryAfterSec ?? null,
                 p_forward_id: detail.forwardId ?? null,
+                p_budget_held: detail.budgetHeld ?? null,
             });
             if (error) {
                 console.error(`finish_support_message failed for ${id}: ${error.message}`);

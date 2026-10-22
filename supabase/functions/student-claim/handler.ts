@@ -61,6 +61,9 @@ import type * as StudentCodes from '../_shared/studentCodes.ts';
  *    claim for the reset), so the reset's scramble can never land before a
  *    claim's password write, and a rotated code can never be committed with the
  *    old one;
+ *  * archiving blocks a claim in flight (its commit refuses an archived row)
+ *    without dropping its reservation, so a reset of the archived student
+ *    still waits for it until this request lets go;
  *  * every way this request can stop short of the commit hands the reservation
  *    back at once (releaseClaim), so a retry with the same card works.
  */
@@ -326,8 +329,11 @@ export const handleStudentClaim = async (req: Request, deps: StudentClaimDeps): 
         }
         // Lost: the row was archived, its code rotated, or this reservation
         // expired and was taken over. REJECTED, the same answer the lookup would
-        // give a moment later. Nothing to release: it is not ours any more.
+        // give a moment later. Released all the same: an archive keeps the
+        // reservation until its holder lets go (so a reset waits for us), and a
+        // release only ever removes this request's own reservation.
         deps.logError(`roster row ${studentId} was no longer this claim's when it tried to commit`);
+        await release();
         return reject();
     }
 
