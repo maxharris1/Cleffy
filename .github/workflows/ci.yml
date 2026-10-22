@@ -135,3 +135,20 @@ jobs:
                       exit 0
                   fi
                   node scripts/check-supabase-drift.mjs
+
+    # The Edge Functions type-checked the way Deno loads them (launchfix P3,
+    # Codex r2 on #70). supabase/functions/deno.json sets nodeModulesDir
+    # "none", so npm: specifiers resolve from Deno's own cache: no npm ci, and
+    # the repo-root package.json no longer puts Deno in node_modules mode.
+    # Deno 2.1.4: the version the local edge runtime (1.77.4) is built on.
+    # score-analyze is left out: 6 type errors in it predate launchfix P3
+    # (supabase-js client generics), a follow-up.
+    edge-functions-deno:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: denoland/setup-deno@v2
+              with:
+                  deno-version: v2.1.4
+            - name: deno check the Edge Function entry points
+              run: deno check --config supabase/functions/deno.json $(ls supabase/functions/*/index.ts | grep -v '/score-analyze/')
