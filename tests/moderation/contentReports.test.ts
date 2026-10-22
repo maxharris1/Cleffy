@@ -33,13 +33,14 @@ import {
     type NoticeSender,
     type OutboxNotice,
 } from '../../supabase/functions/_shared/contentReports';
-import { MAIL_CATEGORY_CAPS, MAIL_WINDOW_MS } from '../../supabase/functions/_shared/mailBudget';
+import { MAIL_CATEGORY_CAPS, MAIL_WINDOW_MS, mailLimit } from '../../supabase/functions/_shared/mailBudget';
 import {
     resendIdempotencyKey,
     sendViaResend,
     type ResendResult,
 } from '../../supabase/functions/_shared/resendDelivery';
 import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
+import { supportInboundBudgetKey } from '../../supabase/functions/resend-inbound/handler';
 import { chunkedJson } from '../security/chunkedBody';
 import { CONTROL_BODY_MAX_BYTES, PAYLOAD_TOO_LARGE } from '../../supabase/functions/_shared/readCappedJson';
 
@@ -1001,6 +1002,24 @@ describe('the mail budget across uncertain sends (unknown keeps, a definite reje
         expect(await run({ ...deps, idempotencyKey })).toMatchObject({ sent: 1 });
         expect(idempotencyKey).toHaveBeenCalledWith(CONTENT_NOTICE_OUTBOX, id);
         expect(keys).toEqual([`via-helper:content-notice-outbox:${id}`]);
+    });
+
+    it('inbound support forwards spending their whole share cannot delay an acknowledgment', async () => {
+        // Codex r1 finding 1: inbound used to spend these very buckets. Now it
+        // counts under its own (resend-inbound/handler.ts), so a flood of mail
+        // to support@ exhausts only the inbound share.
+        const { outbox, limiter, deps } = setup([ok()]);
+        for (const window of ['hour', 'day'] as const) {
+            const { limit, windowMs } = mailLimit('supportInbound', window);
+            for (let i = 0; i < limit; i += 1) {
+                await limiter.checkRateLimit(supportInboundBudgetKey(window), limit, windowMs);
+            }
+            expect((await limiter.checkRateLimit(supportInboundBudgetKey(window), limit, windowMs)).ok).toBe(false);
+            expect(supportInboundBudgetKey(window)).not.toBe(window === 'hour' ? HOUR : DAY);
+        }
+        expect(await run(deps)).toMatchObject({ sent: 1 });
+        expect(outbox.rows[0]?.status).toBe('sent');
+        expect(limiter.used(HOUR)).toBe(1);
     });
 
     it('a window that refuses hands back what the other window reserved', async () => {

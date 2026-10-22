@@ -15,11 +15,13 @@ import type * as SupportMail from '../_shared/supportMail.ts';
  *
  * Deliberately no rate limit on intake: throttling here would drop Svix's
  * retries, and a dropped retry is a support request nobody ever sees. What IS
- * limited is what we send: every forward reserves one unit of the
- * contentReportAck share of the shared mail budget (_shared/mailBudget.ts,
- * decision 14, the 60/300 split unchanged) BEFORE it is sent, and is sent
- * through _shared/resendDelivery.ts with an Idempotency-Key derived from
- * Resend's email id, so a resumed or retried forward can never deliver twice.
+ * limited is what we send: every forward ATTEMPT reserves one unit of the
+ * supportInbound share of the shared mail budget (_shared/mailBudget.ts,
+ * buckets of its own, so inbound can never spend the content-report
+ * acknowledgments' share) BEFORE it is sent, and is sent through
+ * _shared/resendDelivery.ts with an Idempotency-Key derived from Resend's email
+ * id, so a resumed or retried forward does not deliver twice while Resend
+ * still remembers the key.
  *
  * The webhook carries metadata only — Resend's docs are explicit that the body,
  * headers and attachments are not in it — so the message itself is fetched from
@@ -38,13 +40,33 @@ import type * as SupportMail from '../_shared/supportMail.ts';
  * the message stored as forward_deferred and answers 200: the retry path —
  * pg_cron's support_inbound_retry_tick, POSTing here with
  * x-support-retry-secret — forwards it when the window reopens. A forward whose
- * outcome is unknown keeps its budget, answers 502, and is retried with the
- * same key.
+ * outcome is unknown keeps its reservation, answers 502, and is retried with
+ * the same key.
+ *
+ * Every attempt pays for itself (the billingOutbox.ts pattern): a retry after
+ * an unknown outcome reserves again in the windows it sends in, and the earlier
+ * charge stays where it was. That may count one email twice; it never lets a
+ * send through that this window did not pay for, which is what a held
+ * reservation carried across a window boundary used to do.
+ *
+ * And retries stop before Resend forgets the key. Resend keeps an
+ * Idempotency-Key for 24 hours; past that a replay is a new email. The row
+ * records when its first send was attempted (begin_support_forward,
+ * 20261022110300_support_inbound_retry_window.sql), and once ~23 hours have
+ * gone by no further send is made: the row is marked `failed` for a person to
+ * look at, and later deliveries treat it as finished.
  */
 
 /** The cap on a webhook body: readCappedJson.ts's WEBHOOK_BODY_MAX_BYTES. */
 export const WEBHOOK_BODY_MAX_BYTES = 256 * 1024;
 const PAYLOAD_TOO_LARGE = { error: 'Request body too large', code: 'payload_too_large' } as const;
+
+/**
+ * The edge rate-limit bucket inbound forwards are counted in, per window. Their
+ * own: content-report acknowledgments count under `mail:content-report-ack:*`,
+ * so no amount of inbound mail can delay them.
+ */
+export const supportInboundBudgetKey = (window: string): string => `mail:support-inbound:${window}`;
 
 /** The outbox name in a forward's Idempotency-Key: `support-forward-<Resend email id>`. */
 export const SUPPORT_FORWARD_OUTBOX = 'support-forward';
@@ -97,8 +119,6 @@ export interface InboundMessage {
     subject: string | null;
     textBody: string | null;
     htmlBody: string | null;
-    /** An earlier attempt's forward had an unknown outcome and already spent its budget. */
-    budgetHeld: boolean;
 }
 
 export type ClaimAnswer =
@@ -116,13 +136,20 @@ export interface InboundStore {
     saveBody: (id: string, holder: string, text: string | null, html: string | null) => Promise<boolean | null>;
     /** True when recorded; false when this holder no longer holds the row; null on error. */
     finish: (id: string, holder: string, outcome: FinishOutcome, detail?: FinishDetail) => Promise<boolean | null>;
+    /**
+     * begin_support_forward, right before a send: 'send' (the first send's time
+     * is recorded if this is it), 'expired' (the retry window since the first
+     * send has closed; the row is now failed and nothing may be sent), 'lost'
+     * (this holder no longer holds the row), null on error.
+     */
+    beginSend: (id: string, holder: string) => Promise<'send' | 'expired' | 'lost' | null>;
 }
 
 export interface FinishDetail {
     error?: string;
     retryAfterSec?: number;
     forwardId?: string;
-    /** On 'retry': the forward's budget is spent (unknown outcome); the retry must not reserve again. */
+    /** On 'retry': this attempt's outcome is unknown and its reservation was kept (recorded, never read back). */
     budgetHeld?: boolean;
 }
 
@@ -150,7 +177,7 @@ export interface InboundDeps {
     fetchBody: (
         emailId: string,
     ) => Promise<{ ok: true; text?: string | null; html?: string | null } | { ok: false; detail: string }>;
-    /** One unit of contentReportAck, every window, or when there will be some again. */
+    /** One unit of supportInbound, every window, or when there will be some again. */
     reserveBudget: () => Promise<BudgetReservation>;
     /** resendDelivery.ts's sendViaResend, with the API key bound. */
     send: (email: ResendEmail, idempotencyKey: string) => Promise<ResendResult>;
@@ -235,13 +262,12 @@ export const processMessage = async (message: InboundMessage, deps: InboundDeps)
         return { status: 200, body: { ...stored, forwarded: false, reason: 'loop_guard' } };
     }
 
-    // 4. The budget, BEFORE the send. Spent: stored as forward_deferred, and the
-    //    retry path forwards it when the window reopens. A retry of a forward
-    //    whose outcome was unknown already paid: it re-sends with the same key
-    //    (Resend replays rather than mails again) and reserves nothing.
-    const budget: BudgetReservation = message.budgetHeld
-        ? { ok: true, release: async () => undefined }
-        : await deps.reserveBudget();
+    // 4. The budget, BEFORE the send, on EVERY attempt. Spent: stored as
+    //    forward_deferred, and the retry path forwards it when the window
+    //    reopens. A retry after an unknown outcome pays again: its earlier
+    //    charge may belong to a window that has since reset, and this send
+    //    happens in this one.
+    const budget = await deps.reserveBudget();
     if (!budget.ok) {
         deps.logError('budget_deferred', `inbound ${message.resendEmailId} deferred: the forward budget is spent`);
         return (await finish('deferred', { retryAfterSec: budget.retryAfterSec }))
@@ -249,7 +275,25 @@ export const processMessage = async (message: InboundMessage, deps: InboundDeps)
             : { status: 500, body: { error: 'Could not record the message' } };
     }
 
-    // 5. The forward. Tagged by the inbox it reached, so privacy@ and legal@
+    // 5. The send window. Resend replays a key for 24 hours; after ~23 hours
+    //    since the first send attempt, a retry could mail a second copy, so
+    //    none is made. The database marks the row failed (manual review).
+    const window = await store.beginSend(id, holder);
+    if (window !== 'send') {
+        await budget.release();
+        if (window === 'expired') {
+            deps.logError(
+                'forward_window_closed',
+                `inbound ${message.resendEmailId}: the retry window since its first send has closed; marked failed for review`,
+            );
+            return { status: 200, body: { ...stored, forwarded: false, reason: 'retry_window_closed' } };
+        }
+        return window === 'lost'
+            ? { status: 503, body: { inProgress: true } }
+            : { status: 500, body: { error: 'Could not record the message' } };
+    }
+
+    // 6. The forward. Tagged by the inbox it reached, so privacy@ and legal@
     //    stand out in the one mailbox all three forward to; replying goes to the
     //    person who wrote in, not to our own relay.
     const from = message.fromAddress || 'unknown sender';
@@ -304,8 +348,9 @@ export const processMessage = async (message: InboundMessage, deps: InboundDeps)
         return { status: 200, body: { ...stored, forwarded: false } };
     }
 
-    // Unknown: it may have gone. The reservation stays spent, and the retry
-    // uses the same Idempotency-Key, so Resend replays rather than re-sends.
+    // Unknown: it may have gone. This attempt's reservation stays spent, and
+    // the retry (which reserves again) uses the same Idempotency-Key, so Resend
+    // replays rather than re-sends while the window is open.
     deps.logError('forward_unknown', `forward of ${message.resendEmailId}: ${sent.reason}`);
     await finish('retry', { error: `forward outcome unknown: ${sent.reason}`, budgetHeld: true });
     return { status: 502, body: { ...stored, forwarded: false, reason: 'forward_unknown' } };
