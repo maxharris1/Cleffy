@@ -5,6 +5,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { cancellationMailKey } from '../../supabase/functions/_shared/billingOutbox';
 import {
+    type DeletedAccountStripe,
+    stopDeletedAccountSubscription,
+} from '../../supabase/functions/_shared/deletedAccountBilling';
+import {
     duplicateUndoStateOf,
     EDGE_FUNCTION_WALL_CLOCK_MS,
     handleStripeEvent,
@@ -131,8 +135,38 @@ class FakeStore implements WebhookStore {
     };
     userIdForCustomer = async (customerId: string) => this.customers.get(customerId) ?? null;
     linkCustomer = async (customerId: string, userId: string) => {
+        // The user_id FK, as the real store meets it: a deleted account's
+        // customer is not linked, and the event carries on (stripe-webhook).
+        if (this.deletedUsers.has(userId)) {
+            return;
+        }
         this.customers.set(customerId, userId);
     };
+    /**
+     * account_deletion_pending(), per user (launch-fix item 16): absent is
+     * clear, and `unknown` is a check that could not be answered.
+     */
+    deletion = new Map<string, 'pending' | 'unknown'>();
+    deletionChecks: string[] = [];
+    accountDeletionPending = async (userId: string) => {
+        this.deletionChecks.push(userId);
+        return this.deletion.get(userId) ?? 'clear';
+    };
+    /**
+     * Accounts whose deletion completed: their Auth user is gone, so the
+     * subscription write answers `missing_user`, which the real store hands to
+     * deletedAccountBilling.ts -- driven here with the same function.
+     */
+    deletedUsers = new Set<string>();
+    stripeCancelledForDeletedAccount: string[] = [];
+    deletedAccountStripe: DeletedAccountStripe = {
+        retrieveStatus: async (subscriptionId) => this.remote.get(subscriptionId)?.status ?? null,
+        cancel: async (subscriptionId) => {
+            this.stripeCancelledForDeletedAccount.push(subscriptionId);
+        },
+    };
+    /** Every write that reached the table, applied or not. */
+    writes: string[] = [];
     /**
      * The upsert, plus the two database guards that sit on it: the partial
      * unique index that refuses a SECOND entitling subscription for one user
@@ -150,6 +184,18 @@ class FakeStore implements WebhookStore {
         if (this.locks.get(row.stripe_subscription_id)?.holder !== holder) {
             this.writesRefusedWithoutLease.push(row.stripe_subscription_id);
             return { outcome: 'lost_lock' };
+        }
+        this.writes.push(row.stripe_subscription_id);
+        if (this.deletedUsers.has(row.user_id)) {
+            // write_subscription_under_lock's `missing_user`, as stripe-webhook
+            // answers it: stop whatever can still bill, write no row.
+            await stopDeletedAccountSubscription(
+                row.stripe_subscription_id,
+                row.status,
+                this.deletedAccountStripe,
+                this.log,
+            );
+            return { outcome: 'written' };
         }
 
         const other = [...this.subscriptions.values()].find(
@@ -1946,6 +1992,218 @@ describe('stripe event handling', () => {
             expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'active', tier: 'teacher' });
             expect(store.restored).toEqual(['teacher-1']);
         });
+    });
+});
+
+/**
+ * Launch-fix item 16, decision 70(1): an event for an account whose deletion
+ * is pending answers 503, writes nothing and releases its claim, so Stripe's
+ * retry is processed normally if the deletion is abandoned, or by the
+ * deleted-account path (deletedAccountBilling.ts) once it has completed.
+ */
+describe('an account whose deletion is pending', () => {
+    let store: FakeStore;
+
+    beforeEach(() => {
+        store = new FakeStore();
+    });
+
+    const checkout = (id = 'evt_checkout_pending'): StripeEventLike => ({
+        id,
+        type: 'checkout.session.completed',
+        created: EVENT_CREATED,
+        data: {
+            object: {
+                id: 'cs_1',
+                customer: 'cus_1',
+                subscription: 'sub_1',
+                client_reference_id: 'teacher-1',
+                metadata: { user_id: 'teacher-1', consent_id: 'consent-1' },
+                amount_total: 2100,
+                currency: 'eur',
+            },
+        },
+    });
+
+    /** Nothing at all was written for the account, and the claim is gone. */
+    const expectNothingWritten = (eventId: string) => {
+        expect(store.writes).toEqual([]);
+        expect(store.subscriptions.size).toBe(0);
+        expect(store.customers.size).toBe(0);
+        expect(store.archived).toEqual([]);
+        expect(store.restored).toEqual([]);
+        expect(store.purchases).toEqual([]);
+        expect(store.cancellations).toEqual([]);
+        expect(store.locks.size).toBe(0);
+        expect(store.events.has(eventId)).toBe(false);
+        expect(store.released).toContain(eventId);
+    };
+
+    it('refuses a subscription event with 503, writes nothing and releases the claim', async () => {
+        store.deletion.set('teacher-1', 'pending');
+        const result = await deliver(store, subscriptionEvent('evt_pending', 'customer.subscription.updated'));
+        expect(result).toEqual({ status: 503, body: { error: 'account_deletion_pending', retry: true } });
+        expectNothingWritten('evt_pending');
+        // Refused before the lock: not even Stripe's copy was read under it.
+        expect(store.locksTaken).toBe(0);
+        expect(store.deletionChecks).toEqual(['teacher-1']);
+    });
+
+    it('refuses a cancellation the same way, so it neither archives nor queues the confirmation', async () => {
+        store.deletion.set('teacher-1', 'pending');
+        const event = subscriptionEvent('evt_pending_cancel', 'customer.subscription.updated', {
+            cancel_at_period_end: true,
+        });
+        event.data = { ...event.data, previous_attributes: { cancel_at_period_end: false } };
+        const result = await deliver(store, event);
+        expect(result.status).toBe(503);
+        expectNothingWritten('evt_pending_cancel');
+    });
+
+    it('refuses a checkout before it links the customer or completes the consent', async () => {
+        store.deletion.set('teacher-1', 'pending');
+        store.remote.set('sub_1', {
+            id: 'sub_1',
+            status: 'active',
+            customer: 'cus_1',
+            current_period_end: 1_800_000_000,
+            items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            metadata: { user_id: 'teacher-1' },
+        });
+        const result = await handleStripeEvent(checkout(), store, PRICE_TIERS);
+        expect(result).toEqual({ status: 503, body: { error: 'account_deletion_pending', retry: true } });
+        expectNothingWritten('evt_checkout_pending');
+        expect(store.locksTaken).toBe(0);
+    });
+
+    it('refuses an invoice for a recorded subscription before the lock', async () => {
+        await deliver(store, subscriptionEvent('evt_start', 'customer.subscription.created'));
+        const before = { writes: store.writes.length, locks: store.locksTaken };
+        store.deletion.set('teacher-1', 'pending');
+        const result = await handleStripeEvent(
+            { id: 'evt_inv_pending', type: 'invoice.payment_failed', data: { object: { subscription: 'sub_1' } } },
+            store,
+            PRICE_TIERS,
+        );
+        expect(result).toEqual({ status: 503, body: { error: 'account_deletion_pending', retry: true } });
+        expect(store.writes.length).toBe(before.writes);
+        expect(store.locksTaken).toBe(before.locks);
+        expect(store.events.has('evt_inv_pending')).toBe(false);
+    });
+
+    it('refuses an invoice whose payer only Stripe names inside the lock, before the write, and unlocks', async () => {
+        store.deletion.set('teacher-1', 'pending');
+        store.remote.set('sub_1', {
+            id: 'sub_1',
+            status: 'active',
+            customer: 'cus_1',
+            current_period_end: 1_800_000_000,
+            items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            metadata: { user_id: 'teacher-1' },
+        });
+        const result = await handleStripeEvent(
+            { id: 'evt_inv_first', type: 'invoice.paid', data: { object: { subscription: 'sub_1' } } },
+            store,
+            PRICE_TIERS,
+        );
+        expect(result).toEqual({ status: 503, body: { error: 'account_deletion_pending', retry: true } });
+        expectNothingWritten('evt_inv_first');
+        expect(store.locksTaken).toBe(1);
+    });
+
+    it('refuses on a check it could not answer, and asks for the retry', async () => {
+        store.deletion.set('teacher-1', 'unknown');
+        const result = await deliver(store, subscriptionEvent('evt_unknown', 'customer.subscription.updated'));
+        expect(result).toEqual({ status: 503, body: { error: 'deletion_check_unavailable', retry: true } });
+        expectNothingWritten('evt_unknown');
+    });
+
+    it('deletion abandoned: the retried event is processed normally, exactly once', async () => {
+        const event = subscriptionEvent('evt_retry', 'customer.subscription.updated', { cancel_at_period_end: true });
+        event.data = { ...event.data, previous_attributes: { cancel_at_period_end: false } };
+        store.deletion.set('teacher-1', 'pending');
+        expect((await deliver(store, event)).status).toBe(503);
+
+        // The deletion is abandoned (settle_account_deletion_attempt): clear again.
+        store.deletion.delete('teacher-1');
+        const retried = await deliverLate(store, event);
+        expect(retried).toEqual({ status: 200, body: { received: true, applied: 'subscription_upserted' } });
+        expect(store.subscriptions.get('sub_1')).toMatchObject({ user_id: 'teacher-1', cancel_at_period_end: true });
+        expect(store.cancellations).toHaveLength(1);
+        expect(store.events.get('evt_retry')?.status).toBe('done');
+
+        // Stripe redelivers once more: a duplicate, nothing applied again.
+        const again = await deliverLate(store, event);
+        expect(again).toEqual({ status: 200, body: { received: true, duplicate: true } });
+        expect(store.writes).toEqual(['sub_1']);
+        expect(store.cancellations).toHaveLength(1);
+    });
+
+    it('deletion abandoned: a retried checkout links, records and confirms the purchase once', async () => {
+        store.remote.set('sub_1', {
+            id: 'sub_1',
+            status: 'active',
+            customer: 'cus_1',
+            current_period_end: 1_800_000_000,
+            items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            metadata: { user_id: 'teacher-1' },
+        });
+        store.deletion.set('teacher-1', 'pending');
+        expect((await handleStripeEvent(checkout(), store, PRICE_TIERS)).status).toBe(503);
+        store.deletion.delete('teacher-1');
+        expect((await handleStripeEvent(checkout(), store, PRICE_TIERS)).status).toBe(200);
+        expect((await handleStripeEvent(checkout(), store, PRICE_TIERS)).body).toMatchObject({ duplicate: true });
+        expect(store.customers.get('cus_1')).toBe('teacher-1');
+        expect(store.writes).toEqual(['sub_1']);
+        expect(store.purchases).toHaveLength(1);
+    });
+
+    it('deletion completed: the retried event goes through the deleted-account path and cancels', async () => {
+        const event = subscriptionEvent('evt_after', 'customer.subscription.updated');
+        store.deletion.set('teacher-1', 'pending');
+        expect((await deliver(store, event)).status).toBe(503);
+
+        // The deletion completed: the Auth user is gone, and its marker with it.
+        store.deletion.delete('teacher-1');
+        store.deletedUsers.add('teacher-1');
+        const retried = await deliverLate(store, event);
+        expect(retried.status).toBe(200);
+        // deletedAccountBilling.ts: still able to bill, so cancelled now; no row.
+        expect(store.stripeCancelledForDeletedAccount).toEqual(['sub_1']);
+        expect(store.subscriptions.size).toBe(0);
+        expect(store.logs.some((line) => /belonged to a deleted account; cancelled it/.test(line))).toBe(true);
+    });
+
+    it('deletion completed: a retried checkout links nothing and its subscription is cancelled', async () => {
+        store.remote.set('sub_1', {
+            id: 'sub_1',
+            status: 'active',
+            customer: 'cus_1',
+            current_period_end: 1_800_000_000,
+            items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            metadata: { user_id: 'teacher-1' },
+        });
+        store.deletion.set('teacher-1', 'pending');
+        expect((await handleStripeEvent(checkout(), store, PRICE_TIERS)).status).toBe(503);
+        store.deletion.delete('teacher-1');
+        store.deletedUsers.add('teacher-1');
+        expect((await handleStripeEvent(checkout(), store, PRICE_TIERS)).status).toBe(200);
+        expect(store.customers.size).toBe(0);
+        expect(store.subscriptions.size).toBe(0);
+        expect(store.stripeCancelledForDeletedAccount).toEqual(['sub_1']);
+    });
+
+    it('asks about every account an invoice is tied to, and leaves other accounts alone', async () => {
+        await deliver(store, subscriptionEvent('evt_start', 'customer.subscription.created'));
+        store.deletion.set('someone-else', 'pending');
+        store.deletionChecks = [];
+        const result = await handleStripeEvent(
+            { id: 'evt_inv_ok', type: 'invoice.paid', data: { object: { customer: 'cus_1', subscription: 'sub_1' } } },
+            store,
+            PRICE_TIERS,
+        );
+        expect(result.status).toBe(200);
+        expect(store.deletionChecks).toEqual(['teacher-1', 'teacher-1']);
     });
 });
 

@@ -416,6 +416,12 @@ export interface WebhookStore {
     recordPurchaseNotice: (notice: PurchaseNotice) => Promise<void>;
     /** After a cancellation is scheduled: the cancellation confirmation, queued once. Same failure rule. */
     recordCancellationNotice: (notice: CancellationNotice) => Promise<void>;
+    /**
+     * account_deletion_pending() for the user an event is about (deletionPending.ts),
+     * asked before the event writes anything for them (launch-fix item 16,
+     * decision 70(1)). `unknown` is a check that could not be answered.
+     */
+    accountDeletionPending: (userId: string) => Promise<'clear' | 'pending' | 'unknown'>;
     log: (message: string) => void;
 }
 
@@ -1028,6 +1034,57 @@ const leaseLost = async (
 };
 
 /**
+ * The answer for an event about an account whose deletion is pending (launch-fix
+ * item 16, decision 70(1)): 503, nothing written, the claim released.
+ *
+ * The deletion cancels every subscription itself and sweeps Stripe again once
+ * the Auth user is gone (accountDeletion.ts), so nothing here may race it: no
+ * billing_customers link, no subscriptions row, no archive or restore, no
+ * notice. Releasing the claim is what makes Stripe's retry count. If the
+ * deletion is abandoned, the retry finds the account clear and is processed
+ * normally, once (its claim is taken and marked done like any other). If it
+ * completes, the retry's write finds no user and goes through the deleted-account
+ * path (deletedAccountBilling.ts), which cancels anything that can still bill.
+ * A check that could not be answered is refused the same way: nothing was
+ * written, and the retry asks again.
+ *
+ * `userIds` are every user the event was attributed to before the write, so
+ * one resolved two ways is checked both ways; nulls and repeats are skipped.
+ */
+const deletionRefusal = async (
+    store: WebhookStore,
+    event: StripeEventLike,
+    userIds: ReadonlyArray<string | null>,
+): Promise<WebhookResult | null> => {
+    const checked = new Set<string>();
+    for (const userId of userIds) {
+        if (!userId || checked.has(userId)) {
+            continue;
+        }
+        checked.add(userId);
+        const answer = await store.accountDeletionPending(userId);
+        if (answer === 'clear') {
+            continue;
+        }
+        store.log(
+            `${event.type} ${event.id}: ` +
+                (answer === 'pending'
+                    ? `account ${userId} is being deleted; nothing written, asking Stripe to redeliver`
+                    : `could not check whether account ${userId} is being deleted; asking Stripe to redeliver`),
+        );
+        await store.releaseEvent(event.id);
+        return {
+            status: 503,
+            body: {
+                error: answer === 'pending' ? 'account_deletion_pending' : 'deletion_check_unavailable',
+                retry: true,
+            },
+        };
+    }
+    return null;
+};
+
+/**
  * The answer for an event whose subscription Stripe says does not exist. The
  * claim is KEPT and the answer is a 200: retrying for Stripe's three days would
  * fail identically every time and trip its endpoint-failure alerts, burying the
@@ -1046,7 +1103,8 @@ const subscriptionMissing = (store: WebhookStore, event: StripeEventLike, subscr
  * Returns 200 for anything it understands OR deliberately ignores — a non-2xx
  * makes Stripe retry, which is only useful when nobody has applied the event.
  * Every non-2xx it returns has either released the event's claim (retryLater,
- * and the subscription-lock 503 beside it) or never held it (the 409 for a
+ * the subscription-lock 503 beside it, and the 503 for an account whose
+ * deletion is pending, deletionRefusal) or never held it (the 409 for a
  * claim another delivery is holding); a THROWN error leaves the release to the
  * caller, which does it the same way.
  *
@@ -1103,6 +1161,11 @@ const dispatchStripeEvent = async (
             if (!userId) {
                 store.log(`checkout.session.completed ${event.id}: no user could be resolved`);
                 return { status: 200, body: { received: true, ignored: 'unknown_user' } };
+            }
+            // Before the first write, the customer link (decision 70(1)).
+            const pendingCheckout = await deletionRefusal(store, event, [userId]);
+            if (pendingCheckout) {
+                return pendingCheckout;
             }
             if (customerId) {
                 await store.linkCustomer(customerId, userId);
@@ -1164,6 +1227,12 @@ const dispatchStripeEvent = async (
             if (!userId) {
                 store.log(`${event.type} ${event.id}: no user could be resolved`);
                 return { status: 200, body: { received: true, ignored: 'unknown_user' } };
+            }
+            // Before the lock and so before anything is read or written for
+            // them (decision 70(1)).
+            const pendingSubscription = await deletionRefusal(store, event, [userId]);
+            if (pendingSubscription) {
+                return pendingSubscription;
             }
 
             // Stripe guarantees delivery, never ORDER -- and a retry after a 500
@@ -1257,6 +1326,18 @@ const dispatchStripeEvent = async (
             if (!subscriptionId) {
                 return { status: 200, body: { received: true, ignored: 'no_subscription' } };
             }
+            // Before the lock (decision 70(1)): whoever the database already
+            // ties this invoice to. The user the Stripe read resolves is asked
+            // again below, before the write -- after the lock, where only a
+            // duplicate refund some earlier delivery still owed can have run.
+            const invoiceCustomer = idOf(invoice.customer);
+            const pendingInvoice = await deletionRefusal(store, event, [
+                invoiceCustomer ? await store.userIdForCustomer(invoiceCustomer) : null,
+                await store.userIdForSubscription(subscriptionId),
+            ]);
+            if (pendingInvoice) {
+                return pendingInvoice;
+            }
 
             return await withSubscriptionLock(store, event, subscriptionId, async (holder) => {
                 // Re-read from Stripe rather than trusting the invoice: Stripe
@@ -1272,12 +1353,16 @@ const dispatchStripeEvent = async (
                     store.log(`${event.type} ${event.id}: subscription ${subscriptionId} not retrievable`);
                     return retryLater(store, event, 'subscription_unavailable');
                 }
-                const customerId = idOf(invoice.customer) ?? idOf(sub.customer);
+                const customerId = invoiceCustomer ?? idOf(sub.customer);
                 const userId =
                     (await resolveUserId(store, customerId, sub.metadata)) ??
                     (await store.userIdForSubscription(sub.id));
                 if (!userId) {
                     return { status: 200, body: { received: true, ignored: 'unknown_user' } };
+                }
+                const pendingPayer = await deletionRefusal(store, event, [userId]);
+                if (pendingPayer) {
+                    return pendingPayer;
                 }
 
                 const refused = await applySubscription(store, event, sub, userId, priceTiers, holder);
