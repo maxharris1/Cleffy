@@ -28,13 +28,21 @@ import type { AnnotationRow } from '@/types/database';
  * joins the new ones; the collaborator's own app, told no, leaves both topics
  * at once.
  *
+ * And an archive (20261022120200): every open device of the score -- owner,
+ * editor, viewer -- leaves its topics, and once the score is restored joins
+ * again by itself, the same mounted channel, no reopen.
+ *
  * Local stack only (`npm run cloud:up`); skipped unless pointed at it:
  *
  *     CLEFFY_LIVE_SUPABASE_URL=http://127.0.0.1:54421 \
  *     CLEFFY_LIVE_ANON_KEY=... CLEFFY_LIVE_SERVICE_ROLE_KEY=... \
  *     npx vitest run tests/live/takedownRealtime.live.test.ts
  *
- * It creates its own throwaway accounts and score and deletes them after.
+ * It creates its own throwaway accounts and scores and deletes them after,
+ * with the takedowns, the notices they queued and the scores' storage cleanup
+ * rows. Two things it causes are out of the API's reach and are left to the
+ * local stack: the hints the server broadcast (realtime.messages, dropped
+ * with their daily partition) and GoTrue's audit log of the sign-ups.
  */
 const URL = process.env.CLEFFY_LIVE_SUPABASE_URL ?? '';
 const ANON = process.env.CLEFFY_LIVE_ANON_KEY ?? '';
@@ -177,8 +185,23 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
         for (const client of extraClients) {
             await client.removeAllChannels();
         }
-        for (const id of [docId, ...extraDocIds].filter(Boolean)) {
+        const docIds = [docId, ...extraDocIds].filter(Boolean);
+        // The takedowns' notices (apply/lift_content_takedown queue and log
+        // them), before the scores take the takedown rows with them.
+        const { data: takedowns } = await admin.from('content_takedowns').select('id').in('document_id', docIds);
+        const takedownIds = (takedowns ?? []).map((t: { id: string }) => t.id);
+        if (takedownIds.length > 0) {
+            await admin.from('content_notice_outbox').delete().in('takedown_id', takedownIds);
+            await admin.from('content_notice_log').delete().in('takedown_id', takedownIds);
+        }
+        for (const id of docIds) {
             await admin.from('documents').delete().eq('id', id);
+        }
+        // What deleting a score queues for its storage objects (there are none),
+        // and the takedown records a deleted score keeps (document_id cleared).
+        await admin.from('document_storage_cleanup').delete().in('document_id', docIds);
+        if (takedownIds.length > 0) {
+            await admin.from('content_takedowns').delete().in('id', takedownIds);
         }
         for (const id of userIds) {
             await admin.auth.admin.deleteUser(id);
@@ -663,4 +686,116 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
         ownerApp.channel.stop();
         stayApp.channel.stop();
     }, 120_000);
+    /**
+     * 20261022120200: archiving is temporary. The plan's score cap archives an
+     * open score; every device on it leaves both topics and asks again every
+     * 15-45 s, and after the restore joins the current generation by itself.
+     */
+    it('an archived score’s open devices leave its topics, and rejoin by themselves once it is restored', async () => {
+        const o3 = await signedIn(admin, `owner3-${tag}@takedown.test`);
+        const ed = await signedIn(admin, `editor3-${tag}@takedown.test`);
+        const vw = await signedIn(admin, `viewer3-${tag}@takedown.test`);
+        userIds.push(o3.id, ed.id, vw.id);
+        extraClients.push(o3.client, ed.client, vw.client);
+        const scoreId = crypto.randomUUID();
+        extraDocIds.push(scoreId);
+        const { error: docError } = await admin.from('documents').insert({
+            id: scoreId,
+            owner_id: o3.id,
+            title: 'Live archive',
+            storage_path: `${scoreId}/original.pdf`,
+        });
+        expect(docError).toBeNull();
+        const { error: memberError } = await admin.from('document_members').insert([
+            { document_id: scoreId, user_id: ed.id, role: 'editor' },
+            { document_id: scoreId, user_id: vw.id, role: 'viewer' },
+        ]);
+        expect(memberError).toBeNull();
+
+        const ownerApp = ownerDevice(o3.client, scoreId, o3.id, 'Owner');
+        const editorApp = ownerDevice(ed.client, scoreId, ed.id, 'Editor');
+        const viewerApp = ownerDevice(vw.client, scoreId, vw.id, 'Viewer');
+        const devices = [
+            { client: o3.client, app: ownerApp },
+            { client: ed.client, app: editorApp },
+            { client: vw.client, app: viewerApp },
+        ];
+        const scoreTopics = (client: SupabaseClient) => joinedTopics(client).filter((topic) => topic.includes(scoreId));
+        const onGeneration = (client: SupabaseClient, n: number) => {
+            const topics = scoreTopics(client);
+            return topics.includes(docTopic(scoreId, n)) && topics.includes(docDbTopic(scoreId, n));
+        };
+        await waitFor('every device to join generation 0', () => devices.every((d) => onGeneration(d.client, 0)));
+        await sleep(1500);
+        stroke(ownerApp, 'before');
+        await waitFor('the editor and the viewer to hear the owner before', () =>
+            [editorApp, viewerApp].every((app) => app.inks.some((m) => m.strokeId === 'before')),
+        );
+
+        // Archived (service role, as the plan's score cap does it).
+        const { error: archiveError } = await admin
+            .from('documents')
+            .update({ archived_at: new Date().toISOString(), archived_reason: 'plan_lapse' })
+            .eq('id', scoreId);
+        expect(archiveError).toBeNull();
+        await waitFor('every device to leave both topics', () =>
+            devices.every((d) => scoreTopics(d.client).length === 0 && d.app.epochReads.includes('archived')),
+        );
+        // Each was told the score is archived, not that it lost it, and the app re-checks.
+        for (const { app } of devices) {
+            expect(app.epochReads).not.toContain('denied');
+            expect(app.membershipChecks()).toBeGreaterThan(0);
+        }
+        stroke(ownerApp, 'while-archived');
+        await sleep(1500);
+        expect(devices.every((d) => scoreTopics(d.client).length === 0)).toBe(true);
+        expect(editorApp.inks.some((m) => m.strokeId === 'while-archived')).toBe(false);
+        const checksWhileArchived = devices.map((d) => d.app.membershipChecks());
+
+        // Restored: nobody reopens anything; the next recheck (15-45 s) rejoins.
+        const { error: restoreError } = await admin
+            .from('documents')
+            .update({ archived_at: null, archived_reason: null })
+            .eq('id', scoreId);
+        expect(restoreError).toBeNull();
+        await waitFor(
+            'every device to rejoin generation 1 by itself',
+            () => devices.every((d) => onGeneration(d.client, 1)),
+            60_000,
+        );
+        devices.forEach((d, i) => {
+            expect(d.app.epochReads.at(-1)).toBe('epoch');
+            // The viewer re-reads the score and leaves its archived state.
+            expect(d.app.membershipChecks()).toBeGreaterThan(checksWhileArchived[i]!);
+        });
+        await sleep(1500);
+
+        // Live ink both ways, and committed marks, on the same mounted channels.
+        stroke(ownerApp, 'restored');
+        await waitFor('the editor and the viewer to hear the owner after the restore', () =>
+            [editorApp, viewerApp].every((app) => app.inks.some((m) => m.strokeId === 'restored')),
+        );
+        stroke(editorApp, 'editor-restored');
+        await waitFor('the owner to hear the editor after the restore', () =>
+            ownerApp.inks.some((m) => m.strokeId === 'editor-restored'),
+        );
+        const markId = crypto.randomUUID();
+        const { error: insertError } = await o3.client.from('annotations').insert({
+            id: markId,
+            document_id: scoreId,
+            page: 0,
+            kind: 'stroke' as const,
+            color: '#000000',
+            payload: { pts: [0, 0, 1], w: 0.01 },
+            created_by: o3.id,
+        });
+        expect(insertError).toBeNull();
+        await waitFor('the editor and the viewer to receive the committed mark', () =>
+            [editorApp, viewerApp].every((app) => app.rows.some((row) => row.id === markId)),
+        );
+
+        for (const { app } of devices) {
+            app.channel.stop();
+        }
+    }, 150_000);
 });

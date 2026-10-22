@@ -16,6 +16,8 @@ import {
     EPOCH_RETRY_BASE_MS,
     EPOCH_RETRY_MAX_MS,
     ROTATION_JITTER_MAX_MS,
+    ARCHIVED_RECHECK_MS,
+    archivedRecheckDelayMs,
     docDbTopic,
     docTopic,
     epochRetryDelayMs,
@@ -889,8 +891,17 @@ describe('DocRealtimeChannel presence names', () => {
     });
 });
 
-const toRead = (epoch: number | null | undefined): TopicEpochRead =>
-    epoch === undefined ? { status: 'failed' } : epoch === null ? { status: 'denied' } : { status: 'epoch', epoch };
+/** A generation, null a denial, undefined a failed read, 'archived' an archived score. */
+type EpochAnswer = number | null | undefined | 'archived';
+
+const toRead = (epoch: EpochAnswer): TopicEpochRead =>
+    epoch === undefined
+        ? { status: 'failed' }
+        : epoch === null
+          ? { status: 'denied' }
+          : epoch === 'archived'
+            ? { status: 'archived' }
+            : { status: 'epoch', epoch };
 
 /** One stroke, flushed at pen-up without advancing the clock. */
 const scribble = (rt: DocRealtimeChannel, strokeId = 's1'): void => {
@@ -910,13 +921,9 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
 
     /**
      * A channel that asks the generation first; `epochs` answers each ask in
-     * turn, the last one from then on: a number is that generation, null a
-     * denial, undefined a failed read.
+     * turn, the last one from then on (see EpochAnswer).
      */
-    const setupWithEpochs = async (
-        epochs: Array<number | null | undefined>,
-        overrides: Partial<DocRealtimeChannelOptions> = {},
-    ) => {
+    const setupWithEpochs = async (epochs: EpochAnswer[], overrides: Partial<DocRealtimeChannelOptions> = {}) => {
         const answers = [...epochs];
         const fetchTopicEpoch = vi.fn(async () => toRead(answers.length > 1 ? answers.shift() : answers[0]));
         const channels: FakeChannel[] = [];
@@ -1056,14 +1063,22 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
     it('reads the generation over PostgREST: only a null answer is a denial, anything unclear a failure', async () => {
         const rpc = vi.fn();
         const supabase = { rpc } as unknown as TypedSupabaseClient;
-        rpc.mockResolvedValueOnce({ data: 2, error: null });
+        rpc.mockResolvedValueOnce({ data: { status: 'open', epoch: 2 }, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'epoch', epoch: 2 });
-        expect(rpc).toHaveBeenCalledWith('realtime_topic_epoch', { p_document: DOC });
-        rpc.mockResolvedValueOnce({ data: 0, error: null });
+        expect(rpc).toHaveBeenCalledWith('realtime_topic_access', { p_document: DOC });
+        rpc.mockResolvedValueOnce({ data: { status: 'open', epoch: 0 }, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'epoch', epoch: 0 });
         // The function ran under this user's token and document_role() said no.
         rpc.mockResolvedValueOnce({ data: null, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'denied' });
+        // A member of an archived score (20261022120200): wait, do not stop.
+        rpc.mockResolvedValueOnce({ data: { status: 'archived' }, error: null });
+        await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'archived' });
+        // Shapes it does not know, the old function's bare integer among them.
+        for (const data of [2, [], 'archived', { status: 'open' }, { status: 'open', epoch: -1 }, { status: 'gone' }]) {
+            rpc.mockResolvedValueOnce({ data, error: null });
+            await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
+        }
         // None of these says anything about access.
         rpc.mockResolvedValueOnce({ data: null, error: { message: 'Could not find the function' } });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
@@ -1073,14 +1088,14 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
         rpc.mockRejectedValueOnce(new Error('offline'));
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
-        rpc.mockResolvedValueOnce({ data: 1.5, error: null });
+        rpc.mockResolvedValueOnce({ data: { status: 'open', epoch: 1.5 }, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
         rpc.mockResolvedValueOnce({ data: undefined, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
     });
 
     /** Owner and a collaborator on generation 0, the owner's ink reaching it. */
-    const ownerWithCollaborator = async (epochs: Array<number | null | undefined>) => {
+    const ownerWithCollaborator = async (epochs: EpochAnswer[]) => {
         const ctx = await setupWithEpochs(epochs);
         const live = ctx.latest(docTopic(DOC))!;
         const db = ctx.latest(docDbTopic(DOC))!;
@@ -1424,6 +1439,164 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
             db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
             rt.stop();
             await afterJitter();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+            expect(vi.getTimerCount()).toBe(0);
+        });
+    });
+
+    /**
+     * 20261022120200_realtime_archive_recovery (decision 55): archiving is a
+     * temporary denial. A member's open score leaves both topics when it is
+     * archived, asks again every 15-45 s, and joins the current generation by
+     * itself once the score is restored -- no reopen.
+     */
+    describe('an archived score waits, and rejoins on restore (20261022120200)', () => {
+        // Every wait at its longest: one recheck per afterArchivedRecheck().
+        beforeEach(() => {
+            vi.spyOn(Math, 'random').mockReturnValue(1);
+        });
+
+        /** Past one archived recheck (the longest, with Math.random at 1). */
+        const afterArchivedRecheck = () => vi.advanceTimersByTimeAsync((ARCHIVED_RECHECK_MS * 3) / 2);
+
+        it('spreads the rechecks uniformly over 15..45 s', () => {
+            expect(ARCHIVED_RECHECK_MS).toBe(30_000);
+            expect(archivedRecheckDelayMs(() => 0)).toBe(15_000);
+            expect(archivedRecheckDelayMs(() => 0.5)).toBe(30_000);
+            expect(archivedRecheckDelayMs(() => 1)).toBe(45_000);
+        });
+
+        it('an open viewer sees the score archived, then restored, and realtime resumes without a reopen', async () => {
+            const { rt, opts, channels, removed, latest, fetchTopicEpoch, live, db } = await ownerWithCollaborator([
+                0,
+                'archived',
+                'archived',
+                1,
+            ]);
+
+            // The archive rotates the score: the hint on doc-db:{id}.
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            await afterJitter();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            // Archived: nothing is opened, the viewer is asked to re-check
+            // (it shows the score archived), and nothing goes out.
+            expect(channels).toHaveLength(2);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+            syncPresence(live, 2);
+            scribble(rt, 'archived');
+            rt.setPage(2);
+            expect(live.send).not.toHaveBeenCalled();
+            // No row can be written on an archived score: no fallback polling.
+            await vi.advanceTimersByTimeAsync(DB_JOIN_GRACE_MS + DB_FALLBACK_POLL_MS);
+            expect(opts.onResync).not.toHaveBeenCalled();
+
+            // Still archived at the next recheck: still off, nothing new to say.
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(channels).toHaveLength(2);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+
+            // Restored: the next recheck joins the current generation, the same
+            // mounted channel, no reopen.
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
+            const live1 = latest(docTopic(DOC, 1))!;
+            const db1 = latest(docDbTopic(DOC, 1))!;
+            expect(channels.map((c) => c.topic)).toEqual([
+                docTopic(DOC),
+                docDbTopic(DOC),
+                docTopic(DOC, 1),
+                docDbTopic(DOC, 1),
+            ]);
+            // The viewer re-reads, and leaves its archived state.
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(2);
+            live1.status('SUBSCRIBED');
+            db1.status('SUBSCRIBED');
+            // A re-join: one gap-fill pull for what was committed before it landed.
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            // Committed marks, live ink and presence all flow again.
+            db1.broadcast('INSERT', dbChange(row({ seq: 42 })));
+            expect(opts.onDbChange).toHaveBeenCalledWith(expect.objectContaining({ seq: 42 }));
+            live1.broadcast(INK_PROGRESS_EVENT, peerStroke());
+            expect(opts.onRemoteInk).toHaveBeenCalled();
+            expect(live1.track).toHaveBeenCalled();
+            syncPresence(live1, 2);
+            scribble(rt, 'restored');
+            expect(inkSent(live1).map((m) => m.strokeId)).toContain('restored');
+            expect(live.send).not.toHaveBeenCalled();
+            // Nothing left to ask.
+            await vi.advanceTimersByTimeAsync(ARCHIVED_RECHECK_MS * 4);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
+            rt.stop();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('a score opened while archived joins nothing, then joins on restore and pulls the gap', async () => {
+            const { opts, channels, latest, fetchTopicEpoch } = await setupWithEpochs(['archived', 0]);
+            expect(channels).toEqual([]);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            latest(docTopic(DOC))!.status('SUBSCRIBED');
+            latest(docDbTopic(DOC))!.status('SUBSCRIBED');
+            // Rows written after the open's own pull, before these joins.
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(2);
+        });
+
+        it('a failed read while archived asks again at the archived pace, not the retry pace', async () => {
+            const { channels, latest, fetchTopicEpoch, db } = await ownerWithCollaborator([
+                0,
+                'archived',
+                undefined,
+                2,
+            ]);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            await afterJitter();
+            await afterArchivedRecheck();
+            // The failed read opens nothing: generation 0 would only be refused.
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(channels).toHaveLength(2);
+            await vi.advanceTimersByTimeAsync(EPOCH_RETRY_BASE_MS * 4);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
+            expect(latest(docTopic(DOC, 2))).toBeDefined();
+            expect(latest(docDbTopic(DOC, 2))).toBeDefined();
+        });
+
+        it('a denial while archived still stops for good', async () => {
+            const { opts, channels, fetchTopicEpoch, db } = await ownerWithCollaborator([0, 'archived', null]);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            await afterJitter();
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(2);
+            await vi.advanceTimersByTimeAsync(ARCHIVED_RECHECK_MS * 4);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(channels).toHaveLength(2);
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('a device that missed the archive (its re-join refused) waits too, and re-joins nothing meanwhile', async () => {
+            const { opts, channels, removed, fetchTopicEpoch, live, db } = await ownerWithCollaborator([0, 'archived']);
+            // Its socket was down for the hint; realtime-js's re-join is refused.
+            live.status('CHANNEL_ERROR', new Error('Unauthorized'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            // The re-join the drop armed never fires, and nothing is polled.
+            await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS);
+            expect(channels).toHaveLength(2);
+            expect(opts.onResync).not.toHaveBeenCalled();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        });
+
+        it('teardown while archived cancels the recheck', async () => {
+            const { rt, fetchTopicEpoch } = await setupWithEpochs(['archived']);
+            rt.stop();
+            await afterArchivedRecheck();
             expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
             expect(vi.getTimerCount()).toBe(0);
         });
