@@ -14,7 +14,16 @@ import { describe, expect, it } from 'vitest';
  */
 const source = readFileSync(resolve(process.cwd(), 'supabase/functions/student-provision/index.ts'), 'utf8');
 const reset = source.slice(source.indexOf('const resetStudentAccess = async'), source.indexOf('const archiveStudent'));
-const codePath = reset.slice(reset.indexOf('const resumeToken'));
+const codePath = reset.slice(reset.indexOf('// Reserve the row before anything is revoked'));
+const emailPath = reset.slice(
+    reset.indexOf("if (row.auth_method === 'email')"),
+    reset.indexOf('// Reserve the row before anything is revoked'),
+);
+// How a stopped reset (either method) is answered.
+const outcomes = source.slice(
+    source.indexOf('const resetOutcomeResponse'),
+    source.indexOf('const resetStudentAccess = async'),
+);
 const ports = source.slice(
     source.indexOf('const codeResetPorts = '),
     source.indexOf('const resetStudentAccess = async'),
@@ -69,7 +78,7 @@ describe('student-provision code reset wiring', () => {
             /if \(!\(await landed\(ports, studentUserId, lease\.worker\)\)\) \{\s+return \{ kind: 'unconfirmed'/,
         );
         expect(failed.match(/incomplete\(\)/g)).toHaveLength(1);
-        expect(codePath).toContain("code: 'reset_unconfirmed', resetToken: outcome.resetToken");
+        expect(outcomes).toMatch(/code: 'reset_unconfirmed',\s+resetToken: outcome\.resetToken/);
         expect(source).toMatch(
             /RESET_UNCONFIRMED_MESSAGE =\s+'[^']*held for up to 10 minutes\. Try the reset again in a few minutes\./,
         );
@@ -88,14 +97,54 @@ describe('student-provision code reset wiring', () => {
     });
 
     it('a live reset or claim is refused, not taken over; a fenced-out try says so', () => {
-        expect(codePath).toContain("code: 'reset_in_progress'");
-        expect(codePath).toContain("code: 'claim_in_progress'");
-        expect(codePath).toContain("code: 'reset_lost'");
+        expect(codePath).toContain('return resetOutcomeResponse(outcome);');
+        expect(outcomes).toContain("code: 'reset_in_progress'");
+        expect(outcomes).toContain("code: 'claim_in_progress'");
+        expect(outcomes).toContain("code: 'reset_lost'");
     });
 
     it('a part-way failure keeps the hold, says it lasts up to 10 minutes, and returns the token', () => {
         expect(source).toMatch(/RESET_INCOMPLETE_MESSAGE =\s+'[^']*held for up to 10 minutes/);
-        expect(codePath).toContain("code: 'reset_incomplete', resetToken: outcome.resetToken");
+        expect(outcomes).toMatch(/code: 'reset_incomplete',\s+resetToken: outcome\.resetToken/);
         expect(source).not.toMatch(/release_student_code_reset/);
+    });
+});
+
+describe('student-provision email reset wiring (20261022140800)', () => {
+    it('runs through runCodeReset with the email ports: reserved, fenced, quarantined and resumable like a code reset', () => {
+        expect(emailPath).toContain('runCodeReset(emailResetPorts(admin, userId)');
+        expect(emailPath).toContain('uuidRe.test(body.resetToken)');
+        // No Auth write of its own: the scramble and the session revocation
+        // are the code ports', fenced by the lease.
+        expect(emailPath).not.toContain('updateUserById');
+        expect(emailPath).not.toContain('endStudentSessions(');
+        expect(emailPath).not.toMatch(/update\(\{\s*claimed_at/);
+        const email = source.slice(
+            source.indexOf('const emailResetPorts = '),
+            source.indexOf('const resetOutcomeResponse'),
+        );
+        expect(email).toContain('...codeResetPorts(admin, userId)');
+        const complete = email.slice(email.indexOf("admin.rpc('complete_student_email_reset'"));
+        expect(complete).toContain('p_worker: lease.worker');
+        expect(complete).toContain('p_epoch: lease.epoch');
+    });
+
+    it('reserves the mail first, gives it back on any stopped reset, and mails the link only after the reset', () => {
+        const mail = emailPath.indexOf('reserveStudentMail(userId, row.student_email)');
+        const run = emailPath.indexOf('runCodeReset(emailResetPorts');
+        const otp = emailPath.indexOf('signInWithOtp(');
+        expect(mail).toBeGreaterThan(-1);
+        expect(mail).toBeLessThan(run);
+        expect(run).toBeLessThan(otp);
+        expect(emailPath).toMatch(
+            /if \(outcome\.kind !== 'reset'\) \{[\s\S]*?await mail\.release\(\);\s+return resetOutcomeResponse\(outcome, 'email'\);/,
+        );
+    });
+
+    it('a stopped email reset is answered without the card copy, and says so (method: email)', () => {
+        expect(outcomes).toContain("method === 'email' ? EMAIL_RESET_INCOMPLETE_MESSAGE : RESET_INCOMPLETE_MESSAGE");
+        expect(outcomes).toContain("method === 'email' ? EMAIL_RESET_UNCONFIRMED_MESSAGE : RESET_UNCONFIRMED_MESSAGE");
+        expect(source).toMatch(/EMAIL_RESET_INCOMPLETE_MESSAGE =\s+'[^']*no new link was sent/);
+        expect(source).not.toMatch(/EMAIL_RESET_[A-Z_]+ =\s+'[^']*card/);
     });
 });

@@ -242,7 +242,12 @@ describe('the deletion check is asked again right before the later Auth writes (
             source.indexOf('const resetStudentAccess = async'),
             source.indexOf('const archiveStudent'),
         );
-        before(reset, 'await deletionRefusal(admin, userId)', 'admin.auth.admin.updateUserById(row.student_user_id, {');
+        // Both paths run the worker now (the email one since 20261022140800),
+        // which asks right before its scramble (below); the email ports are the
+        // code ports' with their deletion check.
+        expect(reset).toContain('runCodeReset(emailResetPorts(admin, userId)');
+        expect(source).toContain('...codeResetPorts(admin, userId),');
+        expect(reset).not.toContain('admin.auth.admin.updateUserById(row.student_user_id, {');
         const restore = source.slice(source.indexOf('const restoreStudent = async'));
         before(restore, 'await deletionRefusal(admin, userId)', "ban_duration: 'none'");
         // The code path: the worker's port, asked after the reservation and before the first fence.

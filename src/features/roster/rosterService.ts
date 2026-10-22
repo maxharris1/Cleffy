@@ -215,6 +215,13 @@ export const RESET_INCOMPLETE_MESSAGE =
 export const RESET_UNCONFIRMED_MESSAGE =
     'The reset did not finish, and we could not confirm whether the student’s password was changed. Their current card is held for up to 10 minutes. Try the reset again in a few minutes.';
 
+/** The same two for an email-method student, who has no card (the answer says `method: 'email'`). */
+export const EMAIL_RESET_INCOMPLETE_MESSAGE =
+    'The reset did not finish and no new link was sent. The student’s account is held for up to 10 minutes, so another reset cannot start meanwhile. Try the reset again.';
+
+export const EMAIL_RESET_UNCONFIRMED_MESSAGE =
+    'The reset did not finish, and we could not confirm whether the student’s password was changed. No new link was sent. Try the reset again in a few minutes.';
+
 /**
  * The hold a failed reset left, by student: sent with the next reset of that
  * student so it resumes its own hold (20261022110500_student_code_reset_holder.sql).
@@ -244,7 +251,8 @@ export const resetStudentAccess = async (studentId: string): Promise<ResetResult
         const failure = (await response
             .clone()
             .json()
-            .catch(() => ({}))) as { code?: string; resetToken?: unknown };
+            .catch(() => ({}))) as { code?: string; resetToken?: unknown; method?: unknown };
+        const email = failure.method === 'email';
         // The server kept the reset's hold on the student's current card; the
         // token lets the teacher's next try resume it instead of waiting. Any
         // failure that hands one back is kept, not just reset_incomplete.
@@ -252,10 +260,10 @@ export const resetStudentAccess = async (studentId: string): Promise<ResetResult
             pendingResetTokens.set(studentId, failure.resetToken);
         }
         if (failure.code === 'reset_incomplete') {
-            throw new Error(RESET_INCOMPLETE_MESSAGE);
+            throw new Error(email ? EMAIL_RESET_INCOMPLETE_MESSAGE : RESET_INCOMPLETE_MESSAGE);
         }
         if (failure.code === 'reset_unconfirmed') {
-            throw new Error(RESET_UNCONFIRMED_MESSAGE);
+            throw new Error(email ? EMAIL_RESET_UNCONFIRMED_MESSAGE : RESET_UNCONFIRMED_MESSAGE);
         }
         if (failure.code === 'reset_lost') {
             pendingResetTokens.delete(studentId);

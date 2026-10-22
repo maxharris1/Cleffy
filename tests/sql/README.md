@@ -1079,6 +1079,18 @@ reset is over, and is the service role's alone. Ends with `failures | total`.
 Proven against the local stack on 2026-10-22: all 11 checks passed; the proof
 does not run without the function.
 
+`student_email_reset_fence.sql` proves
+`supabase/migrations/20261022140800_student_email_reset_fence.sql` (P3's
+"the email reset path is unfenced"): on an email-method roster row, the code
+reset's reservation, worker lease, fences and fenced session revocation hold a
+second reset off (busy), fence out a stale worker after a retry takes a newer
+lease (its fence, session revocation and completion do nothing), and let the
+current worker complete through `complete_student_email_reset()`, which drops
+the reservation and clears `claimed_at`; a code row is refused (22023) with its
+card and reservation untouched; the function is the service role's alone. Ends
+with `failures | total`. Proven against the local stack on 2026-10-22: all 12
+checks passed; the proof does not run without the function.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

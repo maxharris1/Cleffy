@@ -7,6 +7,8 @@ import {
     provisionStudent,
     RESET_INCOMPLETE_MESSAGE,
     RESET_UNCONFIRMED_MESSAGE,
+    EMAIL_RESET_INCOMPLETE_MESSAGE,
+    EMAIL_RESET_UNCONFIRMED_MESSAGE,
     resetStudentAccess,
     restoreStudent,
 } from '@/features/roster/rosterService';
@@ -141,6 +143,20 @@ describe('resetStudentAccess', () => {
         expect((callEdgeFunction.mock.calls[2] as [string, Record<string, unknown>])[1]).not.toHaveProperty(
             'resetToken',
         );
+    });
+
+    it('an email student’s stopped reset is told in words without a card (method: email)', async () => {
+        const token = '7a2d3b51-2c3d-4e4f-9a01-123456789abd';
+        callEdgeFunction.mockResolvedValueOnce(
+            jsonResponse({ error: 'x', code: 'reset_incomplete', resetToken: token, method: 'email' }, 502),
+        );
+        await expect(resetStudentAccess('s-email')).rejects.toThrow(EMAIL_RESET_INCOMPLETE_MESSAGE);
+        callEdgeFunction.mockResolvedValueOnce(
+            jsonResponse({ error: 'x', code: 'reset_unconfirmed', resetToken: token, method: 'email' }, 502),
+        );
+        await expect(resetStudentAccess('s-email')).rejects.toThrow(EMAIL_RESET_UNCONFIRMED_MESSAGE);
+        expect(EMAIL_RESET_INCOMPLETE_MESSAGE).not.toContain('card');
+        expect(EMAIL_RESET_UNCONFIRMED_MESSAGE).not.toContain('card');
     });
 
     it('a reset whose password write could not be confirmed says to try again in a few minutes, and keeps the token', async () => {
