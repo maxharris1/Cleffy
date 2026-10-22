@@ -329,3 +329,29 @@ Merge order per the packet: P2 goes second, after P1, and there is no file overl
 
 - **Vercel:** the rate-limit failure on `1ceeb9d` (Addendum 2) did not recur. The preview built and deployed on this head.
 - **Not re-verified:** as before, this session has not re-run the local checks, the CSP smoke or the ui-check on the later heads.
+
+## Addendum 4 (10:16 UTC): head `0ca6c92`, everything green
+
+- **Two commits from a fourth Claude session** (`Claude-Session: https://claude.ai/code/session_01UoMJrKhKrHz5QiAXKAKGP6`), both fast-forwards authored as Max Harris:
+    - `db55cab`: "fix(ink): sign-out keeps held ink for Export or Discard; Dismiss only hides; cut-off writes swept"
+    - `0ca6c92ec186de1bc0038d4e65cd81f638ee221f`: "fix(ink): fit the conflict notice's three actions on a phone; room for the export menu in the signed-out export dialog"
+
+    This session pushed neither.
+
+- **CI on `0ca6c92`:** all green.
+
+    | Check                   | Run id (job id)                         | Result  |
+    | ----------------------- | --------------------------------------- | ------- |
+    | checks                  | 39761010499 (119764885658)              | success |
+    | supabase-local          | 39761010499 (119764886078)              | success |
+    | supabase-drift          | 39761010499 (119764886162)              | success |
+    | omr-service             | 39761010499 (119764886241)              | success |
+    | checks                  | 39761016648 (119764906571)              | success |
+    | supabase-local          | 39761016648 (119764906751)              | success |
+    | supabase-drift          | 39761016648 (119764906730)              | success |
+    | omr-service             | 39761016648 (119764906838)              | success |
+    | Vercel Preview Comments | check 119765202789                      | success |
+    | Vercel (commit status)  | deployment GaH7WxjoFU4noCfMf6Y7iEYqah24 | success |
+    | Supabase Preview        | check 119764881541                      | skipped |
+
+- **Not re-verified:** as before, this session has not re-run the local checks, the CSP smoke or the ui-check on the heads after `0508174`.
