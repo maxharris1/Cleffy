@@ -980,6 +980,20 @@ with `failures | total`. Proven against the local stack on 2026-10-22: all 13
 checks passed; with 20261022130400's run restored, 4 of the 13 failed (the
 hand-ons, and the three students left archived after the renewal).
 
+`district_retention_detach_kept.sql` proves
+`supabase/migrations/20261022140100_district_retention_detach_kept.sql`
+(decision 68(2)): the hard delete still deletes only listed students who are
+still archived (a teacher's restore during the purge week wins), and every
+listed student it keeps in the district (restored, or an account that is not a
+provisioned student) is detached: `district_studio_id` cleared, nothing deleted,
+attribution and teacher unchanged, logged as `attribution_changed` with
+`counts.event = 'detached_kept'` and counted as `students_detached` in the run's
+result (the `hard_deleted` row's counts keep their shape). A student a
+human moved to another district before the hard delete is untouched. Ends with
+`failures | total`. Proven against the local stack on 2026-10-22: all 10 checks
+passed; with 20261022140000's run, 4 of the 10 failed (both kept students still
+named the deleted district).
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
