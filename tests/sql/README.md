@@ -1068,6 +1068,17 @@ read or write is refused. The audit found no gap, so no migration; the proof
 keeps it so. Ends with `failures | total`. Proven against the local stack on
 2026-10-22: all 11 checks passed.
 
+`clear_stale_code_reset_markers.sql` proves
+`supabase/migrations/20261022140700_clear_stale_code_reset_markers.sql`
+(decision 64(1)'s follow-up): `clear_stale_code_reset_markers()` removes
+`app_metadata.code_reset_worker`, and nothing else of `app_metadata`, from an
+account no live reservation holds (a completed reset, an expired hold, no
+roster row), keeps it under a live reset (worker inside its Auth call) or a
+live claim, is idempotent, honours its limit, clears a held marker once that
+reset is over, and is the service role's alone. Ends with `failures | total`.
+Proven against the local stack on 2026-10-22: all 11 checks passed; the proof
+does not run without the function.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

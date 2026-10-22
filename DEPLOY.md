@@ -2178,12 +2178,22 @@ launch-fix follow-ups' migrations above.
 Step 20 watches these three. On a fresh production each query returns no
 rows. Run them in production's SQL editor, as `postgres`.
 
-**The `code_reset_worker` marker stays.** After a code student's reset,
+**Stale `code_reset_worker` markers.** After a code student's reset,
 `app_metadata.code_reset_worker` (an opaque UUID) stays in the student's
-`app_metadata`, and so in their JWT. Under decision 64 it is left there: it is
-harmless, admin-only, and fenced by the reset's epoch and quarantine
-(`20261022110700`, `20261022110800`). Clearing stale markers is a follow-up,
-not a launch step. Do not clear it by hand.
+`app_metadata`, and so in their JWT. It is harmless, admin-only, and fenced by
+the reset's epoch and quarantine (`20261022110700`, `20261022110800`), and it
+matters only while a reset holds the student. To clear the stale ones, run, as
+`postgres` or the service role, at any time and as often as wanted:
+
+```sql
+select public.clear_stale_code_reset_markers();
+```
+
+It removes the key (nothing else of `app_metadata`) only from accounts that no
+live reservation holds, under the reset's own locks, skips a student someone is
+working on, and returns how many it cleared; a second run clears nothing
+(`20261022140700`). Nothing schedules it. Never edit `app_metadata` by hand
+instead.
 
 **Orphaned student provisioning accounts.** When a teacher adds a student,
 `student-provision` first records an intent (`public.student_provision_intents`),
