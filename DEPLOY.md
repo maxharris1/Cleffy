@@ -2186,6 +2186,7 @@ select i.roster_id, i.teacher_id, i.auth_email, i.created_at, i.expires_at,
        i.student_user_id as recorded_user_id,
        r.id is not null as recorded_account_exists,
        r.created_at between i.created_at - interval '1 minute' and i.expires_at as recorded_in_window,
+       -- Email candidate columns: information only, never enough to delete.
        c.id as email_candidate_id,
        c.created_at as email_candidate_created_at,
        c.created_at between i.created_at - interval '1 minute' and i.expires_at as email_candidate_in_window
@@ -2211,8 +2212,11 @@ The two account columns are kept apart on purpose:
 - `email_candidate_id` is any other account at the intent's address. Account
   deletion's `student_provision_intents_for()` falls back to such an account
   when nothing was recorded, with no upper time bound (`20261022110600`), so it
-  can be a separate signup made later at the same address. It is a lead, never
-  proof. An intent shows on more than one row when several accounts match.
+  can be a separate signup made later at the same address, or the account of
+  another provisioning intent for the same address. It is shown for
+  information only and is never enough to delete anything, whatever its
+  window, flag or sign-in fields show. An intent shows on more than one row
+  when several accounts match.
 - The window runs from one minute before the intent's `created_at` (the
   fallback's own allowance) to its `expires_at`, after which the request that
   wrote the intent can no longer be running.
@@ -2228,24 +2232,22 @@ from auth.users u
 where u.id = '<user_id>';
 ```
 
-**Proof that this provisioning created the account.** The account was created
-inside the window (`recorded_in_window` or `email_candidate_in_window` is
-true), and either:
+**Proof that this provisioning created the account.** There is one proof,
+**(A) recorded:** the account is the intent's `recorded_user_id`
+(`recorded_account_exists` is true) and it was created inside the window
+(`recorded_in_window` is true). It is the only proof that permits any
+deletion.
 
-- **(A) recorded:** it is the intent's `recorded_user_id`; or
-- **(B) flagged:** nothing was recorded (`recorded_user_id` is null), it is the
-  email candidate, and its `app_metadata` carries the student flag naming this
-  teacher (`user_type = 'student'` and `flagged_teacher` equals the intent's
-  `teacher_id`). The flag is admin-only and only `student-provision` writes it:
-  at creation for a code student, just after the invite for an email student.
-  So an unrecorded flagged account is a code student whose request died
-  before `attach_student_provision`.
-
-That is everything dev records about who made an account. There is no other
-provisioning marker (`code_reset_worker` belongs to the code reset). A matching
-address, a candidate created inside the window, or null
-`email_confirmed_at`/`last_sign_in_at` are not proof: each also fits a separate
-signup at the same address. Without proof (A) or (B), nothing is deleted.
+An email candidate is never proof. Its address, `email_candidate_in_window`,
+a student flag naming this teacher (`user_type = 'student'` and
+`flagged_teacher` equal to the intent's `teacher_id`), or null
+`email_confirmed_at`/`last_sign_in_at` each also fit a separate signup at the
+same address, or another intent's account: a later request for the same
+teacher and address creates, attaches and flags its own account before its
+roster insert, so that account can sit unrostered inside this intent's window
+while that request is still live. There is no other provisioning marker
+(`code_reset_worker` belongs to the code reset). Without proof (A), nothing is
+deleted.
 
 Resolve each row:
 
@@ -2259,7 +2261,7 @@ Resolve each row:
    recorded, the email candidate) has `has_roster_row` true. It is a rostered
    student, not an orphan; delete nothing. Run
    `select public.finish_student_provision('<roster_id>');`.
-3. **Proven (A) or (B), flagged as this teacher's student, no roster row:** the
+3. **Proven (A), flagged as this teacher's student, no roster row:** the
    account belongs to nobody. Delete it, its Storage first, as account deletion
    does (`supabase/functions/_shared/accountDeletion.ts`, `purgeOwnedDocuments`):
     1. List the score folders it owns or still has pending. Storage keeps each
@@ -2317,12 +2319,13 @@ Resolve each row:
       account. Contact the address, or the teacher if `teacher_exists` is
       true, before deleting anything. If they agree to its deletion, delete it
       as in case 3. If they keep it, finish the intent and leave the account.
-5. **No proof:** any other account with no roster row: an email candidate on
-   an unrecorded intent without this teacher's flag, an account created
-   outside the window, or one flagged for another teacher. It may be a
-   separate person's signup. Delete nothing and do not finish the intent: it
-   stays open. Resolve it by hand and escalate to Max with the row and the
-   account's details.
+5. **No proof:** any other account with no roster row: every email candidate
+   on an unrecorded intent (flagged as this teacher's student or not, inside
+   the window or not), a recorded account created outside the window, or one
+   flagged for another teacher. It may be a separate person's signup or
+   another provisioning intent's account that is still live. Delete nothing
+   and do not finish the intent: it stays open. Resolve it by hand and
+   escalate to Max with the row and the account's details.
 6. **`teacher_exists` is false** (the teacher's account was deleted while this
    provisioning was live or unflagged): handle it as in cases 1 to 5. The
    intent outlives the teacher on purpose (it has no foreign key), so that
