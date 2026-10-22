@@ -7,6 +7,13 @@
 -- attempt that crashed after it started deleting keeps it (the runbook case)
 -- until a retry completes and the marker cascades away with the auth user.
 --
+-- And for 20261022110600_account_deletion_barrier.sql, section 7: the same
+-- predicate refuses Storage uploads into an existing score (both buckets),
+-- joins (share-link redemption), checkout leases and staging, and a new
+-- provisioning intent; a checkout lease taken before the marker is reported
+-- live; provisioning intents name the Auth account to clean up, and outlive
+-- the teacher.
+--
 -- Runs inside one transaction and ROLLS BACK -- nothing persists. Same harness
 -- and reading as tests/sql/launch_checkout_fixes.sql:
 --
@@ -92,6 +99,12 @@ values (pg_temp.u(11), 'authenticated', 'authenticated', 'st-pending-11@students
        (pg_temp.u(13), 'authenticated', 'authenticated', 'st-pending-13@students.cleffy.app', '{"user_type":"student"}'),
        (pg_temp.u(14), 'authenticated', 'authenticated', 'st-pending-14@students.cleffy.app', '{"user_type":"student"}'),
        (pg_temp.u(15), 'authenticated', 'authenticated', 'st-pending-15@students.cleffy.app', '{"user_type":"student"}');
+insert into auth.users (id, aud, role, email)
+values (pg_temp.u(3), 'authenticated', 'authenticated', 'barrier-teacher@example.invalid'),
+       (pg_temp.u(4), 'authenticated', 'authenticated', 'barrier-member@example.invalid'),
+       (pg_temp.u(5), 'authenticated', 'authenticated', 'barrier-buyer@example.invalid');
+insert into storage.buckets (id, name, public) values ('scores', 'scores', false), ('thumbnails', 'thumbnails', false)
+on conflict (id) do nothing;
 
 select pg_temp.as_service();
 
@@ -217,6 +230,112 @@ select pg_temp.chk('36 marking again keeps the first time cleanup began',
 $q$select public.mark_account_deletion_destructive (pg_temp.u(1), pg_temp.att('d4'))$q$);
 select pg_temp.chk('36a ... (an hour ago, not now)',
 $q$select destructive_started_at < now() - interval '59 minutes' from public.account_deletions where user_id = pg_temp.u(1)$q$);
+
+-- ===========================================================================
+-- 7. The barrier beyond scores and roster rows (20261022110600)
+-- ===========================================================================
+select pg_temp.ran('70 before: u3 owns a score with a file', pg_temp.doc_sql(301, 3));
+select pg_temp.ran('70a ... and a bystander (u2) owns one too', pg_temp.doc_sql(302, 2));
+insert into storage.objects (bucket_id, name, owner)
+values ('scores', pg_temp.u(301) || '/original.pdf', pg_temp.u(3));
+insert into public.share_links (token, document_id, role, created_by)
+values ('barrier-link-301', pg_temp.u(301), 'viewer', pg_temp.u(3)),
+       ('barrier-link-302', pg_temp.u(302), 'viewer', pg_temp.u(2));
+select pg_temp.as_user(3);
+select pg_temp.ran('71 before the deletion the owner can upload into their score',
+$q$insert into storage.objects (bucket_id, name, owner) values ('scores', pg_temp.u(301) || '/extra.pdf', pg_temp.u(3))$q$);
+select pg_temp.chk('71a ... and is told nothing is pending for them',
+$q$select not public.caller_account_deletion_pending ()$q$);
+select pg_temp.as_service();
+select pg_temp.begin('b3', 3);
+select pg_temp.as_user(3);
+select pg_temp.chk('72 once deletion begins, the caller is pending', $q$select public.caller_account_deletion_pending ()$q$);
+select pg_temp.refused('73 an upload into the score that already exists is refused (scores)',
+$q$insert into storage.objects (bucket_id, name, owner) values ('scores', pg_temp.u(301) || '/late.pdf', pg_temp.u(3))$q$, '42501');
+select pg_temp.refused('74 ... and a cover into thumbnails',
+$q$insert into storage.objects (bucket_id, name, owner) values ('thumbnails', pg_temp.u(301) || '/0.jpg', pg_temp.u(3))$q$, '42501');
+select pg_temp.refused('75 ... and an overwrite (upload with upsert)',
+$q$insert into storage.objects (bucket_id, name, owner, metadata) values ('scores', pg_temp.u(301) || '/original.pdf', pg_temp.u(3), '{"size": 2}')
+   on conflict (bucket_id, name collate "C") where archived_at is null do update set metadata = excluded.metadata$q$, '42501');
+select pg_temp.chk('76 removing files is not restricted (the sweep, or the owner''s own delete, through the Storage API)',
+$q$select not exists (select 1 from pg_policies where schemaname = 'storage' and tablename = 'objects'
+                      and policyname like 'storage_refuse_during_account_deletion%' and cmd = 'DELETE')
+      and (select count(*) = 2 from pg_policies where schemaname = 'storage' and tablename = 'objects'
+           and policyname like 'storage_refuse_during_account_deletion%' and permissive = 'RESTRICTIVE')$q$);
+select pg_temp.as_user(2);
+select pg_temp.ran('77 another account''s uploads are not affected',
+$q$insert into storage.objects (bucket_id, name, owner) values ('scores', pg_temp.u(302) || '/original.pdf', pg_temp.u(2))$q$);
+select pg_temp.as_user(4);
+select pg_temp.refused('78 redeeming a share link to the deleting owner''s score is refused',
+$q$select * from public.redeem_share_link ('barrier-link-301')$q$, '55000');
+select pg_temp.ran('78a ... a link to anyone else''s score still works',
+$q$select * from public.redeem_share_link ('barrier-link-302')$q$);
+select pg_temp.as_user(3);
+select pg_temp.refused('79 the deleting account cannot join a score by link either',
+$q$select * from public.redeem_share_link ('barrier-link-302')$q$, '55000');
+select pg_temp.as_service();
+select pg_temp.refused('79a ... nor be added to one by any other insert',
+$q$insert into public.document_members (document_id, user_id, role) values (pg_temp.u(302), pg_temp.u(3), 'viewer')$q$, '55000');
+select pg_temp.refused('80 a checkout lease is refused for the deleting account',
+$q$select * from public.begin_checkout_attempt (pg_temp.u(3), 'live', interval '5 minutes')$q$, '55000');
+select pg_temp.chk('80a ... and none is in flight for it',
+$q$select not public.checkout_attempt_in_flight (pg_temp.u(3))$q$);
+-- u5 starts a checkout, THEN asks to delete their account.
+select pg_temp.chk('81 a checkout lease taken before the deletion',
+$q$select count(*) = 1 from public.begin_checkout_attempt (pg_temp.u(5), 'live', interval '5 minutes')$q$);
+select pg_temp.begin('b5', 5);
+select pg_temp.chk('82 ... is reported in flight to the deletion, which must not go on',
+$q$select public.checkout_attempt_in_flight (pg_temp.u(5))$q$);
+select pg_temp.refused('83 ... and cannot stage a Stripe create any more',
+$q$select public.stage_checkout_attempt (pg_temp.u(5), 'live',
+    (select holder from public.checkout_attempts where user_id = pg_temp.u(5) and mode = 'live'),
+    gen_random_uuid(), 'price_x')$q$, '55000');
+select pg_temp.chk('84 ... but can still let go of its lease, after which nothing is in flight',
+$q$with r as (update public.checkout_attempts set holder = null where user_id = pg_temp.u(5) returning 1)
+   select count(*) = 1 from r$q$);
+select pg_temp.chk('84a ...', $q$select not public.checkout_attempt_in_flight (pg_temp.u(5))$q$);
+select pg_temp.chk('85 a provisioning for the deleting teacher records nothing and is refused',
+$q$select public.begin_student_provision (pg_temp.u(3), pg_temp.u(401), 'st-x@students.cleffy.app') = 'deletion_pending'
+      and not exists (select 1 from public.student_provision_intents where teacher_id = pg_temp.u(3))$q$);
+select pg_temp.chk('86 a provisioning for a teacher not being deleted records its intent first',
+$q$select public.begin_student_provision (pg_temp.u(2), pg_temp.u(402), 'St-' || pg_temp.u(402) || '@Students.Cleffy.App') = 'ok'$q$);
+select pg_temp.chk('86a ... live, with no account yet, its address normalized',
+$q$select student_user_id is null and live from public.student_provision_intents_for (pg_temp.u(2)) where roster_id = pg_temp.u(402)$q$);
+reset role;
+-- GoTrue stamps created_at on every account it creates.
+insert into auth.users (id, aud, role, email, raw_app_meta_data, created_at)
+values (pg_temp.u(16), 'authenticated', 'authenticated', 'st-' || pg_temp.u(402) || '@students.cleffy.app',
+        json_build_object('user_type', 'student', 'teacher_id', pg_temp.u(2))::jsonb, now());
+-- An account at the address the next intent uses, created a day before it.
+update auth.users set created_at = now() - interval '1 day' where id = pg_temp.u(4);
+select pg_temp.as_service();
+select pg_temp.chk('87 a crash between the Auth create and the attach: the intent still finds the account by address',
+$q$select student_user_id = pg_temp.u(16) from public.student_provision_intents_for (pg_temp.u(2)) where roster_id = pg_temp.u(402)$q$);
+select pg_temp.chk('88 the attach records it',
+$q$select public.attach_student_provision (pg_temp.u(402), pg_temp.u(16))$q$);
+select pg_temp.ran('89 the roster row is the success ...',
+$q$insert into public.managed_students (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method)
+   values (pg_temp.u(402), pg_temp.u(2), pg_temp.u(16), 'Provisioned', 'hash-402', 'code')$q$);
+select pg_temp.chk('89a ... and clears the intent in the same transaction',
+$q$select not exists (select 1 from public.student_provision_intents where roster_id = pg_temp.u(402))$q$);
+select pg_temp.chk('90 an intent at an address that already had an account ...',
+$q$select public.begin_student_provision (pg_temp.u(2), pg_temp.u(403), 'barrier-member@example.invalid') = 'ok'$q$);
+select pg_temp.chk('90a ... never matches that older account (it is not the provisioning''s)',
+$q$select student_user_id is null from public.student_provision_intents_for (pg_temp.u(2)) where roster_id = pg_temp.u(403)$q$);
+select pg_temp.chk('91 a provisioning that undid its account finishes its intent; a late attach then fails',
+$q$select public.finish_student_provision (pg_temp.u(403)) and not public.attach_student_provision (pg_temp.u(403), pg_temp.u(4))$q$);
+select pg_temp.chk('92 an intent outlives its teacher (no foreign key), so a crash around a deletion stays on record',
+$q$select public.begin_student_provision (pg_temp.u(4), pg_temp.u(404), 'st-' || pg_temp.u(404) || '@students.cleffy.app') = 'ok'$q$);
+reset role;
+delete from auth.users where id = pg_temp.u(4);
+select pg_temp.chk('92a ...', $q$select exists (select 1 from public.student_provision_intents where roster_id = pg_temp.u(404))$q$);
+select pg_temp.as_user(2);
+select pg_temp.refused('93 a client cannot register a provisioning',
+$q$select public.begin_student_provision (pg_temp.u(2), gen_random_uuid(), 'x@example.invalid')$q$, '42501');
+select pg_temp.refused('93a ... or read the intents', $q$select count(*) from public.student_provision_intents$q$, '42501');
+select pg_temp.refused('93b ... or list them', $q$select count(*) from public.student_provision_intents_for (pg_temp.u(2))$q$, '42501');
+select pg_temp.refused('93c ... or ask about another account''s checkout', $q$select public.checkout_attempt_in_flight (pg_temp.u(3))$q$, '42501');
+select pg_temp.as_service();
 
 -- ===========================================================================
 -- 5. Completion: the marker and its attempts go with the auth user

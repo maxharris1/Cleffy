@@ -190,6 +190,16 @@ export const CHECKOUT_IN_PROGRESS = {
     code: 'checkout_in_progress',
 } as const;
 
+/**
+ * The buyer's account is being deleted (20261022110600_account_deletion_barrier.sql):
+ * the database refuses the attempt lease, so no session can be opened that the
+ * deletion's billing sweeps would miss.
+ */
+export const CHECKOUT_DELETION_PENDING = {
+    error: 'This account is being deleted, so a new purchase cannot start.',
+    code: 'account_deletion_pending',
+} as const;
+
 /** Layer 4: this buyer has paid and we are waiting for Stripe to tell us. */
 /**
  * The auto-renewal checkbox was not ticked, or the request did not say so.
@@ -297,6 +307,8 @@ export interface StagedAttempt {
 export type AttemptStart =
     | { ok: true; holder: string; stored: StoredAttempt }
     | { ok: false; reason: 'in_flight' }
+    /** The lease was refused because the account is being deleted. */
+    | { ok: false; reason: 'deletion_pending' }
     | { ok: false; reason: 'error'; error: unknown };
 
 /**
@@ -1028,6 +1040,9 @@ export const handleCheckout = async (req: Request, deps: CheckoutDeps): Promise<
         if (!start.ok) {
             if (start.reason === 'error') {
                 return unavailable(deps, 'checkout_attempt_lock_failed', start.error);
+            }
+            if (start.reason === 'deletion_pending') {
+                return deps.json(CHECKOUT_DELETION_PENDING, 409);
             }
             deps.log(`checkout: ${caller.userId} already has an attempt in flight (${mode})`);
             return deps.json(CHECKOUT_IN_PROGRESS, 409);
