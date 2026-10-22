@@ -61,9 +61,18 @@ const walk = (dir: string): string[] =>
     });
 
 describe('Content-Security-Policy', () => {
-    it('allows scripts only from our origin, plus WebAssembly compilation for the pdf.js decoders', () => {
-        expect(csp().get('script-src')).toEqual(["'self'", "'wasm-unsafe-eval'"]);
+    it('allows scripts only from our origin and Turnstile, plus WebAssembly compilation for the pdf.js decoders', () => {
+        expect(csp().get('script-src')).toEqual(["'self'", "'wasm-unsafe-eval'", 'https://challenges.cloudflare.com']);
         expect(csp().get('default-src')).toEqual(["'self'"]);
+    });
+
+    it('frames only the Turnstile challenge, and only from its own host', () => {
+        // Cloudflare's Turnstile CSP reference names exactly these two
+        // directives: api.js (script-src) and the challenge iframe (frame-src).
+        // https://developers.cloudflare.com/turnstile/reference/content-security-policy/
+        expect(csp().get('frame-src')).toEqual(['https://challenges.cloudflare.com']);
+        const turnstile = read('src/features/auth/turnstile.ts');
+        expect(turnstile).toContain("'https://challenges.cloudflare.com/turnstile/v0/api.js");
     });
 
     it('never allows inline or eval in any directive', () => {
