@@ -666,11 +666,12 @@ select pg_temp.refused (
     '%captured_on is in the future%'
 );
 
-select pg_temp.allowed (
-    'snapshots: an update touches nothing (no update policy)',
+select pg_temp.refused (
+    'snapshots: an update is refused (no update policy, so no update privilege: 20261022100700)',
     $q$update public.annotation_snapshots set payload = '[{"forged":1}]'
        where id = 'c1ef0000-0000-4000-8000-0000000000c1'$q$,
-    0
+    '42501',
+    'permission denied%'
 );
 
 select pg_temp.act_as ('c1ef0000-0000-4000-8000-0000000000a3');
@@ -828,11 +829,12 @@ select pg_temp.refused (
     '%row-level security%'
 );
 
-select pg_temp.allowed (
-    'tags: a document_tags update touches nothing (no update policy)',
+select pg_temp.refused (
+    'tags: a document_tags update is refused (no update policy, so no update privilege: 20261022100700)',
     $q$update public.document_tags set document_id = 'c1ef0000-0000-4000-8000-0000000000d2'
        where tag_id = 'c1ef0000-0000-4000-8000-0000000000e1'$q$,
-    0
+    '42501',
+    'permission denied%'
 );
 
 select pg_temp.removed (
@@ -858,11 +860,12 @@ select pg_temp.refused (
     '%row-level security%'
 );
 
-select pg_temp.allowed (
-    'favorites: an update touches nothing (no update policy)',
+select pg_temp.refused (
+    'favorites: an update is refused (no update policy, so no update privilege: 20261022100700)',
     $q$update public.document_favorites set user_id = 'c1ef0000-0000-4000-8000-0000000000a1'
        where document_id = 'c1ef0000-0000-4000-8000-0000000000d1'$q$,
-    0
+    '42501',
+    'permission denied%'
 );
 
 select pg_temp.removed (

@@ -41,10 +41,11 @@ fi
 
 # The number each failing check prints with: its leading digits, in both
 # result shapes (`22 | name | f | detail` and `22 name | f | detail`).
-failed="$(printf '%s\n' "$out" | sed '$d' | grep -E '\| f( \||$)' | sed -nE 's/^([0-9]+[a-z]?)[ |].*/\1/p' | sort -u)"
+failing_rows="$(printf '%s\n' "$out" | sed '$d' | { grep -E '\| f( \||$)' || true; })"
+failed="$(printf '%s\n' "$failing_rows" | sed -nE 's/^([0-9]+[a-z]?)[ |].*/\1/p' | sort -u)"
 
 # The summary is not taken on trust: a failing row above it fails the proof too.
-if [ "$failures" = "0" ] && [ -z "$failed" ]; then
+if [ "$failures" = "0" ] && [ -z "$failing_rows" ]; then
     echo "OK ${proof}: ${total} checks passed"
     exit 0
 fi

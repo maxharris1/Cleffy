@@ -558,13 +558,20 @@ and `district_retention.sql` (26), `district_student_scope.sql` (22) and
 ## Launchfix P1: DB release safety
 
 `explicit_grants.sql` proves `20261022100000_explicit_service_role_grants.sql`
-(BL-3) and `20261022100100` (decision 20): the service role reads every public
-table and holds full DML on all but five deliberately narrowed ones; anon and
-authenticated hold exactly a pinned list, column grants included (pinned
-against the local stack, whose default ACL is permissive -- run it there); and
-with the default ACL revoked in the transaction, the fifteen BL-3 tables,
-stripped of what the default gave the service role, get it back from the
-migration alone, the client roles unchanged. 14 checks.
+(BL-3), `20261022100100` (decision 20) and
+`20261022100700_client_table_privileges.sql` (Codex round 1 on #69, MAJOR 4):
+the service role reads every public table and holds full DML on all but five
+deliberately narrowed ones; anon and authenticated hold exactly a pinned,
+reduced list, column grants included -- no TRUNCATE, REFERENCES, TRIGGER or
+MAINTAIN anywhere, nothing for anon, nothing for either on `omr_jobs`,
+`score_cache`, `imslp_category_sync` and `imslp_file_licenses`, and no client
+privilege that an RLS policy does not let that role use; a table created now
+gives the client roles nothing; and with the default ACL revoked in the
+transaction, the fifteen BL-3 tables, stripped of what the default gave the
+service role, get it back from the migration alone, the client roles
+unchanged. 22 checks. Run it against the local stack. `column_integrity.sql`
+checks 58, 76 and 80 now expect the client's update of a snapshot, a document
+tag or a favourite to be refused (42501) rather than to match no row.
 `tests/security/explicitServiceRoleGrants.test.ts` holds every table a
 migration creates to an explicit service_role grant.
 
