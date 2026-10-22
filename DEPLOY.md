@@ -67,8 +67,18 @@ only additions), and every function on `main` still exists on `dev`. So:
 - step 11 pushes the other 70, in three batches: 4, then 60, then 6;
 - step 12 deploys all 23 functions.
 
-Count again on the go-live commit, because P1, P3, P4 and P5 add migrations,
-and redo the batch boundaries in step 11 if any of them schedules a cron job.
+Count again on the go-live commit. P1 to P5 add migrations. At their branch
+heads on 2026-10-22, they add 15: P1 adds 9 (`275b188b`), P3 adds 3 (`1c9e8512`),
+P4 adds 1 (`a9e98c92`) and P5 adds 2 (`4ffd856d`). That makes **111**, and step 11's
+third batch **21**. Two of them schedule a cron job, and both land in the third
+batch:
+
+- P5's `retention-content-strikes`, daily at **04:07 UTC**. That makes **six**
+  `retention-*` jobs;
+- P3's `support-inbound-retry`, every five minutes.
+
+That is **12** cron jobs in all, against 10 at 47e9b38f (confirm after P1 to
+P5).
 
 **The deploy is manual and gated.** The Supabase GitHub integration's
 **Deploy to production** stays **off** from step 0 until the smoke tests pass
@@ -77,20 +87,31 @@ function. Every database command runs from one pinned worktree, linked to
 production and checked (step 3). Nothing runs against a target that has not
 been checked.
 
-**Traffic is frozen first** (step 6). cleffy.io serves a Vercel Firewall deny
-to everyone except Max, sign-ups are closed, and the live Stripe webhook is
-disabled. All of this happens before the backup and the wipe, and it stays in
-place until step 20. Production holds nothing material (Max, 2026-10-21). Max
-still confirms that in writing right before the wipe (step 8).
+**Traffic is frozen first** (step 6). The steps, in order:
 
-Steps 6 to 20 are one sitting. Most of what the launchfix packets P1 to P4 add
-was not on any branch when this was written; P5 was
-(`mh/launchfix-p5-district-retention` at 00f48a6). Every name not yet settled
-is marked "(confirm after P<N>)". Replace each one with the real name before you
-start.
+- cleffy.io serves a Vercel Firewall deny to everyone except Max;
+- sign-ups are closed;
+- the live Stripe webhook is disabled;
+- every session is revoked, and writes are seen to stop;
+- only then is Stripe reconciled.
+
+All of this happens before the backup and the wipe, and it stays in place
+until step 20.
+
+**There is no data restore.** Production holds nothing material (Max,
+2026-10-21). The backup in step 7 is kept for reference and forensics only:
+`public`, the `auth` and `storage` metadata, and the object list. Nothing in
+this runbook loads it back. Max confirms that in writing, right before the
+wipe (step 8). After the wipe, a failure is fixed forward, or the run starts
+again from step 8 (_Abort and recovery_).
+
+Steps 6 to 20 are one sitting. P1 to P5 were still open when this was written.
+Their branch heads are named above. Every name not yet settled on `dev` is
+marked "(confirm after P<N>)". Check each one against what merged, and replace
+it, before you start.
 
 **If anything fails, stop.** Do not improvise around a failed check. _Abort
-and restore_, at the end of this section, says what to do at each point.
+and recovery_, at the end of this section, says what to do at each point.
 
 ### 0. Before anything else: turn off automatic deploys to production
 
@@ -128,11 +149,19 @@ It is turned back on in step 19, after the smoke tests pass.
 - Re-count the migrations and functions on `GOLIVE_SHA`. Then list every cron
   job a migration schedules:
   `git grep -n "cron.schedule" "$GOLIVE_SHA" -- supabase/migrations`. At
-  47e9b38f that is exactly `omr-sweep`, `imslp-sync`, `content-notice-retry`,
-  `billing-mail-outbox`, `district-seat-reconcile` and the five
-  `retention-*` jobs, plus the commented-out `retention-district` example.
-  A new one changes step 11's batches and step 13's expected list
-  (confirm after P1 to P5).
+  47e9b38f there are exactly 10:
+    - `omr-sweep`;
+    - `imslp-sync`;
+    - `content-notice-retry`;
+    - `billing-mail-outbox`;
+    - `district-seat-reconcile`;
+    - the five `retention-*` jobs.
+
+    The commented-out `retention-district` example is not one of them. P3 adds
+    `support-inbound-retry` and P5 adds `retention-content-strikes`, which makes 12.
+    Any other new job changes step 11's batches and step 13's expected list
+    (confirm after P1 to P5).
+
 - Update #54's body. The draft is in this PR's report. The current body still
   says 48 migrations and 15 functions.
 
@@ -200,14 +229,20 @@ It is turned back on in step 19, after the smoke tests pass.
 
 ### 3. Plan the sitting, and pin the target
 
-**When.** Outside lesson hours, and well clear of **03:00–03:50 UTC** (and
-04:23 UTC on a Sunday). That is when the `retention-*` jobs run:
-`retention-archived-students` at 03:17, `retention-stale-guests` at 03:27,
-`retention-rate-limits` at 03:37, `retention-support-messages` at 03:47, and
-`retention-compact-tombstones` at 04:23 on Sundays. They are paused as soon as
-their migration lands (step 11), but the sitting must not depend on that pause
-alone. Allow two to three hours. The two IMSLP catalog-data migrations alone
-are ~48 MB.
+**When.** Outside lesson hours, and well clear of **03:00–04:30 UTC**. That is
+when the six `retention-*` jobs run:
+
+- `retention-archived-students` at 03:17;
+- `retention-stale-guests` at 03:27;
+- `retention-rate-limits` at 03:37;
+- `retention-support-messages` at 03:47;
+- `retention-content-strikes` (P5) at 04:07;
+- `retention-compact-tombstones` at 04:23 on Sundays.
+
+They are paused as soon as their migration lands (step 11), but the sitting
+must not depend on that pause alone. Allow three to four hours, of which step
+6's session drain takes at least one. The two IMSLP catalog-data migrations
+alone are ~48 MB.
 
 **Max's addresses.** Note Max's public IPv4 (`curl -4 https://ifconfig.me`)
 and IPv6 (`curl -6 https://ifconfig.me`, if any), from the machine and network
@@ -274,6 +309,13 @@ shows names and SHA-256 digests, never values. Secrets live outside the
 database, so the wipe keeps them. Compare the names with the table in step 9,
 and write down what has to change there.
 
+**Vault names (verify at go-live).** Assume Vault does **not** survive the wipe.
+Record the names now, never the values, in the private ops log:
+`select name, created_at, updated_at from vault.secrets order by 1`. Step 8.4
+deletes any caller pair that does survive, and step 14 re-creates every value
+that production needs. The old production has no `content_strike_pepper`,
+because P5 never ran there.
+
 **Leftover price overrides.** No name may match `STRIPE_PRICE_*` or
 `STRIPE_PRICE_LIVE_*`:
 
@@ -294,19 +336,19 @@ a variable set in the build environment win over the committed
 `.env.production`, so each name below that is set on Vercel overrides the
 repo:
 
-| Variable                                                                      | Expected on Vercel (Production)                                                                                       |
-| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`                                 | **absent**. Either one set pins every host, cleffy.io and dev.cleffy.io alike, to one backend (`src/lib/supabase.ts`) |
-| `VITE_SUPABASE_PROD_URL`, `VITE_SUPABASE_PROD_ANON_KEY`                       | absent: the committed `.env.production` values (production `jibgwgosihadbjgxdsfe`)                                    |
-| `VITE_SUPABASE_DEV_URL`, `VITE_SUPABASE_DEV_ANON_KEY`                         | absent: committed (the `dev` branch project)                                                                          |
-| `VITE_STRIPE_PRICE_*` (7)                                                     | **absent**. The explicit override wins on every host, so it would show one catalogue on both                          |
-| `VITE_STRIPE_LIVE_PRICE_*` (7), `VITE_STRIPE_TEST_PRICE_*` (7)                | absent: committed, and drift-guarded against the Edge catalogue                                                       |
-| `VITE_STRIPE_FOUNDING_OFFER`                                                  | absent: committed `false`                                                                                             |
-| `VITE_FEATURE_PLAYALONG`, `_FINGERING`, `_PRINT_HANDWRITING`, `_SMART_IMPORT` | **absent or not `1`**. All four are off at launch (`src/lib/features.ts`)                                             |
-| `VITE_TURNSTILE_SITE_KEY`                                                     | absent, unless `TURNSTILE_SECRET_KEY` is set on production in step 9. Set both or neither                             |
-| `VITE_SENTRY_DSN`, `VITE_SENTRY_RELEASE`                                      | optional (§2). Unset compiles monitoring out                                                                          |
-| `VERCEL_GIT_COMMIT_SHA`                                                       | provided by Vercel, never set by hand. It tags Sentry's release                                                       |
-| `VITE_STRIPE_PUBLISHABLE_KEY`                                                 | unused: no code reads it (`.env.example`)                                                                             |
+| Variable                                                                      | Expected on Vercel (Production)                                                                                  |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`                                 | **absent**. Set together, they pin every host to one backend (`src/lib/supabase.ts:35–45`). One alone is ignored |
+| `VITE_SUPABASE_PROD_URL`, `VITE_SUPABASE_PROD_ANON_KEY`                       | absent: the committed `.env.production` values (production `jibgwgosihadbjgxdsfe`)                               |
+| `VITE_SUPABASE_DEV_URL`, `VITE_SUPABASE_DEV_ANON_KEY`                         | absent: committed (the `dev` branch project)                                                                     |
+| `VITE_STRIPE_PRICE_*` (7)                                                     | **absent**. The explicit override wins on every host, so it would show one catalogue on both                     |
+| `VITE_STRIPE_LIVE_PRICE_*` (7), `VITE_STRIPE_TEST_PRICE_*` (7)                | absent: committed, and drift-guarded against the Edge catalogue                                                  |
+| `VITE_STRIPE_FOUNDING_OFFER`                                                  | absent: committed `false`                                                                                        |
+| `VITE_FEATURE_PLAYALONG`, `_FINGERING`, `_PRINT_HANDWRITING`, `_SMART_IMPORT` | **absent or not `1`**. All four are off at launch (`src/lib/features.ts`)                                        |
+| `VITE_TURNSTILE_SITE_KEY`                                                     | absent, unless `TURNSTILE_SECRET_KEY` is set on production in step 9. Set both or neither                        |
+| `VITE_SENTRY_DSN`, `VITE_SENTRY_RELEASE`                                      | optional (§2). Unset compiles monitoring out                                                                     |
+| `VERCEL_GIT_COMMIT_SHA`                                                       | provided by Vercel, never set by hand. It tags Sentry's release                                                  |
+| `VITE_STRIPE_PUBLISHABLE_KEY`                                                 | unused: no code reads it (`.env.example`)                                                                        |
 
 Fix any mismatch on Vercel before step 16. That step builds the bundle.
 
@@ -326,8 +368,8 @@ None of these is set for this launch (step 9).
 ### 5. The snapshot (read-only)
 
 In production's SQL editor, record what is there. Run it once now, to plan,
-and **again right after step 6's freeze**, before the dump. That second run is
-the reference for the restore check in step 7.
+and **again right after step 6's drain check (6.6)**, before the dump. That
+second run is the reference for step 7.3's file check.
 
 ```sql
 select (select count(*) from auth.users) as users,
@@ -349,8 +391,8 @@ The last query is only the database's view. Stripe is the authority (step 6).
 
 **What is lost from production.** Every row is lost: accounts, scores,
 annotations, share links, subscriptions rows, `support_messages`, `stripe_events`.
-Every Storage object is lost too. Some of it no migration recreates, so the
-backup is the only production copy:
+Every Storage object is lost too. None of it is restored (step 7). Some of it no
+migration recreates, so the backup is the only production record of it:
 
 - `pd_pdf_store` (2,402 rows on 2026-10-12);
 - `playalong_corpus_seed` (8,215), `playalong_corpus` (0) and
@@ -365,10 +407,10 @@ replay does not create them. Checked on the local stack at 47e9b38f:
 its own copy. The IMSLP works catalogue is **not** lost: the catalog-data
 migrations reload it.
 
-### 6. Freeze traffic (the sitting starts here)
+### 6. Freeze traffic, revoke sessions, drain, reconcile Stripe (the sitting starts here)
 
-Everything in this step comes before the backup. Each part has its own
-rollback.
+Everything in this step comes before the backup, in this order. _Abort and
+recovery_ lists each part's rollback.
 
 1. **cleffy.io into maintenance**, with no app code and no deployment: two
    Vercel Firewall custom rules. Vercel → Project `cleffy` → Firewall → ⋯ →
@@ -387,9 +429,10 @@ rollback.
     - **Rollback:** disable or delete both rules, then Review Changes →
       Publish.
     - **What it does not stop:** a tab that already has the old bundle loaded
-      talks to Supabase directly, not through Vercel. Closing sign-ups (next
-      part) and the wipe, which removes every account and session, take care
-      of that.
+      talks to Supabase directly, not through Vercel. It keeps its session
+      and refreshes it (`persistSession` and `autoRefreshToken`,
+      `src/lib/supabase.ts`). Parts 4 to 6 deal with that.
+
 2. **Close sign-ups now**, before the backup. Management API (`GET` the same
    path first and keep the output for the rollback):
 
@@ -399,39 +442,246 @@ rollback.
       -d '{"disable_signup": true}'
     ```
 
-    This also blocks new anonymous sign-ins (share-link guests). The admin API
-    still works. Rollback: the same PATCH with `false`.
+    This also blocks new anonymous sign-ins (share-link guests). It does
+    **not** stop an existing account from signing in with its password. Part
+    5 does that. The admin API still works. Rollback: the same PATCH with
+    `false`.
 
 3. **Disable the live Stripe webhook endpoint.** Stripe Dashboard (live) →
    Developers → Webhooks → `we_1U9V8T4eZ6RX0W0glk3BZIOi` → ⋯ → **Disable**.
    Leave the sandbox endpoint alone: it serves the `dev` branch. Write down
-   the time, in UTC, as **`FREEZE_AT`**. Step 18 replays anything that
-   happened after it. Rollback: Enable.
-4. **Reconcile Stripe directly** (live account), not from the database:
-    - **Subscriptions.** List every subscription that could still bill:
-      Dashboard → Billing → Subscriptions, filtered to Active, Trialing, Past
-      due, Unpaid, Paused and Incomplete. Or use
-      `GET /v1/subscriptions?status=all&limit=100` and keep everything that is
-      not `canceled` or `incomplete_expired`. The wipe removes the account,
-      but Stripe keeps billing the card. Cancel and refund each one (_Refunds_
-      below), or tell the customer first. Compare the list with step 5's last
-      query, and treat any difference as a finding.
-    - **Open Checkout sessions.** `GET /v1/checkout/sessions?status=open&limit=100`.
-      Expire each one with `POST /v1/checkout/sessions/{id}/expire`, so that
-      nobody can complete a purchase against the old database.
+   the time, in UTC, as **`FREEZE_AT`**, and as a Unix time, **`FREEZE_UNIX`**.
+    - Stripe stops retrying a delivery once it finds the endpoint disabled.
+      **Enabling it again replays nothing.** Only the events that step 18
+      lists and resends reach the new production.
+    - Rollback: Enable.
 
-### 7. Backup, and prove it restores
+4. **Pause the old production's cron jobs**, in production's SQL editor. Then
+   the drain check (part 6) has nothing to explain but client writes. Keep
+   the first query's output for the rollback:
 
-Production's data is not material, so this is kept short. It is still the
-only copy of what step 5 says is lost, and `pitr_enabled: false` means there
-is nothing finer than last night's physical backup (_PITR_ below).
+    ```sql
+    select jobname, schedule, active from cron.job order by 1;
+    select jobname, cron.alter_job(jobid, active := false) from cron.job where active;
+    ```
+
+    Rollback: `cron.alter_job(jobid, active := true)` for each job that the
+    first query showed as active.
+
+5. **Revoke every session**, so that no open tab can write. Do this in three
+   parts.
+    1. **Ban every account except Max's** for the freeze. This uses the Auth
+       admin API, and goes through every page of users. A banned account can
+       neither sign in nor refresh a token. Run it in bash, from the worktree.
+       `SERVICE_KEY` is production's `service_role` key: keep it in this
+       shell only, and never echo it.
+
+        ```bash
+        ADMIN=https://jibgwgosihadbjgxdsfe.supabase.co/auth/v1/admin/users
+        MAX_EMAIL='<max's address>'
+        page=1
+        while :; do
+          users=$(curl -sS "$ADMIN?page=$page&per_page=500" -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY")
+          n=$(jq -e '.users | length' <<<"$users") || { echo "$users" >&2; break; }
+          [ "$n" -gt 0 ] || break
+          jq -r --arg max "$MAX_EMAIL" '.users[] | select(.email != $max) | .id' <<<"$users" | while read -r id; do
+            curl -sS -o /dev/null -w "%{http_code} $id\n" -X PUT "$ADMIN/$id" \
+              -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
+              -H 'Content-Type: application/json' -d '{"ban_duration":"876000h"}'
+          done | tee -a freeze-bans.log
+          page=$((page + 1))
+        done
+        ```
+
+        Every line of `freeze-bans.log` must start with `200`. Then
+        `select count(*) from auth.users where banned_until is null or banned_until < now()`
+        must be 1 (Max), or 0 if Max has no account. Rollback: the same loop,
+        with `{"ban_duration":"none"}`.
+
+    2. **Delete every session**, in production's SQL editor. Write down the
+       time it returns as **`REVOKE_AT`**:
+
+        ```sql
+        select now() as revoke_at;
+        delete from auth.sessions;         -- its refresh tokens go with it (on delete cascade)
+        delete from auth.refresh_tokens;   -- and any without a session
+        select (select count(*) from auth.sessions) as sessions,
+               (select count(*) from auth.refresh_tokens) as refresh_tokens;   -- both 0
+        ```
+
+        Supabase Auth refuses an access token whose session is gone
+        (`session_not_found`). So every Edge Function that checks the caller
+        with `getUser()` refuses the old tabs at once. That includes
+        `stripe-checkout` (`supabase/functions/stripe-checkout/index.ts:85`),
+        so no new Checkout session can be started. PostgREST, Storage and
+        Realtime check only a token's signature and expiry, so they keep
+        accepting it until it expires.
+
+        All three behaved this way on the local stack (CLI 2.121.0):
+        - after a ban, `GET /auth/v1/user`, a refresh and a password sign-in
+          were each refused with `user_banned`;
+        - after the session rows were deleted, `GET /auth/v1/user` answered
+          `403 session_not_found`, and the refresh token was gone;
+        - a PostgREST read with the same access token still answered 200.
+
+    3. **Wait out the access tokens.** `GET` the Auth config (part 2) and read
+       `jwt_exp`, in seconds. It is 3600 unless it was changed
+       (`jwt_expiry` in `supabase/config.toml`). Wait until `REVOKE_AT` +
+       `jwt_exp` + 5 minutes. After that, no token from before the freeze is
+       valid anywhere. Rotating the JWT secret instead is not used here.
+       Nothing in this repository documents it, and rotating the legacy
+       secret replaces the anon key committed in `.env.production`.
+
+6. **Drain check: no writes for 15 minutes.** After part 5's wait, take one
+   reading in production's SQL editor. Wait 15 minutes, then take a second:
+
+    ```sql
+    select now() as at,
+           (select count(*) from auth.sessions) as sessions,
+           (select count(*) from auth.refresh_tokens) as refresh_tokens,
+           (select count(*) from auth.users where banned_until is null or banned_until < now()) as not_banned,
+           (select max(last_sign_in_at) from auth.users) as last_sign_in,
+           (select sum(n_tup_ins + n_tup_upd + n_tup_del) from pg_stat_user_tables
+             where schemaname in ('public', 'auth', 'storage')) as writes;
+    select schemaname, relname, n_tup_ins + n_tup_upd + n_tup_del as writes
+    from pg_stat_user_tables where schemaname in ('public', 'auth', 'storage') order by 1, 2;
+    ```
+
+    **Pass:**
+    - `sessions` and `refresh_tokens` are 0 both times. Max does not sign in
+      to the app during the drain. The dashboard and the SQL editor are not
+      app sign-ins;
+    - `not_banned` is the same as in part 5.1;
+    - `last_sign_in` is the same in both readings;
+    - `writes` is the same in both readings, and so is every row of the
+      second query.
+
+    A table whose count moved means a write got through, unless you can show
+    that it was the platform's own housekeeping. Write down which table, and
+    why. If you cannot explain it, find its source, stop it, and start the
+    15 minutes again. Then take **step 5's snapshot again**. That second
+    snapshot is the reference for step 7.
+
+7. **Reconcile Stripe directly** (live account), not from the database. It
+   comes only after the drain, because before it an open tab could still
+   start a Checkout session. Every Stripe list below is read **to the end**:
+   Stripe returns at most 100 objects a page, so the helper follows
+   `starting_after` until `has_more` is `false`. Run it in bash.
+   `STRIPE_LIVE_KEY` is a live key with read access to Subscriptions,
+   Checkout Sessions and Events, and write access to Checkout Sessions and
+   Subscriptions. Keep it in this shell only, and never echo it.
+
+    ```bash
+    # stripe_all <list> [name=value …]: every object of a Stripe list, one JSON object per line,
+    # following starting_after until has_more is false. Stops on any error.
+    stripe_all() {
+      local list=$1 after='' page
+      shift
+      local args=()
+      for kv in "$@"; do args+=(--data-urlencode "$kv"); done
+      while :; do
+        local paging=(--data-urlencode limit=100)
+        [ -n "$after" ] && paging+=(--data-urlencode "starting_after=$after")
+        page=$(curl -sS -G "https://api.stripe.com/v1/$list" -H "Authorization: Bearer $STRIPE_LIVE_KEY" \
+          "${paging[@]}" "${args[@]}") || return 1
+        jq -e '.object == "list"' <<<"$page" >/dev/null || { jq . <<<"$page" >&2; return 1; }
+        jq -c '.data[]' <<<"$page"
+        [ "$(jq -r .has_more <<<"$page")" = true ] || return 0
+        after=$(jq -r '.data[-1].id' <<<"$page")
+      done
+    }
+    ```
+
+    1. **Checkout sessions first.** Expire every open one. Expiring them
+       before the subscription list means that no purchase can complete after
+       that list is read.
+
+        ```bash
+        stripe_all checkout/sessions status=open | jq -r .id > freeze-open-sessions.txt
+        while read -r cs; do
+          curl -sS -X POST "https://api.stripe.com/v1/checkout/sessions/$cs/expire" \
+            -H "Authorization: Bearer $STRIPE_LIVE_KEY" | jq -r '"\(.id) \(.status)"'
+        done < freeze-open-sessions.txt                     # every line ends in "expired"
+        stripe_all checkout/sessions status=open | wc -l    # must be 0
+        stripe_all checkout/sessions "created[gte]=$FREEZE_UNIX" > freeze-sessions.jsonl
+        ```
+
+        Every session in `freeze-sessions.jsonl` gets a row in the
+        reconciliation table (below). The file holds every session since
+        `FREEZE_AT`, whatever its status. None may have been created after
+        `REVOKE_AT`. One that is `complete` is a purchase against the old
+        database: cancel it and refund it, as in part 2 below.
+
+    2. **Subscriptions.** Read every one, then keep those that can still bill:
+
+        ```bash
+        stripe_all subscriptions status=all > freeze-subscriptions.jsonl
+        jq -r 'select(.status != "canceled" and .status != "incomplete_expired")
+               | [.id, .customer, .status, (.metadata.user_id // "")] | @tsv' freeze-subscriptions.jsonl
+        ```
+
+        The wipe removes each one's account, but Stripe keeps billing the
+        card. Cancel each one **immediately** (Stripe → the subscription →
+        Cancel → Immediately). Refund it as well, if the Refund Policy or Max
+        says so (_Refunds_ below), or tell the customer first. Give each one a
+        row in the table. Compare the list with step 5's last query, and treat
+        any difference as a finding.
+
+        **Expect events from this.** Each cancellation sends
+        `customer.subscription.deleted`, and these arrive while the webhook
+        is disabled. Step 18 lists them and records them as cancelled here.
+        It does **not** resend them, because the new production has no
+        account for these customers. A refund also sends `charge.refunded`.
+        The webhook does not handle that type, so step 18's lists leave it
+        out.
+
+    **The reconciliation table.** It is kept in Max's private ops log, outside
+    the repository. Every Stripe object that this step or step 18 lists gets
+    one row: each Checkout session since `FREEZE_AT`, each subscription that
+    could still bill, and each event in step 18's lists. The columns are the
+    object id (`cs_…`, `sub_…` or `evt_…`), the customer, its creation time
+    in UTC, its disposition, and the evidence.
+
+    The disposition is exactly one of these:
+    - **applied and verified**: resent in step 18, and the endpoint answered
+      `applied: …`. The row in `public.subscriptions` matches Stripe;
+    - **safely irrelevant**: it concerns an account the wipe removed, and
+      nothing is left billing. An example is the `customer.subscription.deleted`
+      of a subscription cancelled in part 2. Another is a type the webhook
+      does not handle;
+    - **cancelled** or **refunded**: cancelled here, or cancelled and refunded
+      (_Refunds_). Record the refund id;
+    - **needs review**: anything else. That includes any 2xx whose body says
+      `ignored: unknown_user`. That answer is not a success: it means the
+      handler found no account for the customer
+      (`supabase/functions/_shared/stripeEvents.ts`, `dispatchStripeEvent`).
+
+    A row leaves **needs review** only when someone finds out what the
+    object is, and records one of the other three dispositions with the
+    evidence. An example is an event about a step 18 throwaway that arrives
+    after that account was deleted. It is "safely irrelevant" once Stripe
+    shows the subscription cancelled and the charge refunded. Nothing opens
+    (step 20) while any row says **needs review**.
+
+### 7. Backup, for reference and forensics only
+
+Production's data is not material (Max, 2026-10-21), and **no data restore is
+supported**. Nothing in this runbook loads this backup back. It is kept so
+that what production held can be looked up later. It is the only record of
+what step 5 says is lost, and `pitr_enabled: false` means there is nothing
+finer than last night's physical backup (_PITR_ below).
+
+It holds the `public` data, the `auth` and `storage` metadata (`auth.users`,
+`auth.identities`, `storage.objects` and the rest), the schemas, and the
+object list. It does **not** hold the object bytes, unless part 2's optional
+download is done. Even then, they are not checked by any restore.
 
 1. **Dump**, from the worktree. The CLI's default schema dump covers `public`
    and the other user schemas, but it leaves out `auth`, `storage` and
    `realtime`. That includes the RLS policies migrations put on
-   `storage.objects` and `realtime.messages`: on the local stack at 47e9b38f,
-   15 storage and 5 realtime policies were missing from it. So those schemas
-   are named explicitly:
+   `storage.objects` and `realtime.messages`. On the local stack at
+   47e9b38f, 15 storage and 5 realtime policies were missing from it. So
+   those schemas are named explicitly:
 
     ```bash
     test "$(cat supabase/.temp/project-ref)" = jibgwgosihadbjgxdsfe || exit 1
@@ -442,101 +692,87 @@ is nothing finer than last night's physical backup (_PITR_ below).
     supabase db dump --linked --data-only --schema supabase_migrations -f prod-20261022-history.sql
     ```
 
-    The data dump carries `auth.users`, `auth.identities` and
-    `storage.objects`: the accounts and the Storage metadata that the
-    `public` rows and the Storage policies depend on.
-
-2. **List and download the objects.** List them first, then download every
-   bucket in step 5's counts (`scores`, `thumbnails`, `pd-pdfs`, and any other
-   bucket listed there):
+2. **The object list.** This list is the record of what Storage held:
 
     ```bash
     # PROD_DB_URL: Dashboard → Connect, with the password from SUPABASE_DB_PASSWORD
     psql "$PROD_DB_URL" -c "\copy (select bucket_id, name, owner, (metadata->>'size')::bigint as bytes, created_at from storage.objects order by 1, 2) to 'prod-20261022-objects.csv' csv header"
-    supabase storage cp -r ss:///scores ./prod-20261022-storage/scores --experimental
-    # …the same for each bucket
     ```
 
-    For each bucket, the downloaded file count and total bytes must equal the
-    list. The backup holds personal data, so store it encrypted and off any
-    shared drive. It is also the only record of `support_messages`, which the
-    Privacy Policy keeps for 24 months.
+    Its row count per bucket must equal step 5's per-bucket counts.
 
-3. **Restore check, on a local stack** (Max's machine, not production).
-    1. Use a clean baseline. Stop your usual stack with `supabase stop`, which
-       keeps its volume. Make a scratch worktree of `origin/main`. In its
-       `supabase/config.toml`, set `project_id = "cleffy-restore"` (its own
-       volume) and `[db.seed] enabled = false`, and empty its
-       `supabase/migrations/`. Then run `supabase start`.
-    2. Load the files with `psql` against the scratch stack's `DB_URL`, in
-       this order:
-        1. `prod-20261022-roles.sql`. An "already exists" error is fine.
-        2. `prod-20261022-schema.sql`.
-        3. `prod-20261022-schema-managed.sql`, for its policies. "Already
-           exists" errors are expected here, because the baseline has the
-           platform's own `auth` / `storage` / `realtime` tables. Any other
-           error is a failure.
-        4. `prod-20261022-data.sql`. It sets
-           `session_replication_role = replica`, which skips triggers **and
-           foreign-key checks**. So the next step re-checks every foreign key.
-    3. **Re-validate the foreign keys** (scratch stack only). This re-adds
-       every `public` foreign key, and fails on the first orphan. It covers
-       every row pointing at a missing `auth.users` identity. On the local
-       stack at 47e9b38f it re-added 72 keys cleanly.
+    **Optional, for forensics only: the bytes.** Nothing later depends on
+    them. One bucket at a time, then compare the file count and the bytes
+    with the list:
 
-        ```sql
-        do $$
-        declare r record; n int := 0;
-        begin
-            for r in
-                select c.conrelid::regclass as tbl, c.conname, pg_get_constraintdef(c.oid) as def
-                from pg_constraint c
-                where c.contype = 'f' and c.connamespace = 'public'::regnamespace
-            loop
-                execute format('alter table %s drop constraint %I, add constraint %I %s', r.tbl, r.conname, r.conname, r.def);
-                n := n + 1;
-            end loop;
-            raise notice 'revalidated % foreign keys', n;
-        end $$;
-        -- storage is owned by supabase_storage_admin, so check its two links by hand: both must be 0
-        select count(*) from storage.objects o where not exists (select 1 from storage.buckets b where b.id = o.bucket_id);
-        select count(*) from storage.objects o where o.owner is not null
-            and not exists (select 1 from auth.users u where u.id = o.owner);
-        ```
+    ```bash
+    supabase storage cp -r ss:///scores ./prod-20261022-storage/scores --linked --experimental
+    ```
 
-    4. **Compare.** Step 5's counts, its per-bucket object counts and its
-       `pg_policies` counts must all match on the scratch stack.
-    5. **`omr_jobs` (R3).** Its `id` is `generated always as identity`. The
-       CLI's `COPY` dump carries the ids and the sequence position. A
-       hand-written `insert … select` copy is refused unless it uses
-       `overriding system value`, and then the sequence must be moved with
-       R3's `setval`. Run that `setval` after any restore, then check
-       `select max(id), (select last_value from public.omr_jobs_id_seq) from public.omr_jobs`.
-    6. Object bytes are not uploaded into the scratch stack. The download count
-       and byte check in part 2 stands in for that.
+3. **Check the files.** This proves that the files are complete and
+   readable, not that they restore. Count the rows in each `COPY` block of
+   the data dump:
+
+    ```bash
+    awk '/^COPY /{t=$2; n=0; next} /^\\\.$/{if (t != "") print t, n; t=""; next} t != ""{n++}' \
+      prod-20261022-data.sql > prod-20261022-data-counts.txt
+    grep -E '^"(auth|public|storage)"\."(users|identities|documents|annotations|support_messages|pd_pdf_store|playalong_corpus_seed|objects)" ' \
+      prod-20261022-data-counts.txt
+    shasum -a 256 prod-20261022-* > prod-20261022.sha256
+    ```
+
+    Each count must equal step 5's second snapshot, and every `db dump` in
+    part 1 must have exited 0. On the local stack, these counts matched the
+    database's own counts. The backup holds personal data, so encrypt it and
+    keep it off any shared drive. It is also the only record of
+    `support_messages`, which the Privacy Policy keeps for 24 months.
 
 ### 8. The wipe (irreversible)
 
-**Max confirms first, in writing, right here.** Production holds nothing
-material (Max, 2026-10-21). Max confirms that again with step 5's snapshot,
-step 6.4's Stripe list and step 7's restore check at hand. Without that
-confirmation, stop and roll the freeze back (_Abort and restore_).
+**First, check that the freeze still holds.** Take part 6.6's reading
+once more: `writes` must be unchanged. Then
+`stripe_all checkout/sessions status=open | wc -l` must be 0. And the
+subscriptions that can still bill (part 6.7.2's `jq`, run on a fresh
+`stripe_all subscriptions status=all`) must each already have a row in the
+reconciliation table.
+
+**Then Max confirms in writing, right here.** With step 5's snapshot, the
+reconciliation table and step 7.3's counts at hand, Max confirms two things
+again:
+
+- production holds nothing material;
+- **no data restore is supported**. The step 7 backup is for reference only.
+  From here on, a failure is fixed forward on the new production, or the run
+  starts again from step 8.1 (_Abort and recovery_).
+
+Without that confirmation, stop and unfreeze (_Abort and recovery_).
 
 Everything below is irreversible. There is one wipe method: empty Storage,
 then reset the database to `main`'s 26 migrations from a staged copy.
 
-1. **Empty Storage.** `db reset` does not touch Storage. For each bucket, use
-   the Storage API, because `supabase storage rm` silently does nothing (see
-   _Resetting a remote database — two traps_):
+1. **Empty Storage.** `db reset` does not touch Storage. Use the Storage API,
+   because `supabase storage rm` silently does nothing (see _Resetting a
+   remote database — two traps_). This loop deletes every object, 1,000 names
+   at a time, bucket by bucket. Run it in bash:
 
     ```bash
-    curl -X DELETE "https://jibgwgosihadbjgxdsfe.supabase.co/storage/v1/object/<bucket>" \
-      -H "Authorization: Bearer $SERVICE_KEY" -H 'Content-Type: application/json' \
-      -d '{"prefixes":["<path>", "…"]}'
+    STORAGE=https://jibgwgosihadbjgxdsfe.supabase.co/storage/v1/object
+    for b in $(psql "$PROD_DB_URL" -Atc "select distinct bucket_id from storage.objects order by 1"); do
+      while :; do
+        names=$(psql "$PROD_DB_URL" -Atc "select coalesce(json_agg(name), '[]') from (select name from storage.objects where bucket_id = '$b' order by name limit 1000) o")
+        [ "$names" = "[]" ] && break
+        deleted=$(curl -sS -X DELETE "$STORAGE/$b" -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \
+          -H 'Content-Type: application/json' -d "{\"prefixes\": $names}" | jq length)
+        echo "$b: deleted $deleted"
+        [ "${deleted:-0}" -gt 0 ] || { echo "$b: nothing deleted, stop" >&2; break; }
+      done
+    done
+    psql "$PROD_DB_URL" -Atc "select count(*) from storage.objects"   # must be 0
     ```
 
-    Repeat until `select count(*) from storage.objects` is 0. The buckets
-    themselves stay.
+    On the local stack, this emptied nested paths in `scores`. If a bucket
+    stops with "nothing deleted", read the API's answer before going on.
+    The buckets themselves stay.
 
 2. **Drop the leftover sequences** in production's SQL editor (trap 1 in
    _Resetting a remote database_). Otherwise the reset dies half-built on
@@ -554,20 +790,25 @@ then reset the database to `main`'s 26 migrations from a staged copy.
     carries every body, and R1's NULL row is gone.
 
 4. **Withhold Vault before any caller cron can fire.** The reset rebuilds
-   `public`, but Vault is not in it. Any `imslp_sync_*`, `billing_outbox_*`,
-   `content_notice_*`, `district_notice_*` or `omr_service_*` secret left from
-   the old production would let a tick call out with old values, while the
-   functions are still the old ones. Delete them all now. Step 14 creates them
-   fresh, after the functions are deployed and checked.
+   `public`, but Vault is not in it. Plan as if Vault does not survive (step 4
+   recorded the names). If any caller secret does survive (`imslp_sync_*`,
+   `billing_outbox_*`, `content_notice_*`, `district_notice_*`,
+   `support_inbound_*` or `omr_service_*`), it would let a tick call out with
+   old values while the functions are still the old ones. Delete them all now.
+   Step 14 creates every value fresh, after the functions are deployed and
+   checked.
 
     ```sql
     delete from vault.secrets
     where name in ('imslp_sync_url', 'imslp_sync_secret', 'billing_outbox_url', 'billing_outbox_secret',
                    'content_notice_url', 'content_notice_secret', 'district_notice_url', 'district_notice_secret',
+                   'support_inbound_url', 'support_inbound_secret',   -- P3 (confirm after P3)
                    'omr_service_url', 'omr_service_secret')
-       -- (confirm after P3: P3's inbound retry names)
     returning name;
     ```
+
+    `content_strike_pepper` is not in this list, because the old production
+    never had one (step 4). Step 14 creates it.
 
     With no Vault pair, each tick only logs "… missing — skip". On the local
     stack, which has no Vault secrets, `imslp-sync`, `billing-mail-outbox` and
@@ -599,7 +840,7 @@ Set, check and unset these from the worktree, with
 | `BILLING_OUTBOX_SECRET`                                         | **required**, equal to Vault `billing_outbox_secret`                           | `billing-mail-outbox`                                       |
 | `CONTENT_NOTICE_SECRET`                                         | **required**, equal to Vault `content_notice_secret`                           | `content-notices`                                           |
 | `DISTRICT_NOTICE_SECRET`                                        | when district retention starts                                                 | `district-retention-notices`                                |
-| P3's inbound-retry secret (confirm after P3)                    | (confirm after P3)                                                             | (confirm after P3)                                          |
+| `SUPPORT_RETRY_SECRET` (P3; confirm after P3)                   | **required**, equal to Vault `support_inbound_secret`                          | `resend-inbound`'s retry tick                               |
 | `LOGIN_THROTTLE_SECRET`                                         | optional, recommended (§9)                                                     | student sign-in limiter                                     |
 | `GUEST_EMAIL_SECRET`, `GUEST_EMAIL_FROM`                        | optional                                                                       | guest email codes                                           |
 | `BILLING_EMAIL_FROM`, `BILLING_CANCEL_SECRET`                   | optional                                                                       | billing mail, `/cancel` limiter                             |
@@ -626,7 +867,7 @@ Set, check and unset these from the worktree, with
   (`supabase/functions/analyze-annotations/index.ts:185–188`). The
   `VITE_FEATURE_SMART_IMPORT` build flag hides the button and nothing else. A
   key left in place keeps recognition callable, and billed, by anyone with a
-  JWT. Step 17 checks the refusal.
+  JWT. Step 18 checks the refusal.
 
 ```bash
 supabase secrets unset --project-ref jibgwgosihadbjgxdsfe ANTHROPIC_API_KEY ANALYZE_NOTES_MODEL \
@@ -687,8 +928,9 @@ it commits**. Before every batch, run the `test` line from step 3, then
 
 Each scheduling migration first unschedules its job by name, then schedules it
 again. A job re-created that way comes back **active**, so a pause only holds
-if no later migration schedules the same job again. At 47e9b38f none does
-(step 1's `git grep`). On the local stack (pg_cron 1.6.4), a plain
+if no later migration schedules the same job again. None does, at 47e9b38f
+or at the P1 to P5 heads named at the top of this section (step 1's
+`git grep`). On the local stack (pg_cron 1.6.4), a plain
 `cron.schedule` over a paused job's name kept it paused.
 
 1. **Batch 1: 4 migrations**, up to `20260902120000_imslp_category_index`,
@@ -725,17 +967,19 @@ if no later migration schedules the same job again. At 47e9b38f none does
     Then, at once:
 
     ```sql
-    select jobname, cron.alter_job(jobid, active := false)
-    from cron.job where jobname like 'retention-%';
-    -- expect 5 rows: archived-students, stale-guests, rate-limits, support-messages, compact-tombstones
+    select jobname, cron.alter_job(jobid, active := false) from cron.job
+    where jobname in ('retention-archived-students', 'retention-stale-guests', 'retention-rate-limits',
+                      'retention-support-messages', 'retention-compact-tombstones');
+    -- expect 5 rows
     ```
 
     `content-notice-retry`, `billing-mail-outbox` and `district-seat-reconcile`
     are scheduled in this batch and stay active. The first two skip without
     their Vault pair, and the third only recomputes seat state, which is empty.
 
-3. **Batch 3: the rest** (6 at 47e9b38f, plus P1 to P5's), from the worktree
-   itself:
+3. **Batch 3: the rest.** That is 6 at 47e9b38f, plus P1 to P5's 15: 21 in
+   all, at the heads named at the top of this section. It runs from the
+   worktree itself:
 
     ```bash
     test "$(cat supabase/.temp/project-ref)" = jibgwgosihadbjgxdsfe || exit 1
@@ -745,8 +989,20 @@ if no later migration schedules the same job again. At 47e9b38f none does
     rm -rf "$(dirname "$GOLIVE_STAGE")"
     ```
 
-    If P1 to P5 schedule a job in this batch, pause it the same way, if it
-    deletes data or calls out (confirm after P1 to P5).
+    Then, at once, pause P5's sixth retention job. It deletes data, so it
+    gets the same gate as the other five (step 21):
+
+    ```sql
+    select jobname, cron.alter_job(jobid, active := false) from cron.job
+    where jobname = 'retention-content-strikes';
+    -- expect 1 row (confirm after P5)
+    ```
+
+    P3's `support-inbound-retry` is also scheduled in this batch, and it
+    stays active. Like `content-notice-retry`, it skips without its Vault
+    pair (`support_inbound_url` / `support_inbound_secret`, step 14). If
+    P1 to P5 schedule any other job, pause it the same way if it deletes data
+    or calls out (confirm after P1 to P5).
 
 ### 12. Functions by hand, and the buckets
 
@@ -785,12 +1041,20 @@ stated.
    narrowing lives in data, not in a hand edit.
 
     ```sql
-    -- (confirm after P1: P1's exact insert / function call)
-    insert into public.deployment_config (…) values (…);
+    -- P1's statement, from 20261022100200_deployment_config.sql (confirm after P1)
+    insert into public.deployment_config (id, entitling_billing_modes, updated_by)
+    values (true, array['live'], 'Max')
+    on conflict (id) do update
+    set entitling_billing_modes = excluded.entitling_billing_modes,
+        updated_by = excluded.updated_by,
+        updated_at = now();
 
     select public.entitling_billing_modes();
     -- must be {live}
     ```
+
+    On a local stack with P1 to P5's migrations, this upsert returned
+    `{live}`. It is idempotent, so run it again after any re-apply.
 
 3. **Grants.** Zero rows is a pass. It was run on the local stack at 47e9b38f,
    where it returned 0 rows. With
@@ -813,12 +1077,17 @@ stated.
         ('edge_login_attempts'), ('edge_rate_buckets'), ('guest_email_verifications'), ('imslp_works'),
         ('imslp_works_building'), ('managed_students'), ('pdf_export_claims'), ('seat_read_only_since'),
         ('share_link_redemptions'), ('stripe_events'), ('studio_seat_override_log'),
-        ('studio_seat_overrides'), ('studio_seat_tenures'), ('support_messages')
+        ('studio_seat_overrides'), ('studio_seat_tenures'), ('support_messages'),
+        ('deployment_config'), ('studio_supersede_log'),         -- P1 (confirm after P1)
+        ('student_claim_reservations'), ('account_deletions'),   -- P3 (confirm after P3)
+        ('document_realtime_rotation_queue'),                    -- P4 (confirm after P4)
+        ('district_retention_restores')                          -- P5 (confirm after P5)
     ),
     client_read (t) as (values
         ('documents'), ('annotations'), ('document_members'), ('share_links'), ('subscriptions'),
         ('billing_customers'), ('studios'), ('studio_members'), ('assignments'), ('practice_notes'),
-        ('usage_counters'), ('teacher_attestations')
+        ('usage_counters'), ('teacher_attestations'),
+        ('thumbnail_storage_cleanup')                            -- P1 (confirm after P1)
     )
     select relname as object, 'RLS is off' as problem from tables where not relrowsecurity
     union all
@@ -836,23 +1105,26 @@ stated.
     ```
 
     `server_only` is every public table that a migration explicitly revokes
-    from `anon` / `authenticated`. Add any table P1 to P5 create the same way
-    (confirm after P1 to P5). An "undefined table" error means a listed table
-    is missing, which is itself a failure.
+    from `anon` / `authenticated`. The marked lines are the tables P1 to P5
+    create at their heads. On a local stack with all 111 migrations, the
+    check returned 0 rows. An "undefined table" error means a listed table is
+    missing, which is itself a failure.
 
-4. **`cron.job`, with the pauses required.** Zero rows is a pass. Ten jobs are
-   expected. `imslp-sync` and the five `retention-*` jobs must be **paused**
-   at this point, the other four active, and `retention-district` must be
-   **absent**: it is scheduled only by hand, after _Before scheduling
-   `retention-district`_. A job in the wrong state is a failure either way.
+4. **`cron.job`, with the pauses required.** Zero rows is a pass. Twelve jobs
+   are expected: 10 from 47e9b38f, plus P3's and P5's. At this point,
+   `imslp-sync` and the six `retention-*` jobs must be **paused**, and the
+   other five active. `retention-district` must be **absent**: it is scheduled
+   only by hand, after _Before scheduling `retention-district`_. A job in the
+   wrong state is a failure either way.
 
     ```sql
     with expected (jobname, active) as (values
         ('billing-mail-outbox', true), ('content-notice-retry', true), ('district-seat-reconcile', true),
-        ('omr-sweep', true), ('imslp-sync', false), ('retention-archived-students', false),
+        ('omr-sweep', true), ('support-inbound-retry', true),          -- P3 (confirm after P3)
+        ('imslp-sync', false), ('retention-archived-students', false),
         ('retention-compact-tombstones', false), ('retention-rate-limits', false),
-        ('retention-stale-guests', false), ('retention-support-messages', false)
-        -- (confirm after P3: add P3's inbound retry job)
+        ('retention-stale-guests', false), ('retention-support-messages', false),
+        ('retention-content-strikes', false)                            -- P5 (confirm after P5)
     )
     select coalesce(e.jobname, j.jobname) as jobname,
            case when j.jobname is null then 'missing'
@@ -894,11 +1166,11 @@ stated.
    `GOLIVE_SHA`. Run the security advisor: only `peek_share_link` is
    anon-executable on purpose (old checklist, step 11).
 
-### 14. Vault secrets, then resume `imslp-sync`
+### 14. Vault secrets and the strike pepper, then resume `imslp-sync`
 
-These go in production's SQL editor. Step 8.4 deleted every caller pair, so
-create each one fresh. Each `…_secret` must equal the matching Edge secret from
-step 9.
+These go in production's SQL editor. Step 8.4 deleted every caller pair, and
+Vault is treated as not surviving the wipe, so create each one fresh. Each
+`…_secret` must equal the matching Edge secret from step 9.
 
 ```sql
 select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/imslp-sync', 'imslp_sync_url');
@@ -909,15 +1181,46 @@ select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v
 select vault.create_secret('<same value as CONTENT_NOTICE_SECRET>', 'content_notice_secret');
 select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/district-retention-notices', 'district_notice_url');
 select vault.create_secret('<same value as DISTRICT_NOTICE_SECRET>', 'district_notice_secret');
--- (confirm after P3: P3's inbound retry URL and secret names)
+-- P3's retry tick posts to resend-inbound (20261022110200_support_inbound_lease.sql; confirm after P3)
+select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/resend-inbound', 'support_inbound_url');
+select vault.create_secret('<same value as SUPPORT_RETRY_SECRET>', 'support_inbound_secret');
 ```
+
+**The copyright-strike pepper (P5).** P5 keys the strikes of a deleted
+account with an HMAC whose key is the Vault secret `content_strike_pepper`
+(`20261022130100_content_strikes_survive_deletion.sql`). Without it, deleting
+an account that has an active strike fails, and so does counting strikes once
+keyed ones exist. Every project gets its **own** random value:
+
+- production: Max creates it here;
+- the `dev` branch project: Max creates a different one there, once P5 is on
+  `dev`;
+- local stacks and CI: the non-secret value in `supabase/seed.sql`.
+
+The value is never typed, shown, logged or committed. Generate it inside the
+database:
+
+```sql
+select vault.create_secret(encode(extensions.gen_random_bytes(32), 'hex'), 'content_strike_pepper',
+                           'Keys copyright strikes after account deletion');
+select name, length(decrypted_secret) as length from vault.decrypted_secrets
+where name = 'content_strike_pepper';                    -- 1 row, length 64
+select public.content_strike_pepper(1::smallint) is not null as pepper_ok;   -- true
+```
+
+Never change or delete it while keyed strikes exist
+(`select count(*) from public.content_strikes where subject_key is not null`
+is not 0). Those strikes would stop matching. After a re-apply from scratch
+(_Abort and recovery_), no keyed strike is left, so create a new value then.
+Step 18 tests it with a struck account's deletion.
 
 `omr_service_url` / `omr_service_secret` are not created, because play-along
 is off for this launch. Without them `omr-sweep` skips its poke and only purges
 the cache.
 
-Check the names with `select name from vault.secrets order by 1`. Every URL
-must start with `https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/`.
+Check the names with `select name from vault.secrets order by 1`. There
+should be 11: five caller pairs and the pepper. Every URL must start with
+`https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/`.
 
 Then resume the IMSLP refresh. The functions, the schema and the credentials
 are all verified now:
@@ -964,7 +1267,7 @@ Check it after step 16: as Max, `/admin/reports` opens (it calls
 1. Dashboard → Authentication → Hooks → **Before User Created** → Postgres →
    `public.hook_before_user_created`. The new bundle is live (step 16), so
    every sign-up carries `age_gate`.
-2. Open sign-ups (`"disable_signup": false`, same PATCH as step 6). From now
+2. Open sign-ups (`"disable_signup": false`, same PATCH as step 6.2). From now
    on the hook age-checks every sign-up and every share-link guest.
    `student-provision` checks the teacher's attestation itself (PR #64).
    cleffy.io is still refused to everyone else, but the Auth API is not behind
@@ -981,7 +1284,7 @@ Check it after step 16: as Max, `/admin/reports` opens (it calls
 Use throwaway accounts only, on cleffy.io from Max's machine. Each line names
 the re-audit test it covers where the mapping is known (confirm the mapping
 against the re-audit). Each must pass. A failure sends you to _Abort and
-restore_.
+recovery_.
 
 **Part A: no Stripe.** The live webhook is still disabled.
 
@@ -1027,19 +1330,99 @@ restore_.
 - **`STRIPE_MODES` behaviour** (_STRIPE_MODES_ below). With a teacher's JWT,
   `stripe-checkout` with `Origin: https://dev.cleffy.io` answers
   `400 unknown_origin`.
+- **A copyright strike survives its account's deletion (P5, the step 14
+  pepper).** An ordinary deletion test passes without the pepper, because it
+  has no strike to key. So this one has a strike.
+    1. Sign up a second throwaway teacher with an outside address you
+       control, and upload a small score.
+    2. As Max, open `/admin/reports` and take that score down with the
+       ground **Copyright (counts as a strike)**. Do not lift it. The
+       uploader's active strikes now read 1.
+    3. As that teacher, delete the account from the Account page. It must
+       succeed. An error that names `content_strike_pepper` means step 14's
+       pepper is missing.
+    4. Check the key, then remove the test takedown. The strike goes with it
+       (`on delete cascade`):
 
-**Re-enable the live webhook, and replay the freeze window.**
+        ```sql
+        select t.id as takedown_id, s.user_id is null as account_gone, s.subject_key_version,
+               s.subject_key = public.content_strike_subject_key('<its address>', 1::smallint) as keyed_to_address
+        from public.content_strikes s join public.content_takedowns t on t.id = s.takedown_id
+        where t.document_title = '<the score's title>';
+        -- one row: account_gone true, subject_key_version 1, keyed_to_address true
+        delete from public.content_takedowns where id = '<takedown_id>';
+        ```
+
+    If the UI path is not practical, run the same check in a transaction
+    that is rolled back, on the step 17 throwaway teacher. It changes
+    nothing:
+
+    ```sql
+    begin;
+    with t as (
+        insert into public.content_takedowns (uploader_id, action, ground, legal_basis, facts, document_title)
+        select id, 'restrict', 'copyright', 'go-live smoke test', 'go-live smoke test', 'go-live strike smoke'
+        from auth.users where email = '<throwaway address>'
+        returning id, uploader_id)
+    insert into public.content_strikes (user_id, takedown_id) select uploader_id, id from t;
+    delete from auth.users where email = '<throwaway address>';
+    select s.user_id is null as account_gone, s.subject_key_version,
+           s.subject_key = public.content_strike_subject_key('<throwaway address>', 1::smallint) as keyed_to_address
+    from public.content_strikes s join public.content_takedowns t on t.id = s.takedown_id
+    where t.document_title = 'go-live strike smoke';
+    -- one row: true, 1, true
+    rollback;
+    ```
+
+    On a local stack with P1 to P5's migrations, both paths passed. Without
+    the pepper, the deletion failed with "the Vault secret
+    content_strike_pepper is not set". A second account with the same address
+    then counted the strike: `active_content_strikes` returned 1.
+
+**Re-enable the live webhook, and replay the freeze window.** Use the same
+bash shell as step 6.7, with `stripe_all`, `STRIPE_LIVE_KEY` and
+`FREEZE_UNIX`. Enabling the endpoint replays nothing by itself. Every event
+has to be listed and either resent or given a disposition.
 
 1. Stripe (live) → Developers → Webhooks → `we_1U9V8T4eZ6RX0W0glk3BZIOi` →
-   **Enable**.
-2. List the events created since `FREEZE_AT`:
-   `GET /v1/events?created[gte]=<FREEZE_AT as a Unix time>&limit=100`. Keep
-   those of the nine types in _Stripe webhook events_. Each of them belongs to
-   the old database, which is gone. A customer from step 6.4 is already
-   cancelled, so expect none. Resend any that concern a live customer of the
-   new production: Dashboard → the event → **Resend**, or
-   `stripe events resend <evt_…> --webhook-endpoint we_1U9V8T4eZ6RX0W0glk3BZIOi --live`.
-   The endpoint answers 2xx.
+   **Enable**. Write down the time as **`ENABLE_AT`**, and as a Unix time,
+   **`ENABLE_UNIX`**. Stripe delivers events created from then on by itself.
+   The replay window is `FREEZE_AT` to `ENABLE_AT`. Record both in the
+   reconciliation table.
+2. **List every event the window holds**, of the nine types in _Stripe
+   webhook events_. Add every event from the three days before `FREEZE_AT`
+   whose delivery had not succeeded. Stripe retries a delivery for up to
+   three days, and stopped when it found the endpoint disabled.
+
+    ```bash
+    TYPES=(checkout.session.completed customer.subscription.created customer.subscription.updated
+           customer.subscription.deleted customer.subscription.paused customer.subscription.resumed
+           invoice.paid invoice.payment_succeeded invoice.payment_failed)
+    T=(); for t in "${TYPES[@]}"; do T+=("types[]=$t"); done
+    stripe_all events "created[gte]=$FREEZE_UNIX" "created[lt]=$ENABLE_UNIX" "${T[@]}" > replay-window.jsonl
+    stripe_all events delivery_success=false "created[gte]=$((FREEZE_UNIX - 259200))" "created[lt]=$FREEZE_UNIX" \
+      "${T[@]}" > replay-outstanding.jsonl
+    cat replay-window.jsonl replay-outstanding.jsonl \
+      | jq -r '[.id, .type, (.data.object.customer // ""), (.created | todate)] | @tsv'
+    ```
+
+3. **Give every event a row in the reconciliation table** (step 6.7):
+    - **Its customer was cancelled in step 6.7.** The row is "safely
+      irrelevant". Do not resend it. Expect one `customer.subscription.deleted`
+      for each subscription cancelled there.
+    - **It concerns an old-database customer that step 6.7 did not
+      cancel.** Cancel the subscription now, and refund it if it is due
+      (_Refunds_). The row is "cancelled" or "refunded". The miss itself is a
+      finding.
+    - **It concerns an account on the new production.** None is expected
+      before part B. Resend it: Dashboard → the event → **Resend**, or
+      `stripe events resend <evt_…> --webhook-endpoint we_1U9V8T4eZ6RX0W0glk3BZIOi --live`.
+      Then read the response body (Webhooks → the endpoint → the delivery).
+        - `applied: …`, with a `public.subscriptions` row that matches
+          Stripe: "applied and verified".
+        - `ignored: unknown_user`, or any other `ignored: …`: "needs review".
+
+    A 2xx alone is never a success.
 
 **Part B: billing, with real money.**
 
@@ -1057,8 +1440,9 @@ restore_.
   arrives from `noreply@cleffy.io` and lands on `/student/welcome`, where the
   student sets a password and signs in. Delete that student too.
 - **Renewal webhook replay.** Stripe (live) → Events → the purchase's
-  `invoice.paid` → **Resend** to the live endpoint. It answers 2xx. It does
-  leaves exactly one `stripe_events` row for that event id. Afterwards
+  `invoice.paid` → **Resend** to the live endpoint. It answers 2xx, with
+  `applied: invoice_recorded` in the body. It leaves exactly one
+  `stripe_events` row for that event id. Afterwards
   `subscriptions.current_period_end` still equals the period end Stripe
   shows. A real renewal cannot happen in the sitting. Step 2's test-clock
   rehearsal on the `dev` branch is the gate for that.
@@ -1075,6 +1459,23 @@ restore_.
   its Stripe subscriptions are cancelled. Its `checkout_consents` rows stay with
   `user_id` null, because they are kept 3 years (PR #62). Delete the guest from
   the join page ("Delete my guest profile").
+- **Reconcile Stripe once more**, now that part B is done. Every page again:
+
+    ```bash
+    stripe_all subscriptions status=all \
+      | jq -r 'select(.status != "canceled" and .status != "incomplete_expired") | [.id, .customer, .status] | @tsv'
+    stripe_all checkout/sessions "created[gte]=$FREEZE_UNIX" | jq -r '[.id, .status, (.customer // "")] | @tsv'
+    stripe_all events "created[gte]=$ENABLE_UNIX" "${T[@]}" | jq -r '[.id, .type] | @tsv'
+    ```
+
+    - Every subscription that can still bill is either in
+      `public.subscriptions` with the same status, or has a row. After
+      part B's refund and cancel, none is expected.
+    - Every Checkout session since `FREEZE_AT` has a row. Part B's purchase
+      is "refunded".
+    - Every event since `ENABLE_AT` shows a delivery that succeeded
+      (Webhooks → the endpoint), and has a row. A body that says
+      `ignored: unknown_user` is "needs review" here too.
 
 Run the old checklist's steps 12 and 13 where they still apply.
 
@@ -1090,10 +1491,16 @@ already applied (`supabase migration list --linked`), so the next push to
 
 **Open when all of these hold:**
 
-- every check in steps 13 and 14, and every smoke test in step 18, passed;
+- every check in steps 13 and 14, and every smoke test in step 18, passed.
+  That includes the struck-account deletion, which proves the pepper;
 - the integration is back on (step 19);
 - the live webhook is enabled, and the freeze window is replayed;
+- every row of the reconciliation table has a disposition, and **none says
+  needs review**;
 - no throwaway account is left.
+
+Accounts banned in step 6.5 were removed by the wipe, so nothing needs to be
+unbanned.
 
 Then:
 
@@ -1112,11 +1519,12 @@ Then:
 
 ### 21. Retention: dry-run counts, then turn the jobs on
 
-The five `retention-*` jobs have been paused since batch 2 (step 11). Turn them
-on as their own step, after opening, once these **T-6 dry-run counts** have been
-read. Each count uses the same rule as its job. Every count should be 0 on a
-fresh production. A count that is not 0, or that you cannot explain, keeps
-that job paused.
+The six `retention-*` jobs have been paused since step 11: five since batch
+2, and P5's `retention-content-strikes` since batch 3. Turn them on as their
+own step, after opening, once these **T-6 dry-run counts** have been read. Each
+count uses the same rule as its job. Every count should be 0 on a fresh
+production. A count that is not 0, or that you cannot explain, keeps that job
+paused.
 
 ```sql
 select
@@ -1129,39 +1537,93 @@ select
      where greatest(last_attempt_at, coalesce(locked_until, last_attempt_at), coalesce(window_ends_at, last_attempt_at))
            < now() - interval '1 day') as rate_limit_rows,
   (select count(*) from public.support_messages where received_at < now() - interval '24 months') as support_messages,
-  (select count(*) from public.annotations where deleted_at < now() - interval '90 days') as tombstones;
+  (select count(*) from public.annotations where deleted_at < now() - interval '90 days') as tombstones,
+  -- P5, retention_purge_content_strikes() (confirm after P5)
+  (select count(*) from public.content_strikes s
+    where s.user_id is null and s.created_at < now() - interval '12 months'
+      and (s.subject_key is null
+           or not exists (select 1 from public.content_strikes n
+                          where n.user_id is null and n.subject_key = s.subject_key
+                            and n.subject_key_version is not distinct from s.subject_key_version
+                            and n.created_at >= now() - interval '12 months'))) as content_strikes;
 ```
 
-(These ran on the local stack at 47e9b38f and returned 0 in every column.)
+These ran on a local stack with P1 to P5's 111 migrations, and returned 0 in
+every column. With two strikes of a deleted account backdated 13 months, in a
+rolled-back transaction, `content_strikes` counted 2 and
+`retention_purge_content_strikes()` purged 2.
 
-Then turn the jobs on, one name at a time or all five:
+Then turn on only the jobs whose count was read and expected. Name each one,
+and never use a pattern, so that a job added later cannot be switched on
+without its own count:
 
 ```sql
-select jobname, cron.alter_job(jobid, active := true)
-from cron.job where jobname like 'retention-%';
+select jobname, cron.alter_job(jobid, active := true) from cron.job
+where jobname in ('retention-archived-students', 'retention-stale-guests', 'retention-rate-limits',
+                  'retention-support-messages', 'retention-compact-tombstones',
+                  'retention-content-strikes');
+-- drop any name whose count was not 0 or not explained
 ```
 
-Change their `false` to `true` in step 13.4's check, and run it again: zero
-rows. `retention-district` is still not scheduled (below).
+Change each resumed job's `false` to `true` in step 13.4's check, and run it
+again: zero rows. `retention-district` is still not scheduled (below).
 
-### Abort and restore
+### Abort and recovery
 
-- **Before the wipe (steps 0 to 7).** Nothing is lost. Roll back the freeze:
-  disable both firewall rules, enable the live webhook, set
-  `disable_signup: false`. Leave Deploy to production off until a new date.
-- **After the wipe, before step 16.** The old production is gone, and the old
-  bundle is still on cleffy.io. Stay frozen, and fix forward from the step that
-  failed. Every step from 9 onwards can be repeated. If a batch push fails,
-  `supabase migration list --linked` shows which versions were recorded; fix
-  the cause and push the same batch again. Never `migration repair` the
-  history to get past it. If Max decides to go back to the old data instead:
-  reset to `main`'s 26 again (step 8.3), load `prod-20261022-data.sql` and the
-  objects from step 7, and re-create the R2 tables from
-  `prod-20261022-schema.sql`. Then run step 7.3's checks against production.
-- **After step 16.** `main` carries the new bundle. To take cleffy.io back to
-  the old bundle, use Vercel → Instant Rollback. That turns off auto-assignment
-  of production domains until you **Undo Rollback** or `vercel promote`. Prefer
-  staying frozen and fixing forward.
+**No data restore is supported** (Max, 2026-10-21, confirmed again at step 8).
+The step 7 backup is for reference and forensics only. Nothing here loads it.
+
+- **Before the wipe (steps 0 to 7): unfreeze and leave it.** Nothing is lost.
+  Undo step 6, part by part:
+    1. Disable both firewall rules, then Review Changes → Publish (6.1).
+    2. Unban the accounts: run 6.5.1's loop with `{"ban_duration":"none"}`.
+       Deleted sessions do not come back, so people sign in again.
+    3. Turn the old cron jobs back on (6.4's rollback).
+    4. Set `disable_signup: false` (6.2).
+    5. Enable the live webhook (6.3). The old database still has these
+       customers, so list the window's events as in step 18 (from
+       `FREEZE_AT` to now), resend them to the endpoint, and give each a
+       row in the reconciliation table. Subscriptions cancelled and Checkout
+       sessions expired in 6.7 stay that way: tell those customers.
+    6. Leave Deploy to production off until a new date.
+- **After the wipe: fix forward.** The old production is gone. Stay frozen,
+  and fix forward from the step that failed. Every step from 9 onwards can be
+  repeated. If a batch push fails, `supabase migration list --linked` shows
+  which versions were recorded: fix the cause and push the same batch again.
+  Never `migration repair` the history to get past it.
+- **After the wipe: re-apply from scratch**, when fixing forward is not
+  sensible. Stay frozen throughout.
+    1. If step 16 has run, take cleffy.io back to the previous production
+       deployment: Vercel → Deployments → **Instant Rollback**. That stops
+       production domains from being assigned automatically. When the re-apply
+       reaches step 16 again, **Undo Rollback**, or `vercel promote` the merge
+       commit's deployment.
+    2. If step 17 has run, turn the **Before User Created** hook **off**, and
+       set `disable_signup: true` (6.2). The reset drops
+       `public.hook_before_user_created`.
+    3. Run step 8 from 8.1. Empty Storage again, because the smoke tests
+       uploaded objects. Then go on through steps 9 to 21 as written.
+    4. **Re-create or re-check what lives outside the migrations.** No
+       migration sets any of these:
+        - **Edge secrets** (step 9). They survive a reset, but check
+          `secrets list` against step 9's table.
+        - **Auth settings** (step 10). They survive too, but `GET` them and
+          compare. The hook stays off until step 17.
+        - **Every Vault entry** (step 14). That is the five caller pairs
+          (`imslp_sync_*`, `billing_outbox_*`, `content_notice_*`,
+          `district_notice_*`, `support_inbound_*`) and
+          `content_strike_pepper`. Treat Vault as gone. Step 8.4 deletes any
+          caller pair that survived. A surviving pepper may be kept, and a
+          missing one is created fresh, because no keyed strike survives a
+          reset.
+        - **Their callers.** The migrations bring the cron jobs back
+          **active**. Pause `imslp-sync` and the six `retention-*` jobs
+          exactly as in step 11. Resume `imslp-sync` only after step 14,
+          and the `retention-*` jobs only after step 21's counts.
+        - **The rest:** P1's `deployment_config` row (13.2), Max's account
+          and `content_moderators` row (15), and the Stripe reconciliation
+          table. Any live purchase made since the webhook was enabled gets
+          its row, and a refund if it is due.
 
 ### Before scheduling `retention-district`
 
@@ -1181,7 +1643,7 @@ It stays unscheduled at launch. Schedule it only when all of these hold:
    `select public.retention_district_dry_run();` on production. On a fresh
    production it is empty until a district has a `contract_ends_at`.
 4. **The hourly notice-sender cron** from decision 11 is scheduled. Its job
-   name and schedule are not on P5's branch at 00f48a6 (confirm after P5). Without it, a notice deferred by the
+   name and schedule are not on P5's branch at 4ffd856d (confirm after P5). Without it, a notice deferred by the
    mail budget (`20261021120900`) waits for the next daily purge run, and
    nothing is purged before its notice is sent.
 
@@ -1255,7 +1717,9 @@ So every refund is two Stripe actions plus a log line:
     - "within 14 days: yes";
     - who did it.
 
-    Keep the log where the support records are kept (confirm where with Max).
+    The log lives in Max's private ops log, outside the repository (Max,
+    2026-10-21). Never commit it. During the go-live, the refund also gets
+    its row in step 6.7's reconciliation table.
 
 6. Reply to the customer, within 14 days of the request.
 
@@ -1268,10 +1732,13 @@ recovery_). Whether to buy PITR (a paid add-on on the Pro plan) is **Max's
 decision before launch**.
 
 **Until PITR is on, take a logical dump before every release** that runs
-migrations against production. Use the commands in step 7.1, prove it restores
-as in step 7.3, and keep it until the next release is known good. Restore it with **R3**'s `omr_jobs` note:
-`id` is `generated always as identity`. A copy written as `insert … select`
-needs `overriding system value` and then the `setval`. The CLI's `COPY` dump
+migrations against production. Use the commands in step 7.1, check the files
+as in step 7.3, and keep the dump until the next release is known good. The
+go-live does not restore its dump (step 7), and nothing in this file
+rehearses a restore. For a later release that might need one, rehearse it on
+a local stack first. Any restore must follow **R3**'s `omr_jobs` note: `id` is
+`generated always as identity`. A copy written as `insert … select` needs
+`overriding system value`, and then the `setval`. The CLI's `COPY` dump
 carries both, but run the `setval` check after any restore anyway.
 
 ### STRIPE_MODES
