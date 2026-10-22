@@ -195,6 +195,21 @@ export const GUEST_EMAIL_ERRORS = {
     codeLocked: { error: 'Too many wrong codes. Send a new one.', code: 'code_locked' },
     attachFailed: { error: 'We couldn’t save your email. Try again.', code: 'attach_failed' },
     /**
+     * The account is being deleted (launch-fix item 16, decision 70(1)): a new
+     * guest email verification is a user-originated write nothing requires,
+     * so it is refused. The code is deletionPending.ts ACCOUNT_DELETION_PENDING's,
+     * restated for the no-runtime-imports reason below.
+     */
+    accountDeletionPending: {
+        error: 'This account is being deleted, so an email address can’t be added to it now.',
+        code: 'account_deletion_pending',
+    },
+    /** That check could not be answered: nothing was changed, try again (deletionPending.ts DELETION_CHECK_UNAVAILABLE). */
+    deletionCheckUnavailable: {
+        error: 'We could not check your account just now, so nothing was changed. Please try again in a minute.',
+        code: 'deletion_check_unavailable',
+    },
+    /**
      * The three Turnstile refusals. Their codes are restated from
      * `_shared/turnstile.ts` rather than imported — this file takes no runtime
      * imports — and `tests/security/turnstile.test.ts` holds the two lists
@@ -251,6 +266,11 @@ interface CommonDeps {
     checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
     /** Key material for the code HMAC; null on a deploy missing it. */
     secret: () => string | null;
+    /**
+     * account_deletion_pending() for the guest (deletionPending.ts), launch-fix
+     * item 16. `unknown` is a check that could not be answered.
+     */
+    accountDeletionPending: (userId: string) => Promise<'clear' | 'pending' | 'unknown'>;
     logError: (message: string, err?: unknown) => void;
     /**
      * _shared/readCappedJson.ts's readCappedJson, passed in because this file
@@ -360,6 +380,29 @@ const admit = async (
 };
 
 /**
+ * Launch-fix item 16, decision 70(1): no new guest email verification for an
+ * account whose deletion is pending -- not a code saved or mailed, not an
+ * address attached. 409 with a plain reason; 503 when the check could not be
+ * answered. Asked before anything is stored, sent or tried, so the guest loses
+ * nothing if the deletion is abandoned.
+ *
+ * Today only an anonymous caller gets this far (admit), and deleting a guest
+ * (accountDeletion.ts deleteGuest) takes no marker, so this cannot refuse
+ * anyone yet: it is the refusal the policy asks for, in place for the day the
+ * guest path marks its deletion.
+ */
+const deletionRefusal = async (deps: CommonDeps, userId: string): Promise<Response | null> => {
+    const answer = await deps.accountDeletionPending(userId);
+    if (answer === 'pending') {
+        return deps.json(GUEST_EMAIL_ERRORS.accountDeletionPending, 409);
+    }
+    if (answer === 'unknown') {
+        return deps.json(GUEST_EMAIL_ERRORS.deletionCheckUnavailable, 503);
+    }
+    return null;
+};
+
+/**
  * The cap on a request body, counted as it streams (Content-Length is not
  * trusted): readCappedJson.ts's CONTROL_BODY_MAX_BYTES. Past it the answer
  * is 413 with PAYLOAD_TOO_LARGE, before anything is parsed.
@@ -432,6 +475,11 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
     const captcha = await deps.verifyCaptcha(req, body);
     if (!captcha.ok) {
         return json(CAPTCHA_REFUSALS[captcha.code], captcha.status);
+    }
+
+    const pendingStart = await deletionRefusal(deps, userId);
+    if (pendingStart) {
+        return pendingStart;
     }
 
     const secret = deps.secret();
@@ -588,6 +636,12 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
     }
     if (!/^\d+$/.test(code) || code.length !== GUEST_EMAIL_CODE_LENGTH) {
         return json(GUEST_EMAIL_ERRORS.invalidCode, 400);
+    }
+
+    // Before the code is tried (a try spent) or anything is attached.
+    const pendingConfirm = await deletionRefusal(deps, userId);
+    if (pendingConfirm) {
+        return pendingConfirm;
     }
 
     const secret = deps.secret();
