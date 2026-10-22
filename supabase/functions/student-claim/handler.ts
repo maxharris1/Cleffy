@@ -308,7 +308,13 @@ export const handleStudentClaim = async (req: Request, deps: StudentClaimDeps): 
     // write is an Auth write no database trigger can refuse (decision 61).
     // Check-then-write, like every Edge deletion check; the deletion removes
     // the account either way.
-    const deletion = await backend.teacherDeletionPending(studentId);
+    // A backend that throws rather than answering is 'unknown' too: the card
+    // is handed back and the answer is the retryable 503, never an unhandled
+    // rejection that leaves the reservation held until it runs out.
+    const deletion = await backend.teacherDeletionPending(studentId).catch((err: unknown) => {
+        deps.logError(`could not check the teacher of roster row ${studentId}: ${String(err)}`);
+        return 'unknown' as const;
+    });
     if (deletion !== 'clear') {
         await release();
         return deletion === 'pending' ? json(CLAIM_DELETION_PENDING, 409) : json(CLAIM_CHECK_UNAVAILABLE, 503);
