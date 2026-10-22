@@ -7,8 +7,19 @@
 # Build:  docker build -t cleffy-omr services/omr-service
 # Run:    docker run -p 8090:8080 -e OMR_SERVICE_SECRET=... \
 #             -e SUPABASE_URL=... -e SUPABASE_SERVICE_ROLE_KEY=... cleffy-omr
+#
+# Both stages start from one base image, pinned by its multi-arch index digest
+# so a re-pushed tag cannot change what is built. The tag is kept beside the
+# digest for readers; Docker uses the digest. Re-pin on purpose:
+#   docker buildx imagetools inspect node:<version>-bookworm-slim
+# and copy its top-level `Digest:` here (both FROM lines).
+# Pinned 2026-10-22: node 22.23.4 on debian bookworm-slim (index digest below).
+# apt packages are NOT version-pinned: bookworm's archive keeps only the current
+# point release, so an exact pin breaks the build at the next security update.
+# The digest fixes the base; `apt-get install` takes bookworm's current
+# security fixes for curl, ca-certificates, fontconfig and fonts-dejavu-core.
 
-FROM node:22-bookworm-slim AS build
+FROM node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS build
 WORKDIR /svc
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -16,7 +27,7 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-bookworm-slim
+FROM node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates fontconfig fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
