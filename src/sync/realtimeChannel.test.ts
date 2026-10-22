@@ -1301,4 +1301,198 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         rt.stop();
         expect(vi.getTimerCount()).toBe(0);
     });
+
+    /**
+     * 20261022120000_realtime_revocation_rotation: a member who loses the score
+     * (removed, unassigned, a student whose access ended) or loses write on it
+     * (editor -> viewer) moves it to the next generation, so every member on it
+     * gets the membership hint (for whoever changed) and `topic_rotated` on
+     * both old topics, in the same commit.
+     */
+    describe('when a membership change rotates the score (20261022120000)', () => {
+        /** Each read answers after READ_MS, from `epochs` in turn (the last one from then on). */
+        const READ_MS = 50;
+        const slowReads = (epochs: Array<number | null>) => {
+            const answers = [...epochs];
+            let inFlight = 0;
+            let maxInFlight = 0;
+            const fetchTopicEpoch = vi.fn(
+                () =>
+                    new Promise<TopicEpochRead>((done) => {
+                        inFlight += 1;
+                        maxInFlight = Math.max(maxInFlight, inFlight);
+                        const answer = answers.length > 1 ? answers.shift() : answers[0];
+                        setTimeout(() => {
+                            inFlight -= 1;
+                            done(toRead(answer));
+                        }, READ_MS);
+                    }),
+            );
+            return { fetchTopicEpoch, maxInFlight: () => maxInFlight };
+        };
+
+        const membership = (userId: string, role: string | null) => ({
+            table: 'document_members',
+            document_id: DOC,
+            user_id: userId,
+            role,
+        });
+
+        /** On generation 0 with a collaborator, both topics joined. */
+        const joinedAtZero = async (epochs: Array<number | null>) => {
+            const reads = slowReads(epochs);
+            const ctx = await setupWithEpochs([0], { fetchTopicEpoch: reads.fetchTopicEpoch });
+            await vi.advanceTimersByTimeAsync(READ_MS);
+            const live = ctx.latest(docTopic(DOC))!;
+            const db = ctx.latest(docDbTopic(DOC))!;
+            live.status('SUBSCRIBED');
+            db.status('SUBSCRIBED');
+            syncPresence(live, 2);
+            return { ...ctx, ...reads, live, db };
+        };
+
+        it('a member who keeps access follows it: two reads, one move, one gap-fill pull, never a read in parallel', async () => {
+            const { rt, opts, channels, removed, latest, fetchTopicEpoch, maxInFlight, live, db } = await joinedAtZero([
+                0, 1,
+            ]);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+
+            // Someone else was removed: their hint is not this member's business.
+            live.broadcast(MEMBERSHIP_EVENT, membership(PEER, null));
+            expect(opts.onMembershipChanged).not.toHaveBeenCalled();
+
+            // The rotation, told on both old topics in the same commit.
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm2', document_id: DOC });
+            // Ink is held from the first hint, whoever may still be on doc:{id}.
+            scribble(rt, 'held');
+            expect(live.send).not.toHaveBeenCalled();
+
+            // The second hint landed mid-read, so the read goes once more (the
+            // answer in flight may predate it), then the channel moves.
+            await vi.advanceTimersByTimeAsync(READ_MS);
+            expect(removed).toEqual([]);
+            await vi.advanceTimersByTimeAsync(READ_MS);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(maxInFlight()).toBe(1);
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            // Exactly one new pair of channels: the move is the whole rejoin.
+            expect(channels.map((c) => c.topic)).toEqual([
+                docTopic(DOC),
+                docDbTopic(DOC),
+                docTopic(DOC, 1),
+                docDbTopic(DOC, 1),
+            ]);
+
+            // The gap-fill pull waits for both new topics, so a mark committed
+            // while neither was joined is pulled (with the pull's overlap)
+            // rather than missed between the pull and the join.
+            const live1 = latest(docTopic(DOC, 1))!;
+            const db1 = latest(docDbTopic(DOC, 1))!;
+            live1.status('SUBSCRIBED');
+            expect(opts.onReconnect).not.toHaveBeenCalled();
+            db1.status('SUBSCRIBED');
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            expect(opts.onResync).not.toHaveBeenCalled();
+            db1.broadcast('INSERT', dbChange(row({ seq: 42 })));
+            expect(opts.onDbChange).toHaveBeenCalledWith(expect.objectContaining({ seq: 42 }));
+
+            // Live ink goes on generation 1 only.
+            syncPresence(live1, 2);
+            scribble(rt, 'after');
+            expect(inkSent(live1).map((m) => m.strokeId)).toEqual(['after']);
+            expect(live.send).not.toHaveBeenCalled();
+
+            // Settled: no further read, rejoin or pull is waiting.
+            await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS * 2);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(channels).toHaveLength(4);
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            expect(opts.onMembershipChanged).not.toHaveBeenCalled();
+            rt.stop();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('a removed member stops cleanly: re-checks on its hint, is denied the generation, and leaves both topics for good', async () => {
+            const { rt, opts, channels, removed, fetchTopicEpoch, live, db } = await joinedAtZero([0, null]);
+
+            // The hint for this user, then the rotation in the same commit.
+            live.broadcast(MEMBERSHIP_EVENT, membership(SELF, null));
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm2', document_id: DOC });
+            await vi.advanceTimersByTimeAsync(READ_MS * 2);
+
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            expect(removed).toHaveLength(2);
+            expect(channels).toHaveLength(2);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(2);
+
+            // Whatever still arrives on the dead channels, nothing goes out.
+            syncPresence(live, 2);
+            scribble(rt, 'after');
+            expect(live.send).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS * 4);
+            expect(channels).toHaveLength(2);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(opts.onResync).not.toHaveBeenCalled();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('an editor made viewer re-checks its role on its hint and follows the rotation (the new join is a viewer’s)', async () => {
+            const { opts, removed, latest, live, db } = await joinedAtZero([0, 1]);
+
+            live.broadcast(MEMBERSHIP_EVENT, membership(SELF, 'viewer'));
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            await vi.advanceTimersByTimeAsync(READ_MS);
+
+            // Off the old doc:{id}, where its channel kept the editor's send
+            // permission Realtime cached at join, and onto generation 1, which
+            // Realtime authorizes afresh: receive and presence only.
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            const live1 = latest(docTopic(DOC, 1))!;
+            const db1 = latest(docDbTopic(DOC, 1))!;
+            live1.status('SUBSCRIBED');
+            db1.status('SUBSCRIBED');
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            // It announces itself there, inside the presence rate limit's gap.
+            await vi.advanceTimersByTimeAsync(PRESENCE_TRACK_MIN_MS);
+            expect(live1.track).toHaveBeenCalledTimes(1);
+        });
+
+        it('rotations back to back (an archive, then the session end) are followed to the newest generation, one read at a time', async () => {
+            const { opts, channels, latest, fetchTopicEpoch, maxInFlight, db } = await joinedAtZero([0, 1, 2]);
+
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            await vi.advanceTimersByTimeAsync(READ_MS);
+            const live1 = latest(docTopic(DOC, 1))!;
+            const db1 = latest(docDbTopic(DOC, 1))!;
+            live1.status('SUBSCRIBED');
+            db1.status('SUBSCRIBED');
+
+            // The second rotation is told on generation 1.
+            db1.broadcast(TOPIC_ROTATED_EVENT, { id: 'm3', document_id: DOC });
+            live1.broadcast(TOPIC_ROTATED_EVENT, { id: 'm4', document_id: DOC });
+            await vi.advanceTimersByTimeAsync(READ_MS * 2);
+            const live2 = latest(docTopic(DOC, 2))!;
+            const db2 = latest(docDbTopic(DOC, 2))!;
+            live2.status('SUBSCRIBED');
+            db2.status('SUBSCRIBED');
+
+            expect(maxInFlight()).toBe(1);
+            // 1 on start, 1 for the first rotation, 2 for the second (both hints).
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
+            expect(channels.map((c) => c.topic)).toEqual([
+                docTopic(DOC),
+                docDbTopic(DOC),
+                docTopic(DOC, 1),
+                docDbTopic(DOC, 1),
+                docTopic(DOC, 2),
+                docDbTopic(DOC, 2),
+            ]);
+            // One gap-fill pull per move.
+            expect(opts.onReconnect).toHaveBeenCalledTimes(2);
+        });
+    });
 });
