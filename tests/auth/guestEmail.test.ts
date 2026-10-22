@@ -54,7 +54,11 @@ const post = (body: unknown, method = 'POST') =>
         body: method === 'POST' ? JSON.stringify(body) : undefined,
     });
 
-const common = (calls: string[], caller: GuestCaller | Response = GUEST) => ({
+const common = (
+    calls: string[],
+    caller: GuestCaller | Response = GUEST,
+    deletion: 'clear' | 'pending' | 'unknown' = 'clear',
+) => ({
     json,
     readJson: readCappedJson,
     options: () => new Response('ok'),
@@ -68,6 +72,11 @@ const common = (calls: string[], caller: GuestCaller | Response = GUEST) => ({
         return { ok: true as const };
     }),
     secret: () => SECRET,
+    // account_deletion_pending() for the guest (launch-fix item 16).
+    accountDeletionPending: vi.fn(async () => {
+        calls.push('deletion');
+        return deletion;
+    }),
     logError: vi.fn(),
 });
 
@@ -89,6 +98,7 @@ const startHarness = (
         save?: boolean;
         /** The Turnstile verdict for the request; a configured deploy that passes by default. */
         captcha?: CaptchaVerdict;
+        deletion?: 'clear' | 'pending' | 'unknown';
     } = {},
 ) => {
     const calls: string[] = [];
@@ -101,7 +111,7 @@ const startHarness = (
         unknown: { outcome: 'unknown', reason: 'network' },
     };
     const deps: GuestEmailStartDeps = {
-        ...common(calls, options.caller),
+        ...common(calls, options.caller, options.deletion),
         verifyCaptcha: vi.fn(async (_req: Request, body: Record<string, unknown> | null) => {
             calls.push(`captcha:${typeof body?.['captchaToken'] === 'string' ? 'token' : 'none'}`);
             return options.captcha ?? ({ ok: true, verified: true } satisfies CaptchaVerdict);
@@ -171,6 +181,7 @@ describe('guest-email-start', () => {
             'auth',
             'rate:guest-email-start:user',
             'captcha:token',
+            'deletion',
             'taken:ada@example.com',
             'rate:guest-email-to:' + (await recipientRateKey(SECRET, 'ada@example.com')).split(':')[1],
             'rate:guest-email-to-day:' + (await recipientRateKey(SECRET, 'ada@example.com', 'day')).split(':')[1],
@@ -517,6 +528,28 @@ describe('guest-email-start', () => {
         expect(h.sent).toEqual([]);
     });
 
+    it('refuses a guest whose account is being deleted: nothing saved, mailed or asked about the address', async () => {
+        const h = startHarness({ deletion: 'pending' });
+        const response = await handleGuestEmailStart(post({ email: 'ada@example.com' }), h.deps);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.accountDeletionPending);
+        expect(GUEST_EMAIL_ERRORS.accountDeletionPending.code).toBe('account_deletion_pending');
+        expect(h.deps.accountDeletionPending).toHaveBeenCalledWith(GUEST.userId);
+        expect(h.saved).toEqual([]);
+        expect(h.sent).toEqual([]);
+        expect(h.calls).not.toContain('taken:ada@example.com');
+        expect(h.calls.filter((call) => call.startsWith('rate:guest-email-to'))).toEqual([]);
+    });
+
+    it('refuses with a retry when that check cannot be answered (launch-fix item 16)', async () => {
+        const h = startHarness({ deletion: 'unknown' });
+        const response = await handleGuestEmailStart(post({ email: 'ada@example.com' }), h.deps);
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.deletionCheckUnavailable);
+        expect(h.saved).toEqual([]);
+        expect(h.sent).toEqual([]);
+    });
+
     it('limits per IP, per guest and per recipient address, hourly and daily', async () => {
         for (const blocked of [
             'guest-email-start:ip',
@@ -546,13 +579,14 @@ const confirmHarness = (
         caller?: GuestCaller | Response;
         /** guest_email_taken's answers, one per call (the last one repeats). */
         taken?: (boolean | null)[];
+        deletion?: 'clear' | 'pending' | 'unknown';
     } = {},
 ) => {
     const calls: string[] = [];
     const checked: { userId: string; email: string; codeHash: string }[] = [];
     const attached: { userId: string; email: string; password: string }[] = [];
     const deps: GuestEmailConfirmDeps = {
-        ...common(calls, options.caller),
+        ...common(calls, options.caller, options.deletion),
         password: { passwordProblem, passwordProblemMessage },
         emailTaken: vi.fn(async (email: string) => {
             calls.push(`taken:${email}`);
@@ -614,6 +648,23 @@ describe('guest-email-confirm', () => {
         const failed = confirmHarness({ check: null });
         expect((await handleGuestEmailConfirm(post(goodConfirm), failed.deps)).status).toBe(503);
         expect(failed.attached).toEqual([]);
+    });
+
+    it('refuses a guest whose account is being deleted before the code is tried: nothing attached', async () => {
+        const h = confirmHarness({ deletion: 'pending' });
+        const response = await handleGuestEmailConfirm(post(goodConfirm), h.deps);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.accountDeletionPending);
+        expect(h.calls).not.toContain('check');
+        expect(h.attached).toEqual([]);
+        // The pending code is left alone: usable again if the deletion is abandoned.
+        expect(h.calls).not.toContain('delete');
+
+        const unknown = confirmHarness({ deletion: 'unknown' });
+        const failed = await handleGuestEmailConfirm(post(goodConfirm), unknown.deps);
+        expect(failed.status).toBe(503);
+        expect(await failed.json()).toEqual(GUEST_EMAIL_ERRORS.deletionCheckUnavailable);
+        expect(unknown.attached).toEqual([]);
     });
 
     it('checks the password before the code, so a weak one does not spend a try', async () => {
