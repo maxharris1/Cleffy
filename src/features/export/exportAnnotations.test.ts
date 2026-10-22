@@ -272,6 +272,32 @@ describe('loadExportAnnotations and marks this device could not store (SF-1)', (
         );
     });
 
+    it('signed out with an overtaken erase held: the copy does not promise the newer version, which is not in the export', async () => {
+        await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });
+        const store = new AnnotationStore(db, DOC);
+        store.setAuthor(USER);
+        await store.load();
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.delete('a1').catch(() => undefined);
+        full.mockRestore();
+        await db.annotations.put({ ...stroke('a1'), seq: 9, color: '#0000ff', pending: 0 });
+        await store.retryFailedPersist();
+        const fullAgain = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(stroke('unsaved')).catch(() => undefined);
+        fullAgain.mockRestore();
+
+        retireAccountInk(USER, 'other-tab');
+        const marks = await loadExportMarks(DOC, USER);
+
+        // Only the unsaved stroke: the newer a1 is a saved mark, not this export's.
+        expect(marks.annotations.map((a) => a.id)).toEqual(['unsaved']);
+        expect(marks.erasedConflicts).toBe(1);
+        expect(exportNotice(marks)).toBe(
+            'You’re signed out, so this export has only the 1 unsaved mark this tab still holds, not the score’s saved marks. One of your unsaved erases was overtaken by a newer version made elsewhere. That version is a saved mark, so it isn’t in this export.',
+        );
+        expect(exportNotice(marks)).not.toMatch(/the export shows/);
+    });
+
     it('signed out with ink still held here: the export has only that account’s unsaved marks, and says so (round 3, item 2)', async () => {
         await drawAs(OTHER, stroke('theirs'));
         await drawAs(USER, stroke('saved'));

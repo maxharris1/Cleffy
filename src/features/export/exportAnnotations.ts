@@ -159,11 +159,22 @@ export const exportNotice = ({
         );
     }
     if (erasedConflicts > 0) {
-        parts.push(
-            erasedConflicts === 1
-                ? 'One of your unsaved erases was overtaken by a newer version made elsewhere: the export shows that version.'
-                : `${erasedConflicts} of your unsaved erases were overtaken by newer versions made elsewhere: the export shows those versions.`,
-        );
+        // Signed out, the export has only the unsaved marks (the PDF still
+        // builds: a signed-out export claims nothing), so the newer version
+        // that overtook an erase is not in it and the copy must not say so.
+        if (signedOut) {
+            parts.push(
+                erasedConflicts === 1
+                    ? 'One of your unsaved erases was overtaken by a newer version made elsewhere. That version is a saved mark, so it isn’t in this export.'
+                    : `${erasedConflicts} of your unsaved erases were overtaken by newer versions made elsewhere. Those versions are saved marks, so they aren’t in this export.`,
+            );
+        } else {
+            parts.push(
+                erasedConflicts === 1
+                    ? 'One of your unsaved erases was overtaken by a newer version made elsewhere: the export shows that version.'
+                    : `${erasedConflicts} of your unsaved erases were overtaken by newer versions made elsewhere: the export shows those versions.`,
+            );
+        }
     }
     return parts.length > 0 ? parts.join(' ') : null;
 };
