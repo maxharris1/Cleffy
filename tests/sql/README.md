@@ -566,3 +566,21 @@ delete's own counts are unchanged; both functions stay the service role's.
 Like the checkout proofs it ends with `failures | total`. Proven against the
 local stack (PostgreSQL 17.11) on 2026-10-22: all 16 checks passed; against
 the 20261021120700 / 20261021120800 definitions, 9 of the 16 failed.
+
+`content_strikes_survive_deletion.sql` proves
+`supabase/migrations/20261022130100_content_strikes_survive_deletion.sql`
+(launch re-audit, SF-15): each strike records `sha256(lower(email))` of its
+uploader's address (whatever the insert says; none for a guest); deleting the
+account keeps every strike (user null; key, date and withdrawal unchanged) and
+the takedown (uploader null); the same address signing up again, in any case,
+inherits the active strike, which `apply_content_takedown` and the moderator's
+takedown list count, while a withdrawn strike, one older than 12 months and
+another address do not; a live account that changes address keeps its strikes
+and hands none to whoever takes the old address. It re-applies the migration
+twice with `\ir` (psql only): the backfill keys an existing strike from its
+account's address, and the rerun leaves one foreign key, one trigger, one
+column and the same counts. No client reads strikes or calls the functions.
+It ends with `failures | total`. Proven against the local stack (PostgreSQL
+17.11) on 2026-10-22: all 22 checks passed; against the 20261020150000
+definitions (cascade, no key), 8 of the 18 checks before the rerun section
+failed.
