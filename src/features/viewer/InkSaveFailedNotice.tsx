@@ -34,9 +34,23 @@ const useRecoveryCount = (store: AnnotationStore | null, read: (store: Annotatio
     return useSyncExternalStore(subscribe, () => (store ? (read(store) ?? 0) : 0));
 };
 
+type NoticeState = 'overflow' | 'held' | 'refused' | 'conflicts';
+
 /** What the strip says: short on phones, so it stays about two lines with its buttons beside it. */
-const copy = (held: boolean, retryFailed: boolean): { short: string; long: string } => {
-    if (held) {
+const copy = (state: NoticeState, retryFailed: boolean): { short: string; long: string } => {
+    if (state === 'overflow') {
+        return {
+            short: 'Too many unsaved marks: new ones weren’t made. Export a copy.',
+            long: 'This device can’t keep any more unsaved marks, so your latest changes weren’t made. Export a copy to keep the rest, then Retry.',
+        };
+    }
+    if (state === 'conflicts') {
+        return {
+            short: 'Some marks changed elsewhere before saving. Export keeps yours.',
+            long: 'Some of your unsaved marks were changed elsewhere before this device could save them, so the newer versions are shown. Export a copy to keep yours.',
+        };
+    }
+    if (state === 'held') {
         return retryFailed
             ? {
                   short: 'Still not saved. Storage may be full: export a copy.',
@@ -69,7 +83,12 @@ const copy = (held: boolean, retryFailed: boolean): { short: string; long: strin
  *
  * Also an edit of an existing mark refused because the day's starting point
  * could not be written first: nothing to export, but Retry writes that
- * snapshot so the edit can be made again.
+ * snapshot so the edit can be made again. And edits not made at all because
+ * this device already holds as many unsaved marks as it can (overflow):
+ * undone on screen, with Export for the rest. And unsaved marks a newer
+ * version overtook before they could be written (conflicts): the newer one
+ * is drawn, Retry leaves them, and Export keeps them; Dismiss lets them go
+ * once the user has seen them.
  *
  * Same amber strip as the viewer's other notices — the app has no toasts —
  * kept to one row on phones: short copy beside its buttons.
@@ -77,12 +96,17 @@ const copy = (held: boolean, retryFailed: boolean): { short: string; long: strin
 export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProps) => {
     const count = useRecoveryCount(store, (s) => s.persistFailureCount);
     const refused = useRecoveryCount(store, (s) => s.refusedEditCount);
+    const overflow = useRecoveryCount(store, (s) => s.overflowCount);
+    const conflicts = useRecoveryCount(store, (s) => s.conflictCount);
     const [retrying, setRetrying] = useState(false);
     const [retryFailed, setRetryFailed] = useState(false);
 
-    if (!store || (count <= 0 && refused <= 0)) {
+    if (!store || (count <= 0 && refused <= 0 && overflow <= 0 && conflicts <= 0)) {
         return null;
     }
+    const state: NoticeState =
+        overflow > 0 ? 'overflow' : count > 0 ? 'held' : refused > 0 ? 'refused' : 'conflicts';
+    const exportable = count > 0 || conflicts > 0;
 
     const retry = async () => {
         setRetrying(true);
@@ -91,7 +115,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
         setRetryFailed(!saved);
     };
 
-    const { short, long } = copy(count > 0, retryFailed);
+    const { short, long } = copy(state, retryFailed);
 
     return (
         <div
@@ -102,12 +126,25 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
                 <span className="sm:hidden">{short}</span>
                 <span className="hidden sm:inline">{long}</span>
             </p>
-            <Button size="sm" variant="secondary" className="shrink-0" disabled={retrying} onClick={() => void retry()}>
-                {retrying ? 'Retrying…' : 'Retry'}
-            </Button>
-            {count > 0 && onExport ? (
+            {state !== 'conflicts' ? (
+                <Button
+                    size="sm"
+                    variant="secondary"
+                    className="shrink-0"
+                    disabled={retrying}
+                    onClick={() => void retry()}
+                >
+                    {retrying ? 'Retrying…' : 'Retry'}
+                </Button>
+            ) : null}
+            {exportable && onExport ? (
                 <Button size="sm" variant="ghost" className="shrink-0" onClick={onExport}>
                     Export
+                </Button>
+            ) : null}
+            {state === 'conflicts' ? (
+                <Button size="sm" variant="ghost" className="shrink-0" onClick={() => store.dismissConflicts()}>
+                    Dismiss
                 </Button>
             ) : null}
         </div>

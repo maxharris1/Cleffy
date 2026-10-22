@@ -2,7 +2,11 @@ import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotSer
 import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/viewer/ink/undoStack';
 import type { LocalAnnotation, ScribblerDb } from '@/sync/db';
 import {
-    evictHeldMarks,
+    baseOf,
+    boundTo,
+    conflictCount,
+    dismissConflicts,
+    HeldInkFull,
     heldMarkCount,
     heldMarkIds,
     heldMarksFor,
@@ -10,14 +14,16 @@ import {
     isHeld,
     noteEditsInFlight,
     noteRefusedEdit,
+    overflowCount,
     owedStartingPoint,
     persistOps,
     refusedEditCount,
     registerOpenStore,
     retryHeld,
+    settleOvertaken,
     startingPointWritten,
-    supersededBy,
     type CommitOp,
+    type RetryOptions,
 } from '@/sync/inkRecovery';
 import { foreignMarkIds } from '@/sync/opOwnership';
 import type { Annotation, AnnotationPayload } from '@/types/models';
@@ -99,6 +105,13 @@ export class AnnotationStore {
      * mirror rows back from them (hasPersistFailure).
      */
     private onHeldChange: (() => void) | null = null;
+    /** The sync engine's part in a Retry (see setRetryHooks). */
+    private retryHooks: RetryHooks | null = null;
+    /**
+     * Moved on when memory is reset for another account (resetMemory): a
+     * hydration or ownership pass begun before it applies nothing after.
+     */
+    private generation = 0;
 
     constructor(
         private db: ScribblerDb,
@@ -130,10 +143,15 @@ export class AnnotationStore {
     }
 
     private async hydrate(): Promise<void> {
+        const generation = this.generation;
         const [rows, foreign] = await Promise.all([
             this.db.annotations.where('docId').equals(this.docId).toArray(),
             this.foreignIds(),
         ]);
+        if (generation !== this.generation) {
+            // Reset for another account meanwhile: its own load applies.
+            return;
+        }
         this.foreign = foreign;
         const touched = new Set<number>();
         // Drawn while the read was out: newer than anything held for them.
@@ -160,21 +178,19 @@ export class AnnotationStore {
     /**
      * Draw the author's held ink (inkRecovery) over the mirror's rows: an
      * edit this device could not store, made in an earlier mount of this
-     * score, is still the newest version of its mark here. One a later write
-     * on this device has since replaced in the mirror is dropped instead
-     * (supersededBy). Marks in `skip` keep what memory has.
+     * score, is still the newest version of its mark here. One a newer
+     * version in the mirror has overtaken (another tab's edit, stored or
+     * uploaded; inkRecovery.overtakes) is not drawn over it: memory keeps
+     * the mirror's, and the held one stays for Export only. Marks in `skip`
+     * keep what memory has.
      */
     private overlayHeld(
         rows: ReadonlyMap<string, LocalAnnotation | undefined>,
         skip: ReadonlySet<string>,
         touched: Set<number>,
     ): void {
-        const superseded: string[] = [];
+        settleOvertaken(this.author, this.docId, rows);
         for (const held of heldMarksFor(this.author, this.docId)) {
-            if (supersededBy(held, rows.get(held.id))) {
-                superseded.push(held.id);
-                continue;
-            }
             if (skip.has(held.id) || this.foreign.has(held.id)) {
                 continue;
             }
@@ -186,12 +202,15 @@ export class AnnotationStore {
             this.applyMemory(held);
             touched.add(held.page);
         }
-        evictHeldMarks(this.author, this.docId, superseded);
     }
 
-    /** Resolve once the mirror is in memory; no extra yield once it is. */
+    /**
+     * Resolve once the mirror is in memory; no extra yield once it is. A
+     * load overtaken by a reset (resetMemory) is waited past, to the one
+     * that replaced it.
+     */
     private async ensureLoaded(): Promise<void> {
-        if (!this.loaded) {
+        while (!this.loaded) {
             await this.load();
         }
     }
@@ -303,6 +322,7 @@ export class AnnotationStore {
                             type: 'restore',
                             annotation: { ...next, seq: existing.seq },
                             baseDeletedAt: existing.deletedAt,
+                            prev: existing,
                         },
                         { recordUndo: true },
                     );
@@ -370,9 +390,52 @@ export class AnnotationStore {
         const prev = this.author;
         this.author = userId;
         this.notifyMeta();
+        if (!this.loading) {
+            return;
+        }
+        if (prev !== null) {
+            // Another account, or none, after one: nothing in memory may
+            // carry over — not its marks, held ink, nor its undo history.
+            this.resetMemory();
+            return;
+        }
+        // The session resolving on a warm open: reveal what is this account's.
+        const next = this.ownership.then(() => this.applyOwnership(prev));
+        this.ownership = next.catch((err: unknown) => console.warn('Could not re-check queued marks', err));
+    }
+
+    /**
+     * Forget everything in memory and hydrate again, for the current author:
+     * the account changed (setAuthor), or a sign-out cleared this author's
+     * held ink (accountInkCleared). Writes of the previous account's still
+     * on their way finish (or are cancelled, inkRecovery) as theirs, and are
+     * that account's queued marks to this one (`foreign`).
+     */
+    private resetMemory(): void {
+        this.generation += 1;
+        const pages = new Set(this.pages.keys());
+        this.pages.clear();
+        this.byId.clear();
+        this.foreign = new Set();
+        this.undo.clear();
+        this.loaded = false;
+        this.loading = null;
+        this.ownership = Promise.resolve();
+        for (const page of pages) {
+            this.notifyPage(page);
+        }
+        this.notifyMeta();
+        void this.load().catch((err: unknown) => console.warn('Could not reload marks for the account', err));
+    }
+
+    /**
+     * A sign-out cleared this store's author's held ink (here or in another
+     * tab; inkRecovery.clearAccountInk): what it drew of it goes, with the
+     * rest of memory, and the mirror is read again.
+     */
+    accountInkCleared(): void {
         if (this.loading) {
-            const next = this.ownership.then(() => this.applyOwnership(prev));
-            this.ownership = next.catch((err: unknown) => console.warn('Could not re-check queued marks', err));
+            this.resetMemory();
         }
     }
 
@@ -386,11 +449,18 @@ export class AnnotationStore {
         return this.author;
     }
 
-    /** The author changed after hydration: hide and reveal marks to match. */
+    /** The author became known after hydration: hide and reveal marks to match. */
     private async applyOwnership(prevAuthor: string | null): Promise<void> {
+        const generation = this.generation;
         await this.ensureLoaded();
+        if (generation !== this.generation) {
+            return;
+        }
         await this.swapHeldInk(prevAuthor);
         const next = await this.foreignIds();
+        if (generation !== this.generation) {
+            return;
+        }
         const touched = new Set<number>();
         for (const id of next) {
             const hidden = this.byId.get(id);
@@ -403,6 +473,9 @@ export class AnnotationStore {
         const revealed = [...this.foreign].filter((id) => !next.has(id));
         this.foreign = next;
         const rows = await this.db.annotations.bulkGet(revealed);
+        if (generation !== this.generation) {
+            return;
+        }
         for (const row of rows) {
             if (row && row.docId === this.docId && !this.byId.has(row.id) && !this.foreign.has(row.id)) {
                 const { pending: _pending, ...annotation } = row;
@@ -427,7 +500,11 @@ export class AnnotationStore {
             return;
         }
         const ids = [...new Set([...hide, ...show])];
+        const generation = this.generation;
         const rows = await this.db.annotations.bulkGet(ids).catch(() => ids.map(() => undefined));
+        if (generation !== this.generation) {
+            return;
+        }
         const byId = new Map(ids.map((id, i) => [id, rows[i]]));
         const touched = new Set<number>();
         for (const id of hide) {
@@ -474,7 +551,8 @@ export class AnnotationStore {
             return;
         }
         const author = this.author;
-        await this.captureStartingPoint(author, this.startingPointFor(author));
+        const live = boundTo(author);
+        await this.captureStartingPoint(author, this.startingPointFor(author), live);
         const touched = new Set<number>();
         const ops: CommitOp[] = [];
         for (const annotation of annotations) {
@@ -484,7 +562,7 @@ export class AnnotationStore {
             touched.add(annotation.page);
         }
         try {
-            await this.persistMany(ops, author);
+            await this.persistMany(ops, author, live);
         } finally {
             for (const page of touched) {
                 this.notifyPage(page);
@@ -510,7 +588,7 @@ export class AnnotationStore {
             return false;
         }
         return this.commit(
-            { type: 'delete', annotation: { ...prev, deletedAt: nowIso(), updatedAt: nowIso() } },
+            { type: 'delete', annotation: { ...prev, deletedAt: nowIso(), updatedAt: nowIso() }, prev },
             {
                 recordUndo: true,
             },
@@ -730,6 +808,29 @@ export class AnnotationStore {
         return refusedEditCount(this.author, this.docId);
     }
 
+    /**
+     * Edits not made because this device could hold no more unsaved marks
+     * (inkRecovery.MAX_HELD_*): undone on screen, and the viewer says so.
+     */
+    get overflowCount(): number {
+        return overflowCount(this.author, this.docId);
+    }
+
+    /**
+     * Held marks a newer version overtook before they could be written
+     * (inkRecovery.overtakes): this store draws the newer one, Retry leaves
+     * them alone, and Export keeps them as well.
+     */
+    get conflictCount(): number {
+        return conflictCount(this.author, this.docId);
+    }
+
+    /** The user has seen the conflicts (the banner's Dismiss): they go. */
+    dismissConflicts(): void {
+        dismissConflicts(this.author, this.docId);
+        this.notifyMeta();
+    }
+
     /** The newest unsaved version of each mark with a failed write, tombstones included. */
     unsavedAnnotations(): Annotation[] {
         return heldMarksFor(this.author, this.docId);
@@ -743,13 +844,30 @@ export class AnnotationStore {
      * held. Each goes out under the account that made it.
      */
     async retryFailedPersist(): Promise<boolean> {
-        const { ok, wrote } = await retryHeld(this.author, this.docId);
+        const hooks = this.retryHooks;
+        const options: RetryOptions = hooks ? { serverRows: hooks.serverRows } : {};
+        const { ok, wrote, overtaken } = await retryHeld(this.author, this.docId, options);
+        if (overtaken.length > 0) {
+            // Drawn as the newer version: this device's newest copy, then the server's.
+            await this.reloadFromMirror(overtaken, { includeQueued: true }).catch(() => undefined);
+            hooks?.overtaken(overtaken);
+        }
         this.notifyMeta();
         this.onHeldChange?.();
         if (wrote.length > 0) {
             this.onDirty?.(wrote);
         }
         return ok;
+    }
+
+    /**
+     * Hooks for the sync engine's part in a Retry: the server's current
+     * versions of held marks (a newer one overtakes them; see
+     * inkRecovery.overtakes), and the marks that were, so it draws the
+     * server's version of them.
+     */
+    setRetryHooks(hooks: RetryHooks | null): void {
+        this.retryHooks = hooks;
     }
 
     /**
@@ -844,6 +962,7 @@ export class AnnotationStore {
                 type: 'restore',
                 annotation: { ...prev, deletedAt: null, updatedAt: nowIso() },
                 baseDeletedAt: prev.deletedAt,
+                prev,
             },
             { recordUndo: true },
         );
@@ -903,6 +1022,7 @@ export class AnnotationStore {
         }
         const CHUNK = 4000;
         const author = this.author;
+        const live = boundTo(author);
         const reversed = [...ops].reverse();
         const inverses: UndoableOp[] = [];
         const wrote: string[] = [];
@@ -919,7 +1039,7 @@ export class AnnotationStore {
             }
             if (commits.length > 0) {
                 try {
-                    await this.persistMany(commits, author);
+                    await this.persistMany(commits, author, live);
                 } finally {
                     // Drawn as memory has it either way: a write that failed
                     // is held for retry, not undone.
@@ -951,7 +1071,7 @@ export class AnnotationStore {
                 }
                 const annotation = { ...prev, deletedAt: nowIso(), updatedAt: nowIso() };
                 this.applyLocal(annotation);
-                return { commit: { type: 'delete', annotation }, inverse: { type: 'restore', id: op.id } };
+                return { commit: { type: 'delete', annotation, prev }, inverse: { type: 'restore', id: op.id } };
             }
             case 'restore': {
                 const prev = this.byId.get(op.id);
@@ -961,7 +1081,7 @@ export class AnnotationStore {
                 const annotation = { ...prev, deletedAt: null, updatedAt: nowIso() };
                 this.applyLocal(annotation);
                 return {
-                    commit: { type: 'restore', annotation, baseDeletedAt: prev.deletedAt },
+                    commit: { type: 'restore', annotation, baseDeletedAt: prev.deletedAt, prev },
                     inverse: { type: 'delete', id: op.id },
                 };
             }
@@ -989,8 +1109,10 @@ export class AnnotationStore {
         if (this.historyOverlay) {
             return false;
         }
-        // The account the edit is made under, whatever it is by the time it is written.
+        // The account the edit is made under, whatever it is by the time it
+        // is written — and its epoch then: a sign-out before the write ends it.
         const author = this.author;
+        const live = boundTo(author);
 
         // Creates apply to the live map before any IndexedDB yield so the
         // handwriting pause can start at pointer-up. Snapshot still uses the
@@ -1002,20 +1124,24 @@ export class AnnotationStore {
             if (options.recordUndo) {
                 this.pushCommitInverse(op);
                 try {
-                    await this.captureStartingPoint(author, preEdit);
+                    await this.captureStartingPoint(author, preEdit, live);
                 } catch (err) {
                     // Never written, but drawn: held for retry like a failed
-                    // write, with the day's starting point it still owes.
-                    holdOps(this.db, this.docId, [{ op, author }], preEdit);
+                    // write, with the day's starting point it still owes —
+                    // or, past the registry's bounds, undone and said so.
+                    const refused = holdOps(this.db, this.docId, [{ op, author }], preEdit);
+                    if (refused.length > 0) {
+                        this.rollBack([op]);
+                    }
                     this.releaseUnpersisted([op]);
                     this.notifyPage(op.annotation.page);
                     this.notifyMeta();
                     this.onHeldChange?.();
-                    throw err;
+                    throw refused.length > 0 ? new HeldInkFull([op], err) : err;
                 }
             }
             try {
-                await this.persistMany([op], author);
+                await this.persistMany([op], author, live);
             } finally {
                 this.notifyPage(op.annotation.page);
                 this.notifyMeta();
@@ -1037,7 +1163,7 @@ export class AnnotationStore {
             if (options.recordUndo) {
                 const preEdit = this.startingPointFor(author);
                 try {
-                    await this.captureStartingPoint(author, preEdit);
+                    await this.captureStartingPoint(author, preEdit, live);
                 } catch (err) {
                     // Refused, as it always was: the edit never applies and
                     // the mark stays as it is. The viewer still says an edit
@@ -1077,7 +1203,7 @@ export class AnnotationStore {
         // 3. Durable mirror + outbox, atomically. 4. Repaint — memory has the
         // edit whether or not the write held — and wake the sync engine.
         try {
-            await this.persistMany([op], author);
+            await this.persistMany([op], author, live);
         } finally {
             this.notifyPage(annotation.page);
             this.notifyMeta();
@@ -1095,9 +1221,13 @@ export class AnnotationStore {
         return owedStartingPoint(author, this.docId) ?? this.liveAnnotations();
     }
 
-    /** ensureDayStartingSnapshot, and on success nothing more is owed (startingPointWritten). */
-    private async captureStartingPoint(author: string | null, preEdit: Annotation[]): Promise<void> {
-        await ensureDayStartingSnapshot(this.db, this.docId, preEdit);
+    /**
+     * ensureDayStartingSnapshot, and on success nothing more is owed
+     * (startingPointWritten). Written only while `live` (the edit's account
+     * has not signed out since).
+     */
+    private async captureStartingPoint(author: string | null, preEdit: Annotation[], live: () => boolean): Promise<void> {
+        await ensureDayStartingSnapshot(this.db, this.docId, preEdit, null, live);
         startingPointWritten(author, this.docId);
     }
 
@@ -1168,10 +1298,18 @@ export class AnnotationStore {
      * readers. An edit of a held mark is written behind its held ops; what
      * could not be written is held, and the error rethrown.
      */
-    private async persistMany(ops: CommitOp[], author: string | null): Promise<void> {
+    private async persistMany(ops: CommitOp[], author: string | null, live: () => boolean): Promise<void> {
         const held = heldMarkCount(author, this.docId);
         try {
-            await this.writeMany(ops, author);
+            await this.writeMany(ops, author, live);
+        } catch (err) {
+            if (err instanceof HeldInkFull) {
+                // Neither written nor held: not made, so not drawn either.
+                this.rollBack(err.ops);
+                this.notifyMeta();
+                this.onHeldChange?.();
+            }
+            throw err;
         } finally {
             this.releaseUnpersisted(ops);
             if (heldMarkCount(author, this.docId) !== held) {
@@ -1182,8 +1320,31 @@ export class AnnotationStore {
     }
 
     /** The write itself (a seam the interleaving tests slow down). */
-    private writeMany(ops: CommitOp[], author: string | null): Promise<void> {
-        return persistOps(this.db, author, this.docId, ops);
+    private writeMany(ops: CommitOp[], author: string | null, live: () => boolean): Promise<void> {
+        return persistOps(this.db, author, this.docId, ops, live);
+    }
+
+    /**
+     * Undo these edits in memory, newest first: they were neither written
+     * nor held (HeldInkFull), so they were not made, and the banner says so
+     * (overflowCount). A mark a later edit has changed since is left as it is.
+     */
+    private rollBack(ops: readonly CommitOp[]): void {
+        for (const op of [...ops].reverse()) {
+            const { id } = op.annotation;
+            if (this.byId.get(id) !== op.annotation) {
+                continue;
+            }
+            const base = baseOf(op);
+            this.pageMap(op.annotation.page).delete(id);
+            this.notifyPage(op.annotation.page);
+            if (base) {
+                this.applyMemory(base);
+                this.notifyPage(base.page);
+            } else {
+                this.byId.delete(id);
+            }
+        }
     }
 
     /** The applyLocal writes of these ops are over, written or not. */
@@ -1231,6 +1392,12 @@ export class AnnotationStore {
             listener();
         }
     }
+}
+
+/** See AnnotationStore.setRetryHooks. */
+export interface RetryHooks {
+    serverRows: NonNullable<RetryOptions['serverRows']>;
+    overtaken: (ids: readonly string[]) => void;
 }
 
 const EMPTY_PAGE: ReadonlyMap<string, Annotation> = new Map();

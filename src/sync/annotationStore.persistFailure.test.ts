@@ -326,7 +326,7 @@ describe('held ink and accounts (finding 1)', () => {
         expect((await db.ops.toArray()).map((op) => op.userId)).toEqual([A]);
     });
 
-    it('sign-out (clearAccountInk) forgets every account’s held ink, and keeps device-only scores’', async () => {
+    it('a sign-out that cannot tell whose session it ended (clearAccountInk()) forgets every account’s held ink, and keeps device-only scores’', async () => {
         await failedStrokeAs(A, 'a1');
         await failedStrokeAs(null, 'local-1');
         expect(unsavedMarkCount(A)).toBe(1);
@@ -436,24 +436,36 @@ describe('held ink across viewer mounts, and latest wins (finding 2)', () => {
         expect(ops.map((op) => `${op.type}:${op.annotation.color}`)).toEqual(['update:#300000']);
     });
 
-    it('is capped: past MAX_HELD_SCORES the oldest score no viewer has open goes', async () => {
+    it('is bounded without losing anything: past MAX_HELD_SCORES no held score goes, the new edit is undone and said so', async () => {
         vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const open = new AnnotationStore(db, 'local-open');
         await open.load();
         const detach = open.attach();
         const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
         await open.create({ ...stroke('kept'), docId: 'local-open' }).catch(() => undefined);
+        const others: AnnotationStore[] = [];
         for (let i = 0; i < MAX_HELD_SCORES + 2; i++) {
             const docId = `local-doc-${i}`;
             const other = new AnnotationStore(db, docId);
+            others.push(other);
             await other.create({ ...stroke(`m${i}`), docId }).catch(() => undefined);
         }
         full.mockRestore();
         detach();
 
+        // Before (round 1) the oldest unopened score's only copy went with a
+        // console warning. Now every held score stays...
         expect(heldMarksFor(null, 'local-open').map((a) => a.id)).toEqual(['kept']);
-        expect(heldMarksFor(null, 'local-doc-0')).toEqual([]);
-        expect(heldMarksFor(null, `local-doc-${MAX_HELD_SCORES + 1}`)).toHaveLength(1);
+        for (let i = 0; i < MAX_HELD_SCORES - 1; i++) {
+            expect(heldMarksFor(null, `local-doc-${i}`)).toHaveLength(1);
+        }
+        // ...and the scores past the bound never held theirs: undone on
+        // screen, with the banner's overflow state, not kept and then dropped.
+        for (let i = MAX_HELD_SCORES - 1; i < MAX_HELD_SCORES + 2; i++) {
+            expect(heldMarksFor(null, `local-doc-${i}`)).toEqual([]);
+            expect(others[i]?.getPage(0).has(`m${i}`)).toBe(false);
+            expect(others[i]?.overflowCount).toBe(1);
+        }
     });
 });
 

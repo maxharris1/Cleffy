@@ -7,6 +7,7 @@ import { displayNameOf, signOut } from '@/features/auth/session';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import { parseCachedAssignments } from '@/features/student/assignmentsCache';
+import { EndedSignInInkPrompt } from '@/features/student/EndedSignInInkPrompt';
 import { signOutEndedStudent } from '@/features/student/endedSignIn';
 import {
     fetchMyAssignments,
@@ -14,6 +15,7 @@ import {
     fetchSignInStillValid,
     type AssignedScore,
 } from '@/features/student/studentApi';
+import { type KnownScore, useEndedSignInInkPrompt } from '@/features/student/useEndedSignInInkPrompt';
 import { getDb } from '@/sync/db';
 import { Badge } from '@/ui/Badge';
 import { EmptyState } from '@/ui/EmptyState';
@@ -49,6 +51,8 @@ const AssignmentsView = ({ session }: { session: Session }) => {
     const [scores, setScores] = useState<AssignedScore[] | null>(null);
     const [loading, setLoading] = useState(true);
     const [notice, setNotice] = useState<string | null>(null);
+    const endedInk = useEndedSignInInkPrompt();
+    const { askFirst: askAboutHeldInk } = endedInk;
 
     useEffect(() => {
         let mounted = true;
@@ -121,6 +125,15 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                         // promises. No row: it was deleted with its teacher,
                         // and nothing it queued can ever upload. (The viewer
                         // asks the same of the server: fetchAccountDeleted.)
+                        // Ink a viewer could not store on this device goes
+                        // with the sign-out: Export is offered first.
+                        const known: Record<string, KnownScore> = Object.fromEntries(
+                            (assigned.status === 'fulfilled' ? assigned.value : []).map(({ document }) => [
+                                document.id,
+                                { title: document.title, doc: document },
+                            ]),
+                        );
+                        await askAboutHeldInk(session.user.id, roster === null, known);
                         const state = await signOutEndedStudent(roster === null);
                         navigate('/student', { replace: true, state });
                         return;
@@ -172,7 +185,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
             document.removeEventListener('visibilitychange', refresh);
             window.removeEventListener('focus', refresh);
         };
-    }, [session.user.id, navigate]);
+    }, [session.user.id, navigate, askAboutHeldInk]);
 
     const handleSignOut = async () => {
         await signOut();
@@ -180,6 +193,16 @@ const AssignmentsView = ({ session }: { session: Session }) => {
     };
     // Uploads (or asks about) unsynced marks first — sign-out clears them.
     const { requestSignOut, checking: savingBeforeSignOut, dialog: signOutDialog } = useGuardedSignOut(handleSignOut);
+
+    if (endedInk.prompt) {
+        return (
+            <EndedSignInInkPrompt
+                prompt={endedInk.prompt}
+                signingOut={endedInk.signingOut}
+                onSignOut={endedInk.proceed}
+            />
+        );
+    }
 
     return (
         <main className="paper-page min-h-full">

@@ -27,6 +27,8 @@ import { usePlayback } from '@/features/playback/usePlayback';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { NotesPanel } from '@/features/notes/NotesPanel';
 import { ShareDialog } from '@/features/share/ShareDialog';
+import { EndedSignInInkPrompt } from '@/features/student/EndedSignInInkPrompt';
+import { type KnownScore, useEndedSignInInkPrompt } from '@/features/student/useEndedSignInInkPrompt';
 import { signOutEndedStudent } from '@/features/student/endedSignIn';
 import { fetchAccountDeleted, fetchSignInStillValid } from '@/features/student/studentApi';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
@@ -242,8 +244,14 @@ const CloudViewer = ({ docId }: { docId: string }) => {
      * and drop the re-check.
      */
     const stateRef = useRef(state);
+    /** The score as last open, for the ended-sign-in prompt's Export after the viewer has closed. */
+    const lastScoreRef = useRef<KnownScore | null>(null);
+    const endedInk = useEndedSignInInkPrompt();
     useLayoutEffect(() => {
         stateRef.current = state;
+        if (state) {
+            lastScoreRef.current = { title: state.doc.title, doc: state.doc, role: state.role };
+        }
     }, [state]);
 
     const userId = session?.user.id;
@@ -344,6 +352,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 // archived or reset account signs in again and uploads what is
                 // queued; one deleted with its teacher never can.
                 const accountDeleted = await fetchAccountDeleted().catch(() => false);
+                // Ink this device could not store goes with the sign-out
+                // unless its last try writes it: Export is offered first.
+                const last = lastScoreRef.current;
+                await endedInk.askFirst(userId, accountDeleted, last ? { [docId]: last } : undefined);
                 const state = await signOutEndedStudent(accountDeleted);
                 navigate('/student', { replace: true, state });
                 return;
@@ -822,6 +834,16 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         }
     }, [searchParams, setSearchParams]);
 
+    if (endedInk.prompt) {
+        // Up until the sign-out completes, whatever the session does meanwhile.
+        return (
+            <EndedSignInInkPrompt
+                prompt={endedInk.prompt}
+                signingOut={endedInk.signingOut}
+                onSignOut={endedInk.proceed}
+            />
+        );
+    }
     if (!loading && !session) {
         // Mid sign-out after the teacher ended it: the student sign-in page is next.
         return accessLoss === 'ended' ? null : <Navigate to="/" replace />;

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as SignOutSyncModule from '@/sync/signOutSync';
 import { getDb } from '@/sync/db';
@@ -17,17 +17,27 @@ vi.mock('@/lib/supabase', () => ({
 
 // Flipped on to make the pre-sign-out upload itself fail.
 const drainFailure = vi.hoisted(() => ({ error: null as Error | null }));
+// Flipped on to make stamping the outbox wait on a database that never answers.
+const stampStall = vi.hoisted(() => ({ on: false }));
 vi.mock('@/sync/signOutSync', async (importOriginal) => {
     const actual = await importOriginal<typeof SignOutSyncModule>();
     return {
         ...actual,
         drainCloudOutboxes: (...args: Parameters<typeof actual.drainCloudOutboxes>) =>
             drainFailure.error ? Promise.reject(drainFailure.error) : actual.drainCloudOutboxes(...args),
+        stampOwnCloudOps: (...args: Parameters<typeof actual.stampOwnCloudOps>) =>
+            stampStall.on ? new Promise<number>(() => undefined) : actual.stampOwnCloudOps(...args),
     };
 });
 
-import { signOut, syncBeforeSignOut } from '@/features/auth/session';
+import {
+    SIGN_OUT_STORAGE_TIMEOUT_MS,
+    signOut,
+    signOutKeepingChanges,
+    syncBeforeSignOut,
+} from '@/features/auth/session';
 import { AnnotationStore } from '@/sync/annotationStore';
+import { ScribblerDb } from '@/sync/db';
 import { heldMarksFor, resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import type { Annotation } from '@/types/models';
 
@@ -166,7 +176,8 @@ describe('signOut', () => {
         expect(await db.entitlements.count()).toBe(0);
     });
 
-    it('forgets the account’s marks this device could not store, after the warning (SF-1)', async () => {
+    it('forgets the account’s marks this device could not store, after the warning (SF-1), and no other account’s', async () => {
+        getSession.mockResolvedValueOnce({ data: { session: { user: { id: 'user-1' } } } });
         const db = getDb();
         const store = new AnnotationStore(db, CLOUD_DOC);
         store.setAuthor('user-1');
@@ -174,8 +185,12 @@ describe('signOut', () => {
         const full = vi
             .spyOn(db.ops, 'bulkAdd')
             .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        const earlier = new AnnotationStore(db, CLOUD_DOC);
+        earlier.setAuthor('user-0');
+        await earlier.load();
         try {
             await store.create(mark('cloud-unsaved', CLOUD_DOC)).catch(() => undefined);
+            await earlier.create(mark('cloud-earlier', CLOUD_DOC)).catch(() => undefined);
         } finally {
             full.mockRestore();
         }
@@ -186,6 +201,8 @@ describe('signOut', () => {
         // The next account in this tab finds nothing of it to draw, export or retry.
         expect(heldMarksFor('user-1', CLOUD_DOC)).toEqual([]);
         expect(store.persistFailureCount).toBe(0);
+        // An account whose session ended here earlier without signing out keeps its own.
+        expect(heldMarksFor('user-0', CLOUD_DOC).map((a) => a.id)).toEqual(['cloud-earlier']);
         resetInkRecoveryForTests();
     });
 });
@@ -257,5 +274,83 @@ describe('syncBeforeSignOut', () => {
             drainFailure.error = null;
             vi.restoreAllMocks();
         }
+    });
+});
+
+describe('signOutKeepingChanges', () => {
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+        stampStall.on = false;
+        resetInkRecoveryForTests();
+    });
+
+    it('stalled keep-changes sign-out: a never-settling IndexedDB cannot hold it, and nothing is written after', async () => {
+        getSession.mockResolvedValue({ data: { session: { user: { id: 'user-1' } } } });
+        signOutAuth.mockClear();
+        // The ink's own database: it took the failed write, and now never answers.
+        const stalled = new ScribblerDb(`stalled-${crypto.randomUUID()}`);
+        const store = new AnnotationStore(stalled, CLOUD_DOC);
+        store.setAuthor('user-1');
+        await store.load();
+        const full = vi
+            .spyOn(stalled.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        await store.create(mark('cloud-unsaved', CLOUD_DOC)).catch(() => undefined);
+        full.mockRestore();
+        expect(heldMarksFor('user-1', CLOUD_DOC)).toHaveLength(1);
+
+        let unstall!: () => void;
+        const stall = new Promise<void>((resolve) => (unstall = resolve));
+        const transaction = stalled.transaction.bind(stalled) as (...args: unknown[]) => Promise<unknown>;
+        const stalledWrite = vi
+            .spyOn(stalled, 'transaction')
+            .mockImplementation(((...args: unknown[]) => stall.then(() => transaction(...args))) as typeof stalled.transaction);
+        // Stamping the outbox stalls too.
+        stampStall.on = true;
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+        let settled = false;
+        const signedOut = signOutKeepingChanges().finally(() => {
+            settled = true;
+        });
+        await vi.advanceTimersByTimeAsync(SIGN_OUT_STORAGE_TIMEOUT_MS - 1);
+        expect(settled).toBe(false);
+        expect(stalledWrite).toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(SIGN_OUT_STORAGE_TIMEOUT_MS * 3);
+
+        // Signed out regardless: the ended session is gone and its held ink with it.
+        await expect(signedOut).resolves.toBe(0);
+        expect(signOutAuth).toHaveBeenCalledWith({ scope: 'local' });
+        expect(heldMarksFor('user-1', CLOUD_DOC)).toEqual([]);
+
+        // The stalled database answers at last: the Retry still waiting on it writes nothing.
+        vi.useRealTimers();
+        unstall();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(await stalled.ops.count()).toBe(0);
+        expect(await stalled.annotations.get('cloud-unsaved')).toBeUndefined();
+        expect(heldMarksFor('user-1', CLOUD_DOC)).toEqual([]);
+    });
+
+    it('writes the held ink first when storage answers, so it is kept with the account’s queued changes', async () => {
+        getSession.mockResolvedValue({ data: { session: { user: { id: 'user-1' } } } });
+        const db = getDb();
+        await Promise.all([db.annotations.clear(), db.ops.clear()]);
+        const store = new AnnotationStore(db, CLOUD_DOC);
+        store.setAuthor('user-1');
+        await store.load();
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        await store.create(mark('cloud-unsaved', CLOUD_DOC)).catch(() => undefined);
+        full.mockRestore();
+
+        await expect(signOutKeepingChanges()).resolves.toBe(1);
+
+        expect((await db.ops.toArray()).map((op) => [op.annotationId, op.userId])).toEqual([
+            ['cloud-unsaved', 'user-1'],
+        ]);
+        expect(heldMarksFor('user-1', CLOUD_DOC)).toEqual([]);
     });
 });

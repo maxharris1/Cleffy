@@ -1,8 +1,24 @@
 import { getDb, type LocalAnnotation } from '@/sync/db';
 import { isCloudDocId } from '@/sync/docIds';
-import { heldMarksFor, openMarksFor, supersededBy } from '@/sync/inkRecovery';
+import { conflictMarksFor, heldChainsFor, heldMarksFor, openMarksFor, overtakes } from '@/sync/inkRecovery';
 import { foreignMarkIds } from '@/sync/opOwnership';
 import type { Annotation } from '@/types/models';
+
+/** The marks an export bakes in, and what the user must be told about them. */
+export interface ExportMarks {
+    annotations: Annotation[];
+    /**
+     * Set when the export leaves marks out: this device's storage could not
+     * be read and no viewer of the score is open, so only the marks not yet
+     * saved (still in memory) are in it — `unsaved` of them.
+     */
+    incomplete: { unsaved: number } | null;
+    /**
+     * This account's unsaved versions of marks a newer version overtook
+     * (inkRecovery.overtakes): baked in beside the newer one, so both show.
+     */
+    conflicts: number;
+}
 
 /**
  * The marks an export bakes in: what `userId`'s viewer draws, read from the
@@ -14,22 +30,22 @@ import type { Annotation } from '@/types/models';
  * disk; see inkRecovery) are taken from memory instead: Export is what the
  * "couldn't be saved" banner offers to keep them, so it must not read the
  * older copy, or none at all. Only `userId`'s own — another account's held
- * ink in this tab never reaches its export — and not where a later write on
- * this device has replaced one (supersededBy). A device-only score's viewer
+ * ink in this tab never reaches its export. A device-only score's viewer
  * draws for no account, so its held ink is under none, whoever is signed in.
+ *
+ * A held mark a newer version has overtaken (another tab's edit, stored or
+ * uploaded) does not replace or hide that version: both are baked in, the
+ * user's under an id of its own, and `conflicts` says so.
  *
  * When the database cannot be read at all — the failure that held the marks
  * may be a closed or broken database — the open viewer's memory is the
  * export: every mark it draws, held ones included. With no viewer open, the
- * held marks alone (and a warning).
+ * held marks alone, and `incomplete` says so.
  */
-export const loadExportAnnotations = async (
-    docId: string,
-    userId: string | null,
-    pageIndex?: number,
-): Promise<Annotation[]> => {
+export const loadExportMarks = async (docId: string, userId: string | null, pageIndex?: number): Promise<ExportMarks> => {
     const wanted = (a: Annotation) => !a.deletedAt && (pageIndex === undefined || a.page === pageIndex);
     const inkAuthor = isCloudDocId(docId) ? userId : null;
+    const kept = conflictMarksFor(inkAuthor, docId).map(asConflict).filter(wanted);
     let rows: LocalAnnotation[];
     let foreign: Set<string>;
     try {
@@ -46,14 +62,59 @@ export const loadExportAnnotations = async (
                 : 'Could not read this device’s marks; exporting only the unsaved ones',
             err,
         );
-        return (open ?? heldMarksFor(inkAuthor, docId)).filter(wanted);
+        const held = (open ?? heldMarksFor(inkAuthor, docId)).filter(wanted);
+        return {
+            annotations: [...held, ...kept],
+            incomplete: open ? null : { unsaved: held.length + kept.length },
+            conflicts: kept.length,
+        };
     }
     const mirror = new Map(rows.map((row) => [row.id, row]));
     const marks = new Map<string, Annotation>(rows.map(({ pending: _pending, ...a }) => [a.id, a]));
-    for (const held of heldMarksFor(inkAuthor, docId)) {
-        if (!supersededBy(held, mirror.get(held.id))) {
-            marks.set(held.id, held);
+    const overtaken: Annotation[] = [];
+    for (const [id, { base, latest }] of heldChainsFor(inkAuthor, docId)) {
+        if (overtakes(mirror.get(id), base, latest)) {
+            overtaken.push(asConflict(latest));
+        } else {
+            marks.set(id, latest);
         }
     }
-    return [...marks.values()].filter((a) => wanted(a) && !foreign.has(a.id));
+    const conflicts = [...kept, ...overtaken.filter(wanted)];
+    return {
+        annotations: [...[...marks.values()].filter((a) => wanted(a) && !foreign.has(a.id)), ...conflicts],
+        incomplete: null,
+        conflicts: conflicts.length,
+    };
+};
+
+/** loadExportMarks' marks alone. */
+export const loadExportAnnotations = async (
+    docId: string,
+    userId: string | null,
+    pageIndex?: number,
+): Promise<Annotation[]> => (await loadExportMarks(docId, userId, pageIndex)).annotations;
+
+/** An overtaken mark's unsaved version, baked in beside the newer one under an id of its own. */
+const asConflict = (held: Annotation): Annotation => ({ ...held, id: `${held.id}:unsaved` });
+
+const marksWord = (n: number): string => (n === 1 ? 'mark' : 'marks');
+
+/**
+ * What the export menu tells the user about an export that is not simply
+ * every mark: one that leaves marks out (and which), or that has two
+ * versions of some. Null when it is complete and has no conflicts.
+ */
+export const exportNotice = ({ incomplete, conflicts }: Pick<ExportMarks, 'incomplete' | 'conflicts'>): string | null => {
+    const parts: string[] = [];
+    if (incomplete) {
+        parts.push(
+            `This export is missing marks. This device’s storage couldn’t be read, so it has only the ${incomplete.unsaved} unsaved ${marksWord(incomplete.unsaved)} this tab still holds, not the score’s saved marks.`,
+        );
+    }
+    if (conflicts > 0) {
+        parts.push(
+            `${conflicts} of your unsaved ${marksWord(conflicts)} changed elsewhere before ${conflicts === 1 ? 'it' : 'they'} could be saved here: the export has both versions.`,
+        );
+    }
+    return parts.length > 0 ? parts.join(' ') : null;
 };
