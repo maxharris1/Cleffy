@@ -718,6 +718,22 @@ for an account already gone writes nothing; and no client role can call it or
 read the table. Proven against the local stack on 2026-10-22: all 29 checks
 passed.
 
+`support_inbound_lease.sql` proves `20261022110200_support_inbound_lease.sql`
+(launchfix P3, SF-2 / Codex B1): the first webhook delivery inserts its
+`support_messages` row and holds it under a lease; a redelivery while it is
+held is `busy`, not a duplicate; only the lease holder can write the body or
+finish the row; a delivery that died is resumed by the next one once its lease
+runs out (no second row, the stored body handed back, the dead holder's writes
+refused); a completed row is the only duplicate. A forward the budget cannot
+pay for is `forward_deferred` (not an attempt) and `claim_due_support_messages`
+takes it only once due, under a fresh lease that a second run or a webhook
+redelivery cannot share; a deferred row a redelivery finds unleased is resumed.
+Failed attempts back off and, at the attempt cap, are completed with their
+error; store-only and refused rows complete; the state is constrained to the
+three values; the retry tick runs and is scheduled; and no client role can
+call any of it or read the table. Proven against the local stack on
+2026-10-22: all 36 checks passed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

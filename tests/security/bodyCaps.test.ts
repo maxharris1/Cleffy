@@ -133,17 +133,20 @@ describe('webhook bodies: the signature is verified over exactly the capped byte
         expect(WEBHOOK_BODY_MAX_BYTES).toBe(256 * 1024);
     });
 
-    it('stripe-webhook and resend-inbound read their raw body capped, before verifying it', () => {
-        for (const [path, verify] of [
-            ['stripe-webhook/index.ts', 'verifyStripeSignature(rawBody'],
-            ['resend-inbound/index.ts', 'verifySvixSignature('],
-        ] as const) {
-            const text = source(path);
-            const read = text.indexOf('readCappedText(req, WEBHOOK_BODY_MAX_BYTES)');
-            expect(read, path).toBeGreaterThan(-1);
-            expect(text.indexOf(verify), path).toBeGreaterThan(read);
-            expect(text, path).toContain('jsonResponse(PAYLOAD_TOO_LARGE, 413)');
-        }
+    it('stripe-webhook reads its raw body capped, before verifying it', () => {
+        const text = source('stripe-webhook/index.ts');
+        const read = text.indexOf('readCappedText(req, WEBHOOK_BODY_MAX_BYTES)');
+        expect(read).toBeGreaterThan(-1);
+        expect(text.indexOf('verifyStripeSignature(rawBody')).toBeGreaterThan(read);
+        expect(text).toContain('jsonResponse(PAYLOAD_TOO_LARGE, 413)');
+    });
+
+    it('resend-inbound reads its raw body through the injected capped reader, before verifying it', () => {
+        const handler = source('resend-inbound/handler.ts');
+        const read = handler.indexOf('deps.readText(req, WEBHOOK_BODY_MAX_BYTES)');
+        expect(read).toBeGreaterThan(-1);
+        expect(handler.indexOf('deps.verifySignature(raw.value')).toBeGreaterThan(read);
+        expect(source('resend-inbound/index.ts')).toContain('readText: readCappedText,');
     });
 });
 
