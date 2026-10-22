@@ -18702,3 +18702,137 @@ revoke all on function public.resolve_entitlements (uuid) from public;
 revoke all on function public.resolve_entitlements (uuid) from anon;
 revoke all on function public.resolve_entitlements (uuid) from authenticated;
 grant execute on function public.resolve_entitlements (uuid) to service_role;
+
+-- ===== supabase/migrations/20261022100400_storage_object_names.sql =====
+-- Clients may write only the object names the app writes, and may not create
+-- a score that is already archived (launch re-audit SF-3, Codex A2).
+--
+-- The scores and thumbnails insert/update policies (20260801160754_rls.sql,
+-- 20260902130000_thumbnails.sql) check only the first folder: the caller must
+-- own the score named there. Anything below it went -- any name, any depth,
+-- any number of objects -- so an owner could park arbitrary files under their
+-- own score's folder, outside every quota, and in thumbnails in particular
+-- under names nothing ever lists or cleans up.
+--
+-- What the app writes (grepped 2026-10-22):
+--   scores      {documentId}/original.pdf             storageUpload.ts (upload and
+--                                                       TUS), documentsService.ts
+--               {documentId}/pre-import-original.pdf  documentsService.replaceDocumentPdf
+--                                                       (the smart-import backup;
+--                                                       document_imports.backup_path
+--                                                       is pinned to it)
+--   thumbnails  {documentId}/{rev}.jpg                thumbnailRemote.ts
+-- documentId is a lower-case uuid (crypto.randomUUID(), and documents.id::text),
+-- rev a non-negative int. The Edge Functions write as the service role, which
+-- these policies do not reach.
+--
+-- RESTRICTIVE, beside the permissive owner policies, as
+-- 20261020180700_read_only_seats_storage.sql does: ANDed with whatever else
+-- allows the write, so this neither copies nor can undo those policies. Every
+-- other bucket answers true. UPDATE has USING and WITH CHECK, so an upsert's
+-- update arm (upload with upsert: true, every TUS upload) and a move are held
+-- to the same names. Reads and deletes are untouched: removing an odd name
+-- left from before this migration still works.
+--
+-- documents: billing_correctness's score cap (20261007120300, the
+-- documents_enforce_score_cap trigger) skips a row inserted with archived_at
+-- already set, since an archived score claims no slot. A client could insert
+-- any number of them -- readable, exportable, and each one a stored PDF -- so a
+-- client insert must arrive active. Archiving stays the server's (lapse,
+-- read-only seats, takedown); the app never inserts one archived.
+--
+-- Rerunnable: each policy is dropped before it is created.
+
+drop policy if exists scores_object_name_insert on storage.objects;
+
+create policy scores_object_name_insert on storage.objects as restrictive for insert to authenticated
+with check (
+    bucket_id is distinct from 'scores'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(original|pre-import-original)\.pdf$'
+);
+
+drop policy if exists scores_object_name_update on storage.objects;
+
+create policy scores_object_name_update on storage.objects as restrictive for update to authenticated
+using (
+    bucket_id is distinct from 'scores'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(original|pre-import-original)\.pdf$'
+)
+with check (
+    bucket_id is distinct from 'scores'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(original|pre-import-original)\.pdf$'
+);
+
+drop policy if exists thumbnails_object_name_insert on storage.objects;
+
+create policy thumbnails_object_name_insert on storage.objects as restrictive for insert to authenticated
+with check (
+    bucket_id is distinct from 'thumbnails'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(0|[1-9][0-9]{0,9})\.jpg$'
+);
+
+drop policy if exists thumbnails_object_name_update on storage.objects;
+
+create policy thumbnails_object_name_update on storage.objects as restrictive for update to authenticated
+using (
+    bucket_id is distinct from 'thumbnails'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(0|[1-9][0-9]{0,9})\.jpg$'
+)
+with check (
+    bucket_id is distinct from 'thumbnails'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(0|[1-9][0-9]{0,9})\.jpg$'
+);
+
+drop policy if exists documents_insert_active_only on public.documents;
+
+create policy documents_insert_active_only on public.documents as restrictive for insert to authenticated
+with check (archived_at is null);
+
+-- ===== supabase/migrations/20261022100500_storage_bucket_limits.sql =====
+-- Size and type limits on the two buckets, from a migration (launch re-audit
+-- SF-3, Codex A2).
+--
+-- The limits lived only where the bucket was made: supabase/config.toml and
+-- seed.sql for the local stack, the thumbnails migration's own insert
+-- (20260902130000), and a dashboard step for hosted scores (rls.sql notes that
+-- hosted storage.buckets writes from migrations can hit ownership errors). A
+-- fresh replay onto a wiped project therefore had no migration that sets the
+-- scores bucket's 50 MiB / application/pdf limit at all.
+--
+-- Same values as config.toml and seed.sql: scores 50 MiB of application/pdf,
+-- thumbnails 2 MiB of image/jpeg. A missing bucket is created private; an
+-- existing one keeps its `public` flag and gets the limits.
+--
+-- Hosted projects may refuse the write (42501, or a platform trigger's raise),
+-- so each bucket is its own block that reports and moves on rather than
+-- failing the replay; the notice says which happened, and
+-- tests/sql/storage_name_limits.sql checks the result. If it was refused, set
+-- the limits in the dashboard (Storage -> bucket -> settings). Rerunnable.
+
+do $$
+begin
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values ('scores', 'scores', false, 52428800, array['application/pdf'])
+    on conflict (id) do update
+    set file_size_limit = excluded.file_size_limit,
+        allowed_mime_types = excluded.allowed_mime_types;
+    raise notice 'scores bucket limits applied: 50 MiB, application/pdf';
+exception
+    when insufficient_privilege or raise_exception then
+        raise notice 'scores bucket limits NOT applied here (% %): set them in the dashboard', sqlstate, sqlerrm;
+end;
+$$;
+
+do $$
+begin
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values ('thumbnails', 'thumbnails', false, 2097152, array['image/jpeg'])
+    on conflict (id) do update
+    set file_size_limit = excluded.file_size_limit,
+        allowed_mime_types = excluded.allowed_mime_types;
+    raise notice 'thumbnails bucket limits applied: 2 MiB, image/jpeg';
+exception
+    when insufficient_privilege or raise_exception then
+        raise notice 'thumbnails bucket limits NOT applied here (% %): set them in the dashboard', sqlstate, sqlerrm;
+end;
+$$;
