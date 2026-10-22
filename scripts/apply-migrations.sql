@@ -20352,3 +20352,2231 @@ $$;
 
 revoke all on function public.claim_superseded_thumbnails (uuid[], integer) from public, anon;
 grant execute on function public.claim_superseded_thumbnails (uuid[], integer) to authenticated;
+
+-- ===== supabase/migrations/20261022110000_student_claim_reservation.sql =====
+-- Student claims: a durable reservation, taken before any password is written.
+--
+-- student-claim used to read the roster row by code hash, set the account's
+-- password, sign in, and only then commit -- and the commit checked neither the
+-- code hash nor who was claiming. So:
+--
+--  * two children typing the same card at once both set a password; the one
+--    that lost the commit had already overwritten the winner's, and nothing
+--    undid it -- the winner's freshly chosen password stopped working;
+--  * a claim in flight across a teacher's reset committed against the OLD code
+--    (the commit never looked at login_code_hash), spending the new card too,
+--    and its password write could land after the reset's scramble, leaving the
+--    old card's holder a working password and session the teacher thought they
+--    had revoked.
+--
+-- Now every claim first takes a RESERVATION (reserve_student_claim): one per
+-- roster row, bound to the login_code_hash it was taken for, held for
+-- p_ttl_seconds. Only the holder writes a password, and the claim commits only
+-- if the row still carries that hash and the reservation is still theirs
+-- (complete_student_claim). A second claim on the same card is told the card is
+-- busy and writes nothing. A teacher's reset takes a reservation of its own
+-- before it scrambles the password (begin_student_code_reset), so a reset and a
+-- claim can never interleave: whichever comes second is told to wait. Archiving
+-- BLOCKS a claim in flight -- its commit refuses an archived row -- but leaves
+-- the reservation until that claim lets go, so a reset of the archived student
+-- (or a new claim after a restore) still waits for the stale claim instead of
+-- racing its password write. Any other change of the code hash refuses while a
+-- live claim holds it.
+--
+-- The TTL is longer than an Edge Function can run (400 s wall clock on the paid
+-- plan), so by the time a reservation expires its holder can no longer be
+-- writing anything. A holder that fails cleanly releases it at once
+-- (release_student_claim); only a crashed request leaves it to expire.
+--
+-- Service role only. RLS on with no policy, every client grant revoked, like
+-- support_messages: the code hash a reservation carries never leaves the server.
+create table if not exists public.student_claim_reservations (
+    student_id uuid primary key references public.managed_students (id) on delete cascade,
+    -- What the holder presents to complete or release. A new one per reservation.
+    reservation uuid not null default gen_random_uuid(),
+    -- 'claim': student-claim, holding the card it was taken for.
+    -- 'reset': a teacher's reset of the code, from student-provision.
+    kind text not null check (kind in ('claim', 'reset')),
+    -- The code hash a claim was taken for; null for a reset of a claimed row.
+    login_code_hash text,
+    reserved_until timestamptz not null,
+    created_at timestamptz not null default now(),
+    constraint student_claim_reservations_claim_has_hash check (kind <> 'claim' or login_code_hash is not null)
+);
+
+alter table public.student_claim_reservations enable row level security;
+
+revoke all on table public.student_claim_reservations from public;
+
+revoke all on table public.student_claim_reservations from anon;
+
+revoke all on table public.student_claim_reservations from authenticated;
+
+grant all on table public.student_claim_reservations to service_role;
+
+-- ---------------------------------------------------------------------------
+-- reserve_student_claim: the claim's first write.
+-- ---------------------------------------------------------------------------
+-- Answers {status: 'reserved', reservation, student_id, student_user_id,
+-- display_name}, {status: 'busy', retry_after_seconds} when another claim or a
+-- reset holds the row, or {status: 'not_found'} for a hash that selects no
+-- unarchived, unclaimed row (or more than one: a collision is refused, as the
+-- old maybeSingle() lookup refused it).
+--
+-- The roster row is locked first, then the reservation: the same order as
+-- complete_student_claim and begin_student_code_reset, so the three serialize
+-- on one row lock and cannot deadlock.
+create or replace function public.reserve_student_claim (p_code_hash text, p_ttl_seconds integer default 600)
+returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_student public.managed_students;
+    v_held public.student_claim_reservations;
+    v_reservation uuid;
+begin
+    if p_code_hash is null or length(p_code_hash) = 0 then
+        return jsonb_build_object('status', 'not_found');
+    end if;
+    begin
+        select * into strict v_student
+        from public.managed_students
+        where login_code_hash = p_code_hash and archived_at is null and claimed_at is null
+        for update;
+    exception
+        when no_data_found or too_many_rows then
+            return jsonb_build_object('status', 'not_found');
+    end;
+
+    select * into v_held from public.student_claim_reservations where student_id = v_student.id for update;
+    if found and v_held.reserved_until > now() then
+        return jsonb_build_object(
+            'status', 'busy',
+            'retry_after_seconds', greatest(1, ceil(extract(epoch from v_held.reserved_until - now()))::integer)
+        );
+    end if;
+
+    v_reservation := gen_random_uuid();
+    insert into public.student_claim_reservations (student_id, reservation, kind, login_code_hash, reserved_until)
+    values (v_student.id, v_reservation, 'claim', p_code_hash,
+            now() + make_interval(secs => greatest(coalesce(p_ttl_seconds, 600), 30)))
+    on conflict (student_id) do update
+    set reservation = excluded.reservation,
+        kind = excluded.kind,
+        login_code_hash = excluded.login_code_hash,
+        reserved_until = excluded.reserved_until,
+        created_at = now();
+
+    return jsonb_build_object(
+        'status', 'reserved',
+        'reservation', v_reservation,
+        'student_id', v_student.id,
+        'student_user_id', v_student.student_user_id,
+        'display_name', v_student.display_name
+    );
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- complete_student_claim: the commit, only for the holder of the hash.
+-- ---------------------------------------------------------------------------
+-- 'claimed', or 'lost' when the row no longer carries p_code_hash, was archived
+-- or claimed meanwhile, or the reservation is no longer p_reservation (released,
+-- or expired and taken by another claim or a reset). A username another row
+-- holds raises 23505 from the unique index, as the old UPDATE did; the
+-- reservation is untouched then, and the caller releases it.
+create or replace function public.complete_student_claim (
+    p_student uuid,
+    p_reservation uuid,
+    p_code_hash text,
+    p_username text
+) returns text language plpgsql security definer
+set search_path = public as $$
+begin
+    perform 1 from public.managed_students where id = p_student for update;
+    perform 1
+    from public.student_claim_reservations
+    where student_id = p_student and reservation = p_reservation and kind = 'claim' and login_code_hash = p_code_hash
+    for update;
+    if not found then
+        return 'lost';
+    end if;
+
+    update public.managed_students
+    set username = p_username, claimed_at = now(), login_code_hash = null
+    where id = p_student and login_code_hash = p_code_hash and archived_at is null and claimed_at is null;
+    if not found then
+        return 'lost';
+    end if;
+
+    delete from public.student_claim_reservations where student_id = p_student;
+    return 'claimed';
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- release_student_claim: a holder that will not complete hands the row back.
+-- ---------------------------------------------------------------------------
+-- Only its own reservation: a stale holder cannot release a newer one.
+create or replace function public.release_student_claim (p_student uuid, p_reservation uuid)
+returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    delete from public.student_claim_reservations where student_id = p_student and reservation = p_reservation;
+    return found;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- begin_student_code_reset: a teacher's reset reserves the row before it
+-- scrambles the password.
+-- ---------------------------------------------------------------------------
+-- 'reserved', or 'busy' while a live claim holds the row: the reset must not
+-- scramble a password a claim is about to set, nor rotate the code under it.
+-- A live reservation of the reset's own kind (a reset retried after a partial
+-- failure) is taken over. The reservation is cleared when the reset writes the
+-- new code hash (student_claim_reservation_guard) and otherwise expires.
+create or replace function public.begin_student_code_reset (p_student uuid, p_ttl_seconds integer default 600)
+returns text language plpgsql security definer
+set search_path = public as $$
+declare
+    v_held public.student_claim_reservations;
+    v_hash text;
+begin
+    select login_code_hash into v_hash from public.managed_students where id = p_student for update;
+    if not found then
+        return 'not_found';
+    end if;
+    select * into v_held from public.student_claim_reservations where student_id = p_student for update;
+    if found and v_held.kind = 'claim' and v_held.reserved_until > now() then
+        return 'busy';
+    end if;
+    insert into public.student_claim_reservations (student_id, kind, login_code_hash, reserved_until)
+    values (p_student, 'reset', v_hash, now() + make_interval(secs => greatest(coalesce(p_ttl_seconds, 600), 30)))
+    on conflict (student_id) do update
+    set reservation = gen_random_uuid(),
+        kind = 'reset',
+        login_code_hash = excluded.login_code_hash,
+        reserved_until = excluded.reserved_until,
+        created_at = now();
+    return 'reserved';
+end;
+$$;
+
+revoke all on function public.reserve_student_claim (text, integer) from public, anon, authenticated;
+
+grant execute on function public.reserve_student_claim (text, integer) to service_role;
+
+revoke all on function public.complete_student_claim (uuid, uuid, text, text) from public, anon, authenticated;
+
+grant execute on function public.complete_student_claim (uuid, uuid, text, text) to service_role;
+
+revoke all on function public.release_student_claim (uuid, uuid) from public, anon, authenticated;
+
+grant execute on function public.release_student_claim (uuid, uuid) to service_role;
+
+revoke all on function public.begin_student_code_reset (uuid, integer) from public, anon, authenticated;
+
+grant execute on function public.begin_student_code_reset (uuid, integer) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The guard: what a change to the row does to its reservation.
+-- ---------------------------------------------------------------------------
+--  * archived: nothing here. The claim's commit refuses an archived row, the
+--    archive's ban stops any sign-in, and the reservation stays until its
+--    holder releases it (or it expires), so a reset of the archived row waits
+--    for the claim rather than scrambling before its password write lands.
+--  * the code hash changes other than by the claim's own commit: refused while
+--    a live CLAIM holds the row (so no path can rotate a card under a claim in
+--    flight), otherwise the reservation is cleared -- a reset's own one
+--    included, which is how a finished reset hands the row back.
+create or replace function public.student_claim_reservation_guard () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if new.login_code_hash is distinct from old.login_code_hash
+        and not (old.claimed_at is null and new.claimed_at is not null) then
+        if exists (
+            select 1 from public.student_claim_reservations
+            where student_id = new.id and kind = 'claim' and reserved_until > now()
+        ) then
+            raise exception 'student_claim_in_progress'
+                using errcode = '55006',
+                      hint = 'A claim holds this student''s card; try again once it finishes.';
+        end if;
+        delete from public.student_claim_reservations where student_id = new.id;
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.student_claim_reservation_guard () from public, anon, authenticated;
+
+drop trigger if exists managed_students_claim_reservation_guard on public.managed_students;
+
+create trigger managed_students_claim_reservation_guard
+after update of login_code_hash on public.managed_students
+for each row execute function public.student_claim_reservation_guard ();
+
+-- ===== supabase/migrations/20261022110100_account_deletion_pending.sql =====
+-- Account deletion: a durable "deletion pending" marker, taken first.
+--
+-- delete-account (_shared/accountDeletion.ts) deleted a teacher's students and
+-- scores in two fixed sweeps while the account was still live, so a score
+-- uploaded or a student provisioned from another tab after the second sweep
+-- listed its rows survived it: the score's row went with the auth user's
+-- cascade but its Storage objects stayed behind, and a student account created
+-- mid-delete (student-provision) was left with no teacher at all.
+--
+-- Now the deletion writes a marker for the account BEFORE anything else, and
+-- while it stands the database refuses any new score (documents) or roster row
+-- (managed_students) for that account, whoever inserts it -- the owner's own
+-- tab, an import under the service role, student-provision. The cleanup then
+-- works from a state that cannot grow: it sweeps until a pass finds nothing.
+--
+-- The marker and the inserts serialize on a per-account advisory lock: taking
+-- the marker waits for every insert for that account already in flight to
+-- commit, and an insert that starts afterwards sees the marker. So no row can
+-- slip in between the marker and the sweep that lists it.
+--
+-- Its lifecycle:
+--   * begin_account_deletion   -- the first step of every attempt; counts it;
+--   * settle_account_deletion  -- 'abandoned' when the attempt deleted nothing
+--     (billing could not be stopped), which clears it and gives the account
+--     back as it was -- but only if no other attempt is on record: a marker an
+--     earlier attempt left after deleting part of the account, or one a second
+--     tab is sweeping under right now, stays; 'failed' when it stopped part-way,
+--     which KEEPS it (with the error) so the half-deleted account cannot grow
+--     while the person retries;
+--   * the auth user's delete cascades it away when the deletion completes.
+--
+-- Service role only, like support_messages.
+create table if not exists public.account_deletions (
+    user_id uuid primary key references auth.users (id) on delete cascade,
+    started_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    attempts integer not null default 1,
+    -- The failure code of the last attempt that stopped part-way.
+    last_error text
+);
+
+alter table public.account_deletions enable row level security;
+
+revoke all on table public.account_deletions from public;
+
+revoke all on table public.account_deletions from anon;
+
+revoke all on table public.account_deletions from authenticated;
+
+grant all on table public.account_deletions to service_role;
+
+-- The per-account lock both sides take: exclusive to set the marker, shared to
+-- insert. hashtext collisions only make two accounts wait on each other.
+create or replace function public.account_deletion_lock_key (p_user uuid) returns bigint
+language sql immutable
+set search_path = public as $$
+    select (hashtext('account_deletion')::bigint << 32) | (hashtext(p_user::text)::bigint & 4294967295);
+$$;
+
+revoke all on function public.account_deletion_lock_key (uuid) from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- begin / settle (service role only)
+-- ---------------------------------------------------------------------------
+create or replace function public.begin_account_deletion (p_user uuid) returns integer
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_attempts integer;
+begin
+    if p_user is null then
+        raise exception 'p_user is required' using errcode = '22004';
+    end if;
+    -- Waits for any score or roster insert for this account still in flight.
+    perform pg_advisory_xact_lock (public.account_deletion_lock_key (p_user));
+    -- An account already gone (a retry after the auth delete landed) has
+    -- nothing left to guard: 0, and no marker.
+    if not exists (select 1 from auth.users where id = p_user) then
+        return 0;
+    end if;
+    insert into public.account_deletions (user_id) values (p_user)
+    on conflict (user_id) do update
+    set attempts = public.account_deletions.attempts + 1, updated_at = now()
+    returning attempts into v_attempts;
+    return v_attempts;
+end;
+$$;
+
+create or replace function public.settle_account_deletion (p_user uuid, p_outcome text, p_error text default null)
+returns void language plpgsql security definer
+set search_path = public as $$
+begin
+    if p_outcome = 'abandoned' then
+        -- Only a marker this attempt alone wrote: attempts counts every begin,
+        -- so 1 with no recorded failure means no earlier attempt deleted
+        -- anything and no other attempt is running on it.
+        delete from public.account_deletions where user_id = p_user and attempts = 1 and last_error is null;
+    elsif p_outcome = 'failed' then
+        update public.account_deletions
+        set last_error = left(p_error, 200), updated_at = now()
+        where user_id = p_user;
+    else
+        raise exception 'unknown outcome: %', p_outcome using errcode = '22023';
+    end if;
+end;
+$$;
+
+revoke all on function public.begin_account_deletion (uuid) from public, anon, authenticated;
+
+grant execute on function public.begin_account_deletion (uuid) to service_role;
+
+revoke all on function public.settle_account_deletion (uuid, text, text) from public, anon, authenticated;
+
+grant execute on function public.settle_account_deletion (uuid, text, text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The refusal: no new score or roster row for an account being deleted
+-- ---------------------------------------------------------------------------
+-- SECURITY DEFINER so the owner's own tab (authenticated, no grant on the
+-- table) is checked against the marker it cannot read.
+create or replace function public.refuse_insert_during_account_deletion () returns trigger
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_owner uuid;
+begin
+    -- Separate statements: a field reference is planned against this table's
+    -- row type, so naming the other table's column would fail here.
+    if tg_table_name = 'documents' then
+        v_owner := new.owner_id;
+    else
+        v_owner := new.teacher_id;
+    end if;
+    if v_owner is null then
+        return new;
+    end if;
+    -- Held to this transaction's end, so a deletion starting now waits for it.
+    perform pg_advisory_xact_lock_shared (public.account_deletion_lock_key (v_owner));
+    if exists (select 1 from public.account_deletions where user_id = v_owner) then
+        raise exception 'account_deletion_pending'
+            using errcode = '55000',
+                  hint = 'This account is being deleted, so nothing new can be added to it.';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.refuse_insert_during_account_deletion () from public, anon, authenticated;
+
+drop trigger if exists documents_refuse_during_account_deletion on public.documents;
+
+create trigger documents_refuse_during_account_deletion
+before insert on public.documents
+for each row execute function public.refuse_insert_during_account_deletion ();
+
+drop trigger if exists managed_students_refuse_during_account_deletion on public.managed_students;
+
+create trigger managed_students_refuse_during_account_deletion
+before insert on public.managed_students
+for each row execute function public.refuse_insert_during_account_deletion ();
+
+-- ===== supabase/migrations/20261022110200_support_inbound_lease.sql =====
+-- Inbound support mail: a processing state and a reclaimable lease, so a
+-- delivery that dies part-way is resumed rather than lost or doubled.
+--
+-- resend-inbound used to INSERT ... ON CONFLICT DO NOTHING and treat a lost
+-- insert as "duplicate, 200". That made the FIRST delivery the only one that
+-- ever did any work: if it died after the insert -- the body fetch failed, the
+-- body write failed (and was ignored), the forward errored -- every retry Svix
+-- sent hit the duplicate path, and the message sat unforwarded for good. And
+-- the forward itself was a direct POST with no budget, outside the shared mail
+-- split (_shared/mailBudget.ts) that everything else we send counts against.
+--
+-- Now each row moves through:
+--
+--   processing        -- a delivery holds it under a lease (lease_holder,
+--                        lease_until); unleased, it is due for a resume at
+--                        next_attempt_at;
+--   forward_deferred  -- stored, with its body, but the contentReportAck share
+--                        of the mail budget is spent; retried when it reopens;
+--   completed         -- forwarded, stored-only, or refused for good (the loop
+--                        guard, a forward Resend rejected, no body at all, or
+--                        out of attempts). A completed row is the only kind a
+--                        later delivery treats as a duplicate.
+--
+-- A delivery CLAIMS the row (claim_support_message): it inserts it, or takes
+-- an existing one that is not completed and not leased by anyone else. Only the
+-- lease holder can save the body or finish the row. A lease that runs out
+-- (the function was killed) makes the row claimable again -- by Svix's next
+-- retry or by the retry tick below -- and the forward carries an
+-- Idempotency-Key derived from Resend's email id, so a resumed send can never
+-- deliver a second copy.
+--
+-- The retry path is the content-notice pattern (20261020150000): pg_cron runs
+-- support_inbound_retry_tick() every five minutes; when anything is due it
+-- POSTs to resend-inbound with the shared secret from the vault
+-- (support_inbound_url, support_inbound_secret = the function's
+-- SUPPORT_RETRY_SECRET). Without those secrets the tick is a no-op and rows
+-- resume only on Svix's own retries.
+--
+-- Rows from before this migration are completed: they were handled (or not)
+-- under the old rules, and resuming them is a decision for a person.
+alter table public.support_messages
+    add column if not exists status text not null default 'completed',
+    add column if not exists lease_holder uuid,
+    add column if not exists lease_until timestamptz,
+    add column if not exists attempts integer not null default 0,
+    add column if not exists next_attempt_at timestamptz,
+    add column if not exists completed_at timestamptz,
+    -- Resend's id for the forward we sent, once it was accepted.
+    add column if not exists forward_resend_id text,
+    -- A forward whose outcome was unknown already spent its share of the mail
+    -- budget; its retry (same Idempotency-Key, which Resend replays) must not
+    -- reserve again.
+    add column if not exists forward_budget_held boolean not null default false;
+
+alter table public.support_messages alter column status set default 'processing';
+
+do $$
+begin
+    alter table public.support_messages add constraint support_messages_status
+        check (status in ('processing', 'forward_deferred', 'completed'));
+exception
+    when duplicate_object then null;
+end;
+$$;
+
+-- What the retry tick looks for, without scanning the table.
+create index if not exists support_messages_due on public.support_messages (next_attempt_at)
+where status <> 'completed';
+
+-- How many failed attempts a row gets before it is completed with its error.
+-- Budget deferrals are not attempts.
+create or replace function public.support_message_max_attempts () returns integer
+language sql immutable as $$ select 16 $$;
+
+revoke all on function public.support_message_max_attempts () from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- claim_support_message: the webhook's first write
+-- ---------------------------------------------------------------------------
+-- {status: 'claimed', id, holder, inserted, attempts, from_address, to_addresses,
+-- received_for, subject, text_body, html_body, budget_held}, {status:
+-- 'duplicate'} for a completed row, or {status: 'busy', retry_after_seconds}
+-- while another delivery holds the lease or the row is backing off (a
+-- redelivery does not jump the backoff, and is not counted as an attempt).
+create or replace function public.claim_support_message (
+    p_email_id text,
+    p_message_id text,
+    p_from text,
+    p_to text[],
+    p_received_for text[],
+    p_subject text,
+    p_attachments jsonb,
+    p_received_at timestamptz,
+    p_lease_seconds integer default 120
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.support_messages;
+    v_holder uuid := gen_random_uuid();
+    v_lease interval := make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 30));
+    v_inserted boolean := false;
+begin
+    if p_email_id is null or length(p_email_id) = 0 then
+        raise exception 'p_email_id is required' using errcode = '22004';
+    end if;
+
+    insert into public.support_messages (
+        resend_email_id, message_id, from_address, to_addresses, received_for, subject, attachments,
+        received_at, status, lease_holder, lease_until, attempts
+    )
+    values (
+        p_email_id, p_message_id, coalesce(p_from, 'unknown'), coalesce(p_to, '{}'), coalesce(p_received_for, '{}'),
+        p_subject, coalesce(p_attachments, '[]'::jsonb), coalesce(p_received_at, now()),
+        'processing', v_holder, now() + v_lease, 1
+    )
+    on conflict (resend_email_id) do nothing
+    returning * into v_row;
+
+    if found then
+        v_inserted := true;
+    else
+        select * into v_row from public.support_messages where resend_email_id = p_email_id for update;
+        if v_row.status = 'completed' then
+            return jsonb_build_object('status', 'duplicate', 'id', v_row.id);
+        end if;
+        if v_row.lease_until is not null and v_row.lease_until > now() then
+            return jsonb_build_object(
+                'status', 'busy',
+                'id', v_row.id,
+                'retry_after_seconds', greatest(1, ceil(extract(epoch from v_row.lease_until - now()))::integer)
+            );
+        end if;
+        if v_row.next_attempt_at is not null and v_row.next_attempt_at > now() then
+            return jsonb_build_object(
+                'status', 'busy',
+                'id', v_row.id,
+                'retry_after_seconds', greatest(1, ceil(extract(epoch from v_row.next_attempt_at - now()))::integer)
+            );
+        end if;
+        update public.support_messages
+        set lease_holder = v_holder, lease_until = now() + v_lease, attempts = attempts + 1
+        where id = v_row.id
+        returning * into v_row;
+    end if;
+
+    return jsonb_build_object(
+        'status', 'claimed',
+        'id', v_row.id,
+        'holder', v_holder,
+        'inserted', v_inserted,
+        'attempts', v_row.attempts,
+        'resend_email_id', v_row.resend_email_id,
+        'from_address', v_row.from_address,
+        'to_addresses', to_jsonb(v_row.to_addresses),
+        'received_for', to_jsonb(v_row.received_for),
+        'subject', v_row.subject,
+        'text_body', v_row.text_body,
+        'html_body', v_row.html_body,
+        'budget_held', v_row.forward_budget_held
+    );
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- claim_due_support_messages: the retry path's claim
+-- ---------------------------------------------------------------------------
+-- Every row that is not completed, not leased, and due, oldest first, each
+-- under a fresh lease and counted as an attempt.
+create or replace function public.claim_due_support_messages (
+    p_limit integer default 10,
+    p_lease_seconds integer default 120
+) returns setof public.support_messages language plpgsql security definer
+set search_path = public as $$
+begin
+    return query
+    update public.support_messages m
+    set lease_holder = gen_random_uuid(),
+        lease_until = now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 30)),
+        attempts = m.attempts + 1
+    where m.id in (
+        select c.id
+        from public.support_messages c
+        where c.status <> 'completed'
+          and (c.lease_until is null or c.lease_until < now())
+          and coalesce(c.next_attempt_at, c.created_at) <= now()
+        order by coalesce(c.next_attempt_at, c.created_at), c.created_at
+        limit least(greatest(coalesce(p_limit, 10), 1), 50)
+        for update skip locked
+    )
+    returning m.*;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- save_support_message_body: the fetched body, written by the lease holder
+-- ---------------------------------------------------------------------------
+create or replace function public.save_support_message_body (
+    p_id uuid,
+    p_holder uuid,
+    p_text text,
+    p_html text
+) returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    update public.support_messages
+    set text_body = p_text, html_body = p_html
+    where id = p_id and lease_holder = p_holder and status <> 'completed';
+    return found;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- finish_support_message: how this attempt ended (lease holder only)
+-- ---------------------------------------------------------------------------
+--   forwarded  -- completed; forwarded_at and the forward's Resend id;
+--   stored     -- completed, store-only (no forwarding address configured);
+--   refused    -- completed with p_error: the loop guard, a forward Resend
+--                 rejected for good, a message with no body at all;
+--   deferred   -- forward_deferred: the budget is spent; retried after
+--                 p_retry_after_seconds; NOT an attempt;
+--   retry      -- still processing: the body fetch failed, the forward's
+--                 outcome is unknown (p_budget_held: its budget is spent, the
+--                 retry must not reserve again), or the forward is not
+--                 configured; retried with backoff, and completed with its
+--                 error once it is out of attempts.
+-- False when p_holder no longer holds the row (its lease ran out and another
+-- delivery took it): that delivery's outcome stands, not this one.
+create or replace function public.finish_support_message (
+    p_id uuid,
+    p_holder uuid,
+    p_outcome text,
+    p_error text default null,
+    p_retry_after_seconds integer default null,
+    p_forward_id text default null,
+    p_budget_held boolean default null
+) returns boolean language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.support_messages;
+begin
+    if p_outcome not in ('forwarded', 'stored', 'refused', 'deferred', 'retry') then
+        raise exception 'unknown outcome: %', p_outcome using errcode = '22023';
+    end if;
+    select * into v_row from public.support_messages where id = p_id and lease_holder = p_holder for update;
+    if not found then
+        return false;
+    end if;
+
+    if p_outcome = 'forwarded' then
+        update public.support_messages
+        set status = 'completed', forwarded_at = now(), forward_error = null, forward_resend_id = p_forward_id,
+            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null,
+            forward_budget_held = false
+        where id = p_id;
+    elsif p_outcome in ('stored', 'refused') then
+        update public.support_messages
+        set status = 'completed', forward_error = left(p_error, 500), completed_at = now(),
+            lease_holder = null, lease_until = null, next_attempt_at = null, forward_budget_held = false
+        where id = p_id;
+    elsif p_outcome = 'deferred' then
+        update public.support_messages
+        set status = 'forward_deferred', forward_error = left(coalesce(p_error, 'forward deferred: the mail budget is spent'), 500),
+            attempts = greatest(attempts - 1, 0),
+            next_attempt_at = now() + make_interval(secs => greatest(coalesce(p_retry_after_seconds, 300), 60)),
+            lease_holder = null, lease_until = null
+        where id = p_id;
+    elsif v_row.attempts >= public.support_message_max_attempts () then
+        update public.support_messages
+        set status = 'completed',
+            forward_error = left('gave up after ' || v_row.attempts || ' attempts: ' || coalesce(p_error, 'unknown'), 500),
+            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null,
+            forward_budget_held = false
+        where id = p_id;
+    else
+        update public.support_messages
+        set forward_error = left(p_error, 500),
+            forward_budget_held = coalesce(p_budget_held, forward_budget_held),
+            next_attempt_at = now() + coalesce(
+                make_interval(secs => p_retry_after_seconds),
+                least(interval '6 hours', interval '1 minute' * power(2, least(greatest(v_row.attempts - 1, 0), 20)))
+            ),
+            lease_holder = null, lease_until = null
+        where id = p_id;
+    end if;
+    return true;
+end;
+$$;
+
+revoke all on function public.claim_support_message (text, text, text, text[], text[], text, jsonb, timestamptz, integer)
+from public, anon, authenticated;
+
+grant execute on function public.claim_support_message (text, text, text, text[], text[], text, jsonb, timestamptz, integer)
+to service_role;
+
+revoke all on function public.claim_due_support_messages (integer, integer) from public, anon, authenticated;
+
+grant execute on function public.claim_due_support_messages (integer, integer) to service_role;
+
+revoke all on function public.save_support_message_body (uuid, uuid, text, text) from public, anon, authenticated;
+
+grant execute on function public.save_support_message_body (uuid, uuid, text, text) to service_role;
+
+revoke all on function public.finish_support_message (uuid, uuid, text, text, integer, text, boolean)
+from public, anon, authenticated;
+
+grant execute on function public.finish_support_message (uuid, uuid, text, text, integer, text, boolean) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The retry tick (pg_cron + pg_net + vault, the content-notice pattern)
+-- ---------------------------------------------------------------------------
+create or replace function public.support_inbound_retry_tick () returns void language plpgsql security definer
+set search_path = public, extensions, vault as $$
+declare
+    v_url text;
+    v_secret text;
+begin
+    if not exists (
+        select 1 from public.support_messages
+        where status <> 'completed'
+          and (lease_until is null or lease_until < now())
+          and coalesce(next_attempt_at, created_at) <= now()
+    ) then
+        return;
+    end if;
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'support_inbound_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'support_inbound_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'support_inbound_retry_tick: vault secrets support_inbound_url/support_inbound_secret missing — skip';
+        return;
+    end if;
+    perform net.http_post(
+        url := v_url,
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-support-retry-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 10000
+    );
+end;
+$$;
+
+revoke all on function public.support_inbound_retry_tick () from public, anon, authenticated;
+
+grant execute on function public.support_inbound_retry_tick () to service_role;
+
+do $$
+begin
+    perform cron.unschedule (jobid) from cron.job where jobname = 'support-inbound-retry';
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('support-inbound-retry', '2-59/5 * * * *', $$select public.support_inbound_retry_tick ()$$);
+
+-- ===== supabase/migrations/20261022110300_support_inbound_retry_window.sql =====
+-- Inbound support mail: every send attempt pays for itself, and automatic
+-- retries stop before Resend forgets the Idempotency-Key.
+--
+-- 20261022110200_support_inbound_lease.sql kept a forward's budget reservation
+-- across retries once a send's outcome was unknown (forward_budget_held), and a
+-- held retry reserved nothing. A retry made after the hourly window reset then
+-- sent without paying in the window it sent in: eight fresh forwards could use
+-- the new hour's allowance and the held retry send a ninth. resend-inbound now
+-- reserves on every attempt (the _shared/billingOutbox.ts pattern), keeping the
+-- earlier uncertain charge where it was; forward_budget_held stays as a record
+-- that a reservation was kept, and nothing reads it to skip the budget.
+--
+-- And the 16-attempt exponential schedule ran for days, while Resend keeps an
+-- Idempotency-Key for 24 hours: a replay after that is a new email, so a
+-- forward that did go out on an "unknown" attempt could be delivered twice.
+-- Now the row records when its FIRST send was attempted
+-- (first_send_attempt_at, set by begin_support_forward right before the send),
+-- and no send is made once support_forward_retry_window() (23 hours, an hour
+-- inside Resend's retention) has passed since then. Such a row, and one out of
+-- attempts, becomes `failed`: terminal, never sent again, and left for a person
+-- (the row keeps its body, sender and last error). A later delivery of a failed
+-- row is answered as a duplicate.
+--
+-- Replayable: every statement is idempotent or create-or-replace.
+alter table public.support_messages add column if not exists first_send_attempt_at timestamptz;
+
+alter table public.support_messages drop constraint if exists support_messages_status;
+
+alter table public.support_messages add constraint support_messages_status
+check (status in ('processing', 'forward_deferred', 'completed', 'failed'));
+
+drop index if exists public.support_messages_due;
+
+create index if not exists support_messages_due on public.support_messages (next_attempt_at)
+where status in ('processing', 'forward_deferred');
+
+-- How long after the first send attempt a forward may still be (re)sent:
+-- inside Resend's 24-hour Idempotency-Key retention, with an hour to spare.
+create or replace function public.support_forward_retry_window () returns interval
+language sql immutable as $$ select interval '23 hours' $$;
+
+revoke all on function public.support_forward_retry_window () from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- claim_support_message: a failed row is finished, like a completed one
+-- ---------------------------------------------------------------------------
+create or replace function public.claim_support_message (
+    p_email_id text,
+    p_message_id text,
+    p_from text,
+    p_to text[],
+    p_received_for text[],
+    p_subject text,
+    p_attachments jsonb,
+    p_received_at timestamptz,
+    p_lease_seconds integer default 120
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.support_messages;
+    v_holder uuid := gen_random_uuid();
+    v_lease interval := make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 30));
+    v_inserted boolean := false;
+begin
+    if p_email_id is null or length(p_email_id) = 0 then
+        raise exception 'p_email_id is required' using errcode = '22004';
+    end if;
+
+    insert into public.support_messages (
+        resend_email_id, message_id, from_address, to_addresses, received_for, subject, attachments,
+        received_at, status, lease_holder, lease_until, attempts
+    )
+    values (
+        p_email_id, p_message_id, coalesce(p_from, 'unknown'), coalesce(p_to, '{}'), coalesce(p_received_for, '{}'),
+        p_subject, coalesce(p_attachments, '[]'::jsonb), coalesce(p_received_at, now()),
+        'processing', v_holder, now() + v_lease, 1
+    )
+    on conflict (resend_email_id) do nothing
+    returning * into v_row;
+
+    if found then
+        v_inserted := true;
+    else
+        select * into v_row from public.support_messages where resend_email_id = p_email_id for update;
+        if v_row.status in ('completed', 'failed') then
+            return jsonb_build_object('status', 'duplicate', 'id', v_row.id, 'failed', v_row.status = 'failed');
+        end if;
+        if v_row.lease_until is not null and v_row.lease_until > now() then
+            return jsonb_build_object(
+                'status', 'busy',
+                'id', v_row.id,
+                'retry_after_seconds', greatest(1, ceil(extract(epoch from v_row.lease_until - now()))::integer)
+            );
+        end if;
+        if v_row.next_attempt_at is not null and v_row.next_attempt_at > now() then
+            return jsonb_build_object(
+                'status', 'busy',
+                'id', v_row.id,
+                'retry_after_seconds', greatest(1, ceil(extract(epoch from v_row.next_attempt_at - now()))::integer)
+            );
+        end if;
+        update public.support_messages
+        set lease_holder = v_holder, lease_until = now() + v_lease, attempts = attempts + 1
+        where id = v_row.id
+        returning * into v_row;
+    end if;
+
+    return jsonb_build_object(
+        'status', 'claimed',
+        'id', v_row.id,
+        'holder', v_holder,
+        'inserted', v_inserted,
+        'attempts', v_row.attempts,
+        'resend_email_id', v_row.resend_email_id,
+        'from_address', v_row.from_address,
+        'to_addresses', to_jsonb(v_row.to_addresses),
+        'received_for', to_jsonb(v_row.received_for),
+        'subject', v_row.subject,
+        'text_body', v_row.text_body,
+        'html_body', v_row.html_body,
+        'first_send_attempt_at', v_row.first_send_attempt_at
+    );
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- claim_due_support_messages: only rows still in flight
+-- ---------------------------------------------------------------------------
+create or replace function public.claim_due_support_messages (
+    p_limit integer default 10,
+    p_lease_seconds integer default 120
+) returns setof public.support_messages language plpgsql security definer
+set search_path = public as $$
+begin
+    return query
+    update public.support_messages m
+    set lease_holder = gen_random_uuid(),
+        lease_until = now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 120), 30)),
+        attempts = m.attempts + 1
+    where m.id in (
+        select c.id
+        from public.support_messages c
+        where c.status in ('processing', 'forward_deferred')
+          and (c.lease_until is null or c.lease_until < now())
+          and coalesce(c.next_attempt_at, c.created_at) <= now()
+        order by coalesce(c.next_attempt_at, c.created_at), c.created_at
+        limit least(greatest(coalesce(p_limit, 10), 1), 50)
+        for update skip locked
+    )
+    returning m.*;
+end;
+$$;
+
+create or replace function public.save_support_message_body (
+    p_id uuid,
+    p_holder uuid,
+    p_text text,
+    p_html text
+) returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    update public.support_messages
+    set text_body = p_text, html_body = p_html
+    where id = p_id and lease_holder = p_holder and status in ('processing', 'forward_deferred');
+    return found;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- begin_support_forward: the last check before a send (lease holder only)
+-- ---------------------------------------------------------------------------
+--   'send'    -- go ahead; the first attempt records first_send_attempt_at;
+--   'expired' -- the retry window since the first send attempt has closed:
+--                the row is now failed and the lease released; send nothing;
+--   'lost'    -- p_holder no longer holds the row (or it is finished).
+create or replace function public.begin_support_forward (p_id uuid, p_holder uuid) returns text
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.support_messages;
+begin
+    select * into v_row from public.support_messages
+    where id = p_id and lease_holder = p_holder and status in ('processing', 'forward_deferred')
+    for update;
+    if not found then
+        return 'lost';
+    end if;
+    if v_row.first_send_attempt_at is null then
+        update public.support_messages set first_send_attempt_at = now() where id = p_id;
+        return 'send';
+    end if;
+    if now() >= v_row.first_send_attempt_at + public.support_forward_retry_window () then
+        update public.support_messages
+        set status = 'failed',
+            forward_error = left(
+                'retry window closed: no send since ' || (v_row.first_send_attempt_at at time zone 'UTC')::text
+                    || ' UTC could be retried safely; last error: ' || coalesce(v_row.forward_error, 'none'),
+                500
+            ),
+            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null
+        where id = p_id;
+        return 'expired';
+    end if;
+    return 'send';
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- finish_support_message: a retry that would land past the window, or one out
+-- of attempts, fails for review instead of being scheduled
+-- ---------------------------------------------------------------------------
+create or replace function public.finish_support_message (
+    p_id uuid,
+    p_holder uuid,
+    p_outcome text,
+    p_error text default null,
+    p_retry_after_seconds integer default null,
+    p_forward_id text default null,
+    p_budget_held boolean default null
+) returns boolean language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.support_messages;
+    v_next timestamptz;
+begin
+    if p_outcome not in ('forwarded', 'stored', 'refused', 'deferred', 'retry') then
+        raise exception 'unknown outcome: %', p_outcome using errcode = '22023';
+    end if;
+    select * into v_row from public.support_messages
+    where id = p_id and lease_holder = p_holder and status in ('processing', 'forward_deferred')
+    for update;
+    if not found then
+        return false;
+    end if;
+
+    if p_outcome = 'forwarded' then
+        update public.support_messages
+        set status = 'completed', forwarded_at = now(), forward_error = null, forward_resend_id = p_forward_id,
+            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null,
+            forward_budget_held = false
+        where id = p_id;
+        return true;
+    elsif p_outcome in ('stored', 'refused') then
+        update public.support_messages
+        set status = 'completed', forward_error = left(p_error, 500), completed_at = now(),
+            lease_holder = null, lease_until = null, next_attempt_at = null, forward_budget_held = false
+        where id = p_id;
+        return true;
+    end if;
+
+    if p_outcome = 'deferred' then
+        v_next := now() + make_interval(secs => greatest(coalesce(p_retry_after_seconds, 300), 60));
+    else
+        v_next := now() + coalesce(
+            make_interval(secs => p_retry_after_seconds),
+            least(interval '6 hours', interval '1 minute' * power(2, least(greatest(v_row.attempts - 1, 0), 20)))
+        );
+    end if;
+
+    if v_row.first_send_attempt_at is not null
+        and v_next >= v_row.first_send_attempt_at + public.support_forward_retry_window () then
+        update public.support_messages
+        set status = 'failed',
+            forward_error = left(
+                'retry window closed before the next attempt; last error: ' || coalesce(p_error, 'unknown'), 500
+            ),
+            forward_budget_held = forward_budget_held or coalesce(p_budget_held, false),
+            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null
+        where id = p_id;
+    elsif p_outcome = 'deferred' then
+        update public.support_messages
+        set status = 'forward_deferred',
+            forward_error = left(coalesce(p_error, 'forward deferred: the mail budget is spent'), 500),
+            attempts = greatest(attempts - 1, 0),
+            next_attempt_at = v_next,
+            lease_holder = null, lease_until = null
+        where id = p_id;
+    elsif v_row.attempts >= public.support_message_max_attempts () then
+        update public.support_messages
+        set status = 'failed',
+            forward_error = left('gave up after ' || v_row.attempts || ' attempts: ' || coalesce(p_error, 'unknown'), 500),
+            forward_budget_held = forward_budget_held or coalesce(p_budget_held, false),
+            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null
+        where id = p_id;
+    else
+        update public.support_messages
+        set forward_error = left(p_error, 500),
+            forward_budget_held = forward_budget_held or coalesce(p_budget_held, false),
+            next_attempt_at = v_next,
+            lease_holder = null, lease_until = null
+        where id = p_id;
+    end if;
+    return true;
+end;
+$$;
+
+revoke all on function public.begin_support_forward (uuid, uuid) from public, anon, authenticated;
+
+grant execute on function public.begin_support_forward (uuid, uuid) to service_role;
+
+-- create or replace keeps existing grants; restated so this file stands alone.
+revoke all on function public.claim_support_message (text, text, text, text[], text[], text, jsonb, timestamptz, integer)
+from public, anon, authenticated;
+
+grant execute on function public.claim_support_message (text, text, text, text[], text[], text, jsonb, timestamptz, integer)
+to service_role;
+
+revoke all on function public.claim_due_support_messages (integer, integer) from public, anon, authenticated;
+
+grant execute on function public.claim_due_support_messages (integer, integer) to service_role;
+
+revoke all on function public.save_support_message_body (uuid, uuid, text, text) from public, anon, authenticated;
+
+grant execute on function public.save_support_message_body (uuid, uuid, text, text) to service_role;
+
+revoke all on function public.finish_support_message (uuid, uuid, text, text, integer, text, boolean)
+from public, anon, authenticated;
+
+grant execute on function public.finish_support_message (uuid, uuid, text, text, integer, text, boolean) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The retry tick: only rows still in flight are due
+-- ---------------------------------------------------------------------------
+create or replace function public.support_inbound_retry_tick () returns void language plpgsql security definer
+set search_path = public, extensions, vault as $$
+declare
+    v_url text;
+    v_secret text;
+begin
+    if not exists (
+        select 1 from public.support_messages
+        where status in ('processing', 'forward_deferred')
+          and (lease_until is null or lease_until < now())
+          and coalesce(next_attempt_at, created_at) <= now()
+    ) then
+        return;
+    end if;
+    select decrypted_secret into v_url from vault.decrypted_secrets where name = 'support_inbound_url' limit 1;
+    select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'support_inbound_secret' limit 1;
+    if v_url is null or v_secret is null or length(trim(v_url)) = 0 then
+        raise notice 'support_inbound_retry_tick: vault secrets support_inbound_url/support_inbound_secret missing — skip';
+        return;
+    end if;
+    perform net.http_post(
+        url := v_url,
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-support-retry-secret', v_secret),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 10000
+    );
+end;
+$$;
+
+revoke all on function public.support_inbound_retry_tick () from public, anon, authenticated;
+
+grant execute on function public.support_inbound_retry_tick () to service_role;
+
+-- ===== supabase/migrations/20261022110400_account_deletion_attempts.sql =====
+-- Account deletion: active attempts counted apart from historical ones, a
+-- record of whether destructive cleanup began, and a lease, so a marker can
+-- no longer restrict an untouched account for good.
+--
+-- 20261022110100_account_deletion_pending.sql cleared the marker only for a
+-- lone first attempt ("attempts = 1 and last_error is null"). Two attempts that
+-- both abandoned (billing down twice, two tabs) left attempts = 2, and a
+-- request that crashed never settled at all: either way score uploads and new
+-- students stayed refused with no way back, though nothing had been deleted.
+--
+-- Now:
+--
+--   * every attempt gets a row in account_deletion_attempts, under a lease
+--     (lease_until, 600 s: longer than an Edge Function can run, so an attempt
+--     whose lease has run out can no longer be doing anything). An ACTIVE
+--     attempt is one that has neither ended nor run out its lease.
+--     account_deletions.attempts still counts every attempt ever begun -- the
+--     history -- and nothing decides anything on it any more;
+--   * account_deletions.destructive_started_at is set, by the attempt itself,
+--     right before the first thing is deleted (mark_account_deletion_destructive);
+--   * the account is restricted (account_deletion_pending()) while an attempt
+--     is active OR destructive cleanup has begun. An untouched marker with no
+--     active attempt restricts nothing: a crashed attempt stops restricting the
+--     moment its lease runs out, with no sweep needed, and the next attempt
+--     reuses the row. An abandoned attempt that leaves no other active one
+--     deletes the row outright.
+--   * once destructive cleanup has begun the restriction stays until the
+--     deletion completes (the auth user's cascade removes the marker): a
+--     half-deleted account must not grow while the person retries. A row in
+--     that state with no active attempt is the support runbook's case (P6:
+--     "account_deletions with destructive_started_at set and no live attempt").
+--
+-- Replaces begin_account_deletion / settle_account_deletion (dropped below:
+-- new in the same unmerged PR, never deployed) with attempt-scoped functions.
+alter table public.account_deletions add column if not exists destructive_started_at timestamptz;
+
+create table if not exists public.account_deletion_attempts (
+    attempt uuid primary key default gen_random_uuid(),
+    user_id uuid not null references public.account_deletions (user_id) on delete cascade,
+    started_at timestamptz not null default now(),
+    lease_until timestamptz not null,
+    ended_at timestamptz,
+    outcome text check (outcome in ('abandoned', 'failed')),
+    error text
+);
+
+create index if not exists account_deletion_attempts_user on public.account_deletion_attempts (user_id);
+
+alter table public.account_deletion_attempts enable row level security;
+
+revoke all on table public.account_deletion_attempts from public;
+
+revoke all on table public.account_deletion_attempts from anon;
+
+revoke all on table public.account_deletion_attempts from authenticated;
+
+grant all on table public.account_deletion_attempts to service_role;
+
+drop function if exists public.begin_account_deletion (uuid);
+
+drop function if exists public.settle_account_deletion (uuid, text, text);
+
+-- ---------------------------------------------------------------------------
+-- account_deletion_pending: is this account restricted right now?
+-- ---------------------------------------------------------------------------
+-- Takes the per-account lock SHARED, held to the caller's transaction end, so
+-- a deletion beginning now waits for whatever the caller is about to write,
+-- and the caller sees an attempt that began before it. Every guard that
+-- refuses a write during a deletion goes through this one function.
+create or replace function public.account_deletion_pending (p_user uuid) returns boolean
+language plpgsql volatile security definer
+set search_path = public as $$
+begin
+    if p_user is null then
+        return false;
+    end if;
+    perform pg_advisory_xact_lock_shared (public.account_deletion_lock_key (p_user));
+    return exists (
+        select 1
+        from public.account_deletions d
+        where d.user_id = p_user
+          and (
+              d.destructive_started_at is not null
+              or exists (
+                  select 1 from public.account_deletion_attempts a
+                  where a.user_id = d.user_id and a.ended_at is null and a.lease_until > now()
+              )
+          )
+    );
+end;
+$$;
+
+revoke all on function public.account_deletion_pending (uuid) from public, anon, authenticated;
+
+grant execute on function public.account_deletion_pending (uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- begin / mark destructive / settle (service role only)
+-- ---------------------------------------------------------------------------
+-- begin: the first step of every attempt. Waits for any guarded write for
+-- this account still in flight, writes (or re-counts) the marker, and returns
+-- the attempt's id -- or null, writing nothing, for an account already gone.
+create or replace function public.begin_account_deletion_attempt (p_user uuid, p_lease_seconds integer default 600)
+returns uuid language plpgsql security definer
+set search_path = public as $$
+declare
+    v_attempt uuid;
+begin
+    if p_user is null then
+        raise exception 'p_user is required' using errcode = '22004';
+    end if;
+    perform pg_advisory_xact_lock (public.account_deletion_lock_key (p_user));
+    if not exists (select 1 from auth.users where id = p_user) then
+        return null;
+    end if;
+    insert into public.account_deletions (user_id) values (p_user)
+    on conflict (user_id) do update
+    set attempts = public.account_deletions.attempts + 1, updated_at = now();
+    insert into public.account_deletion_attempts (user_id, lease_until)
+    values (p_user, now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 600), 60)))
+    returning attempt into v_attempt;
+    return v_attempt;
+end;
+$$;
+
+-- Called by the attempt right before it deletes anything. False (and nothing
+-- recorded) when the attempt is no longer active: it must not start deleting.
+create or replace function public.mark_account_deletion_destructive (p_user uuid, p_attempt uuid)
+returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    perform 1 from public.account_deletion_attempts
+    where attempt = p_attempt and user_id = p_user and ended_at is null and lease_until > now()
+    for update;
+    if not found then
+        return false;
+    end if;
+    update public.account_deletions
+    set destructive_started_at = coalesce(destructive_started_at, now()), updated_at = now()
+    where user_id = p_user;
+    return true;
+end;
+$$;
+
+-- How an attempt ended without completing. 'abandoned': it deleted nothing
+-- (billing could not be stopped); 'failed': it stopped part-way. Either way
+-- the attempt is no longer active. The marker goes when no active attempt is
+-- left and no destructive cleanup ever began -- the account is then exactly
+-- as it was.
+create or replace function public.settle_account_deletion_attempt (
+    p_user uuid,
+    p_attempt uuid,
+    p_outcome text,
+    p_error text default null
+) returns void language plpgsql security definer
+set search_path = public as $$
+begin
+    if p_outcome not in ('abandoned', 'failed') then
+        raise exception 'unknown outcome: %', p_outcome using errcode = '22023';
+    end if;
+    perform pg_advisory_xact_lock (public.account_deletion_lock_key (p_user));
+    update public.account_deletion_attempts
+    set ended_at = coalesce(ended_at, now()), outcome = coalesce(outcome, p_outcome), error = left(p_error, 200)
+    where attempt = p_attempt and user_id = p_user;
+    if p_outcome = 'failed' then
+        update public.account_deletions
+        set last_error = left(p_error, 200), updated_at = now()
+        where user_id = p_user;
+    end if;
+    delete from public.account_deletions d
+    where d.user_id = p_user
+      and d.destructive_started_at is null
+      and not exists (
+          select 1 from public.account_deletion_attempts a
+          where a.user_id = d.user_id and a.ended_at is null and a.lease_until > now()
+      );
+end;
+$$;
+
+revoke all on function public.begin_account_deletion_attempt (uuid, integer) from public, anon, authenticated;
+
+grant execute on function public.begin_account_deletion_attempt (uuid, integer) to service_role;
+
+revoke all on function public.mark_account_deletion_destructive (uuid, uuid) from public, anon, authenticated;
+
+grant execute on function public.mark_account_deletion_destructive (uuid, uuid) to service_role;
+
+revoke all on function public.settle_account_deletion_attempt (uuid, uuid, text, text) from public, anon, authenticated;
+
+grant execute on function public.settle_account_deletion_attempt (uuid, uuid, text, text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The refusal on documents and managed_students, through the one predicate
+-- ---------------------------------------------------------------------------
+create or replace function public.refuse_insert_during_account_deletion () returns trigger
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_owner uuid;
+begin
+    -- Separate statements: a field reference is planned against this table's
+    -- row type, so naming the other table's column would fail here.
+    if tg_table_name = 'documents' then
+        v_owner := new.owner_id;
+    else
+        v_owner := new.teacher_id;
+    end if;
+    if public.account_deletion_pending (v_owner) then
+        raise exception 'account_deletion_pending'
+            using errcode = '55000',
+                  hint = 'This account is being deleted, so nothing new can be added to it.';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.refuse_insert_during_account_deletion () from public, anon, authenticated;
+
+-- ===== supabase/migrations/20261022110500_student_code_reset_holder.sql =====
+-- Teacher resets of a student's card: a holder token, no takeover of a live
+-- reset, and only the holder may complete or release it.
+--
+-- 20261022110000_student_claim_reservation.sql let a reset take over another
+-- reset's live reservation ("a reset retried after a partial failure"), and
+-- returned nothing that identified the holder. So reset A could reserve and
+-- pause before its scramble; reset B took the row over, finished and cleared
+-- it; a student claimed B's new card and chose a password; and A then resumed
+-- and scrambled that password -- the student's fresh account stopped working.
+--
+-- Now:
+--   * reserve_student_code_reset() returns the reservation's token. A live
+--     reservation of either kind refuses it ('busy', with its kind), unless the
+--     caller presents that reservation's own token -- a reset retried by the
+--     same teacher after a partial failure resumes its own reservation (and
+--     renews it) instead of waiting it out. student-provision hands the token
+--     back on a failed reset for exactly that.
+--   * complete_student_code_reset() writes the new code hash, only for the
+--     holder, and hands the row back in the same statement's transaction.
+--   * release_student_code_reset() hands the row back, only for the holder.
+--   * the guard trigger refuses every other change of the code hash while any
+--     live reservation holds the row (before: only a claim's). The claim's own
+--     commit is still the one exception.
+--
+-- A reservation the holder never completes (the request died) expires after
+-- its TTL, 600 s, longer than an Edge Function can run. Until then the
+-- student's current card cannot be claimed: the roster UI says so ("held for
+-- up to 10 minutes", decision 49 item 5).
+--
+-- begin_student_code_reset() (same unmerged PR, never deployed) is dropped.
+drop function if exists public.begin_student_code_reset (uuid, integer);
+
+create or replace function public.reserve_student_code_reset (
+    p_student uuid,
+    p_reservation uuid default null,
+    p_ttl_seconds integer default 600
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_held public.student_claim_reservations;
+    v_hash text;
+    v_reservation uuid;
+    v_until timestamptz := now() + make_interval(secs => greatest(coalesce(p_ttl_seconds, 600), 30));
+begin
+    -- The roster row first, then the reservation: the order every function on
+    -- this table takes, so they serialize on one row lock and never deadlock.
+    select login_code_hash into v_hash from public.managed_students where id = p_student for update;
+    if not found then
+        return jsonb_build_object('status', 'not_found');
+    end if;
+    select * into v_held from public.student_claim_reservations where student_id = p_student for update;
+    if found and v_held.reserved_until > now() then
+        if v_held.kind = 'reset' and p_reservation is not null and v_held.reservation = p_reservation then
+            -- The same reset, retried by its holder: resumed, and renewed.
+            update public.student_claim_reservations set reserved_until = v_until where student_id = p_student;
+            return jsonb_build_object('status', 'reserved', 'reservation', v_held.reservation, 'resumed', true);
+        end if;
+        return jsonb_build_object(
+            'status', 'busy',
+            'kind', v_held.kind,
+            'retry_after_seconds', greatest(1, ceil(extract(epoch from v_held.reserved_until - now()))::integer)
+        );
+    end if;
+    v_reservation := gen_random_uuid();
+    insert into public.student_claim_reservations (student_id, reservation, kind, login_code_hash, reserved_until)
+    values (p_student, v_reservation, 'reset', v_hash, v_until)
+    on conflict (student_id) do update
+    set reservation = excluded.reservation,
+        kind = 'reset',
+        login_code_hash = excluded.login_code_hash,
+        reserved_until = excluded.reserved_until,
+        created_at = now();
+    return jsonb_build_object('status', 'reserved', 'reservation', v_reservation, 'resumed', false);
+end;
+$$;
+
+-- 'reset' when the holder's new code is written (and claimed_at cleared, as a
+-- reset sends the student back to Invited); 'lost' when p_reservation no
+-- longer holds the row -- nothing is written then.
+create or replace function public.complete_student_code_reset (
+    p_student uuid,
+    p_reservation uuid,
+    p_code_hash text
+) returns text language plpgsql security definer
+set search_path = public as $$
+begin
+    if p_code_hash is null or length(p_code_hash) = 0 then
+        raise exception 'p_code_hash is required' using errcode = '22004';
+    end if;
+    perform 1 from public.managed_students where id = p_student for update;
+    delete from public.student_claim_reservations
+    where student_id = p_student and reservation = p_reservation and kind = 'reset';
+    if not found then
+        return 'lost';
+    end if;
+    -- The reservation is gone (above, same transaction), so the guard lets
+    -- this one write through.
+    update public.managed_students set login_code_hash = p_code_hash, claimed_at = null where id = p_student;
+    return 'reset';
+end;
+$$;
+
+create or replace function public.release_student_code_reset (p_student uuid, p_reservation uuid)
+returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    delete from public.student_claim_reservations
+    where student_id = p_student and reservation = p_reservation and kind = 'reset';
+    return found;
+end;
+$$;
+
+revoke all on function public.reserve_student_code_reset (uuid, uuid, integer) from public, anon, authenticated;
+
+grant execute on function public.reserve_student_code_reset (uuid, uuid, integer) to service_role;
+
+revoke all on function public.complete_student_code_reset (uuid, uuid, text) from public, anon, authenticated;
+
+grant execute on function public.complete_student_code_reset (uuid, uuid, text) to service_role;
+
+revoke all on function public.release_student_code_reset (uuid, uuid) from public, anon, authenticated;
+
+grant execute on function public.release_student_code_reset (uuid, uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The guard: no code change under ANY live reservation but the holder's own
+-- ---------------------------------------------------------------------------
+--  * a claim's own commit (claimed_at set as the hash clears) passes, as before;
+--  * a reset's commit passes because complete_student_code_reset removed its
+--    reservation first;
+--  * anything else that changes the hash while a live claim OR reset holds the
+--    row is refused (55006). Otherwise an expired reservation is cleared.
+create or replace function public.student_claim_reservation_guard () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if new.login_code_hash is distinct from old.login_code_hash
+        and not (old.claimed_at is null and new.claimed_at is not null) then
+        if exists (
+            select 1 from public.student_claim_reservations
+            where student_id = new.id and reserved_until > now()
+        ) then
+            raise exception 'student_claim_in_progress'
+                using errcode = '55006',
+                      hint = 'A claim or a reset holds this student''s card; try again once it finishes.';
+        end if;
+        delete from public.student_claim_reservations where student_id = new.id;
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.student_claim_reservation_guard () from public, anon, authenticated;
+
+-- ===== supabase/migrations/20261022110600_account_deletion_barrier.sql =====
+-- Account deletion: the barrier, extended beyond the two table inserts.
+--
+-- 20261022110100 refused new documents and roster rows while an account's
+-- deletion is pending (account_deletion_pending(), 20261022110400). Four other
+-- ways to add to an account being deleted were still open (Codex r1 Part B
+-- finding 3):
+--
+--   1. Storage writes into a score that already exists: an upload or an
+--      overwrite authorized while the score was there could land after the
+--      sweep had emptied its folders, leaving bytes nothing points at.
+--   2. Provisioning created the student's Auth account BEFORE its roster row:
+--      a request that crashed in between (or whose undo failed) left an
+--      account the teacher's inventory never listed, so the deletion never
+--      found it.
+--   3. Checkout: a lease taken, or a session staged, from another tab could
+--      open a Stripe session after the deletion's billing sweeps.
+--   4. Share-link redemption (and any other membership insert) kept adding
+--      members to the account, or to its scores, mid-deletion.
+--
+-- Each is now refused while the account is pending, through the same
+-- predicate, which takes the per-account lock SHARED: a deletion beginning
+-- waits for the write in flight, and a write starting after it sees the
+-- marker.
+--
+-- And provisioning registers its intent durably BEFORE it creates an Auth
+-- account (student_provision_intents): the deletion sweeps those too, and a
+-- crashed request leaves a row naming what to clean up -- recoverable rather
+-- than invisible. The table deliberately has no foreign key to the teacher, so
+-- it outlives a teacher whose deletion completed around a crash.
+--
+-- Replayable: create-or-replace, if-not-exists, drop-if-exists throughout.
+
+-- ===========================================================================
+-- 1. Storage: no upload or overwrite by an account being deleted
+-- ===========================================================================
+-- The permissive scores_/thumbnails_ policies already require the caller to
+-- own the score, so the caller is the account that matters. Keyed on the
+-- caller alone, so it answers nothing about anyone else.
+create or replace function public.caller_account_deletion_pending () returns boolean
+language plpgsql volatile security definer
+set search_path = public as $$
+begin
+    return public.account_deletion_pending (auth.uid());
+end;
+$$;
+
+revoke all on function public.caller_account_deletion_pending () from public, anon;
+
+grant execute on function public.caller_account_deletion_pending () to authenticated, service_role;
+
+-- UPDATE has USING and WITH CHECK: an upsert's update arm (upload with
+-- upsert: true, and resumable uploads) is refused with an error by a failing
+-- USING. DELETE is left alone: the sweep, and the owner, may still remove.
+drop policy if exists storage_refuse_during_account_deletion_insert on storage.objects;
+
+create policy storage_refuse_during_account_deletion_insert on storage.objects as restrictive for insert to authenticated
+with check (
+    bucket_id not in ('scores', 'thumbnails')
+    or not (select public.caller_account_deletion_pending ())
+);
+
+drop policy if exists storage_refuse_during_account_deletion_update on storage.objects;
+
+create policy storage_refuse_during_account_deletion_update on storage.objects as restrictive for update to authenticated
+using (bucket_id not in ('scores', 'thumbnails') or not (select public.caller_account_deletion_pending ()))
+with check (bucket_id not in ('scores', 'thumbnails') or not (select public.caller_account_deletion_pending ()));
+
+-- ===========================================================================
+-- 2. Memberships: no share-link redemption (or other join) mid-deletion
+-- ===========================================================================
+-- redeem_share_link inserts into document_members (ON CONFLICT DO UPDATE --
+-- a BEFORE INSERT trigger fires for those too). Refused when the joining
+-- account is being deleted, or the score's owner is.
+create or replace function public.refuse_membership_during_account_deletion () returns trigger
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_owner uuid;
+begin
+    if public.account_deletion_pending (new.user_id) then
+        raise exception 'account_deletion_pending'
+            using errcode = '55000',
+                  hint = 'This account is being deleted, so it cannot join a score.';
+    end if;
+    select owner_id into v_owner from public.documents where id = new.document_id;
+    if v_owner is not null and v_owner is distinct from new.user_id and public.account_deletion_pending (v_owner) then
+        raise exception 'account_deletion_pending'
+            using errcode = '55000',
+                  hint = 'This score''s owner is deleting their account, so it cannot be joined.';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.refuse_membership_during_account_deletion () from public, anon, authenticated;
+
+drop trigger if exists document_members_refuse_during_account_deletion on public.document_members;
+
+create trigger document_members_refuse_during_account_deletion
+before insert on public.document_members
+for each row execute function public.refuse_membership_during_account_deletion ();
+
+-- ===========================================================================
+-- 3. Checkout: no lease taken or session staged mid-deletion
+-- ===========================================================================
+-- begin_checkout_attempt (taking the lease) and stage_checkout_attempt (the
+-- step right before Stripe's create) both write a row that holds a holder.
+-- Releasing (holder set null) stays allowed.
+create or replace function public.refuse_checkout_during_account_deletion () returns trigger
+language plpgsql security definer
+set search_path = public as $$
+begin
+    if new.holder is not null and public.account_deletion_pending (new.user_id) then
+        raise exception 'account_deletion_pending'
+            using errcode = '55000',
+                  hint = 'This account is being deleted, so no checkout can start.';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.refuse_checkout_during_account_deletion () from public, anon, authenticated;
+
+drop trigger if exists checkout_attempts_refuse_during_account_deletion on public.checkout_attempts;
+
+create trigger checkout_attempts_refuse_during_account_deletion
+before insert or update on public.checkout_attempts
+for each row execute function public.refuse_checkout_during_account_deletion ();
+
+-- The other half: a checkout that took its lease BEFORE the marker may still
+-- be creating a session. The deletion asks this after its marker is in place
+-- (so no new lease can start) and refuses to go on while one is live. The
+-- interval is checkoutFlow.ts's CHECKOUT_ATTEMPT_STALE_AFTER: past it the
+-- lease can be taken over and its holder can no longer stage.
+create or replace function public.checkout_attempt_in_flight (p_user uuid) returns boolean
+language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1 from public.checkout_attempts
+        where user_id = p_user and holder is not null and claimed_at > now() - interval '5 minutes'
+    );
+$$;
+
+revoke all on function public.checkout_attempt_in_flight (uuid) from public, anon, authenticated;
+
+grant execute on function public.checkout_attempt_in_flight (uuid) to service_role;
+
+-- ===========================================================================
+-- 4. Provisioning: the intent first, then the Auth account
+-- ===========================================================================
+create table if not exists public.student_provision_intents (
+    roster_id uuid primary key,
+    -- No foreign key: the row must outlive a teacher whose deletion completed
+    -- around a crashed provisioning, or nothing would name the orphan.
+    teacher_id uuid not null,
+    -- The address the Auth account is created at: the synthetic one for a
+    -- code student, the invited address for an email student.
+    auth_email text not null,
+    -- Set the moment the Auth account exists.
+    student_user_id uuid,
+    created_at timestamptz not null default now(),
+    -- Past this the request that wrote it can no longer be running.
+    expires_at timestamptz not null
+);
+
+create index if not exists student_provision_intents_teacher on public.student_provision_intents (teacher_id);
+
+alter table public.student_provision_intents enable row level security;
+
+revoke all on table public.student_provision_intents from public;
+
+revoke all on table public.student_provision_intents from anon;
+
+revoke all on table public.student_provision_intents from authenticated;
+
+grant all on table public.student_provision_intents to service_role;
+
+-- 'ok' (recorded), or 'deletion_pending' (nothing recorded: the teacher's
+-- account is being deleted, so no account may be created for them).
+create or replace function public.begin_student_provision (
+    p_teacher uuid,
+    p_roster_id uuid,
+    p_auth_email text,
+    p_ttl_seconds integer default 600
+) returns text language plpgsql security definer
+set search_path = public as $$
+begin
+    if p_teacher is null or p_roster_id is null or p_auth_email is null then
+        raise exception 'p_teacher, p_roster_id and p_auth_email are required' using errcode = '22004';
+    end if;
+    if public.account_deletion_pending (p_teacher) then
+        return 'deletion_pending';
+    end if;
+    insert into public.student_provision_intents (roster_id, teacher_id, auth_email, expires_at)
+    values (p_roster_id, p_teacher, lower(p_auth_email),
+            now() + make_interval(secs => greatest(coalesce(p_ttl_seconds, 600), 60)));
+    return 'ok';
+end;
+$$;
+
+-- The Auth account now exists. False when the intent is gone (a deletion swept
+-- it): the caller undoes the account it just made.
+create or replace function public.attach_student_provision (p_roster_id uuid, p_student_user uuid)
+returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    update public.student_provision_intents set student_user_id = p_student_user where roster_id = p_roster_id;
+    return found;
+end;
+$$;
+
+-- The provisioning ended without a roster row and its Auth account is gone
+-- (or was never made): nothing left to clean up.
+create or replace function public.finish_student_provision (p_roster_id uuid)
+returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    delete from public.student_provision_intents where roster_id = p_roster_id;
+    return found;
+end;
+$$;
+
+-- What a deletion of p_teacher must clean up: every intent, with the Auth
+-- account it names -- recorded, or found by address among accounts created
+-- since the intent (a crash between the create and the attach) -- and whether
+-- the request that wrote it can still be running.
+create or replace function public.student_provision_intents_for (p_teacher uuid)
+returns table (roster_id uuid, student_user_id uuid, live boolean)
+language sql stable security definer
+set search_path = public as $$
+    select i.roster_id,
+           coalesce(
+               i.student_user_id,
+               (select u.id from auth.users u
+                where lower(u.email) = i.auth_email and u.created_at >= i.created_at - interval '1 minute'
+                order by u.created_at limit 1)
+           ),
+           i.expires_at > now()
+    from public.student_provision_intents i
+    where i.teacher_id = p_teacher
+    order by i.created_at;
+$$;
+
+-- The roster row is the provisioning's success: its intent goes in the same
+-- transaction.
+create or replace function public.clear_student_provision_intent () returns trigger
+language plpgsql security definer
+set search_path = public as $$
+begin
+    delete from public.student_provision_intents where roster_id = new.id;
+    return new;
+end;
+$$;
+
+revoke all on function public.clear_student_provision_intent () from public, anon, authenticated;
+
+drop trigger if exists managed_students_clear_provision_intent on public.managed_students;
+
+create trigger managed_students_clear_provision_intent
+after insert on public.managed_students
+for each row execute function public.clear_student_provision_intent ();
+
+revoke all on function public.begin_student_provision (uuid, uuid, text, integer) from public, anon, authenticated;
+
+grant execute on function public.begin_student_provision (uuid, uuid, text, integer) to service_role;
+
+revoke all on function public.attach_student_provision (uuid, uuid) from public, anon, authenticated;
+
+grant execute on function public.attach_student_provision (uuid, uuid) to service_role;
+
+revoke all on function public.finish_student_provision (uuid) from public, anon, authenticated;
+
+grant execute on function public.finish_student_provision (uuid) to service_role;
+
+revoke all on function public.student_provision_intents_for (uuid) from public, anon, authenticated;
+
+grant execute on function public.student_provision_intents_for (uuid) to service_role;
+
+-- ===== supabase/migrations/20261022110700_student_code_reset_worker.sql =====
+-- Teacher resets of a student's card: a fresh worker lease per attempt, with a
+-- fencing epoch, separate from the resume token (Codex r2 Part B; decision 59).
+--
+-- 20261022110500_student_code_reset_holder.sql let a reset retried with its
+-- own token resume the reservation. Both retries of one token got the same
+-- answer, though, and nothing told them apart, so:
+--
+--   1. retry A presented token T, reserved, and paused before its password
+--      write;
+--   2. retry B presented T too, scrambled the password, ended the sessions and
+--      completed -- a new card;
+--   3. the student claimed that card and chose a password;
+--   4. A resumed, overwrote the student's password and ended their sessions.
+--      Its completion came back 'lost', after the Auth writes had happened.
+--
+-- Now the token T only says WHICH reset is being resumed. Who may act on it is
+-- a separate WORKER LEASE that every attempt takes afresh, under the roster and
+-- reservation row locks: a worker id plus an epoch from a sequence that never
+-- goes back. The newest attempt's lease is the only one that counts.
+--
+--   * reserve_student_code_reset() hands each attempt its own worker and
+--     epoch. A retry presenting T fences out the worker before it -- unless
+--     that worker is INSIDE an Auth call (it passed a fence and has not
+--     reported back), when the retry is told the reset is still finishing
+--     ('busy', kind 'reset'): a password write already on its way to Auth
+--     cannot be called back, so nothing may start behind it.
+--   * fence_student_code_reset() is what the worker calls immediately before
+--     EACH Auth side effect (the password write, then the session
+--     revocation). It answers 'ok' only while this worker and epoch still hold
+--     the live reservation and no claim has happened since the reservation was
+--     taken (the roster's code hash and claimed_at are what they were then);
+--     it marks the worker as inside an Auth call and renews the hold. 'lost'
+--     means stop: a stale worker aborts before touching Auth.
+--   * complete_student_code_reset() writes the new code only for the current
+--     worker and epoch, under the same no-claim check.
+--   * stop_student_code_reset_worker() is the worker reporting back on a
+--     failure: no Auth call of its own is in flight any more, so a retry with
+--     T may take a new lease at once. The reservation stays (the password may
+--     already be scrambled; the old card must not be claimable meanwhile).
+--
+-- A worker that never reports back (its request died inside an Auth call)
+-- holds the row until the reservation runs out: 600 s, renewed at each fence,
+-- longer than an Edge Function can run (400 s wall clock), so by then it can
+-- no longer be writing. That is the "held for up to 10 minutes" the roster UI
+-- already states (decision 49 item 5).
+--
+-- complete_student_code_reset (uuid, uuid, text) (same unmerged PR, never
+-- deployed) is replaced by the worker-checked version.
+
+create sequence if not exists public.student_code_reset_epoch;
+
+revoke all on sequence public.student_code_reset_epoch from public, anon, authenticated;
+
+alter table public.student_claim_reservations
+    -- The attempt allowed to act on a reset reservation; null once it reported back.
+    add column if not exists worker uuid,
+    -- Its fencing epoch (student_code_reset_epoch): strictly newer per attempt.
+    add column if not exists worker_epoch bigint,
+    -- True from a fence until that worker reports back: an Auth call may be in flight.
+    add column if not exists worker_in_auth boolean not null default false,
+    -- The roster's claimed_at when the reservation was taken (no claim since).
+    add column if not exists claimed_at_seen timestamptz;
+
+drop function if exists public.complete_student_code_reset (uuid, uuid, text);
+
+-- {status: 'reserved', reservation, worker, epoch, resumed} | {status: 'busy',
+-- kind, retry_after_seconds} | {status: 'not_found'}. Same signature as
+-- 20261022110500; the answer gains worker and epoch.
+create or replace function public.reserve_student_code_reset (
+    p_student uuid,
+    p_reservation uuid default null,
+    p_ttl_seconds integer default 600
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.managed_students;
+    v_held public.student_claim_reservations;
+    v_reservation uuid;
+    v_worker uuid := gen_random_uuid();
+    v_epoch bigint;
+    v_until timestamptz := now() + make_interval(secs => greatest(coalesce(p_ttl_seconds, 600), 30));
+begin
+    -- The roster row first, then the reservation: the order every function on
+    -- this table takes, so they serialize on one row lock and never deadlock.
+    select * into v_row from public.managed_students where id = p_student for update;
+    if not found then
+        return jsonb_build_object('status', 'not_found');
+    end if;
+    select * into v_held from public.student_claim_reservations where student_id = p_student for update;
+    if found and v_held.reserved_until > now() then
+        if v_held.kind = 'reset' and p_reservation is not null and v_held.reservation = p_reservation
+            and not v_held.worker_in_auth then
+            -- The same reset, retried: a new lease fences out the worker before it.
+            v_epoch := nextval('public.student_code_reset_epoch');
+            update public.student_claim_reservations
+            set worker = v_worker, worker_epoch = v_epoch, worker_in_auth = false, reserved_until = v_until
+            where student_id = p_student;
+            return jsonb_build_object(
+                'status', 'reserved', 'reservation', v_held.reservation,
+                'worker', v_worker, 'epoch', v_epoch, 'resumed', true
+            );
+        end if;
+        -- Another reservation, or this one with a worker still inside an Auth call.
+        return jsonb_build_object(
+            'status', 'busy',
+            'kind', v_held.kind,
+            'retry_after_seconds', greatest(1, ceil(extract(epoch from v_held.reserved_until - now()))::integer)
+        );
+    end if;
+    v_reservation := gen_random_uuid();
+    v_epoch := nextval('public.student_code_reset_epoch');
+    insert into public.student_claim_reservations (
+        student_id, reservation, kind, login_code_hash, reserved_until,
+        worker, worker_epoch, worker_in_auth, claimed_at_seen
+    )
+    values (p_student, v_reservation, 'reset', v_row.login_code_hash, v_until,
+            v_worker, v_epoch, false, v_row.claimed_at)
+    on conflict (student_id) do update
+    set reservation = excluded.reservation,
+        kind = 'reset',
+        login_code_hash = excluded.login_code_hash,
+        reserved_until = excluded.reserved_until,
+        worker = excluded.worker,
+        worker_epoch = excluded.worker_epoch,
+        worker_in_auth = false,
+        claimed_at_seen = excluded.claimed_at_seen,
+        created_at = now();
+    return jsonb_build_object(
+        'status', 'reserved', 'reservation', v_reservation,
+        'worker', v_worker, 'epoch', v_epoch, 'resumed', false
+    );
+end;
+$$;
+
+-- Does this worker still own the live reset, with no claim since? (Locks held.)
+create or replace function public.student_code_reset_owned (
+    p_row public.managed_students,
+    p_held public.student_claim_reservations,
+    p_reservation uuid,
+    p_worker uuid,
+    p_epoch bigint
+) returns boolean language sql immutable as $$
+    select p_held.student_id is not null
+        and p_held.kind = 'reset'
+        and p_held.reservation = p_reservation
+        and p_held.worker = p_worker
+        and p_held.worker_epoch = p_epoch
+        and p_row.login_code_hash is not distinct from p_held.login_code_hash
+        and p_row.claimed_at is not distinct from p_held.claimed_at_seen
+$$;
+
+-- 'ok' (go ahead with the next Auth side effect) or 'lost' (abort, touch nothing).
+create or replace function public.fence_student_code_reset (
+    p_student uuid,
+    p_reservation uuid,
+    p_worker uuid,
+    p_epoch bigint,
+    p_ttl_seconds integer default 600
+) returns text language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.managed_students;
+    v_held public.student_claim_reservations;
+begin
+    select * into v_row from public.managed_students where id = p_student for update;
+    if not found then
+        return 'lost';
+    end if;
+    select * into v_held from public.student_claim_reservations where student_id = p_student for update;
+    if not found or v_held.reserved_until <= now()
+        or not public.student_code_reset_owned(v_row, v_held, p_reservation, p_worker, p_epoch) then
+        return 'lost';
+    end if;
+    update public.student_claim_reservations
+    set worker_in_auth = true,
+        reserved_until = greatest(reserved_until, now() + make_interval(secs => greatest(coalesce(p_ttl_seconds, 600), 30)))
+    where student_id = p_student;
+    return 'ok';
+end;
+$$;
+
+-- 'reset' when the current worker's new code is written (and claimed_at
+-- cleared, as a reset sends the student back to Invited); 'lost' otherwise --
+-- nothing is written then.
+create or replace function public.complete_student_code_reset (
+    p_student uuid,
+    p_reservation uuid,
+    p_worker uuid,
+    p_epoch bigint,
+    p_code_hash text
+) returns text language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.managed_students;
+    v_held public.student_claim_reservations;
+begin
+    if p_code_hash is null or length(p_code_hash) = 0 then
+        raise exception 'p_code_hash is required' using errcode = '22004';
+    end if;
+    select * into v_row from public.managed_students where id = p_student for update;
+    if not found then
+        return 'lost';
+    end if;
+    select * into v_held from public.student_claim_reservations where student_id = p_student for update;
+    if not found or not public.student_code_reset_owned(v_row, v_held, p_reservation, p_worker, p_epoch) then
+        return 'lost';
+    end if;
+    -- The reservation goes first (same transaction), so the guard lets this
+    -- one write through.
+    delete from public.student_claim_reservations where student_id = p_student;
+    update public.managed_students set login_code_hash = p_code_hash, claimed_at = null where id = p_student;
+    return 'reset';
+end;
+$$;
+
+-- The worker reporting back after a failure: no Auth call of its own is in
+-- flight. The hold stays; a retry with the token may take a new lease at once.
+create or replace function public.stop_student_code_reset_worker (
+    p_student uuid,
+    p_reservation uuid,
+    p_worker uuid,
+    p_epoch bigint
+) returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    perform 1 from public.managed_students where id = p_student for update;
+    update public.student_claim_reservations
+    set worker = null, worker_in_auth = false
+    where student_id = p_student and kind = 'reset' and reservation = p_reservation
+        and worker = p_worker and worker_epoch = p_epoch;
+    return found;
+end;
+$$;
+
+-- Release by token, as in 20261022110500, but never under a worker that may
+-- still be inside an Auth call: the old card would become claimable while a
+-- password write is on its way.
+create or replace function public.release_student_code_reset (p_student uuid, p_reservation uuid)
+returns boolean language plpgsql security definer
+set search_path = public as $$
+begin
+    delete from public.student_claim_reservations
+    where student_id = p_student and reservation = p_reservation and kind = 'reset' and not worker_in_auth;
+    return found;
+end;
+$$;
+
+revoke all on function public.reserve_student_code_reset (uuid, uuid, integer) from public, anon, authenticated;
+
+grant execute on function public.reserve_student_code_reset (uuid, uuid, integer) to service_role;
+
+revoke all on function public.student_code_reset_owned (
+    public.managed_students, public.student_claim_reservations, uuid, uuid, bigint
+) from public, anon, authenticated;
+
+revoke all on function public.fence_student_code_reset (uuid, uuid, uuid, bigint, integer) from public, anon, authenticated;
+
+grant execute on function public.fence_student_code_reset (uuid, uuid, uuid, bigint, integer) to service_role;
+
+revoke all on function public.complete_student_code_reset (uuid, uuid, uuid, bigint, text) from public, anon, authenticated;
+
+grant execute on function public.complete_student_code_reset (uuid, uuid, uuid, bigint, text) to service_role;
+
+revoke all on function public.stop_student_code_reset_worker (uuid, uuid, uuid, bigint) from public, anon, authenticated;
+
+grant execute on function public.stop_student_code_reset_worker (uuid, uuid, uuid, bigint) to service_role;
+
+revoke all on function public.release_student_code_reset (uuid, uuid) from public, anon, authenticated;
+
+grant execute on function public.release_student_code_reset (uuid, uuid) to service_role;
+
+-- ===== supabase/migrations/20261022110800_student_code_reset_quarantine.sql =====
+-- Teacher resets of a student's card: an Auth write whose outcome is unknown
+-- quarantines the attempt (Codex r3 on #70; decision 61).
+--
+-- 20261022110700_student_code_reset_worker.sql made every attempt take its own
+-- worker lease and stay "inside an Auth call" (worker_in_auth) from its fence
+-- until it reported back. But the worker reported back on ANY failed password
+-- write, including a dropped connection or a timeout, where GoTrue may still
+-- apply the write afterwards:
+--
+--   1. worker A passed its fence and sent the password scramble;
+--   2. the transport failed: A saw an error, while the request could still
+--      commit at Auth;
+--   3. A reported back (stop_student_code_reset_worker), clearing
+--      worker_in_auth, and handed the teacher the resume token;
+--   4. retry B took a fresh lease at once, completed, and the student claimed
+--      B's card and chose a password;
+--   5. A's password write committed after that, overwriting it.
+--
+-- Now (../functions/_shared/studentCodeReset.ts) only a DEFINITE refusal (a
+-- 4xx from Auth other than 408) reports back at once. Any other failure leaves
+-- worker_in_auth set: the attempt is quarantined. Nothing here changes for
+-- that -- the worker simply does not call stop_student_code_reset_worker -- and
+-- the quarantine ends one of two ways:
+--
+--   * the write is CONFIRMED. The scramble writes a marker into the same Auth
+--     update (app_metadata.code_reset_worker = this worker's id; GoTrue applies
+--     password and app_metadata in one transaction), so seeing the marker means
+--     that write has landed and nothing of it is still in flight. Then the
+--     worker carries on (when it re-reads the user straight after the error),
+--     or a retry presenting the token reports the quarantined worker back
+--     itself (stop_student_code_reset_worker with that worker's lease) and
+--     takes a new one. reserve_student_code_reset's 'busy' answer below hands
+--     that lease to the caller presenting the token, and only to them;
+--   * the server-side TIME LIMIT passes: the hold the fence renewed just before
+--     the write (600 s, longer than an Edge Function can run) runs out, as for
+--     a worker that died inside an Auth call. That is the "held for up to 10
+--     minutes" the roster already shows (decision 49 item 5).
+--
+-- Until then a retry is told the reset is still finishing (409
+-- reset_in_progress, "try again in a few minutes"; decision 60(a)), and a claim
+-- of the old card waits, as under any live hold.
+--
+-- The session revocation is a database call, so it can check the lease in its
+-- own transaction rather than lean on the fence before it:
+-- end_student_sessions_fenced() locks the roster row and the reservation, and
+-- ends the sessions only for the current worker and epoch of a live hold, with
+-- no claim since. A stale or delayed call does nothing. The plain
+-- end_student_sessions (uuid) stays as it is for archive and the email reset,
+-- which hold no lease.
+
+-- Same signature and answers as 20261022110700. A 'busy' answer for the caller
+-- presenting this reset's own token, while its worker is inside an Auth call,
+-- also carries that worker's lease ('worker', 'epoch'), so the caller can report
+-- the worker back once its write is confirmed.
+create or replace function public.reserve_student_code_reset (
+    p_student uuid,
+    p_reservation uuid default null,
+    p_ttl_seconds integer default 600
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.managed_students;
+    v_held public.student_claim_reservations;
+    v_reservation uuid;
+    v_worker uuid := gen_random_uuid();
+    v_epoch bigint;
+    v_until timestamptz := now() + make_interval(secs => greatest(coalesce(p_ttl_seconds, 600), 30));
+    v_busy jsonb;
+begin
+    -- The roster row first, then the reservation: the order every function on
+    -- this table takes, so they serialize on one row lock and never deadlock.
+    select * into v_row from public.managed_students where id = p_student for update;
+    if not found then
+        return jsonb_build_object('status', 'not_found');
+    end if;
+    select * into v_held from public.student_claim_reservations where student_id = p_student for update;
+    if found and v_held.reserved_until > now() then
+        if v_held.kind = 'reset' and p_reservation is not null and v_held.reservation = p_reservation
+            and not v_held.worker_in_auth then
+            -- The same reset, retried: a new lease fences out the worker before it.
+            v_epoch := nextval('public.student_code_reset_epoch');
+            update public.student_claim_reservations
+            set worker = v_worker, worker_epoch = v_epoch, worker_in_auth = false, reserved_until = v_until
+            where student_id = p_student;
+            return jsonb_build_object(
+                'status', 'reserved', 'reservation', v_held.reservation,
+                'worker', v_worker, 'epoch', v_epoch, 'resumed', true
+            );
+        end if;
+        -- Another reservation, or this one with a worker still inside an Auth call.
+        v_busy := jsonb_build_object(
+            'status', 'busy',
+            'kind', v_held.kind,
+            'retry_after_seconds', greatest(1, ceil(extract(epoch from v_held.reserved_until - now()))::integer)
+        );
+        if v_held.kind = 'reset' and p_reservation is not null and v_held.reservation = p_reservation
+            and v_held.worker is not null then
+            v_busy := v_busy || jsonb_build_object('worker', v_held.worker, 'epoch', v_held.worker_epoch);
+        end if;
+        return v_busy;
+    end if;
+    v_reservation := gen_random_uuid();
+    v_epoch := nextval('public.student_code_reset_epoch');
+    insert into public.student_claim_reservations (
+        student_id, reservation, kind, login_code_hash, reserved_until,
+        worker, worker_epoch, worker_in_auth, claimed_at_seen
+    )
+    values (p_student, v_reservation, 'reset', v_row.login_code_hash, v_until,
+            v_worker, v_epoch, false, v_row.claimed_at)
+    on conflict (student_id) do update
+    set reservation = excluded.reservation,
+        kind = 'reset',
+        login_code_hash = excluded.login_code_hash,
+        reserved_until = excluded.reserved_until,
+        worker = excluded.worker,
+        worker_epoch = excluded.worker_epoch,
+        worker_in_auth = false,
+        claimed_at_seen = excluded.claimed_at_seen,
+        created_at = now();
+    return jsonb_build_object(
+        'status', 'reserved', 'reservation', v_reservation,
+        'worker', v_worker, 'epoch', v_epoch, 'resumed', false
+    );
+end;
+$$;
+
+-- The reset worker's session revocation: end_student_sessions (uuid) for the
+-- roster row's account, only while this worker and epoch hold the live
+-- reservation, have passed a fence (worker_in_auth), and no claim has happened
+-- since. The number of sessions ended, or NULL when the worker no longer owns
+-- the reset (nothing is ended then).
+create or replace function public.end_student_sessions_fenced (
+    p_student uuid,
+    p_reservation uuid,
+    p_worker uuid,
+    p_epoch bigint
+) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.managed_students;
+    v_held public.student_claim_reservations;
+begin
+    if coalesce(auth.jwt () ->> 'role', '') <> 'service_role' then
+        raise exception 'service role only' using errcode = '42501';
+    end if;
+    select * into v_row from public.managed_students where id = p_student for update;
+    if not found then
+        return null;
+    end if;
+    select * into v_held from public.student_claim_reservations where student_id = p_student for update;
+    if not found or v_held.reserved_until <= now() or not v_held.worker_in_auth
+        or not public.student_code_reset_owned(v_row, v_held, p_reservation, p_worker, p_epoch) then
+        return null;
+    end if;
+    return public.end_student_sessions (v_row.student_user_id);
+end;
+$$;
+
+revoke all on function public.reserve_student_code_reset (uuid, uuid, integer) from public, anon, authenticated;
+
+grant execute on function public.reserve_student_code_reset (uuid, uuid, integer) to service_role;
+
+revoke all on function public.end_student_sessions_fenced (uuid, uuid, uuid, bigint) from public, anon, authenticated;
+
+grant execute on function public.end_student_sessions_fenced (uuid, uuid, uuid, bigint) to service_role;

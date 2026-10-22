@@ -125,15 +125,27 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
  * category whose sender is not on a branch yet keeps its entry anyway, which is
  * what keeps the merged total what each branch tests:
  *
- *     guestEmailCode          28/150  guest and automated: share-link codes
+ *     guestEmailCode          14/85   guest and automated: share-link codes
  *     contentReportAck         8/35   legal: report acknowledgments (#63)
  *     moderationNotice         4/20   legal: statements of reasons (#63)
  *     billingCancelLink        8/40   transactional: signed-out cancel link (#62)
  *     billingConfirmation      7/30   transactional: purchase and cancellation
  *                                     confirmations (#62)
  *     retentionNotice          5/25   legal: district export notice before purge (#64)
+ *     supportInbound           8/35   inbound support@/privacy@/legal@ forwards (#70)
+ *     studentAccountMail       6/30   student invites and email-method reset links (#70)
  *                             ------
  *                             60/300  = budget 100/500 minus the 40/200 reserve
+ *
+ * The last two were added by the P3 fix round (decision 51), carved out of
+ * guestEmailCode (28/150 before) so the reserve stays whole. Inbound forwards
+ * used to spend contentReportAck, which let anyone who can mail support@ delay
+ * the legally required acknowledgments; now each has its own buckets, so
+ * neither can spend the other's share. That is all the split guarantees: every
+ * category still sends through the one Resend account, whose rate limit is
+ * shared and gives no category priority. Student invites and resets go out through
+ * GoTrue, so they would otherwise spend the very auth capacity the reserve
+ * protects, with nothing in our code counting them.
  *
  * Adding a sender is the whole registration step, and no sender sends outside
  * one: if the total then exceeds budget minus reserve,
@@ -146,9 +158,10 @@ export const LAUNCH_MAIL_SPLIT = {
      * `guest-email-start`: the one-time code a share-link guest proves an
      * address with — the guest and automated mail, which anyone can trigger.
      * 60/300 until October 2026, when the legal and transactional senders
-     * needed room.
+     * needed room; 28/150 until the P3 fix round gave inbound support mail and
+     * student account mail their own shares.
      */
-    guestEmailCode: { hour: 28, day: 150 },
+    guestEmailCode: { hour: 14, day: 85 },
     /**
      * `content-report`: the acknowledgment a reporter gets, blind-copied to the
      * legal mailbox. The endpoint is open to anyone, so it is the aimable one.
@@ -176,6 +189,21 @@ export const LAUNCH_MAIL_SPLIT = {
      * gets before its data is purged. Deferred, never dropped, when spent.
      */
     retentionNotice: { hour: 5, day: 25 },
+    /**
+     * `resend-inbound`: each message to support@, privacy@ or legal@ forwarded
+     * to the team mailbox. Anyone can mail those addresses, so it is aimable,
+     * and it has buckets of its own: a flood of inbound mail defers inbound
+     * forwards (stored, retried when the window reopens) and nothing else.
+     */
+    supportInbound: { hour: 8, day: 35 },
+    /**
+     * `student-provision`: the invitation an email-method student gets on
+     * create, and the sign-in link a teacher's reset sends. GoTrue mails these,
+     * so they leave on the auth side; counted here so a teacher (or a stolen
+     * teacher session) cannot spend the reserve resets and sign-ups rely on.
+     * Per-teacher and per-recipient limits sit under this in student-provision.
+     */
+    studentAccountMail: { hour: 6, day: 30 },
 } as const;
 
 /** The caps the budget functions below read: the launch split. */

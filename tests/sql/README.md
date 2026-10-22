@@ -687,6 +687,117 @@ ends in `deadlock detected`.
 
 Each `\ir`s its migrations to rerun them, so it is psql only.
 
+## Launchfix P3: edge hardening
+
+`student_claim_reservation.sql` proves
+`20261022110000_student_claim_reservation.sql` (launchfix P3, SF-11): a
+student claim reserves its roster row, bound to the card's `login_code_hash`,
+before student-claim writes any password, and `complete_student_claim` commits
+only while the row still carries that hash and the reservation is still the
+caller's. The interleavings are written statement by statement: one claim
+start to finish; two claims on one card (the second is `busy` and never
+replaces the first's reservation; a taken username is 23505 with the
+reservation kept); a claim against a teacher's reset both ways round (the
+reset is `busy` during a claim and rotating the code under a live claim is
+refused with 55006; a claim is `busy` during a reset, and the old hash can
+never be committed against the new code); expiry (a dead holder is taken
+over by a claim or a reset and its late commit and release are no-ops);
+archive blocks a claim's commit but keeps its reservation until the claim
+releases it, so a reset of the archived student waits for it; and no client
+role can call any of it or read the table. Since the P3 fix round it also
+proves `20261022110500_student_code_reset_holder.sql`: a reset carries a holder
+token, a second reset (no token, or a wrong one) cannot take a live reset over,
+the holder's own token resumes it, only the holder can complete or release it,
+no other path can rotate the code under it, and the paused reset / reset /
+claim interleaving can no longer scramble the student's chosen password; a
+dead reset is taken over only after its TTL. Proven against the local stack on
+2026-10-22: all 73 checks passed (53 before the fix round).
+
+Since the P3 fix round 2 it also proves
+`20261022110700_student_code_reset_worker.sql`: every reset attempt takes its
+own worker lease (a worker id and a fencing epoch that only goes up), separate
+from the resume token. Two retries of one token (section 8): B completes, the
+student claims, and A -- paused before its password write -- is `lost` at its
+fence, at its completion and at its report-back, so the claim stands; with the
+hold still live a newer lease fences the older worker out; a worker that passed
+a fence (an Auth call may be in flight) can be neither taken over by the same
+token nor released under, until it reports back; and a claim since the
+reservation (after the hold ran out, or a claim commit under it) fences the
+reset out. Proven against the local stack on 2026-10-22: all 99 checks passed
+(73 before fix round 2).
+
+Since the P3 fix round 3 it also proves
+`20261022110800_student_code_reset_quarantine.sql` (section 9): a worker whose
+password write came back ambiguous does not report back, so a retry with the
+token is `busy` (and is handed that worker's lease, which a caller without the
+token is not), a claim of the old card waits, and the hold cannot be released;
+once the write is confirmed the retry reports the worker back and takes a newer
+lease, and the quarantined worker's delayed fence, session revocation and
+completion all do nothing; an attempt never confirmed holds the row for the
+full window from its fence, after which a retry gets a fresh reservation or the
+student claims the old card, and the stale worker can do nothing more; and
+`end_student_sessions_fenced` ends sessions only for the current worker of a
+live hold that has passed a fence, with no claim since. Proven against the
+local stack on 2026-10-22: all 125 checks passed (99 before fix round 3).
+
+`account_deletion_pending.sql` proves
+`20261022110100_account_deletion_pending.sql` (launchfix P3, SF-13): once
+`begin_account_deletion` has written the marker (holding the account's
+advisory lock exclusively until it commits), a new score or roster row for
+that account is refused with 55000 whoever inserts it (service role, or the
+owner's own tab), while other accounts and updates to existing rows are
+unaffected and every insert takes the shared lock; a retry counts its attempt;
+`settle_account_deletion` keeps the marker with its error on `failed`, and
+clears it on `abandoned` only when it is a lone first attempt's -- a retry that
+deletes nothing leaves an earlier part-way attempt's marker in place, and one
+tab abandoning cannot clear the marker a second tab is sweeping under;
+deleting the auth user cascades it away, and a retry for an account already
+gone writes nothing; and no client role can call it or read the table.
+
+Since the P3 fix round it proves the final shape, with
+`20261022110400_account_deletion_attempts.sql` (attempt-scoped
+`begin_account_deletion_attempt` / `mark_account_deletion_destructive` /
+`settle_account_deletion_attempt`, the single-counter functions gone): two
+abandoned attempts clear the marker; a crashed attempt stops restricting once
+its lease runs out; an attempt that crashed after cleanup began keeps the
+account restricted (the runbook case) until a retry completes; and
+`20261022110600_account_deletion_barrier.sql`: uploads and overwrites into an
+existing score (scores and thumbnails) are refused while removals are not;
+share-link redemption is refused for a deleting account and into a deleting
+owner's score; a checkout lease cannot be taken or staged, and one taken
+before the marker reads as in flight; a provisioning intent is refused for a
+deleting teacher, finds a crashed provisioning's account by address (never an
+older account), is cleared by the roster insert, and outlives its teacher.
+Proven against the local stack on 2026-10-22: all 89 checks passed (36 before
+the fix round).
+
+`support_inbound_lease.sql` proves `20261022110200_support_inbound_lease.sql`
+(launchfix P3, SF-2 / Codex B1): the first webhook delivery inserts its
+`support_messages` row and holds it under a lease; a redelivery while it is
+held is `busy`, not a duplicate; only the lease holder can write the body or
+finish the row; a delivery that died is resumed by the next one once its lease
+runs out (no second row, the stored body handed back, the dead holder's writes
+refused); a completed row is the only duplicate. A forward the budget cannot
+pay for is `forward_deferred` (not an attempt) and `claim_due_support_messages`
+takes it only once due, under a fresh lease that a second run or a webhook
+redelivery cannot share; a redelivery before a row is due is told to wait and
+is not counted as an attempt, and once due it resumes the row. Failed attempts
+back off and, at the attempt cap, are failed (for review) with their error; a
+forward whose outcome was unknown is retried with its kept reservation recorded
+(cleared once forwarded), and the claim no longer tells the retry to skip the
+budget; store-only and refused rows complete; the state is constrained to its
+values; the retry tick runs and is scheduled; and no client role can call any
+of it or read the table.
+
+Since the P3 fix round it also proves
+`20261022110300_support_inbound_retry_window.sql`: the window is 23 hours; the
+first send attempt is recorded and later ones keep it; only the lease holder
+may begin a send; past the window a claimed retry is told not to send and the
+row is `failed`, a later delivery is a duplicate and the retry path never takes
+it; a retry or a budget deferral whose next attempt would land past the window
+fails at once; and a forward never attempted has no window. Proven against the
+local stack on 2026-10-22: all 58 checks passed (43 before the fix round).
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

@@ -1,10 +1,12 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { accountDeletionPending } from '../_shared/deletionPending.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { passwordProblem, passwordProblemMessage } from '../_shared/passwordPolicy.ts';
 import { loginThrottleSecret } from '../_shared/rateLimit.ts';
+import { readCappedJson } from '../_shared/readCappedJson.ts';
 import {
     hashLoginCode,
     isPlausibleLoginCode,
@@ -14,351 +16,174 @@ import {
     USERNAME_MAX,
     USERNAME_MIN,
 } from '../_shared/studentCodes.ts';
+import { type ClaimReservation, handleStudentClaim, type StudentClaimBackend } from './handler.ts';
 
 /**
- * Spending a login code: the one time a student's code is ever accepted.
- *
- * Deployed with `verify_jwt = false` (see supabase/config.toml), the third such
- * function after stripe-webhook and student-login, for the same structural
- * reason: the caller has no Supabase JWT to present. A child typing the code off
- * their card has no account they can reach yet — this is the endpoint that turns
- * the card into a username and a password.
- *
- * The code is a CLAIM TOKEN, not a password. It selects the roster row by hash
- * exactly once, and the successful claim spends it: the hash is nulled in the
- * same statement that stores the username, so a second attempt with the same
- * card finds nothing. That is the whole reason a student's password is never the
- * code — the card can be lost, photographed or left on the piano afterwards
- * without being a credential.
- *
- * Two things keep an endpoint this open from being a guessing machine:
- *
- *  * The hard rate limit below, taken before any other work — per IP, against
- *    the ~59-bit code space of _shared/studentCodes.ts. Even at this ceiling an
- *    attacker exhausts a meaningful fraction of the space some millions of years
- *    from now, and checkRateLimit fails closed, so losing the RPC does not open
- *    it. The ceiling is a CLASSROOM rather than a person, because a whole studio
- *    claims their cards behind one school NAT at the top of a lesson.
- *  * One indistinguishable failure for every path a guess can reach. Wrong
- *    shape, no such code, archived student, ALREADY CLAIMED code, unreadable
- *    auth user, an account that is not a provisioned student — all of them
- *    answer exactly REJECTED, so this is never an oracle for which codes exist
- *    or which have been spent.
- *
- * Some failures deliberately DO distinguish themselves, because none of them is
- * an oracle: the username and password rules are printed on the form the student
- * is looking at, so refusing silently would just be a form that cannot be
- * filled in. "That username is taken" is the interesting one — it is reachable
- * only by someone already holding a valid, unclaimed code, and a username is a
- * semi-public login identifier rather than a secret, so answering it costs
- * nothing and hiding it would strand a student on a name they cannot use. The
- * two refusals from the sign-in step (`captcha_failed`, `claim_unavailable`)
- * are past the lookup for the same reason, and both are retryable with the same
- * card: the sign-in happens BEFORE the code is spent (see the note on it).
+ * Spending a login code. The control flow — the gates, the reservation, and
+ * why each step comes where it does — lives in handler.ts; this file is only
+ * what it runs against.
  */
 
-/** The only failure a guess can reach. Never varied — see the note above. */
-const REJECTED = { error: 'That code did not work', code: 'invalid_code' };
-
-const reject = (): Response => jsonResponse(REJECTED, 401);
-
-/**
- * The sentence for a challenge GoTrue would not accept — expired, replayed, or
- * absent on a project with `[auth.captcha]` on. The same copy
- * `_shared/guestEmail.ts` uses for its own `captcha_failed`, and the same code,
- * because the browser branches on the code to put up a fresh widget.
- */
-const CAPTCHA_FAILED = { error: 'That “I’m human” check didn’t go through. Try it again.', code: 'captcha_failed' };
-
-/** Whether a GoTrue refusal was about the captcha rather than the credential. */
-const captchaRefusal = (err: { code?: string | null; message?: string | null } | null): boolean =>
-    err?.code === 'captcha_failed' || /captcha/i.test(err?.message ?? '');
-
-/**
- * Drops a session this function minted and then decided not to hand out. Best
- * effort by design: the alternative to ignoring a failure here is failing a
- * request whose real work is already done, and the session expires on its own.
- *
- * `'local'` -- this ONE session -- and never `'global'`, which is the bug this
- * scope argument exists to spell out (QA round 4 review of #57). Two children
- * typing the same card at once both get past the lookup and both mint a session
- * for the SAME auth user; exactly one of them commits. The loser lands here, and
- * a global sign-out revokes every session that user has, which at that moment
- * includes the session the WINNER is about to be handed. The winner's `setSession`
- * then fails or their next refresh 400s, and the card is already spent, so there
- * is no retry that fixes it. The same applies to the quieter version of the race:
- * a student re-claiming on a second device, or a retry after a dropped response,
- * would sign the working device out.
- *
- * Only the loser's own token is ours to revoke, and `'local'` is exactly that
- * token's session. `'others'` would be the same bug with the arguments the other
- * way round.
- */
-const signOutQuietly = async (
-    admin: { auth: { admin: { signOut: (jwt: string, scope?: 'global' | 'local' | 'others') => Promise<unknown> } } },
-    accessToken: string,
-): Promise<void> => {
-    try {
-        await admin.auth.admin.signOut(accessToken, 'local');
-    } catch (err) {
-        console.error('could not revoke the session of an uncommitted claim:', err);
-    }
-};
-
-Deno.serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return optionsResponse();
-    }
-    if (req.method !== 'POST') {
-        return jsonResponse({ error: 'Method not allowed' }, 405);
-    }
-
-    // Ahead of everything, the body read included: this is the brute-force gate,
-    // so it must cost an attacker a slot even for a request that never parses.
-    const rate = await checkRateLimit(`student-claim:${clientKey(req)}`, 60, 60_000);
-    if (!rate.ok) {
-        return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
-    }
-
-    let body: { code?: string; username?: string; password?: string; captchaToken?: string };
-    try {
-        body = await req.json();
-    } catch {
-        return jsonResponse({ error: 'Invalid JSON body' }, 400);
-    }
-
-    // Cards print XXXX-XXXX-XXXX, so normalizing first means the dashes, spaces
-    // and lower case a child types are not a way to fail. A missing or non-string
-    // `code` normalizes to '' and falls into the same single rejection below.
-    const normalized = normalizeLoginCode(typeof body.code === 'string' ? body.code : '');
-    if (!isPlausibleLoginCode(normalized)) {
-        return reject();
-    }
-
-    // Checked after the code, so a bad code plus a bad username is still one
-    // indistinguishable 401 rather than a hint that the code was the good half.
-    const username = normalizeUsername(typeof body.username === 'string' ? body.username : '');
-    if (!isValidUsername(username)) {
-        return jsonResponse(
-            {
-                error: `Usernames are ${USERNAME_MIN}-${USERNAME_MAX} lowercase letters, numbers and underscores`,
-                code: 'invalid_username',
-            },
-            422,
-        );
-    }
-
-    // Taken exactly as sent: never trimmed, never normalized. A password whose
-    // spaces are silently eaten here is one the student cannot type at
-    // /auth/v1/token afterwards.
-    const password = typeof body.password === 'string' ? body.password : '';
-    // Checked here, before the code is anywhere near spent, against the same
-    // policy GoTrue enforces on updateUserById below — a password it would
-    // refuse there surfaces as a 502 "could not set up the account", which a
-    // child cannot act on. One sentence per rule: naming the minimum to a
-    // student who typed too MUCH is the one answer they cannot act on.
-    const problem = passwordProblem(password);
-    if (problem) {
-        return jsonResponse({ error: passwordProblemMessage(problem), code: 'weak_password' }, 422);
-    }
-
-    // Optional, forwarded untouched to the password grant below and nowhere
-    // else. GoTrue's captcha (`[auth.captcha]`) is PROJECT-WIDE: once it is on,
-    // every password sign-in needs a token — including the one this function
-    // makes server-side, with no browser in the loop to solve a challenge. So
-    // the token has to come from whoever called us, and StudentClaimPage sends
-    // one whenever VITE_TURNSTILE_SITE_KEY is set.
-    //
-    // NOT verified here, deliberately. A Turnstile token may be redeemed once:
-    // verifying it ourselves (verifyTurnstileRequest, as guest-email-start
-    // does) would spend it and leave GoTrue nothing to check, so for this
-    // endpoint GoTrue is the verifier and this is a pass-through. What makes
-    // that safe is the ORDER below — the grant, and therefore the captcha
-    // verdict, now comes BEFORE the code is spent, so a refused challenge costs
-    // the student a retry and not their card.
-    //
-    // Still never a reason to refuse a claim by itself: the code is the
-    // credential here, and a deploy with captcha off ignores the token
-    // entirely.
-    const captchaToken = typeof body.captchaToken === 'string' && body.captchaToken ? body.captchaToken : null;
-
+const backend = (): StudentClaimBackend | null => {
     const admin = serviceClient();
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
     if (!admin || !supabaseUrl || !anonKey) {
-        return jsonResponse({ error: 'Server misconfigured' }, 500);
+        return null;
     }
+    return {
+        reserveClaim: async (codeHash) => {
+            const { data, error } = await admin.rpc('reserve_student_claim', { p_code_hash: codeHash });
+            if (error || !data || typeof data !== 'object') {
+                if (error) {
+                    console.error(`reserve_student_claim failed: ${error.message}`);
+                }
+                return null;
+            }
+            const row = data as Record<string, unknown>;
+            if (row['status'] === 'busy') {
+                return { status: 'busy', retryAfterSec: Number(row['retry_after_seconds']) || 60 };
+            }
+            if (row['status'] === 'reserved') {
+                return {
+                    status: 'reserved',
+                    reservation: String(row['reservation']),
+                    studentId: String(row['student_id']),
+                    studentUserId: String(row['student_user_id']),
+                    displayName: String(row['display_name'] ?? ''),
+                } satisfies ClaimReservation;
+            }
+            return { status: 'not_found' };
+        },
 
-    // The hash is all the roster stores. Three filters, one rejection: an
-    // archived student's code is refused because archiving is a real revocation,
-    // and a claimed_at that is already set means this card was spent — the row
-    // it belongs to now has a username and no hash at all.
-    const hash = await hashLoginCode(normalized);
-    const { data: student, error: lookupError } = await admin
-        .from('managed_students')
-        .select('id, student_user_id, display_name')
-        .eq('login_code_hash', hash)
-        .is('archived_at', null)
-        .is('claimed_at', null)
-        .maybeSingle();
-    if (lookupError || !student) {
-        return reject();
-    }
+        readAuthUser: async (userId) => {
+            const { data, error } = await admin.auth.admin.getUserById(userId);
+            const user = data?.user;
+            if (error || !user) {
+                return null;
+            }
+            return { email: user.email ?? null, userType: user.app_metadata?.user_type };
+        },
 
-    // The address comes from the auth user the roster row points at, never from
-    // the request: an email the caller supplied would let a known code be aimed
-    // at somebody else's account.
-    const { data: userData, error: userError } = await admin.auth.admin.getUserById(student.student_user_id);
-    const studentUser = userData?.user;
-    const email = studentUser?.email;
-    if (userError || !studentUser || !email) {
-        console.error(`roster row ${student.id} points at an auth user that cannot be read`);
-        return reject();
-    }
-    // Belt and braces on top of that. app_metadata.user_type is admin-set at
-    // creation, so checking it here means a roster row that somehow named an
-    // ordinary account could not turn this open endpoint into a password RESET
-    // for it.
-    if (studentUser.app_metadata?.user_type !== 'student') {
-        console.error(`roster row ${student.id} points at an account that is not a provisioned student`);
-        return reject();
-    }
+        teacherDeletionPending: async (studentId) => {
+            const { data, error } = await admin
+                .from('managed_students')
+                .select('teacher_id')
+                .eq('id', studentId)
+                .maybeSingle();
+            if (error || !data) {
+                console.error(`could not read the teacher of roster row ${studentId}: ${error?.message ?? 'no row'}`);
+                return 'unknown';
+            }
+            const pending = await accountDeletionPending(admin, data.teacher_id as string);
+            if (!pending.ok) {
+                console.error(`could not check whether ${data.teacher_id} is being deleted: ${pending.message}`);
+                return 'unknown';
+            }
+            return pending.pending ? 'pending' : 'clear';
+        },
 
-    // A friendly answer for the overwhelmingly common case, ahead of the write.
-    // The unique index is still the authority — this is a race the pre-check
-    // cannot close, which is why the 23505 branch below says the same thing.
-    const { data: taken } = await admin
-        .from('managed_students')
-        .select('id')
-        .eq('username', username)
-        .neq('id', student.id)
-        .maybeSingle();
-    if (taken) {
-        return jsonResponse({ error: 'That username is taken', code: 'username_taken' }, 409);
-    }
+        usernameTakenByOther: async (username, studentId) => {
+            const { data } = await admin
+                .from('managed_students')
+                .select('id')
+                .eq('username', username)
+                .neq('id', studentId)
+                .maybeSingle();
+            return Boolean(data);
+        },
 
-    // The password goes FIRST, and the half-state that leaves is safe in every
-    // direction: the roster row is still Invited, so student-login matches
-    // nothing and the code is still live for a retry. The only person who could
-    // have set that password is whoever held the code, and the account they set
-    // it on has no sign-in path until the row below says it does.
-    const { error: passwordError } = await admin.auth.admin.updateUserById(student.student_user_id, {
-        password,
-    });
-    if (passwordError) {
-        console.error(`could not set the password for student ${student.id}: ${passwordError.message}`);
-        return jsonResponse({ error: 'Could not set up the account' }, 502);
-    }
+        setPassword: async (userId, password) => {
+            const { error } = await admin.auth.admin.updateUserById(userId, { password });
+            return error ? error.message : null;
+        },
 
-    // The sign-in comes BEFORE the commit, and that order is the whole point.
-    //
-    // It used to come after, which meant the one thing that can refuse a
-    // password grant for a reason unconnected to the password — GoTrue's
-    // project-wide captcha — got its say only once the code was already spent:
-    // the card was dead, the account existed, and the child was told to go and
-    // sign in instead. Here, every way the grant can fail leaves the roster row
-    // untouched (still Invited, still holding its hash), so the honest answer is
-    // "try that again" and the card still works.
-    //
-    // The half-state this leaves is the same one the password write above
-    // leaves, and is safe for the same reason: a password set and a session
-    // minted for an account whose row is still Invited reaches nothing —
-    // student-login matches no unclaimed row, and the only person who could
-    // have got this far is whoever held the code.
-    //
-    // A FRESH anon-key client, deliberately carrying no Authorization header:
-    // nothing the caller sent travels with this sign-in, and the session it
-    // produces is handed to the client rather than kept in the isolate.
-    const anonClient = createClient(supabaseUrl, anonKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-    });
+        // A FRESH anon-key client, deliberately carrying no Authorization header:
+        // nothing the caller sent travels with this sign-in, and the session it
+        // produces is handed to the client rather than kept in the isolate.
+        signIn: async (email, password, captchaToken) => {
+            const anonClient = createClient(supabaseUrl, anonKey, {
+                auth: { persistSession: false, autoRefreshToken: false },
+            });
+            const { data, error } = await anonClient.auth.signInWithPassword({
+                email,
+                password,
+                // `options` is omitted entirely without a token, so nothing about
+                // this request changes on a project with captcha disabled.
+                ...(captchaToken ? { options: { captchaToken } } : {}),
+            });
+            if (error || !data.session) {
+                return { ok: false, error: error ? { code: error.code ?? null, message: error.message } : null };
+            }
+            return {
+                ok: true,
+                session: { accessToken: data.session.access_token, refreshToken: data.session.refresh_token },
+            };
+        },
 
-    const { data: signIn, error: signInError } = await anonClient.auth.signInWithPassword({
-        email,
-        password,
-        // `options` is omitted entirely without a token, so nothing about this
-        // request changes on a project with captcha disabled.
-        ...(captchaToken ? { options: { captchaToken } } : {}),
-    });
-    if (signInError || !signIn.session) {
-        // Said plainly rather than collapsed into REJECTED: the caller is past
-        // the lookup, so they hold a valid unclaimed code, and telling them
-        // what went wrong reveals nothing a code-holder does not already know
-        // (the same reasoning that lets "that username is taken" be said). A
-        // captcha refusal is called by its name so the form knows to put up a
-        // fresh challenge rather than sending the spent token again.
-        console.error(`claim for student ${student.id} could not sign in: ${signInError?.message ?? 'no session'}`);
-        return captchaRefusal(signInError)
-            ? jsonResponse(CAPTCHA_FAILED, 403)
-            : jsonResponse(
-                  { error: 'Could not finish setting up your account. Please try again.', code: 'claim_unavailable' },
-                  502,
-              );
-    }
+        completeClaim: async (studentId, reservation, codeHash, username) => {
+            const { data, error } = await admin.rpc('complete_student_claim', {
+                p_student: studentId,
+                p_reservation: reservation,
+                p_code_hash: codeHash,
+                p_username: username,
+            });
+            if (error) {
+                if (error.code === '23505') {
+                    return 'username_taken';
+                }
+                console.error(`complete_student_claim failed for ${studentId}: ${error.message}`);
+                return 'error';
+            }
+            return data === 'claimed' ? 'claimed' : 'lost';
+        },
 
-    // The commit: one UPDATE that stores the name, stamps the claim and spends
-    // the code. Filtered on the same three conditions the lookup selected on, so
-    // a row claimed or archived in the meantime is refused here as well, and the
-    // CHECK constraint refuses any two of these three landing without the third.
-    //
-    // The row is read BACK on purpose, and that is the whole reason those filters
-    // are load-bearing: PostgREST answers an UPDATE that matched nothing with a
-    // bare 204, which supabase-js reports as a plain success. Without the
-    // .select() the request that LOST a race reads exactly like the one that won
-    // and falls through to the sign-in below — a session handed out against a
-    // card somebody else has already spent.
-    const { data: claimed, error: claimError } = await admin
-        .from('managed_students')
-        .update({
-            username,
-            claimed_at: new Date().toISOString(),
-            login_code_hash: null,
-        })
-        .eq('id', student.id)
-        .is('archived_at', null)
-        .is('claimed_at', null)
-        .select('id')
-        .maybeSingle();
-    if (claimError || !claimed) {
-        // Nothing was stored, so the session just minted must not be handed
-        // out: the row it belongs to is somebody else's claim now (or still
-        // nobody's). Dropped server-side, and revoked best-effort so it does
-        // not sit in GoTrue until it expires.
-        await signOutQuietly(admin, signIn.session.access_token);
-        if (claimError?.code === '23505') {
-            // The unique index fired between the pre-check and here. Nothing was
-            // written, so the code is still live and the student simply picks
-            // another name — the same answer the pre-check gives.
-            return jsonResponse({ error: 'That username is taken', code: 'username_taken' }, 409);
-        }
-        if (claimError) {
-            console.error(`could not claim roster row ${student.id}: ${claimError.message}`);
-            return jsonResponse({ error: 'Could not set up the account' }, 502);
-        }
-        // Another claim spent this card between our lookup and this statement, or
-        // the teacher archived the row in that gap. REJECTED rather than a
-        // session, because the card really is spent by now: that is the same
-        // answer the lookup above would give a moment later, and an already
-        // claimed code is one of the paths the note at the top of this file
-        // counts among the single indistinguishable refusal.
-        console.error(`roster row ${student.id} was already claimed when this request tried to commit`);
-        return reject();
-    }
+        releaseClaim: async (studentId, reservation) => {
+            const { error } = await admin.rpc('release_student_claim', {
+                p_student: studentId,
+                p_reservation: reservation,
+            });
+            if (error) {
+                // The reservation runs out on its own; a retry waits until then.
+                console.error(`release_student_claim failed for ${studentId}: ${error.message}`);
+            }
+        },
 
-    // The card is spent and the username is this student's now, so whatever
-    // student-login has counted against that name — someone hammering it before
-    // a teacher's reset, or before this student ever claimed it — no longer
-    // stands between them and signing in. Best effort, past the commit.
-    await forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, username);
+        // `'local'` -- this ONE session -- and never `'global'` (QA round 4
+        // review of #57): a global sign-out would revoke every session the
+        // account has, which can include the one a concurrent winner was handed.
+        signOutSession: async (accessToken) => {
+            try {
+                await admin.auth.admin.signOut(accessToken, 'local');
+            } catch (err) {
+                console.error('could not revoke the session of an uncommitted claim:', err);
+            }
+        },
 
-    // The token pair, the name and the username the student now owns. The client
-    // calls supabase.auth.setSession with the pair. The synthetic email stays an
-    // implementation detail of provisioning and never leaves the server, and no
-    // user object is echoed back for a caller to mine.
-    return jsonResponse({
-        accessToken: signIn.session.access_token,
-        refreshToken: signIn.session.refresh_token,
-        displayName: student.display_name,
-        username,
-    });
-});
+        forgetLogin: async (username) => {
+            await forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, username);
+        },
+    };
+};
+
+Deno.serve((req) =>
+    handleStudentClaim(req, {
+        json: jsonResponse,
+        options: optionsResponse,
+        clientKey,
+        checkRateLimit,
+        readJson: readCappedJson,
+        codes: {
+            hashLoginCode,
+            isPlausibleLoginCode,
+            isValidUsername,
+            normalizeLoginCode,
+            normalizeUsername,
+            USERNAME_MAX,
+            USERNAME_MIN,
+        },
+        password: { passwordProblem, passwordProblemMessage },
+        backend: backend(),
+        logError: (message) => console.error(message),
+    }),
+);

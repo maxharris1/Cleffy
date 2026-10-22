@@ -7,8 +7,11 @@ import { describe, expect, it, vi } from 'vitest';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import { LEGAL_VERSIONS } from '../../supabase/functions/_shared/legalVersions';
 import {
+    BODY_MAX_BYTES,
     CHECKOUT_ATTEMPT_STALE_AFTER,
     CHECKOUT_ATTEMPT_STALE_AFTER_MS,
+    CHECKOUT_DELETION_CHECK_UNAVAILABLE,
+    CHECKOUT_DELETION_PENDING,
     checkoutIdempotencyKey,
     EDGE_FUNCTION_WALL_CLOCK_MS,
     handleCheckout,
@@ -22,6 +25,9 @@ import {
     EDGE_FUNCTION_WALL_CLOCK_MS as WEBHOOK_WALL_CLOCK_MS,
     holdsRunningSubscription,
 } from '../../supabase/functions/_shared/stripeEvents';
+import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
+import { chunkedJson } from '../security/chunkedBody';
+import { CONTROL_BODY_MAX_BYTES, PAYLOAD_TOO_LARGE } from '../../supabase/functions/_shared/readCappedJson';
 
 /**
  * The checkout flow, run for real against a fake Stripe that models open
@@ -373,6 +379,7 @@ const harness = (
     const consents: Array<ConsentRecord & { id: string; sessionId: string | null }> = [];
     const deps: CheckoutDeps = {
         json,
+        readJson: readCappedJson,
         options: () => new Response(null, { status: 204 }),
         clientKey: () => '203.0.113.9',
         checkRateLimit: vi.fn(async () => {
@@ -1313,6 +1320,43 @@ describe('stripe-checkout flow', () => {
             expect(h.deps.releaseAttempt).not.toHaveBeenCalled();
         });
 
+        it('refuses, as 409 account_deletion_pending, when the account is being deleted', async () => {
+            // 20261022110600_account_deletion_barrier.sql refuses the lease, so
+            // no session can be opened behind the deletion's billing sweeps.
+            const h = harness({ customerId: 'cus_1' });
+            (h.deps.beginAttempt as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+                ok: false,
+                reason: 'deletion_pending',
+            });
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(409);
+            expect(await body(response)).toEqual(CHECKOUT_DELETION_PENDING);
+            expect(h.deps.createSession).not.toHaveBeenCalled();
+            expect(h.deps.releaseAttempt).not.toHaveBeenCalled();
+        });
+
+        it('refuses, as a 503 retry prompt, when it cannot tell whether the account is being deleted', async () => {
+            // Fails closed (decision 60(b)): nothing was taken, and the next try
+            // usually gets its answer.
+            const h = harness({ customerId: 'cus_1' });
+            (h.deps.beginAttempt as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+                ok: false,
+                reason: 'deletion_check_failed',
+                error: new Error('rpc down'),
+            });
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(503);
+            expect(await body(response)).toEqual(CHECKOUT_DELETION_CHECK_UNAVAILABLE);
+            expect(CHECKOUT_DELETION_CHECK_UNAVAILABLE.error).toMatch(/try again in a minute/);
+            expect(h.deps.createSession).not.toHaveBeenCalled();
+            expect(h.deps.releaseAttempt).not.toHaveBeenCalled();
+            expect(h.errors).toEqual(['deletion_check_failed']);
+        });
+
         it("refuses when Stripe's own subscription list cannot be read", async () => {
             // Without this read a paid-but-unlanded purchase is invisible, so a
             // failure to make it has to refuse rather than fall through.
@@ -1635,5 +1679,28 @@ describe('stripe-checkout/index.ts is wiring only', () => {
         // reader of the SQL sees only finish_checkout_attempt, so the nulls are
         // asserted here.
         expect(source).toMatch(/p_attempt_id: null,\s*\n\s*p_price_id: null,\s*\n\s*p_session_id: null,/);
+    });
+});
+
+describe('stripe-checkout body cap', () => {
+    it('answers 413 to a chunked body past the control cap, before Stripe is called', async () => {
+        expect(BODY_MAX_BYTES).toBe(CONTROL_BODY_MAX_BYTES);
+        const h = harness();
+        const response = await handleCheckout(
+            chunkedJson({ priceId: 'price_teacher_annual' }, BODY_MAX_BYTES + 1, {
+                url: 'https://edge.test/functions/v1/stripe-checkout',
+                headers: { Origin: 'https://cleffy.io', Authorization: 'Bearer jwt' },
+            }),
+            h.deps,
+        );
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual(PAYLOAD_TOO_LARGE);
+        expect(h.params).toHaveLength(0);
+    });
+
+    it('refuses a JSON body that is not an object', async () => {
+        const h = harness();
+        expect((await handleCheckout(post(null), h.deps)).status).toBe(400);
+        expect((await handleCheckout(post([1, 2]), h.deps)).status).toBe(400);
     });
 });

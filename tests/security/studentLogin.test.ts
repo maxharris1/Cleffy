@@ -10,6 +10,10 @@ import {
     type StudentLoginBackend,
     type StudentLoginDeps,
 } from '../../supabase/functions/student-login/handler';
+import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
+import { chunkedJson } from './chunkedBody';
+import { BODY_MAX_BYTES } from '../../supabase/functions/student-login/handler';
+import { CONTROL_BODY_MAX_BYTES, PAYLOAD_TOO_LARGE } from '../../supabase/functions/_shared/readCappedJson';
 
 /**
  * student-login's control flow, run for real against stub clients: the
@@ -92,6 +96,7 @@ const harness = (
         return options.ipGate ?? { ok: true as const };
     });
     const deps: StudentLoginDeps = {
+        readJson: readCappedJson,
         json: (body, status = 200) =>
             new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }),
         options: () => new Response('ok'),
@@ -332,5 +337,27 @@ describe('student-login handler', () => {
             Promise.resolve(fn === 'begin_login_attempt' ? begin(args) : { data: null, error: null }),
         );
         expect((await handleStudentLogin(post(goodBody), student.deps)).status).toBe(200);
+    });
+});
+
+describe('student-login body cap', () => {
+    it('answers 413 to a chunked body past the control cap, after the IP gate and before any lookup', async () => {
+        expect(BODY_MAX_BYTES).toBe(CONTROL_BODY_MAX_BYTES);
+        const h = harness();
+        const response = await handleStudentLogin(
+            chunkedJson({ username: 'ada', password: 'pw' }, BODY_MAX_BYTES + 1, {
+                url: 'https://edge.test/functions/v1/student-login',
+            }),
+            h.deps,
+        );
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual(PAYLOAD_TOO_LARGE);
+        expect(h.checkRateLimit).toHaveBeenCalledTimes(1);
+    });
+
+    it('still reads a chunked body under the cap', async () => {
+        const h = harness();
+        const response = await handleStudentLogin(chunkedJson({ username: '', password: '' }, 2048), h.deps);
+        expect(response.status).not.toBe(413);
     });
 });

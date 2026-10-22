@@ -11,6 +11,7 @@ import {
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 import { expireOpenCheckoutSessions, servedModes, stripeClient } from '../_shared/stripe.ts';
 
 /**
@@ -44,13 +45,13 @@ interface DeleteBody {
     password?: unknown;
 }
 
-const readBody = async (req: Request): Promise<DeleteBody | null> => {
-    try {
-        const parsed = await req.json();
-        return parsed && typeof parsed === 'object' ? (parsed as DeleteBody) : null;
-    } catch {
-        return null;
+/** The body, null when it is not a JSON object, or 'too_large' past the control cap. */
+const readBody = async (req: Request): Promise<DeleteBody | null | 'too_large'> => {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? 'too_large' : null;
     }
+    return isJsonObject(read.value) ? (read.value as DeleteBody) : null;
 };
 
 const isStripeMissing = (err: unknown): boolean =>
@@ -140,6 +141,56 @@ const removeFolder = async (admin: SupabaseClient, bucket: string, prefix: strin
 };
 
 const ports = (admin: SupabaseClient): DeletionPorts => ({
+    beginDeletion: async (userId) => {
+        const { data, error } = await admin.rpc('begin_account_deletion_attempt', { p_user: userId });
+        if (error) {
+            throw new Error(`could not mark the deletion pending: ${error.message}`);
+        }
+        return typeof data === 'string' ? data : null;
+    },
+    markDestructive: async (userId, attempt) => {
+        const { data, error } = await admin.rpc('mark_account_deletion_destructive', {
+            p_user: userId,
+            p_attempt: attempt,
+        });
+        if (error) {
+            throw new Error(`could not record that the deletion began: ${error.message}`);
+        }
+        return data === true;
+    },
+    settleDeletion: async (userId, attempt, outcome, code) => {
+        const { error } = await admin.rpc('settle_account_deletion_attempt', {
+            p_user: userId,
+            p_attempt: attempt,
+            p_outcome: outcome,
+            p_error: code,
+        });
+        if (error) {
+            throw new Error(`could not settle the deletion marker: ${error.message}`);
+        }
+    },
+    checkoutInFlight: async (userId) => {
+        const { data, error } = await admin.rpc('checkout_attempt_in_flight', { p_user: userId });
+        if (error) {
+            throw new Error(`could not check for a checkout in flight: ${error.message}`);
+        }
+        return data === true;
+    },
+    provisionIntents: async (teacherId) => {
+        const { data, error } = await admin.rpc('student_provision_intents_for', { p_teacher: teacherId });
+        if (error) {
+            throw new Error(`could not read provisioning intents: ${error.message}`);
+        }
+        return ((data ?? []) as Array<{ roster_id: string; student_user_id: string | null; live: boolean }>).map(
+            (row) => ({ rosterId: row.roster_id, studentUserId: row.student_user_id, live: row.live === true }),
+        );
+    },
+    clearProvisionIntent: async (rosterId) => {
+        const { error } = await admin.rpc('finish_student_provision', { p_roster_id: rosterId });
+        if (error) {
+            throw new Error(`could not clear provisioning intent ${rosterId}: ${error.message}`);
+        }
+    },
     billingCustomers: async (userId) => {
         const { data, error } = await admin
             .from('billing_customers')
@@ -358,6 +409,9 @@ Deno.serve(async (req) => {
     }
 
     const body = await readBody(req);
+    if (body === 'too_large') {
+        return jsonResponse(PAYLOAD_TOO_LARGE, 413);
+    }
     if (!body || body.confirm !== DELETE_CONFIRMATION) {
         return jsonResponse({ error: `Type ${DELETE_CONFIRMATION} to confirm`, code: 'confirmation_required' }, 400);
     }

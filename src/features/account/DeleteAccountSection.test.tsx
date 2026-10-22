@@ -114,6 +114,35 @@ describe('DeleteAccountSection', () => {
         expect(screen.getByRole('button', { name: 'Delete my account' })).toBeEnabled();
     });
 
+    it('a deletion refused during a checkout says to wait a few minutes and try again', async () => {
+        // Decision 58(3): delete-account answers 409 checkout_in_progress while
+        // another tab's checkout lease is live; the dialog shows the server's
+        // words and stays open for the retry.
+        const { AccountDeletionError } = await vi.importActual<typeof AccountDeletionModule>(
+            '@/features/account/accountDeletion',
+        );
+        requestAccountDeletion.mockRejectedValue(
+            new AccountDeletionError(
+                'A checkout is open in another tab or window. Close it, wait a few minutes, and try again. Nothing has been deleted.',
+                'checkout_in_progress',
+                409,
+            ),
+        );
+        const onDeleted = vi.fn();
+        renderSection(<DeleteAccountSection session={sessionFor()} onDeleted={onDeleted} />);
+        const user = await openDialog();
+        await user.type(screen.getByLabelText('Type DELETE to confirm'), 'DELETE');
+        await user.type(screen.getByLabelText('Your password'), 'right');
+        await user.click(screen.getByRole('button', { name: 'Delete my account' }));
+
+        expect(await screen.findByText(/wait a few minutes, and try again/)).toHaveTextContent(
+            'Nothing has been deleted.',
+        );
+        expect(clearLocalAccountData).not.toHaveBeenCalled();
+        expect(onDeleted).not.toHaveBeenCalled();
+        expect(screen.getByRole('button', { name: 'Delete my account' })).toBeEnabled();
+    });
+
     it('offers a password reset to an account that may never have had a password', async () => {
         renderSection(<DeleteAccountSection session={sessionFor()} onDeleted={vi.fn()} />);
         await openDialog();

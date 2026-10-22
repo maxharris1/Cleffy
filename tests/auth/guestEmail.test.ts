@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+    BODY_MAX_BYTES,
     generateGuestEmailCode,
     GUEST_EMAIL_CODE_TTL_MS,
     GUEST_EMAIL_ERRORS,
@@ -28,6 +29,9 @@ import { mailLimit } from '../../supabase/functions/_shared/mailBudget';
 import { resendIdempotencyKey, sendViaResend } from '../../supabase/functions/_shared/resendDelivery';
 import { FakeResend } from '../billing/fakeResend';
 import { passwordProblem, passwordProblemMessage } from '../../supabase/functions/_shared/passwordPolicy';
+import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
+import { chunkedJson } from '../security/chunkedBody';
+import { CONTROL_BODY_MAX_BYTES, PAYLOAD_TOO_LARGE } from '../../supabase/functions/_shared/readCappedJson';
 
 /**
  * The guest "attach your email" flow, run for real against stubs. The point of
@@ -52,6 +56,7 @@ const post = (body: unknown, method = 'POST') =>
 
 const common = (calls: string[], caller: GuestCaller | Response = GUEST) => ({
     json,
+    readJson: readCappedJson,
     options: () => new Response('ok'),
     authenticate: vi.fn(async () => {
         calls.push('auth');
@@ -763,5 +768,30 @@ describe('the browser no longer attaches an email itself', () => {
         const config = readFileSync(resolve(process.cwd(), 'supabase/config.toml'), 'utf8');
         expect(config).toMatch(/\[functions\.guest-email-start\]\s*\nverify_jwt = true/);
         expect(config).toMatch(/\[functions\.guest-email-confirm\]\s*\nverify_jwt = true/);
+    });
+});
+
+describe('guest email body cap', () => {
+    it('guest-email-start answers 413 to a chunked body past the control cap and mails nothing', async () => {
+        expect(BODY_MAX_BYTES).toBe(CONTROL_BODY_MAX_BYTES);
+        const h = startHarness();
+        const response = await handleGuestEmailStart(
+            chunkedJson({ email: 'a@example.com' }, BODY_MAX_BYTES + 1, { headers: { Authorization: 'Bearer jwt' } }),
+            h.deps,
+        );
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual(PAYLOAD_TOO_LARGE);
+        expect(h.sent).toHaveLength(0);
+    });
+
+    it('guest-email-confirm answers 413 the same way', async () => {
+        const h = confirmHarness();
+        const response = await handleGuestEmailConfirm(
+            chunkedJson({ email: 'a@example.com', code: '123456' }, BODY_MAX_BYTES + 1, {
+                headers: { Authorization: 'Bearer jwt' },
+            }),
+            h.deps,
+        );
+        expect(response.status).toBe(413);
     });
 });

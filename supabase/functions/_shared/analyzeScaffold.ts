@@ -3,6 +3,7 @@ import { jsonResponse, optionsResponse } from './cors.ts';
 import { METRIC_BY_FUNCTION, type UsageMetric } from './entitlements.ts';
 import { checkRateLimit, clientKey, serviceClient } from './imslp.ts';
 import { enforce } from './quota.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from './readCappedJson.ts';
 
 /**
  * Shared body for the three metered analysis endpoints.
@@ -73,12 +74,16 @@ export const serveMeteredAnalysis = (functionName: string): void => {
             return student;
         }
 
-        let body: { documentId?: string };
-        try {
-            body = await req.json();
-        } catch {
+        const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+        if (!read.ok) {
+            return read.status === 413
+                ? jsonResponse(PAYLOAD_TOO_LARGE, 413)
+                : jsonResponse({ error: 'Invalid JSON body' }, 400);
+        }
+        if (!isJsonObject(read.value)) {
             return jsonResponse({ error: 'Invalid JSON body' }, 400);
         }
+        const body = read.value as { documentId?: string };
 
         const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
         if (!documentId || !UUID_RE.test(documentId)) {

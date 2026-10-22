@@ -8,17 +8,35 @@ import type { AnnotationRow } from '@/types/database';
  * a crash.
  */
 
+/**
+ * Bounds on one live-ink message. A peer's websocket is not trusted: without
+ * these a single broadcast could carry millions of points or a megabyte id.
+ * The sender's largest batch is a pen-up flush of 1500 points
+ * (PEN_UP_MAX_POINTS in realtimeChannel.ts), well inside `maxBatchPoints`.
+ * remoteInkBuffers.ts bounds what accumulates across batches.
+ */
+export const INK_LIMITS = {
+    /** Points (x, y, p triples) in one batch. */
+    maxBatchPoints: 2048,
+    /** Points one live stroke may accumulate across its batches. */
+    maxStrokePoints: 10_000,
+    /** strokeId / userId length; both are UUIDs (36 characters) in practice. */
+    maxIdLength: 64,
+    /** A CSS colour string. */
+    maxColorLength: 64,
+} as const;
+
 /** Live in-progress ink: streamed point batches, never persisted. */
 export const inkProgressSchema = z.object({
-    strokeId: z.string().min(1),
-    userId: z.string().min(1),
+    strokeId: z.string().min(1).max(INK_LIMITS.maxIdLength),
+    userId: z.string().min(1).max(INK_LIMITS.maxIdLength),
     page: z.number().int().nonnegative(),
     kind: z.enum(['stroke', 'highlight']),
-    color: z.string().min(1),
+    color: z.string().min(1).max(INK_LIMITS.maxColorLength),
     /** Base width / page width. */
     w: z.number().positive(),
     /** Flat [x,y,p,…] batch to APPEND to the stroke. */
-    pts: z.array(z.number()),
+    pts: z.array(z.number()).max(INK_LIMITS.maxBatchPoints * 3),
     /** Present on the final batch. */
     done: z.literal(true).optional(),
     /** Present when the stroke was abandoned (pointercancel). */

@@ -1,5 +1,10 @@
 import { requireUser } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import {
+    ACCOUNT_DELETION_PENDING,
+    accountDeletionPending,
+    DELETION_CHECK_UNAVAILABLE,
+} from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import {
     checkRateLimit,
@@ -29,6 +34,7 @@ import {
 import { buildImslpProvenance } from '../_shared/imslpProvenance.ts';
 import { wikitextFromMwPage } from '../_shared/imslpWorkPage.ts';
 import { enforce, refund } from '../_shared/quota.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -147,7 +153,16 @@ Deno.serve(async (req) => {
         );
     }
 
-    let body: {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413
+            ? jsonResponse(PAYLOAD_TOO_LARGE, 413)
+            : jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    if (!isJsonObject(read.value)) {
+        return jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    const body = read.value as {
         filename?: string;
         acceptedDisclaimer?: boolean;
         documentId?: string;
@@ -155,11 +170,6 @@ Deno.serve(async (req) => {
         create?: boolean;
         title?: string;
     };
-    try {
-        body = await req.json();
-    } catch {
-        return jsonResponse({ error: 'Invalid JSON body' }, 400);
-    }
 
     const filename = typeof body.filename === 'string' ? body.filename.trim() : '';
     if (!filename || !filename.toLowerCase().endsWith('.pdf')) {
@@ -220,6 +230,18 @@ Deno.serve(async (req) => {
     const admin = serviceClient();
     if (!admin) {
         return jsonResponse({ error: 'Server misconfigured' }, 500);
+    }
+
+    // A score imported into an account being deleted would outlive the sweep
+    // (../_shared/deletionPending.ts). Asked before any quota, pacing slot or
+    // write; the documents trigger stays the backstop.
+    const pending = await accountDeletionPending(admin, userId);
+    if (!pending.ok) {
+        logError('imslp-download', new Error(pending.message), { code: 'deletion_check_failed' });
+        return jsonResponse(DELETION_CHECK_UNAVAILABLE, 503);
+    }
+    if (pending.pending) {
+        return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
     }
 
     const flow = await runImslpImport(

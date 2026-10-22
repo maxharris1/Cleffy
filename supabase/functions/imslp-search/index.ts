@@ -25,6 +25,7 @@ import {
     workPageUrl,
 } from '../_shared/imslp.ts';
 import { POPULAR_WORKS, WORK_ALIASES } from '../_shared/popularWorks.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 import {
     aliasTitlesForQuery,
     buildSearchVariants,
@@ -341,18 +342,22 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
 
-    let body: {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413
+            ? jsonResponse(PAYLOAD_TOO_LARGE, 413)
+            : jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    if (!isJsonObject(read.value)) {
+        return jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    const body = read.value as {
         q?: string;
         limit?: number;
         offset?: number;
         filters?: unknown;
         sort?: unknown;
     };
-    try {
-        body = await req.json();
-    } catch {
-        return jsonResponse({ error: 'Invalid JSON body' }, 400);
-    }
 
     const q = typeof body.q === 'string' ? body.q.trim() : '';
     const filters = parseFilters(body.filters);
