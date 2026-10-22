@@ -109,6 +109,15 @@ describe('ShareExportMenu export allowance', () => {
         vi.restoreAllMocks();
     });
 
+    it('opens when the viewer’s “couldn’t be saved” banner asks (openSignal), and only then', () => {
+        const { rerender } = render(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" openSignal={0} />);
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+
+        rerender(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" openSignal={1} />);
+
+        expect(screen.getByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
+    });
+
     it('builds the PDF, then claims, then hands it over only once the claim is granted', async () => {
         rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
         const user = await openMenu();
@@ -270,8 +279,41 @@ describe('ShareExportMenu export allowance', () => {
             0,
             expect.any(String),
             teacher.user.id,
+            expect.any(Function),
         );
         expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('shows what an incomplete export is missing, and stays open over it, not just a console warning (MAJOR 3)', async () => {
+        const missing = 'This export is missing marks. This device’s storage couldn’t be read.';
+        buildAnnotatedPdf.mockImplementation(
+            (_doc: string, _bytes: ArrayBuffer, _title: string, options: { onNotice?: (notice: string) => void }) => {
+                options.onNotice?.(missing);
+                return Promise.resolve(builtPdf);
+            },
+        );
+        rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
+        const user = await openMenu();
+
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledWith(builtPdf));
+        expect(await screen.findByText(missing)).toBeInTheDocument();
+        expect(screen.getByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
+    });
+
+    it('shows the same notice for a page sent as a photo', async () => {
+        const conflict =
+            'One of your unsaved marks changed elsewhere before it could be saved here: the export has both versions.';
+        exportAnnotatedPageImage.mockImplementation((...args: unknown[]) => {
+            (args[5] as (notice: string) => void)(conflict);
+            return Promise.resolve();
+        });
+        const user = await openMenu();
+
+        await user.click(screen.getByRole('menuitem', { name: /Send page 1 as photo/ }));
+
+        expect(await screen.findByText(conflict)).toBeInTheDocument();
     });
 
     describe('as a share-link guest', () => {

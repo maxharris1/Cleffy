@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
+import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import type { Annotation } from '@/types/models';
 
 const DOC = 'local-testdoc';
@@ -350,7 +351,7 @@ describe('AnnotationStore', () => {
             return gate;
         };
 
-        const settledFlag = (promise: Promise<void>) => {
+        const settledFlag = (promise: Promise<unknown>) => {
             const flag = { settled: false };
             void promise.then(() => (flag.settled = true));
             return flag;
@@ -371,7 +372,7 @@ describe('AnnotationStore', () => {
 
                 gate.release();
                 await editing;
-                await store.whenSaved('a1');
+                await expect(store.whenSaved('a1')).resolves.toBe(true);
                 expect(store.hasUnsavedEdit('a1')).toBe(false);
                 expect((await db.ops.toArray()).map((op) => op.type)).toEqual(['create', 'update']);
             } finally {
@@ -395,7 +396,8 @@ describe('AnnotationStore', () => {
                 const saved = store.whenSaved('a1');
                 gate.release();
                 await editing;
-                await saved;
+                // Refused, so nothing of it is left unsaved.
+                await expect(saved).resolves.toBe(true);
                 expect(store.hasUnsavedEdit('a1')).toBe(false);
                 expect((await db.ops.toArray()).map((op) => op.type)).toEqual(['create']);
             } finally {
@@ -413,10 +415,14 @@ describe('AnnotationStore', () => {
                 expect(store.hasUnsavedEdit('a1')).toBe(true);
                 const saved = store.whenSaved('a1');
                 await expect(editing).rejects.toThrow('QuotaExceededError');
-                await saved;
+                // Refused (never applied), so nothing of it is unsaved; the
+                // viewer still hears it could not be saved.
+                await expect(saved).resolves.toBe(true);
                 expect(store.hasUnsavedEdit('a1')).toBe(false);
+                expect(store.refusedEditCount).toBe(1);
             } finally {
                 spy.mockRestore();
+                resetInkRecoveryForTests();
             }
         });
     });

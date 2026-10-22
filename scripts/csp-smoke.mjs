@@ -25,6 +25,12 @@
 //      an *.ingest.us.sentry.io host: throw an uncaught error on the score and
 //      require the SDK's report to leave the page (connect-src) with no
 //      violation. The ingest request is answered locally, never sent.
+//      CSP_SMOKE_TURNSTILE=1 — the build was made with VITE_TURNSTILE_SITE_KEY
+//      set to Cloudflare's always-passes test key 1x00000000000000000000AA:
+//      require the real challenge (api.js from challenges.cloudflare.com, then
+//      its iframe) to load on /login, /register and /student and hand back a
+//      token, with no violation (script-src, frame-src). This one talks to
+//      Cloudflare for real; the test key never challenges anyone.
 //      CSP_SMOKE_SHOT_DIR (default: no screenshots),
 //      CHROMIUM_PATH (default: Playwright's own browser),
 //      CSP_SMOKE_OLD_BROWSER=1 — delete, in the page AND in the pdf.js worker,
@@ -43,6 +49,7 @@ const vercel = JSON.parse(fs.readFileSync('vercel.json', 'utf8'));
 
 const OLD_BROWSER = process.env.CSP_SMOKE_OLD_BROWSER === '1';
 const SENTRY = process.env.CSP_SMOKE_SENTRY === '1';
+const TURNSTILE = process.env.CSP_SMOKE_TURNSTILE === '1';
 
 /**
  * Removes what an older Safari does not have. Kept in step with
@@ -396,11 +403,48 @@ const visit = async (route, ready) => {
     }
 };
 
+/**
+ * With a Turnstile build: the challenge script loaded (script-src), its iframe
+ * is one of the page's frames (frame-src; Turnstile mounts it in a shadow root,
+ * out of reach of selectors), and the test key's token came back through the
+ * script's own API.
+ */
+const turnstileSolved = async (route) => {
+    if (!TURNSTILE) {
+        return;
+    }
+    const solved = await page
+        .waitForFunction(() => Boolean(window.turnstile?.getResponse()), null, { timeout: 30_000 })
+        .then(() => true)
+        .catch(() => false);
+    const frame = page.frames().find((f) => f.url().startsWith('https://challenges.cloudflare.com/'));
+    check(
+        `${route} Turnstile challenge loaded and solved (test key)`,
+        solved && Boolean(frame),
+        frame ? 'challenge frame mounted' : 'no challenge frame',
+    );
+};
+
 // Public pages first, signed out.
 await visit('/', () => page.waitForSelector('main, #root > *', { timeout: 15_000 }));
-await visit('/login', () => page.waitForSelector('#login-email', { timeout: 15_000 }));
-await visit('/register', () => page.waitForSelector('#register-email', { timeout: 15_000 }));
-await visit('/student', () => page.waitForSelector('input', { timeout: 15_000 }));
+await visit('/login', async () => {
+    await page.waitForSelector('#login-email', { timeout: 15_000 });
+    await turnstileSolved('/login');
+});
+await visit('/register', async () => {
+    // Sign-up opens on the age screen (AgeScreen.tsx); an adult passes it.
+    await page.waitForSelector('#age-country', { timeout: 15_000 });
+    await page.selectOption('#age-country', 'GB');
+    await page.selectOption('#age-month', '1');
+    await page.selectOption('#age-year', String(new Date().getFullYear() - 40));
+    await page.getByRole('button', { name: 'Continue' }).click();
+    await page.waitForSelector('#register-email', { timeout: 15_000 });
+    await turnstileSolved('/register');
+});
+await visit('/student', async () => {
+    await page.waitForSelector('input', { timeout: 15_000 });
+    await turnstileSolved('/student');
+});
 await visit('/privacy', () => page.getByRole('heading', { name: 'Privacy Policy' }).waitFor({ timeout: 15_000 }));
 await visit('/terms', () => page.getByRole('heading', { name: 'Terms of Service' }).waitFor({ timeout: 15_000 }));
 await visit('/account-deleted', () => page.waitForSelector('main, #root > *', { timeout: 15_000 }));
@@ -523,7 +567,7 @@ await browser.close();
 server.close();
 
 console.log(
-    `${OLD_BROWSER ? '(old-browser simulation)\n' : ''}${SENTRY ? '(Sentry build)\n' : ''}${results.join('\n')}`,
+    `${OLD_BROWSER ? '(old-browser simulation)\n' : ''}${SENTRY ? '(Sentry build)\n' : ''}${TURNSTILE ? '(Turnstile test-key build)\n' : ''}${results.join('\n')}`,
 );
 if (consoleErrors.length) {
     console.log(`\n(non-CSP console errors, informational — Supabase is stubbed)\n  ${consoleErrors.join('\n  ')}`);

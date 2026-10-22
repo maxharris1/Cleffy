@@ -1,4 +1,4 @@
-import { loadExportAnnotations } from '@/features/export/exportAnnotations';
+import { exportNotice, loadExportMarks } from '@/features/export/exportAnnotations';
 import type { ExportRequest, ExportResponse } from '@/features/export/exportWorker';
 import { safeFileBase, shareOrDownloadFile, type ShareOutcome } from '@/features/export/shareFile';
 import { annotationNeedsMusicFont, MUSIC_FONT_URL } from '@/features/viewer/ink/musicFont';
@@ -8,6 +8,8 @@ export interface ExportAnnotatedPdfOptions {
     userId: string | null;
     /** When set, export only this 0-based page (single-page annotated PDF). */
     pageIndex?: number;
+    /** Told what the user must know about the marks baked in: missing ones, two versions (exportNotice). */
+    onNotice?: (notice: string) => void;
 }
 
 /**
@@ -22,7 +24,12 @@ export const buildAnnotatedPdf = async (
     title: string,
     options: ExportAnnotatedPdfOptions,
 ): Promise<File> => {
-    const annotations = await loadExportAnnotations(docId, options.userId, options.pageIndex);
+    const marks = await loadExportMarks(docId, options.userId, options.pageIndex);
+    const { annotations } = marks;
+    const notice = exportNotice(marks);
+    if (notice) {
+        options.onNotice?.(notice);
+    }
     // Converted dynamics need the music face embedded; fetch it only then
     // (fails soft — the worker paints ASCII `mf` / `sfz` in Helvetica-Oblique).
     let musicFont: ArrayBuffer | undefined;

@@ -1,5 +1,6 @@
 import type { Session } from '@supabase/supabase-js';
 import { cleanup, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,6 +10,7 @@ import { AssignmentsPage } from '@/features/student/AssignmentsPage';
 import type { ManagedStudentRow } from '@/types/database';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
+import { heldMarksFor, resetInkRecoveryForTests } from '@/sync/inkRecovery';
 
 /**
  * The teacher ended this sign-in (a reset, or an archive) while the student
@@ -137,6 +139,8 @@ beforeEach(async () => {
 
 afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
+    resetInkRecoveryForTests();
 });
 
 describe('AssignmentsPage once the teacher has ended this sign-in', () => {
@@ -164,6 +168,31 @@ describe('AssignmentsPage once the teacher has ended this sign-in', () => {
         expect(await db.annotations.where('docId').equals(DOC).count()).toBe(2);
         // The scores themselves go, as on any sign-out.
         expect(await db.pdfCache.count()).toBe(0);
+    });
+
+    it('offers Export of marks this device could not store first, then writes them with the kept changes (new finding 1)', async () => {
+        fetchMyRosterProfile.mockResolvedValue(rosterRow);
+        const db = getDb();
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        await queueOfflineMark('unsaved-mark').catch(() => undefined);
+        full.mockRestore();
+        expect(heldMarksFor(STUDENT, DOC)).toHaveLength(1);
+
+        renderAssignments();
+
+        expect(await screen.findByText(/Some marks you made couldn’t be saved on this device/)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Export' })).toBeInTheDocument();
+        expect(authSignOut).not.toHaveBeenCalled();
+
+        await userEvent.click(screen.getByRole('button', { name: 'Sign out now' }));
+
+        expect(await screen.findByText('student login: teacher true, kept 1')).toBeInTheDocument();
+        expect((await db.ops.where('docId').equals(DOC).toArray()).map((op) => [op.annotationId, op.userId])).toEqual([
+            ['unsaved-mark', STUDENT],
+        ]);
+        expect(heldMarksFor(STUDENT, DOC)).toEqual([]);
     });
 
     it('keeps them for an archived student too (a restore brings the account back)', async () => {

@@ -3,6 +3,7 @@ import { BrowserRouter } from 'react-router';
 import { BackgroundSync } from '@/app/BackgroundSync';
 import { ErrorBoundary } from '@/app/ErrorBoundary';
 import { AppRoutes } from '@/app/routes';
+import { SignedOutInkGate } from '@/app/SignedOutInkGate';
 import { AuthLinkErrorNotice } from '@/features/auth/AuthLinkErrorNotice';
 
 export const App = () => {
@@ -14,6 +15,7 @@ export const App = () => {
             <BrowserRouter>
                 <AppRoutes />
                 <AuthLinkErrorNotice />
+                <SignedOutInkGate />
             </BrowserRouter>
         </ErrorBoundary>
     );

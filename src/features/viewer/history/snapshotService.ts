@@ -21,12 +21,15 @@ export const stopSnapshotWrites = (): void => {
 /**
  * Capture today's starting-point snapshot if one does not already exist.
  * `preEdit` must be the live annotation set *before* the triggering edit.
+ * `live`: checked in the transaction before the add (an ink Retry's account
+ * epoch, inkRecovery) — false writes nothing.
  */
 export const ensureDayStartingSnapshot = async (
     db: ScribblerDb,
     docId: string,
     preEdit: Annotation[],
     createdBy: string | null = null,
+    live: () => boolean = () => true,
 ): Promise<LocalAnnotationSnapshot | null> => {
     const capturedOn = localDateString();
     const createdAt = new Date().toISOString();
@@ -45,7 +48,7 @@ export const ensureDayStartingSnapshot = async (
                 .where('[docId+capturedOn]')
                 .equals([docId, capturedOn])
                 .count();
-            if (existing > 0) {
+            if (existing > 0 || !live()) {
                 return null;
             }
             // Copied only when it is kept: the marks are replaced, never

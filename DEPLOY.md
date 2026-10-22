@@ -591,8 +591,10 @@ to refund (comment at the end of `20261007120300`).
     and `peek_share_link` is the only one anon may execute.)
 12. Run the CSP smoke against the production build
     (`npm run build && node scripts/csp-smoke.mjs`; with a Sentry DSN build also
-    `CSP_SMOKE_SENTRY=1`) — zero violations, legal pages, Account page, Source
-    dialog and both exports included. Then open cleffy.io with the console open:
+    `CSP_SMOKE_SENTRY=1`; with a Turnstile build — `VITE_TURNSTILE_SITE_KEY` set,
+    or Cloudflare's test key `1x00000000000000000000AA` — also
+    `CSP_SMOKE_TURNSTILE=1`) — zero violations, legal pages, Account page, Source
+    dialog, both exports and the Turnstile challenge included. Then open cleffy.io with the console open:
     no CSP or header errors.
 13. Smoke on production with throwaway accounts: share a score, change a
     member's role and watch the other tab follow live, revoke a link with

@@ -632,6 +632,23 @@ export class SyncEngine {
             this.announce('written', ids);
             this.requestFlush();
         });
+        // Ink the store could not write: the status says so (see drain).
+        this.deps.store.setHeldHook(() => this.requestFlush());
+        // Its Retry asks the server whether a newer version overtook a held
+        // mark, and draws the server's version of any that one did.
+        this.deps.store.setRetryHooks({
+            serverRows: async (ids) => {
+                const { data, error } = await this.withAuth(() => this.deps.api.fetchMany(this.deps.docId, ids));
+                return error || !data ? null : data.map(fromServerRow);
+            },
+            overtaken: (ids) => {
+                if (!this.stopped) {
+                    void this.applyDeferred(ids)
+                        .then(() => (this.stopped ? undefined : this.askAgain(ids)))
+                        .catch((err: unknown) => console.warn('Could not refresh overtaken marks', err));
+                }
+            },
+        });
         window.addEventListener('online', this.onlineListener);
         window.addEventListener('offline', this.offlineListener);
         activeEngines.set(this.deps.docId, this);
@@ -647,6 +664,8 @@ export class SyncEngine {
     stop(): void {
         this.stopped = true;
         this.deps.store.setDirtyHook(null);
+        this.deps.store.setHeldHook(null);
+        this.deps.store.setRetryHooks(null);
         window.removeEventListener('online', this.onlineListener);
         window.removeEventListener('offline', this.offlineListener);
         if (activeEngines.get(this.deps.docId) === this) {
@@ -1032,15 +1051,24 @@ export class SyncEngine {
      * to upload, and sign-out says so before it clears them.
      */
     private async drain(): Promise<void> {
-        const { db, docId, getUserId } = this.deps;
+        const { db, docId, getUserId, store } = this.deps;
         this.reconciled = new Set();
+        let heldForRetry: boolean;
         for (;;) {
             if (this.stopped) {
                 return;
             }
             const queued = await db.ops.where('docId').equals(docId).sortBy('opId');
             this.owns = await opOwnerFor(db, docId, getUserId(), queued, this.legacyOwners);
-            const ops = queued.filter(this.owns);
+            const owned = queued.filter(this.owns);
+            // A mark whose newest edit could not be written to this device
+            // (AnnotationStore.hasPersistFailure) waits, queued ops and all:
+            // what is queued is not all the user did to it, so neither a
+            // push nor a reconcile verdict may be based on it. Its retry
+            // queues the rest and wakes this engine. A held new mark has
+            // nothing queued at all, so the store's count says it too.
+            const ops = owned.filter((op) => !store.hasPersistFailure(op.annotationId));
+            heldForRetry = ops.length < owned.length || store.persistFailureCount > 0;
             if (ops.length === 0) {
                 break;
             }
@@ -1102,6 +1130,12 @@ export class SyncEngine {
         // worked too: a failed pull means changes made elsewhere have not
         // arrived, which is not "synced", and the retry it scheduled keeps
         // its backoff rather than starting over at the shortest delay.
+        // Nor while marks wait on a write to this device (the viewer's
+        // "couldn't be saved" banner says which).
+        if (heldForRetry) {
+            this.setStatus('error');
+            return;
+        }
         if (navigator.onLine === false) {
             this.setStatus('offline');
             return;
@@ -1199,6 +1233,11 @@ export class SyncEngine {
                     // nothing for reconcile here, and the pass looks again.
                     return null;
                 }
+                if (store.hasPersistFailure(annotationId)) {
+                    // An edit of it never reached the outbox: no verdict
+                    // without it (see drain).
+                    return 'failed' as const;
+                }
                 if (store.hasUnsavedEdit(annotationId)) {
                     return 'unsaved' as const;
                 }
@@ -1220,6 +1259,10 @@ export class SyncEngine {
                 await adoption?.saved;
                 return { kept, repaint: adoption?.repaint ?? null };
             });
+            if (decided === 'failed') {
+                // Left as queued; the next pass holds the mark back.
+                return true;
+            }
             const repaint = decided !== null && decided !== 'unsaved' ? decided.repaint : null;
             if (repaint) {
                 // Adopted and committed: draw it, and tell the other engines,
@@ -1232,7 +1275,10 @@ export class SyncEngine {
             }
             if (decided === 'unsaved') {
                 // Decide with that edit in the queue, against the same read.
-                await store.whenSaved(annotationId);
+                if (!(await store.whenSaved(annotationId))) {
+                    // Its write failed: left as queued, held back next pass.
+                    return true;
+                }
                 continue;
             }
             decided?.kept.forEach((id) => this.reconciled.add(id));

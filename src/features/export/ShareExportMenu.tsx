@@ -53,6 +53,18 @@ interface ShareExportMenuProps {
      * score's id; a local score has no owner to bill.
      */
     localOnly?: boolean;
+    /**
+     * Opens the menu each time it changes: the viewer's "couldn't be
+     * saved" banner offers Export as the way to keep marks this device could
+     * not store.
+     */
+    openSignal?: number;
+    /**
+     * The account whose marks are exported, when it is not (or may no
+     * longer be) the session's: an ended sign-in's last export of its own
+     * unsaved marks (EndedSignInInkPrompt).
+     */
+    userId?: string | null;
 }
 
 /** A failure the teacher can act on, worded for them rather than for a log. */
@@ -81,7 +93,16 @@ const describeFailure = (stage: 'source' | 'export', label: string, err: unknown
  * people access (ShareDialog), and one word for both sent people to the wrong
  * one.
  */
-export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = false }: ShareExportMenuProps) => {
+export const ShareExportMenu = ({
+    docId,
+    bytes,
+    doc,
+    role,
+    title,
+    localOnly = false,
+    openSignal = 0,
+    userId: exportingFor,
+}: ShareExportMenuProps) => {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -92,11 +113,25 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
     const [refusal, setRefusal] = useState<string | null>(null);
     /** The share sheet was dismissed after a PDF export was claimed. */
     const [notSent, setNotSent] = useState(false);
+    /**
+     * What the last export's marks need saying (exportNotice): marks it had
+     * to leave out, or two versions of some. Shown, not just logged.
+     */
+    const [marksNotice, setMarksNotice] = useState<string | null>(null);
     const [pricingOpen, setPricingOpen] = useState(false);
     const rootRef = useRef<HTMLDivElement | null>(null);
     const menuRef = useRef<HTMLDivElement | null>(null);
     const focusedPageIndex = useViewerStore((s) => s.focusedPageIndex);
     const { session } = useSession();
+    /** Whose marks are baked in (see the userId prop). */
+    const markOwner = exportingFor !== undefined ? exportingFor : (session?.user.id ?? null);
+
+    // Adjusted during render, React's pattern for state that follows a prop.
+    const [seenSignal, setSeenSignal] = useState(openSignal);
+    if (openSignal !== seenSignal) {
+        setSeenSignal(openSignal);
+        setOpen(true);
+    }
 
     useEffect(() => {
         if (!open) {
@@ -162,6 +197,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
         setRefusal(null);
         setNotSent(false);
         setError(null);
+        setMarksNotice(null);
         return true;
     };
 
@@ -186,6 +222,12 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
         setDownload(null);
     };
 
+    /** An export whose marks need saying: kept open over it, as for a failure. */
+    const noteMarks = (notice: string) => {
+        setMarksNotice(notice);
+        setOpen(true);
+    };
+
     /**
      * Sending the page as a photo: a PNG, which is not what the pdf_exports
      * allowance counts (the pricing promises "1 PDF export a month"), so it is
@@ -194,7 +236,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
     const runUnmetered = async (
         label: string,
         failureLabel: string,
-        action: (source: ArrayBuffer) => Promise<unknown>,
+        action: (source: ArrayBuffer, onNotice: (notice: string) => void) => Promise<unknown>,
     ) => {
         if (!begin(label)) {
             return;
@@ -203,8 +245,12 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
         try {
             const source = await sourceFor(label);
             stage = 'export';
-            await action(source);
-            setOpen(false);
+            let noticed = false;
+            await action(source, (notice) => {
+                noticed = true;
+                noteMarks(notice);
+            });
+            setOpen(noticed);
         } catch (err) {
             fail(stage, failureLabel, err);
         } finally {
@@ -234,10 +280,15 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
         try {
             const source = await sourceFor(label);
             stage = 'export';
-            const userId = session?.user.id ?? null;
+            const userId = markOwner;
+            let noticed = false;
+            const onNotice = (notice: string) => {
+                noticed = true;
+                noteMarks(notice);
+            };
             const file = await (page === null
-                ? buildAnnotatedPdf(docId, source, title, { userId })
-                : buildAnnotatedPdf(docId, source, title, { userId, pageIndex: page }));
+                ? buildAnnotatedPdf(docId, source, title, { userId, onNotice })
+                : buildAnnotatedPdf(docId, source, title, { userId, pageIndex: page, onNotice }));
             const claim = await claimPdfExport(session, localOnly ? null : docId, attempt);
             if (!claim.ok) {
                 if ('limit' in claim) {
@@ -255,7 +306,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
                 return;
             }
             markExportDelivered(attempt);
-            setOpen(false);
+            setOpen(noticed);
         } catch (err) {
             fail(stage, failureLabel, err);
         } finally {
@@ -265,11 +316,13 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
 
     const pageLabel = focusedPageIndex + 1;
     const status = refusal ?? (notSent ? EXPORT_NOT_SENT_MESSAGE : null);
-    const wide = Boolean(limit || status || error);
+    const wide = Boolean(limit || status || error || marksNotice);
 
     // The menu hangs from the button's right edge, which on a phone sits near
     // the middle of the toolbar: widened for a notice it would run off the
     // left of the screen, so nudge it back inside the gutter.
+    // Placed again when the button's label changes ("Exporting…" and back),
+    // which moves that edge under a menu kept open over a notice.
     useLayoutEffect(() => {
         const menu = menuRef.current;
         if (!open || !menu) {
@@ -285,7 +338,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
         place();
         window.addEventListener('resize', place);
         return () => window.removeEventListener('resize', place);
-    }, [open, wide]);
+    }, [open, wide, busy]);
 
     return (
         <div ref={rootRef} className="relative">
@@ -300,6 +353,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
                     setRefusal(null);
                     setNotSent(false);
                     setError(null);
+                    setMarksNotice(null);
                     setOpen((v) => !v);
                 }}
                 className={buttonClassName('ghost', 'sm')}
@@ -322,13 +376,14 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
                             hint="PNG — send via Messages"
                             disabled={busy !== null}
                             onClick={() =>
-                                void runUnmetered('Exporting…', 'The export', (source) =>
+                                void runUnmetered('Exporting…', 'The export', (source, onNotice) =>
                                     exportAnnotatedPageImage(
                                         docId,
                                         source,
                                         focusedPageIndex,
                                         title,
-                                        session?.user.id ?? null,
+                                        markOwner,
+                                        onNotice,
                                     ),
                                 )
                             }
@@ -354,6 +409,14 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
                         />
                     ) : null}
                     {error ? <ErrorText className="mx-3 my-2">{error}</ErrorText> : null}
+                    {marksNotice ? (
+                        <p
+                            role="status"
+                            className="m-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+                        >
+                            {marksNotice}
+                        </p>
+                    ) : null}
                     {limit ? (
                         <LimitReachedNotice
                             limit={limit}

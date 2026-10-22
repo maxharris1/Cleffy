@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNod
 
 import { features } from '@/lib/features';
 import type { ObscuredEdges } from '@/features/viewer/geometry';
-import type { AnnotationStore } from '@/sync/annotationStore';
+import { settleEdit, type AnnotationStore } from '@/sync/annotationStore';
 import { STROKE_COLORS, useViewerStore } from '@/state/store';
 import type { StrokeWidthKey, Tool } from '@/types/models';
 import { PointerIcon, RedoIcon, UndoIcon } from '@/ui/icons';
@@ -301,7 +301,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                     title="Undo"
                     aria-label="Undo"
                     disabled={!canUndo}
-                    onClick={() => void store.undoLast()}
+                    onClick={() => settleEdit(store.undoLast())}
                     className={`${BAR_BUTTON} hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent sm:w-10`}
                 >
                     <UndoIcon size={20} />
@@ -311,7 +311,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                     title="Redo"
                     aria-label="Redo"
                     disabled={!canRedo}
-                    onClick={() => void store.redoLast()}
+                    onClick={() => settleEdit(store.redoLast())}
                     className={`${BAR_BUTTON} hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent sm:w-10`}
                 >
                     <RedoIcon size={20} />

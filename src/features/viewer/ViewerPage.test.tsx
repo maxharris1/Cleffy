@@ -5,6 +5,9 @@ import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-rou
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
+import { AnnotationStore } from '@/sync/annotationStore';
+import { ScribblerDb } from '@/sync/db';
+import { holdOps, resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import type { DocumentRow } from '@/types/database';
 
 const fetchDocument = vi.fn();
@@ -91,7 +94,11 @@ const lastSync = vi.hoisted(() => ({
     current: null as null | { onRejected?: (r: unknown) => void; onHeld?: (h: unknown) => void },
 }));
 
-const storeReady = vi.hoisted(() => ({ enabled: false }));
+/** What the viewport mock reports as its store: a stub, or a real AnnotationStore. */
+const storeReady = vi.hoisted(() => {
+    const stub = { subscribeMeta: () => () => undefined, persistFailureCount: 0, refusedEditCount: 0 };
+    return { enabled: false, stub, store: stub as unknown };
+});
 
 vi.mock('@/features/viewer/PdfViewport', () => ({
     PdfViewport: ({
@@ -109,7 +116,7 @@ vi.mock('@/features/viewer/PdfViewport', () => ({
     }) => {
         // The smart-import test needs a store to exist; nothing else reads it.
         if (storeReady.enabled) {
-            queueMicrotask(() => onStoreReady?.({}));
+            queueMicrotask(() => onStoreReady?.(storeReady.store));
         }
         viewportSync.current = sync;
         lastSync.current = sync ?? null;
@@ -138,7 +145,25 @@ vi.mock('@/features/viewer/ViewerHeader', () => ({
 vi.mock('@/features/viewer/presence/PresenceBar', () => ({ PresenceBar: () => null }));
 vi.mock('@/features/viewer/history/LessonHistoryButton', () => ({ LessonHistoryButton: () => null }));
 vi.mock('@/features/export/ShareExportMenu', () => ({
-    ShareExportMenu: () => <div data-testid="share-export-menu" />,
+    ShareExportMenu: ({
+        openSignal = 0,
+        docId,
+        title,
+        userId,
+    }: {
+        openSignal?: number;
+        docId: string;
+        title: string;
+        userId?: string | null;
+    }) => (
+        <div
+            data-testid="share-export-menu"
+            data-open-signal={openSignal}
+            data-doc={docId}
+            data-title={title}
+            data-user={userId ?? ''}
+        />
+    ),
 }));
 vi.mock('@/features/import/ImportScanButton', () => ({
     ImportScanButton: () => <div data-testid="import-scan-button" />,
@@ -263,6 +288,7 @@ beforeEach(() => {
     flags.playalong = false;
     flags.smartImport = false;
     storeReady.enabled = false;
+    storeReady.store = storeReady.stub;
     pdfProps.current = null;
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
     loadDocumentSource.mockResolvedValue({ bytes: new ArrayBuffer(16) });
@@ -278,6 +304,7 @@ beforeEach(() => {
 afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    resetInkRecoveryForTests();
 });
 
 describe('CloudViewer warm open', () => {
@@ -1111,6 +1138,54 @@ describe('CloudViewer sign-in ended under the sync engine', () => {
         expect(purgeLocalDocument).not.toHaveBeenCalled();
     });
 
+    it('offers Export of ink this device could not store before signing out, and signs out when asked (new finding 1)', async () => {
+        const user = userEvent.setup();
+        sessionKind.userType = 'student';
+        holdOps(new ScribblerDb(`viewer-held-${crypto.randomUUID()}`), DOC_ID, [
+            {
+                op: {
+                    type: 'create',
+                    annotation: {
+                        id: 'unsaved-1',
+                        docId: DOC_ID,
+                        page: 0,
+                        kind: 'stroke',
+                        color: '#111111',
+                        payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+                        createdBy: null,
+                        createdAt: '2026-10-22T00:00:00.000Z',
+                        updatedAt: '2026-10-22T00:00:00.000Z',
+                        deletedAt: null,
+                        seq: 0,
+                    },
+                },
+                author: SESSION.user.id,
+            },
+        ]);
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('editor');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        act(() => {
+            lastSync.current?.onHeld?.({ reason: 'signed-out', pendingMarks: 2 });
+        });
+
+        expect(await screen.findByText(/Some marks you made couldn’t be saved on this device/)).toBeInTheDocument();
+        const menu = screen.getByTestId('share-export-menu');
+        expect(menu).toHaveAttribute('data-doc', DOC_ID);
+        expect(menu).toHaveAttribute('data-user', SESSION.user.id);
+        expect(menu.getAttribute('data-title')).toBe(serverDoc().title);
+        // Nothing is signed out (or cleared) while the student can still export.
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
+
+        await user.click(screen.getByRole('button', { name: 'Sign out now' }));
+
+        expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
+        expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
+    });
+
     it('discards, and says so, the outbox of a student whose account was deleted with their teacher', async () => {
         // No next sign-in can upload them: the account is gone, not archived.
         sessionKind.userType = 'student';
@@ -1251,5 +1326,76 @@ describe('CloudViewer on a read-only Academy seat', () => {
 
         await waitFor(() => expect(fetchSeatReadOnly).toHaveBeenCalled());
         await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+    });
+});
+
+describe('CloudViewer: marks this device could not store (SF-1)', () => {
+    const fullDiskStore = async () => {
+        const db = new ScribblerDb(`viewer-${crypto.randomUUID()}`);
+        const store = new AnnotationStore(db, DOC_ID);
+        await store.load();
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        await store
+            .create({
+                id: 'unsaved-1',
+                docId: DOC_ID,
+                page: 0,
+                kind: 'stroke',
+                color: '#111111',
+                payload: { pts: [0.1, 0.1, 0.5, 0.2, 0.2, 0.5], w: 0.005 },
+                createdBy: null,
+                createdAt: '2026-10-22T00:00:00.000Z',
+                updatedAt: '2026-10-22T00:00:00.000Z',
+                deletedAt: null,
+                seq: 0,
+            })
+            .catch(() => undefined);
+        return { store, full };
+    };
+
+    const openWith = async (store: AnnotationStore) => {
+        storeReady.enabled = true;
+        storeReady.store = store;
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+    };
+
+    it('shows one persistent banner with Retry and Export, and clears it once a retry saves them', async () => {
+        const { store, full } = await fullDiskStore();
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        await openWith(store);
+
+        const banner = await screen.findByText('Some marks couldn’t be saved on this device.');
+        expect(screen.getAllByText(/couldn’t be saved on this device/)).toHaveLength(1);
+        expect(banner.closest('[role="status"]')).not.toBeNull();
+        expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
+
+        // Export opens the viewer's existing Export menu.
+        expect(screen.getByTestId('share-export-menu')).toHaveAttribute('data-open-signal', '0');
+        await userEvent.click(screen.getByRole('button', { name: 'Export' }));
+        expect(screen.getByTestId('share-export-menu')).toHaveAttribute('data-open-signal', '1');
+
+        // Still full: the banner stays and says what to do instead.
+        await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+        expect(await screen.findByText(/Retrying didn’t work/)).toBeInTheDocument();
+        expect(store.hasPersistFailure('unsaved-1')).toBe(true);
+
+        full.mockRestore();
+        await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+        await waitFor(() => expect(screen.queryByText(/couldn’t be saved on this device/)).not.toBeInTheDocument());
+        expect(store.hasPersistFailure('unsaved-1')).toBe(false);
+    });
+
+    it('shows nothing while every mark is saved', async () => {
+        const db = new ScribblerDb(`viewer-${crypto.randomUUID()}`);
+        const store = new AnnotationStore(db, DOC_ID);
+        await store.load();
+        await openWith(store);
+        expect(screen.queryByText(/couldn’t be saved/)).not.toBeInTheDocument();
     });
 });

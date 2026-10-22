@@ -27,6 +27,8 @@ import { usePlayback } from '@/features/playback/usePlayback';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { NotesPanel } from '@/features/notes/NotesPanel';
 import { ShareDialog } from '@/features/share/ShareDialog';
+import { EndedSignInInkPrompt } from '@/features/student/EndedSignInInkPrompt';
+import { type KnownScore, useEndedSignInInkPrompt } from '@/features/student/useEndedSignInInkPrompt';
 import { signOutEndedStudent } from '@/features/student/endedSignIn';
 import { fetchAccountDeleted, fetchSignInStillValid } from '@/features/student/studentApi';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
@@ -36,6 +38,7 @@ import { PdfProvider, type PdfSource, type StreamedPdfSource } from '@/features/
 import { warmPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
 import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
+import { InkSaveFailedNotice } from '@/features/viewer/InkSaveFailedNotice';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { features } from '@/lib/features';
@@ -43,6 +46,7 @@ import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
 import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import type { AnnotationStore } from '@/sync/annotationStore';
+import { rememberScoreSource } from '@/sync/inkRecovery';
 import type { SyncHold, SyncRejection, SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
 import type { DocumentRow, MemberRole } from '@/types/database';
@@ -215,6 +219,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [playAlongOpen, setPlayAlongOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
+    /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
+    const [exportSignal, setExportSignal] = useState(0);
     const [staleBytes, setStaleBytes] = useState(false);
     const [accessLoss, setAccessLoss] = useState<AccessLoss | null>(null);
     /** "Your access changed" banner after a live role change. */
@@ -239,9 +245,26 @@ const CloudViewer = ({ docId }: { docId: string }) => {
      * and drop the re-check.
      */
     const stateRef = useRef(state);
+    /** The score as last open, for the ended-sign-in prompt's Export after the viewer has closed. */
+    const lastScoreRef = useRef<KnownScore | null>(null);
+    const endedInk = useEndedSignInInkPrompt();
     useLayoutEffect(() => {
         stateRef.current = state;
+        if (state) {
+            lastScoreRef.current = { title: state.doc.title, doc: state.doc, role: state.role };
+        }
     }, [state]);
+    // The PDF and title, for Export of ink this account still holds here
+    // after it signs out (SignedOutInkNotice), when sign-out has cleared the
+    // device's copy. Kept by inkRecovery only while such ink is held.
+    const sourceTitle = state?.doc.title;
+    const sourceBytes = state?.bytes ?? undefined;
+    useEffect(() => {
+        if (!sourceTitle) {
+            return;
+        }
+        return rememberScoreSource(docId, sourceTitle, sourceBytes);
+    }, [docId, sourceTitle, sourceBytes]);
 
     const userId = session?.user.id;
 
@@ -341,6 +364,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 // archived or reset account signs in again and uploads what is
                 // queued; one deleted with its teacher never can.
                 const accountDeleted = await fetchAccountDeleted().catch(() => false);
+                // Ink this device could not store: Export is offered first,
+                // and the sign-out waits on the student. Unmounted first: no
+                // sign-out here, and the ink stays (the next page asks again).
+                const last = lastScoreRef.current;
+                if (!(await endedInk.askFirst(userId, accountDeleted, last ? { [docId]: last } : undefined))) {
+                    return;
+                }
                 const state = await signOutEndedStudent(accountDeleted);
                 navigate('/student', { replace: true, state });
                 return;
@@ -819,6 +849,16 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         }
     }, [searchParams, setSearchParams]);
 
+    if (endedInk.prompt) {
+        // Up until the sign-out completes, whatever the session does meanwhile.
+        return (
+            <EndedSignInInkPrompt
+                prompt={endedInk.prompt}
+                signingOut={endedInk.signingOut}
+                onSignOut={endedInk.proceed}
+            />
+        );
+    }
     if (!loading && !session) {
         // Mid sign-out after the teacher ended it: the student sign-in page is next.
         return accessLoss === 'ended' ? null : <Navigate to="/" replace />;
@@ -966,7 +1006,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                   the menu. The row lets it download the PDF when the cache has none.
                 */}
                 {confirmed ? (
-                    <ShareExportMenu docId={docId} doc={state.doc} role={state.role} title={state.doc.title} />
+                    <ShareExportMenu
+                        docId={docId}
+                        doc={state.doc}
+                        role={state.role}
+                        title={state.doc.title}
+                        openSignal={exportSignal}
+                    />
                 ) : null}
                 {confirmed && state.role === 'owner' ? (
                     // "Share" is sharing the score with people (links, who has
@@ -1008,6 +1054,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 ) : null}
                 <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
                 <SyncHeldNotice count={heldCount} reason={held?.reason} />
+                <InkSaveFailedNotice
+                    store={annotationStore}
+                    onExport={confirmed ? () => setExportSignal((n) => n + 1) : undefined}
+                />
                 {staleBytes ? (
                     <div
                         className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
@@ -1152,6 +1202,8 @@ export const SyncDot = ({ status }: { status: SyncStatus | 'waiting' }) => {
 const LocalViewer = ({ docId }: { docId: string }) => {
     const [, forceRender] = useState(0);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
+    /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
+    const [exportSignal, setExportSignal] = useState(0);
     const [reopenError, setReopenError] = useState<string | null>(null);
     const bytes = getLocalDoc(docId);
 
@@ -1225,12 +1277,15 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                     />
                 ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
-                <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly />
+                <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly openSignal={exportSignal} />
             </ViewerHeader>
-            <main className="min-h-0 flex-1">
-                <PdfProvider data={bytes}>
-                    <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />
-                </PdfProvider>
+            <main className="flex min-h-0 flex-1 flex-col">
+                <InkSaveFailedNotice store={annotationStore} onExport={() => setExportSignal((n) => n + 1)} />
+                <div className="min-h-0 flex-1">
+                    <PdfProvider data={bytes}>
+                        <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />
+                    </PdfProvider>
+                </div>
             </main>
         </div>
     );

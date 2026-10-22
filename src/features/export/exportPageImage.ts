@@ -1,6 +1,6 @@
 import { getDocument } from 'pdfjs-dist';
 
-import { loadExportAnnotations } from '@/features/export/exportAnnotations';
+import { exportNotice, loadExportMarks } from '@/features/export/exportAnnotations';
 import { safeFileBase, shareOrDownloadFile } from '@/features/export/shareFile';
 import { drawAnnotation, StrokePathCache } from '@/features/viewer/ink/strokeRenderer';
 import { createPdfWorker } from '@/features/viewer/pdf/pdfWorker';
@@ -19,8 +19,9 @@ export const exportAnnotatedPageImage = async (
     pageIndex: number,
     title: string,
     userId: string | null,
+    onNotice?: (notice: string) => void,
 ): Promise<void> => {
-    const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title, userId);
+    const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title, userId, onNotice);
     await shareOrDownloadFile(file, file.name);
 };
 
@@ -29,10 +30,17 @@ export const buildAnnotatedPagePng = async (
     sourceBytes: ArrayBuffer,
     pageIndex: number,
     title: string,
-    /** The signed-in account: only the marks its viewer draws are baked in (see loadExportAnnotations). */
+    /** The signed-in account: only the marks its viewer draws are baked in (see loadExportMarks). */
     userId: string | null,
+    /** Told what the user must know about the marks baked in (exportNotice). */
+    onNotice?: (notice: string) => void,
 ): Promise<File> => {
-    const annotations = await loadExportAnnotations(docId, userId, pageIndex);
+    const marks = await loadExportMarks(docId, userId, pageIndex);
+    const { annotations } = marks;
+    const notice = exportNotice(marks);
+    if (notice) {
+        onNotice?.(notice);
+    }
 
     const worker = createPdfWorker();
     const loadingTask = getDocument({ data: sourceBytes.slice(0), worker, ...pdfDocumentOptions });

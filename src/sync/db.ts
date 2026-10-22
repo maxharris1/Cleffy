@@ -47,6 +47,14 @@ export interface PendingOp {
      * Plain field, not indexed — no Dexie version bump needed.
      */
     userId?: string;
+    /**
+     * The local-edit write that queued it (inkRecovery.writeOps): a write a
+     * sign-out cut off is not done, so its rows, should its transaction
+     * commit all the same, are nobody's and are swept (cutOffWrites). Absent
+     * on ops queued otherwise, or before this field existed. Plain field,
+     * not indexed — no Dexie version bump needed.
+     */
+    inkWrite?: string;
 }
 
 export interface SyncState {

@@ -18,7 +18,7 @@ import {
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import type { InkDelegate } from '@/features/viewer/ink/GestureController';
 import { maxTextSizeFor, onMusicFontReady, textBoundsNorm, textDrawSpec } from '@/features/viewer/ink/musicFont';
-import type { AnnotationStore } from '@/sync/annotationStore';
+import { settleEdit, type AnnotationStore } from '@/sync/annotationStore';
 import type { LiveInkPublisher } from '@/sync/realtimeChannel';
 import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
 import type { InkProgressMsg } from '@/sync/wire';
@@ -686,8 +686,9 @@ export class InkController {
         };
         // Ink is in the live map as soon as create() runs (before Dexie
         // persist). Arm the grouping pause now so IndexedDB is not on the
-        // convert clock.
-        void this.opts.store.create(annotation);
+        // convert clock. A write that fails is held for retry and shown by
+        // the viewer's banner; the stroke stays drawn (settleEdit).
+        settleEdit(this.opts.store.create(annotation));
         // create() put the stroke in the page map before its first await; paint
         // it now rather than after the IndexedDB write, so the ink does not
         // blink out between the live canvas clearing and the store's notify.
@@ -855,9 +856,11 @@ export class InkController {
             weight: spec.weight,
         });
         const y = scale.payload.y + (metrics.topInset * (scale.payload.size - size)) / aspect;
-        void this.opts.store.update(scale.annotation.id, {
-            payload: { ...livePayload, size, y: Math.min(1, Math.max(0, y)) },
-        });
+        settleEdit(
+            this.opts.store.update(scale.annotation.id, {
+                payload: { ...livePayload, size, y: Math.min(1, Math.max(0, y)) },
+            }),
+        );
     }
 
     private endTextScale(): void {
@@ -961,7 +964,7 @@ export class InkController {
         }
         drag.committed = next;
         drag.lastCommitAt = now;
-        void this.opts.store.update(drag.annotation.id, { payload: { ...livePayload, ...next } });
+        settleEdit(this.opts.store.update(drag.annotation.id, { payload: { ...livePayload, ...next } }));
     }
 
     // ---- internals ------------------------------------------------------
@@ -1008,7 +1011,7 @@ export class InkController {
             canvases.committed.height,
         );
         for (const hit of hits) {
-            void this.opts.store.delete(hit.id);
+            settleEdit(this.opts.store.delete(hit.id));
         }
     }
 
