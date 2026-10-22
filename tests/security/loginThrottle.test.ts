@@ -255,15 +255,12 @@ describe('recovery paths lift the limits', () => {
         // After the commit, and only after it: the misses this forgets belong
         // to a username that is this student's from the commit onwards, and a
         // claim that never committed must leave another student's throttle
-        // alone. The sign-in now runs BEFORE the commit (so a refused captcha
-        // cannot spend the card), which is why this is keyed on the commit's
-        // own guard rather than on the grant.
+        // alone. The flow is in handler.ts (tests/security/studentClaim.test.ts
+        // drives it); index.ts wires forgetLogin to the throttle.
         const source = read('student-claim');
-        const forget = source.indexOf(
-            'forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, username)',
-        );
-        expect(forget).toBeGreaterThan(-1);
-        expect(source.indexOf('signInWithPassword(')).toBeLessThan(source.indexOf('.update({'));
-        expect(forget).toBeGreaterThan(source.indexOf('if (claimError || !claimed) {'));
+        expect(source).toContain('forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, username)');
+        const handler = readFileSync(resolve(process.cwd(), 'supabase/functions/student-claim/handler.ts'), 'utf8');
+        const forget = handler.indexOf('backend.forgetLogin(username)');
+        expect(forget).toBeGreaterThan(handler.indexOf("if (completed !== 'claimed') {"));
     });
 });

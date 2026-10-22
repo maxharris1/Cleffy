@@ -172,7 +172,6 @@ describe('control bodies: every Deno entry point is capped', () => {
         'imslp-search/index.ts',
         'imslp-work/index.ts',
         'score-analyze/index.ts',
-        'student-claim/index.ts',
         'student-provision/index.ts',
         '_shared/analyzeScaffold.ts',
     ])('%s reads through readCappedJson at CONTROL_BODY_MAX_BYTES and answers 413', (path) => {
@@ -187,6 +186,7 @@ describe('control bodies: every Deno entry point is capped', () => {
         ['_shared/cancelFlow.ts', 'deps.readJson(req, BODY_MAX_BYTES)'],
         ['_shared/contentReports.ts', 'deps.readJson(req, REPORT_BODY_MAX_BYTES)'],
         ['student-login/handler.ts', 'deps.readJson(req, BODY_MAX_BYTES)'],
+        ['student-claim/handler.ts', 'deps.readJson(req, BODY_MAX_BYTES)'],
     ])('%s reads through the injected capped reader', (path, call) => {
         expect(source(path)).toContain(call);
     });
@@ -198,6 +198,7 @@ describe('control bodies: every Deno entry point is capped', () => {
             'billing-cancel/index.ts',
             'stripe-checkout/index.ts',
             'student-login/index.ts',
+            'student-claim/index.ts',
         ]) {
             expect(source(path), path).toContain('readJson: readCappedJson,');
         }

@@ -620,6 +620,29 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
         return jsonResponse({ invited: true, studentEmail: row.student_email });
     }
 
+    // Reserve the row before anything is revoked
+    // (20261022110000_student_claim_reservation.sql). A claim in flight on the
+    // current card is about to set its own password; scrambling first would let
+    // that write land after ours and survive the reset. So a reset during a
+    // claim waits for it, and a claim during this reset waits for us. Writing
+    // the new code hash below hands the row back.
+    const { data: reservation, error: reserveError } = await admin.rpc('begin_student_code_reset', {
+        p_student: row.id,
+    });
+    if (reserveError) {
+        console.error(`could not reserve student ${row.id} for a reset: ${reserveError.message}`);
+        return jsonResponse({ error: 'Could not reset the login code' }, 502);
+    }
+    if (reservation === 'busy') {
+        return jsonResponse(
+            {
+                error: 'This student is setting up their account with their current card right now. Try again in a few minutes.',
+                code: 'claim_in_progress',
+            },
+            409,
+        );
+    }
+
     // The scramble is what revokes the password the student chose when they
     // claimed. Minting a code without it would leave the OLD password working
     // alongside the new card — a "reset" that resets nothing.
