@@ -238,12 +238,17 @@ select pg_temp.ran('70 before: u3 owns a score with a file', pg_temp.doc_sql(301
 select pg_temp.ran('70a ... and a bystander (u2) owns one too', pg_temp.doc_sql(302, 2));
 insert into storage.objects (bucket_id, name, owner)
 values ('scores', pg_temp.u(301) || '/original.pdf', pg_temp.u(3));
+-- A second score of u3's with no file yet: its folder takes check 73's
+-- upload. Object names follow 20261022100400 (only {id}/original.pdf and
+-- {id}/pre-import-original.pdf in scores), so the barrier, not the name
+-- rule, is what refuses it.
+do $d$ begin execute pg_temp.doc_sql(303, 3); end $d$;
 insert into public.share_links (token, document_id, role, created_by)
 values ('barrier-link-301', pg_temp.u(301), 'viewer', pg_temp.u(3)),
        ('barrier-link-302', pg_temp.u(302), 'viewer', pg_temp.u(2));
 select pg_temp.as_user(3);
 select pg_temp.ran('71 before the deletion the owner can upload into their score',
-$q$insert into storage.objects (bucket_id, name, owner) values ('scores', pg_temp.u(301) || '/extra.pdf', pg_temp.u(3))$q$);
+$q$insert into storage.objects (bucket_id, name, owner) values ('scores', pg_temp.u(301) || '/pre-import-original.pdf', pg_temp.u(3))$q$);
 select pg_temp.chk('71a ... and is told nothing is pending for them',
 $q$select not public.caller_account_deletion_pending ()$q$);
 select pg_temp.as_service();
@@ -251,7 +256,7 @@ select pg_temp.begin('b3', 3);
 select pg_temp.as_user(3);
 select pg_temp.chk('72 once deletion begins, the caller is pending', $q$select public.caller_account_deletion_pending ()$q$);
 select pg_temp.refused('73 an upload into the score that already exists is refused (scores)',
-$q$insert into storage.objects (bucket_id, name, owner) values ('scores', pg_temp.u(301) || '/late.pdf', pg_temp.u(3))$q$, '42501');
+$q$insert into storage.objects (bucket_id, name, owner) values ('scores', pg_temp.u(303) || '/original.pdf', pg_temp.u(3))$q$, '42501');
 select pg_temp.refused('74 ... and a cover into thumbnails',
 $q$insert into storage.objects (bucket_id, name, owner) values ('thumbnails', pg_temp.u(301) || '/0.jpg', pg_temp.u(3))$q$, '42501');
 select pg_temp.refused('75 ... and an overwrite (upload with upsert)',
