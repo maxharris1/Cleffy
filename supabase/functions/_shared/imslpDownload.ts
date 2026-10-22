@@ -579,12 +579,13 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
     const left = remaining();
     if (left > 0) {
         let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+        let budgetExpired = false;
         try {
             const budgetSpent = new Promise<never>((_, reject) => {
-                budgetTimer = setTimeout(
-                    () => reject(new ImslpFetchError('timeout', 'Download budget exhausted')),
-                    left,
-                );
+                budgetTimer = setTimeout(() => {
+                    budgetExpired = true;
+                    reject(new ImslpFetchError('timeout', 'Download budget exhausted'));
+                }, left);
             });
             const data = (await Promise.race([
                 deps.mwFetch(
@@ -624,6 +625,14 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
             if (err instanceof ImslpFetchError && err.code === 'rate_limited') {
                 retryAfterSec = err.retryAfterSec;
                 return fail('rate_limited');
+            }
+            // The API call outlasted the whole budget: that is a timeout, even
+            // if now() still shows a few ms left (a timer can fire before the
+            // clock reaches the deadline). Without this the ImagefromIndex
+            // candidate below would still be fetched, and its HTML answer
+            // reported as 'bot_check'.
+            if (budgetExpired) {
+                return fail('timeout');
             }
         } finally {
             clearTimeout(budgetTimer);

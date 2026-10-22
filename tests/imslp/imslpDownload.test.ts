@@ -381,6 +381,18 @@ describe('tryDownloadPdfWith', () => {
         expect(fetchImpl).toHaveBeenCalledTimes(1);
     });
 
+    it('reports a hung API call as timeout even when the clock lags the budget timer', async () => {
+        // A timer can fire a few ms before now() reaches the deadline (Node
+        // schedules from the event loop's cached time). A frozen clock is that
+        // skew at its widest: the budget timer has fired, yet now() says time is left.
+        const fetchImpl = vi.fn<typeof fetch>(async () => htmlResponse('<html>no wait page here</html>'));
+        const stuckMw = vi.fn(() => new Promise<never>(() => undefined));
+        const result = await tryDownloadPdfWith('a.pdf', { mwFetch: stuckMw, fetchImpl, budgetMs: 20, now: () => 0 });
+        expect(result).toMatchObject({ ok: false, code: 'timeout' });
+        // No request after the budget ran out — that HTML answer is what read as 'bot_check'.
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
     it('treats a 429 from the imageinfo API as IMSLP throttling us: no more requests', async () => {
         const fetchImpl = vi.fn<typeof fetch>(async () => htmlResponse('<html>no wait page here</html>'));
         const throttledMw = vi.fn(async () => {
