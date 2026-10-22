@@ -7,6 +7,7 @@ import { parseAuthNext } from '@/features/auth/authRedirect';
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { ResendConfirmation } from '@/features/auth/ResendConfirmation';
 import { signInWithPassword } from '@/features/auth/session';
+import { CancelSubscriptionLink } from '@/features/billing/CancelSubscriptionLink';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
@@ -67,6 +68,7 @@ const LoginForm = () => {
                             </Link>
                         </p>
                         <LegalLinks className="mt-6 justify-center" />
+                        <CancelSubscriptionLink className="mt-3 text-center" />
                     </>
                 }
                 onSubmit={async ({ email, password, captchaToken }) => {

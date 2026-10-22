@@ -58,6 +58,13 @@ export interface AnnotationsApi {
      * whose sign-in cannot be ended that way.
      */
     fetchSignInEnded?(): Promise<{ ended: boolean; error: ApiError | null }>;
+    /**
+     * Whether this account is on a read-only Academy seat right now (a seat
+     * past its academy's limit: caller_seat_read_only). RLS then refuses its
+     * every write, on any score, until the seat is active again. Absent, or
+     * false, for anyone who is not.
+     */
+    fetchSeatReadOnly?(): Promise<{ readOnly: boolean; error: ApiError | null }>;
     fetchSince(
         docId: string,
         afterSeq: number,
@@ -121,9 +128,13 @@ export interface SyncRejection {
  *   archived them or reset their access) while the device still holds its
  *   token. The changes are this account's (stamped with it) and upload when
  *   it signs in again; no other account sends or draws them meanwhile.
+ * - 'seat-read-only': this account's Academy seat is read-only (its academy
+ *   is over its seat limit), so no score takes its changes. Nothing is lost:
+ *   they upload once the owner makes the seat active again or the academy
+ *   pays.
  */
 export interface SyncHold {
-    reason: 'archived' | 'signed-out';
+    reason: 'archived' | 'signed-out' | 'seat-read-only';
     /** Distinct marks with changes waiting on this document. */
     pendingMarks: number;
 }
@@ -515,6 +526,19 @@ export class SyncEngine {
     private pulling: Promise<void> | null = null;
     /** A pull was asked for while one was in flight; run another after it. */
     private pullAgain = false;
+    /**
+     * Live rows may not move the watermark while this is set. A pull reaches
+     * back only PULL_OVERLAP seqs, so a live row that lands after a stretch
+     * this device never heard (offline, a dropped channel, the score moving
+     * to new realtime topics) would carry the watermark past marks no later
+     * pull could reach. It starts set (the first pull has not run yet), is
+     * set again by noteGap, and is cleared only by a successful pull that
+     * began after the latest gap (see gapGeneration). Live rows are still
+     * applied meanwhile; only the watermark waits.
+     */
+    private watermarkHeld = true;
+    /** Bumped by noteGap; a pull releases the hold only if none came in during it. */
+    private gapGeneration = 0;
     private stopped = false;
     private backoffMs = INITIAL_BACKOFF_MS;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -876,6 +900,17 @@ export class SyncEngine {
         await this.deps.store.load();
         await this.pullSince();
         await this.flush();
+    }
+
+    /**
+     * Committed rows may have gone unheard since the last pull: the realtime
+     * channel re-joined, its committed-row topic was out, or the score moved
+     * to new topics. Holds the watermark against live rows until a pull that
+     * starts after this completes (see watermarkHeld). The caller pulls next.
+     */
+    noteGap(): void {
+        this.gapGeneration += 1;
+        this.watermarkHeld = true;
     }
 
     /**
@@ -1268,6 +1303,9 @@ export class SyncEngine {
      * for good, a whole lesson's work lost to a failed card. Those ops are kept
      * and the drain stops (false) until the score is writable again.
      *
+     * Likewise on a read-only Academy seat (fetchSeatReadOnly): the refusal
+     * is of the seat, on every score, and lifts when the seat does.
+     *
      * Likewise when the server has ended this sign-in (fetchSignInEnded): a
      * student whose teacher reset their access is still a member, and the
      * refusal is of the token, not of the change. The ops are kept for the
@@ -1278,13 +1316,16 @@ export class SyncEngine {
      */
     private async reject(op: PendingOp, reason: string): Promise<boolean> {
         const { api, db, store, docId } = this.deps;
-        const [archive, signIn] = await Promise.all([
+        const [archive, signIn, seat] = await Promise.all([
             this.withAuth(() => api.fetchDocumentArchived(docId)),
             api.fetchSignInEnded
                 ? this.withAuth(() => api.fetchSignInEnded!())
                 : Promise.resolve({ ended: false, error: null }),
+            api.fetchSeatReadOnly
+                ? this.withAuth(() => api.fetchSeatReadOnly!())
+                : Promise.resolve({ readOnly: false, error: null }),
         ]);
-        const unknown = archive.error ?? signIn.error;
+        const unknown = archive.error ?? signIn.error ?? seat.error;
         if (unknown) {
             // Either question unanswered: keep the op and ask again later.
             this.deferRetry(unknown.kind === 'reject' ? { ...unknown, kind: 'retry' } : unknown);
@@ -1296,6 +1337,10 @@ export class SyncEngine {
         }
         if (archive.archived) {
             await this.hold('archived');
+            return false;
+        }
+        if (seat.readOnly) {
+            await this.hold('seat-read-only');
             return false;
         }
         if (this.deps.onRefusalHeld) {
@@ -1495,7 +1540,8 @@ export class SyncEngine {
         if (this.stopped) {
             return;
         }
-        // The cursor is gated until a pull has run the compaction check once
+        // Held: the row is applied, but the pull that closes the gap moves the watermark.
+        // The cursor is also gated until a pull has run the compaction check once
         // (it is what writes checkedSeq). Until then — a device that has never
         // pulled this score, or one whose state was cached before checkedSeq
         // existed — the watermark is the only record of where the last full
@@ -1503,7 +1549,7 @@ export class SyncEngine {
         // broadcast's seq as the checked position and skip a compacted
         // deletion for good. The row is applied either way; the pull fetches
         // it again, harmlessly.
-        if (state?.checkedSeq !== undefined && row.seq > state.watermarkSeq) {
+        if (!this.watermarkHeld && state?.checkedSeq !== undefined && row.seq > state.watermarkSeq) {
             // checkedSeq stays: a live row says nothing about deletions this
             // device missed while it was away (see pullOnce).
             await db.syncState.put({ ...state, docId, watermarkSeq: row.seq });
@@ -1566,6 +1612,9 @@ export class SyncEngine {
 
     private async pullOnce(): Promise<void> {
         const { db, api, docId } = this.deps;
+        // Read before the first request: a gap noted after this pull began
+        // is not covered by it.
+        const gap = this.gapGeneration;
         const state = await db.syncState.get(docId);
         let watermark = state?.watermarkSeq ?? 0;
         const checkedSeq = state?.checkedSeq ?? watermark;
@@ -1636,6 +1685,9 @@ export class SyncEngine {
         }
         await db.syncState.put({ docId, watermarkSeq: watermark, checkedSeq: checked ? watermark : checkedSeq });
         this.lastPullError = null;
+        if (gap === this.gapGeneration) {
+            this.watermarkHeld = false;
+        }
     }
 }
 
@@ -1721,6 +1773,10 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
         async fetchResyncFloor(docId) {
             const { data, error, status } = await supabase.rpc('annotation_resync_floor', { p_document: docId });
             return { floor: error || typeof data !== 'number' ? null : data, error: fail(error, status) };
+        },
+        async fetchSeatReadOnly() {
+            const { data, error, status } = await supabase.rpc('caller_seat_read_only');
+            return { readOnly: !error && data === true, error: fail(error, status) };
         },
         async fetchSince(docId, afterSeq, limit) {
             const { data, error, status } = await supabase

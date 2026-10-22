@@ -26,6 +26,54 @@ jobs:
             - run: npm run test
             - run: npm run build
 
+    # The checkout and cancel-link proofs that need a real database (decision
+    # 30 on #62): the store test runs billingCancelStore.ts against PostgREST,
+    # and the SQL proofs exercise the triggers, grants, row locks and the
+    # database clock that the mocked unit tests cannot.
+    #
+    # LOCAL stack only: `supabase start` on this runner, the migrations it
+    # applies, and the demo keys it prints. No repository secrets, no hosted
+    # project, no link. Scoped to these proofs; billing_double_charge.sql is
+    # left to its own PR (decision 20). No browser is installed or run.
+    supabase-local:
+        runs-on: ubuntu-latest
+        timeout-minutes: 25
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+            - run: npm ci
+            - uses: supabase/setup-cli@v1
+              with:
+                  version: 2.121.0
+            # Only what these proofs touch: Postgres, Auth (the store test
+            # creates accounts), PostgREST and the gateway in front of them.
+            - name: Start the local Supabase stack and apply every migration
+              run: supabase start -x studio,imgproxy,mailpit,realtime,storage-api,edge-runtime,logflare,vector,supavisor,postgres-meta
+            # A recovery replays migrations over a database that already has
+            # them; these must apply again cleanly, in order.
+            - name: Re-apply the cancel-link migrations
+              run: |
+                  DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
+                  for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock; do
+                      psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "supabase/migrations/${migration}.sql"
+                  done
+            - name: Cancel-link store test (billingCancelStore.ts against the local stack)
+              run: |
+                  eval "$(supabase status -o env | grep -E '^(API_URL|SERVICE_ROLE_KEY)=')"
+                  CLEFFY_REQUIRE_LOCAL_DB=1 \
+                  CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
+                  CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+                      npx vitest run tests/billing/cancelLinkStore.test.ts
+            - name: Checkout and cancel-link SQL proofs
+              run: |
+                  DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
+                  for proof in cancel_link_lifetime cancel_link_tombstones cancel_link_db_clock cancel_link_tombstone_race cancel_link_read_db_clock cancel_link_save_after_insert cancel_link_consume_db_clock checkout_consents launch_checkout_fixes; do
+                      bash scripts/ci/sql-proof.sh "$DB_URL" "tests/sql/${proof}.sql"
+                  done
+
     omr-service:
         runs-on: ubuntu-latest
         defaults:

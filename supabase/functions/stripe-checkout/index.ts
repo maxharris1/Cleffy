@@ -1,7 +1,9 @@
 import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
+import * as billingTerms from '../_shared/billingTerms.ts';
 import { CHECKOUT_ATTEMPT_STALE_AFTER, handleCheckout } from '../_shared/checkoutFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
+import { LEGAL_VERSIONS } from '../_shared/legalVersions.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import {
     appOrigin,
@@ -11,6 +13,7 @@ import {
     modeForRequest,
     readCheckoutSession,
     resolvePrice,
+    slotForPrice,
     stripeClient,
     subscriptionStatusOf,
     type StripeMode,
@@ -33,6 +36,8 @@ interface CheckoutAttemptRow {
     attempt_id: string | null;
     price_id: string | null;
     session_id: string | null;
+    consent_id: string | null;
+    params_hash: string | null;
 }
 
 /**
@@ -84,6 +89,52 @@ Deno.serve((req) =>
         },
         modeForRequest,
         resolvePrice,
+        slotForPrice,
+        terms: billingTerms,
+        legalVersions: LEGAL_VERSIONS,
+        // checkout_consents (migration 20261020120000): kept for at least three
+        // years and never cascaded away with the account -- see the migration.
+        recordConsent: async (record) => {
+            const { data, error } = await billing(record.mode)
+                .admin.from('checkout_consents')
+                .insert({
+                    user_id: record.userId,
+                    mode: record.mode,
+                    stripe_customer_id: record.stripeCustomerId,
+                    price_id: record.priceId,
+                    plan_slot: record.planSlot,
+                    currency: record.currency,
+                    amount_minor: record.amountMinor,
+                    renewal_interval: record.renewalInterval,
+                    tax_inclusive: record.taxInclusive,
+                    wording: record.wording,
+                    wording_version: record.wordingVersion,
+                    terms_version: record.termsVersion,
+                    refund_policy_version: record.refundPolicyVersion,
+                    declared_country: record.declaredCountry,
+                    ip_address: record.ip,
+                    user_agent: record.userAgent,
+                })
+                .select('id')
+                .single();
+            if (error || !data) {
+                throw new Error(`could not record the checkout consent: ${error?.message ?? 'no row'}`);
+            }
+            return data.id as string;
+        },
+        linkConsent: async (consentId, sessionId) => {
+            const admin = serviceClient();
+            if (!admin) {
+                throw new Error('Billing is not configured');
+            }
+            const { error } = await admin
+                .from('checkout_consents')
+                .update({ checkout_session_id: sessionId })
+                .eq('id', consentId);
+            if (error) {
+                throw new Error(`could not link the checkout consent: ${error.message}`);
+            }
+        },
         appOrigin,
         billingConfigured: (mode) => Boolean(stripeClient(mode) && serviceClient()),
         runningSubscriptions: async (userId, mode) => {
@@ -140,11 +191,15 @@ Deno.serve((req) =>
                     attemptId: row.attempt_id ?? null,
                     priceId: row.price_id ?? null,
                     sessionId: row.session_id ?? null,
+                    consentId: row.consent_id ?? null,
+                    paramsHash: row.params_hash ?? null,
                 },
             };
         },
         // The idempotency key, durable before it is handed to Stripe, and only
-        // while this request still holds the lease (migration 20261013120100).
+        // while this request still holds the lease (migration 20261013120100) --
+        // with the consent and parameter fingerprint a replay of it must
+        // reproduce (migration 20261020160100).
         // `false` is the lease having been taken over, which is the one answer
         // the flow must not read as a failure: it means another request owns the
         // critical section and this one must open nothing.
@@ -155,6 +210,8 @@ Deno.serve((req) =>
                 p_holder: holder,
                 p_attempt_id: attempt.attemptId,
                 p_price_id: attempt.priceId,
+                p_consent_id: attempt.consentId,
+                p_params_hash: attempt.paramsHash,
             });
             if (error) {
                 throw new Error(`could not stage the checkout attempt: ${error.message}`);

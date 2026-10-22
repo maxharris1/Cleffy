@@ -192,6 +192,20 @@ class FakeApi implements AnnotationsApi {
         return { ended: this.signInEnded, error: null };
     }
 
+    /** caller_seat_read_only(): this account's Academy seat is past its academy's limit. */
+    seatReadOnly = false;
+    seatCheckError: ApiError | null = null;
+
+    async fetchSeatReadOnly() {
+        if (this.offline) {
+            return { readOnly: false, error: this.err() };
+        }
+        if (this.seatCheckError) {
+            return { readOnly: false, error: this.seatCheckError };
+        }
+        return { readOnly: this.seatReadOnly, error: null };
+    }
+
     async fetchOne(id: string) {
         this.fetchOnes += 1;
         if (this.offline) {
@@ -707,6 +721,64 @@ describe('SyncEngine archived score', () => {
     });
 });
 
+describe('SyncEngine read-only Academy seat', () => {
+    // A district over its seat limit makes this account's seat read-only: RLS
+    // refuses its writes on every score, including one that is not archived
+    // (a score someone else owns and shared with it). Marks drawn before that
+    // are the teacher's work, and come back with the seat.
+    const refuseWrites = () => {
+        const forbidden: ApiError = { message: 'new row violates row-level security policy', kind: 'reject' };
+        api.insertIgnoreDuplicates = async () => ({ error: forbidden });
+        api.insertMany = async () => ({ error: forbidden });
+        api.update = async () => ({ error: forbidden });
+        api.updateMany = async () => ({ error: forbidden });
+    };
+
+    it('keeps marks on an unarchived shared score instead of undoing them, and says why', async () => {
+        await store.create(makeStroke('a1'));
+        api.rows.set('a2', serverRow('a2', { seq: 3 }));
+        await store.applyRemoteBatch([fromServerRow(serverRow('a2', { seq: 3 }))], new Set());
+        await store.update('a2', { color: '#222222' });
+        api.seatReadOnly = true;
+        const realInsertMany = api.insertMany.bind(api);
+        refuseWrites();
+
+        await engine.flush();
+
+        expect(api.archived).toBe(false);
+        expect(await db.ops.count()).toBe(2);
+        expect(store.get('a1')).toBeDefined();
+        expect(store.get('a2')?.color).toBe('#222222');
+        expect(rejections).toEqual([]);
+        expect(holds).toEqual([{ reason: 'seat-read-only', pendingMarks: 2 }]);
+        expect(engine.pendingRetryDelayMs).toBeGreaterThanOrEqual(60_000);
+
+        // The academy pays (or the owner keeps this seat): the marks upload.
+        api.seatReadOnly = false;
+        api.insertMany = realInsertMany;
+        api.insertIgnoreDuplicates = FakeApi.prototype.insertIgnoreDuplicates.bind(api);
+        api.update = FakeApi.prototype.update.bind(api);
+        api.updateMany = FakeApi.prototype.updateMany.bind(api);
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(api.rows.get('a1')).toBeDefined();
+        expect(api.rows.get('a2')?.color).toBe('#222222');
+    });
+
+    it('keeps the op when whether the seat is read-only cannot be read', async () => {
+        await store.create(makeStroke('a1'));
+        refuseWrites();
+        api.seatCheckError = { message: 'network down', kind: 'retry' };
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(rejections).toEqual([]);
+        expect(api.fetchOnes).toBe(0);
+    });
+});
+
 describe('SyncEngine sign-in ended by the server', () => {
     // A roster student's teacher reset their access (or archived them) while
     // this device still holds an unexpired token: RLS refuses every request,
@@ -1041,9 +1113,119 @@ describe('SyncEngine.stop during an in-flight pull', () => {
     });
 });
 
+describe('SyncEngine watermark hold across a gap (takedown topics, #63)', () => {
+    const seed = (from: number, to: number): void => {
+        for (let seq = from; seq <= to; seq += 1) {
+            api.rows.set(`r${seq}`, serverRow(`r${seq}`, { seq }));
+        }
+    };
+    const missing = (from: number, to: number): string[] => {
+        const ids: string[] = [];
+        for (let seq = from; seq <= to; seq += 1) {
+            if (!store.get(`r${seq}`)) {
+                ids.push(`r${seq}`);
+            }
+        }
+        return ids;
+    };
+
+    it('more than 50 marks missed, then a newer one live: the next pull still brings every one', async () => {
+        seed(1, 10);
+        await engine.sync();
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+
+        // The score was restricted and lifted (or the channel moved topics):
+        // the device heard none of the next 60 marks.
+        engine.noteGap();
+        seed(11, 70);
+        // The first mark after the lift arrives live, before the gap-fill pull.
+        api.rows.set('r71', serverRow('r71', { seq: 71 }));
+        await engine.applyServerRow(api.rows.get('r71')!);
+        expect(store.get('r71')).toBeDefined();
+        // It is applied, but does not carry the watermark past the gap.
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+
+        await engine.sync();
+        expect(missing(1, 71)).toEqual([]);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(71);
+
+        // The gap is closed: live rows move the watermark again.
+        api.rows.set('r72', serverRow('r72', { seq: 72 }));
+        await engine.applyServerRow(api.rows.get('r72')!);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(72);
+    });
+
+    it('a device opened with a cached watermark holds it until its first pull', async () => {
+        // Cached from an earlier session, before 60 marks it never saw.
+        await db.syncState.put({ docId: DOC, watermarkSeq: 10 });
+        seed(11, 70);
+        api.rows.set('r71', serverRow('r71', { seq: 71 }));
+        const fresh = new AnnotationStore(db, DOC);
+        const e = new SyncEngine({ db, store: fresh, api, docId: DOC, getUserId: () => USER });
+        // A live mark lands before the first pull has run.
+        await e.applyServerRow(api.rows.get('r71')!);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+        await e.sync();
+        e.stop();
+        for (let seq = 11; seq <= 71; seq += 1) {
+            expect(fresh.get(`r${seq}`), `r${seq}`).toBeDefined();
+        }
+    });
+
+    it('a gap noted while a pull is in flight holds until a pull that started after it', async () => {
+        seed(1, 10);
+        await engine.sync();
+
+        const realFetch = api.fetchSince.bind(api);
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        let calls = 0;
+        api.fetchSince = async (...args: Parameters<FakeApi['fetchSince']>) => {
+            calls += 1;
+            const result = await realFetch(...args);
+            if (calls === 1) {
+                await gate;
+            }
+            return result;
+        };
+        const pullA = engine.pullSince();
+        await vi.waitFor(() => expect(calls).toBe(1));
+        // The topics move while A is in flight; A read the server before it.
+        engine.noteGap();
+        release();
+        await pullA;
+        api.fetchSince = realFetch;
+
+        seed(11, 70);
+        api.rows.set('r71', serverRow('r71', { seq: 71 }));
+        await engine.applyServerRow(api.rows.get('r71')!);
+        // A cannot vouch for the gap, so the watermark is still held.
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+        await engine.pullSince();
+        expect(missing(1, 71)).toEqual([]);
+    });
+
+    it('a failed pull does not release the hold', async () => {
+        seed(1, 10);
+        await engine.sync();
+        engine.noteGap();
+        const realFetch = api.fetchSince.bind(api);
+        api.fetchSince = async () => ({ data: null, error: { message: 'too many requests', kind: 'retry' as const } });
+        await engine.pullSince();
+        api.fetchSince = realFetch;
+        api.rows.set('r80', serverRow('r80', { seq: 80 }));
+        await engine.applyServerRow(api.rows.get('r80')!);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+        engine.stop();
+    });
+});
+
 describe('SyncEngine.applyServerRow (broadcast path)', () => {
     it('applies rows and advances the watermark monotonically', async () => {
-        // The cursor only moves once a pull has run the compaction check.
+        // The cursor only moves once a pull has run the compaction check (and,
+        // until then, the watermark is held: see the hold above).
         await engine.pullSince();
         expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 0, checkedSeq: 0 });
         await engine.applyServerRow(serverRow('b1', { page: 4, color: '#123', seq: 9 }));

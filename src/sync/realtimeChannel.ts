@@ -6,11 +6,13 @@ import {
     INK_PROGRESS_EVENT,
     MEMBERSHIP_EVENT,
     SCORE_ANALYSIS_EVENT,
+    TOPIC_ROTATED_EVENT,
     parseDbChange,
     parseDocumentChange,
     parseInkProgress,
     parseMembershipChange,
     parseScoreAnalysisBroadcast,
+    parseTopicRotated,
     presenceSchema,
     type InkProgressMsg,
     type PresencePeer,
@@ -91,6 +93,22 @@ export const rejoinDelayMs = (attempt: number, rateLimited: boolean, random: () 
 };
 
 /**
+ * Retry backoff for the topic-generation read after a `topic_rotated` hint.
+ * The owner's live ink stays held until a read succeeds (see inkHeld), so a
+ * failed read is retried, never given up on: exponential from
+ * EPOCH_RETRY_BASE_MS to EPOCH_RETRY_MAX_MS, with the same equal jitter as a
+ * re-join so a room the server just rotated does not ask in lockstep.
+ */
+export const EPOCH_RETRY_BASE_MS = 500;
+export const EPOCH_RETRY_MAX_MS = 30_000;
+
+/** Delay before generation re-read `attempt` (0-based): bounded on both sides, like rejoinDelayMs. */
+export const epochRetryDelayMs = (attempt: number, random: () => number = Math.random): number => {
+    const ceiling = Math.min(EPOCH_RETRY_MAX_MS, EPOCH_RETRY_BASE_MS * 2 ** Math.min(attempt, 16));
+    return Math.round(ceiling / 2 + (random() * ceiling) / 2);
+};
+
+/**
  * How long doc-db:{id} may be out before we stop waiting for it and pull
  * instead. A healthy (re-)join lands well inside this; anything slower means
  * the join is being refused or retried (e.g. the frontend is live before
@@ -152,10 +170,38 @@ export interface DocRealtimeChannelOptions {
      * re-reads its role rather than trusting either signal.
      */
     onMembershipChanged?: () => void;
+    /**
+     * Read the score's realtime topic generation (realtime_topic_epoch,
+     * migration 20261020150100; see TopicEpochRead). A throw counts as
+     * 'failed'. Absent: always generation 0.
+     */
+    fetchTopicEpoch?: () => Promise<TopicEpochRead>;
 }
 
+/**
+ * One read of a score's topic generation. Only the server's own answer moves
+ * the channel, so a failed read is kept apart from both answers rather than
+ * standing in for either:
+ *  - 'epoch': this user may open the score, at this generation (0 until a
+ *    takedown moves it to fresh topics).
+ *  - 'denied': a definite no. This user may not open the score (any more).
+ *  - 'failed': no answer, which says nothing about access.
+ */
+export type TopicEpochRead = { status: 'epoch'; epoch: number } | { status: 'denied' } | { status: 'failed' };
+
+const EPOCH_READ_FAILED: TopicEpochRead = { status: 'failed' };
+
+/**
+ * The suffix of a score's topics at generation `epoch`. Generation 0 is the
+ * plain topic, so nothing changes for a score no takedown has rotated; after
+ * one, the server sends only to `{topic}:{n}` and admits a join there only
+ * (20261020150100_takedown_realtime_topics): whoever it shut out is left on a
+ * topic nobody talks on.
+ */
+const generation = (epoch: number): string => (epoch > 0 ? `:${epoch}` : '');
+
 /** Private topic for presence and live ink — members may send on it. */
-export const docTopic = (docId: string): string => `doc:${docId}`;
+export const docTopic = (docId: string, epoch = 0): string => `doc:${docId}${generation(epoch)}`;
 
 /**
  * Private topic for server-authored events: committed annotation rows, PDF
@@ -166,7 +212,47 @@ export const docTopic = (docId: string): string => `doc:${docId}`;
  * shared topic any editor could broadcast a hand-made 'INSERT' that peers
  * would apply as a committed row (forged author, forged seq).
  */
-export const docDbTopic = (docId: string): string => `doc-db:${docId}`;
+export const docDbTopic = (docId: string, epoch = 0): string => `doc-db:${docId}${generation(epoch)}`;
+
+/**
+ * The score's topic generation for fetchTopicEpoch.
+ *
+ * Telling a definite denial from a transient failure: realtime_topic_epoch
+ * runs under this request's own token and returns null exactly when
+ * document_role() does, i.e. the caller is not (or no longer) a member, a
+ * takedown shuts them out (restricted: everyone but the owner; removed:
+ * everyone), or the score is gone. That is the check RLS makes, read fresh on
+ * every request, so only a response that arrived with no error and a SQL
+ * null body is 'denied'.
+ *
+ * Everything else is 'failed': a throw (offline, aborted), any error object
+ * (network, timeout, every HTTP 4xx/5xx, among them a 401 from an expired
+ * token that the next refresh fixes and a 404 from a server without the
+ * function), and a 2xx body that is not a non-negative integer. None of those
+ * says anything about access, so when unsure it is a failure, and a failure
+ * after a rotation hint keeps the owner's ink held (fail closed).
+ */
+export const fetchRealtimeTopicEpoch = async (
+    supabase: TypedSupabaseClient,
+    docId: string,
+): Promise<TopicEpochRead> => {
+    let data: unknown;
+    let error: unknown;
+    try {
+        ({ data, error } = await supabase.rpc('realtime_topic_epoch', { p_document: docId }));
+    } catch {
+        return EPOCH_READ_FAILED;
+    }
+    if (error) {
+        return EPOCH_READ_FAILED;
+    }
+    if (data === null) {
+        return { status: 'denied' };
+    }
+    return typeof data === 'number' && Number.isInteger(data) && data >= 0
+        ? { status: 'epoch', epoch: data }
+        : EPOCH_READ_FAILED;
+};
 
 type ChannelKey = 'live' | 'db';
 
@@ -182,6 +268,22 @@ export class DocRealtimeChannel {
     /** doc:{id} re-joined after a drop and onReconnect has not run for it yet. */
     private liveRejoined = false;
     private stopped = false;
+
+    // Topic generation (see fetchTopicEpoch and moveToEpoch).
+    private epoch = 0;
+    private epochCheck: Promise<void> | null = null;
+    private epochCheckAgain = false;
+    /**
+     * The server said the topics moved and no read of the new generation has
+     * succeeded yet: nothing goes out on doc:{id} (no live ink, no presence),
+     * since whoever is still on it may be exactly who the takedown shut out,
+     * and Realtime keeps the permissions it checked when they joined. Only a
+     * successful read lifts it; a failed one keeps it and retries.
+     */
+    private inkHeld = false;
+    /** Failed reads in a row while held (see epochRetryDelayMs); a successful read resets it. */
+    private epochRetryAttempts = 0;
+    private epochRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Re-join after a drop (see scheduleRejoin).
     private readonly rejoinTimers: Record<ChannelKey, ReturnType<typeof setTimeout> | null> = { live: null, db: null };
@@ -219,13 +321,183 @@ export class DocRealtimeChannel {
     constructor(private opts: DocRealtimeChannelOptions) {}
 
     start(): void {
+        if (!this.opts.fetchTopicEpoch) {
+            this.openLive();
+            this.openDb();
+            return;
+        }
+        // Channels open once the generation is known (or could not be asked).
+        this.refreshEpoch();
+    }
+
+    /**
+     * Re-read the topic generation and act on the answer (applyEpochRead).
+     * Runs on start, on the server's `topic_rotated` hint, on a refused join
+     * (a stale generation is refused) and on a retry. Never two reads at
+     * once: a call that lands mid-read makes the read go again, and the
+     * answer that was in flight decides nothing, since the server may have
+     * given it before whatever prompted the call (a newer rotation). A call
+     * also supersedes a retry still waiting, so one loop runs, never two.
+     */
+    private refreshEpoch(): void {
+        const fetchEpoch = this.opts.fetchTopicEpoch;
+        if (!fetchEpoch || this.stopped) {
+            return;
+        }
+        this.clearEpochRetry();
+        if (this.epochCheck) {
+            this.epochCheckAgain = true;
+            return;
+        }
+        const run = async (): Promise<TopicEpochRead | null> => {
+            let read: TopicEpochRead;
+            do {
+                this.epochCheckAgain = false;
+                try {
+                    read = await fetchEpoch();
+                } catch {
+                    read = EPOCH_READ_FAILED;
+                }
+                if (this.stopped) {
+                    return null;
+                }
+            } while (this.epochCheckAgain);
+            return read;
+        };
+        this.epochCheck = run().then((read) => {
+            this.epochCheck = null;
+            if (read && !this.stopped) {
+                this.applyEpochRead(read);
+            }
+        });
+    }
+
+    /**
+     * Only the server's answer moves the channel or lifts the hold:
+     *  - 'epoch': move both channels if the generation changed, then let ink go.
+     *  - 'denied': close everything now (closeOnDenial). Never retried.
+     *  - 'failed': says nothing about access. After a hint, stay held and try
+     *    again with backoff; nothing goes out meanwhile. Otherwise (start, a
+     *    refused join) open generation 0 if nothing is open yet: a fresh join
+     *    is authorized against the current generation, so a wrong guess is
+     *    refused, never admitted, and the refusal asks again.
+     */
+    private applyEpochRead(read: TopicEpochRead): void {
+        if (read.status === 'denied') {
+            this.closeOnDenial();
+            return;
+        }
+        if (read.status === 'failed') {
+            if (this.inkHeld) {
+                this.scheduleEpochRetry();
+            } else if (!this.channel && !this.dbChannel) {
+                this.openLive();
+                this.openDb();
+            }
+            return;
+        }
+        this.epochRetryAttempts = 0;
+        const move = read.epoch !== this.epoch && (this.channel !== null || this.dbChannel !== null);
+        if (move) {
+            this.moveToEpoch(read.epoch);
+        } else {
+            this.epoch = read.epoch;
+        }
+        const wasHeld = this.inkHeld;
+        this.inkHeld = false;
+        if (!this.channel && !this.dbChannel) {
+            this.openLive();
+            this.openDb();
+        } else if (wasHeld && !move) {
+            // Same topics after all (a forged hint): say again what was held back.
+            this.trackPresence({ force: true });
+        }
+    }
+
+    private scheduleEpochRetry(): void {
+        if (this.stopped || this.epochRetryTimer) {
+            return;
+        }
+        const delay = epochRetryDelayMs(this.epochRetryAttempts);
+        this.epochRetryAttempts += 1;
+        this.epochRetryTimer = setTimeout(() => {
+            this.epochRetryTimer = null;
+            this.refreshEpoch();
+        }, delay);
+    }
+
+    private clearEpochRetry(): void {
+        if (this.epochRetryTimer) {
+            clearTimeout(this.epochRetryTimer);
+            this.epochRetryTimer = null;
+        }
+    }
+
+    /**
+     * The server said this user may not open the score (any more). Leave both
+     * topics at once rather than wait for a re-check: a channel joined before
+     * the takedown keeps the permissions Realtime cached at join, so leaving is
+     * the only thing that stops ink going out on it. Then stop for good (no
+     * re-join, retry or fallback pull) and let the app's re-check show the
+     * restricted state.
+     */
+    private closeOnDenial(): void {
+        this.inkHeld = true;
+        this.stop();
+        this.opts.onMembershipChanged?.();
+    }
+
+    /**
+     * Leave both topics for generation `epoch`'s. Treated as a re-join: once
+     * both are back, onReconnect clears live ink and pulls what was committed
+     * while neither topic was joined.
+     */
+    private moveToEpoch(epoch: number): void {
+        const { supabase } = this.opts;
+        this.epoch = epoch;
+        const old = [this.channel, this.dbChannel];
+        this.channel = null;
+        this.dbChannel = null;
+        for (const key of ['live', 'db'] as const) {
+            this.clearRejoinTimer(key);
+            this.joined[key] = false;
+            this.joinedAt[key] = null;
+            this.rejoinAttempts[key] = 0;
+            this.everJoined[key] = true;
+        }
+        this.dropLiveAudience();
+        for (const channel of old) {
+            if (channel) {
+                void supabase.removeChannel(channel).catch(() => undefined);
+            }
+        }
         this.openLive();
         this.openDb();
     }
 
+    /** The server moved this score's topics: stop live ink now, then follow. */
+    private onTopicRotated(payload: unknown): void {
+        if (parseTopicRotated(payload)?.document_id !== this.opts.docId || !this.opts.fetchTopicEpoch) {
+            return;
+        }
+        this.inkHeld = true;
+        this.dropLiveAudience();
+        this.refreshEpoch();
+    }
+
+    /** Nobody is reachable on doc:{id} until a presence sync says so again. */
+    private dropLiveAudience(): void {
+        this.hasRemoteAudience = false;
+        this.pending = [];
+        if (this.flushTimer) {
+            clearTimeout(this.flushTimer);
+            this.flushTimer = null;
+        }
+    }
+
     private openLive(): void {
         const { supabase, docId, self } = this.opts;
-        const channel = supabase.channel(docTopic(docId), {
+        const channel = supabase.channel(docTopic(docId, this.epoch), {
             config: {
                 private: true,
                 broadcast: { self: false, ack: false },
@@ -257,6 +529,9 @@ export class DocRealtimeChannel {
                 this.opts.onMembershipChanged?.();
             }
         });
+
+        // Any member could forge this one here too; it only makes us re-read.
+        channel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload));
 
         channel.on('presence', { event: 'sync' }, () => {
             const state = channel.presenceState<Record<string, unknown>>();
@@ -297,6 +572,9 @@ export class DocRealtimeChannel {
                 // join there is refused, which says nothing about access —
                 // nor does a join refused by the rate limiter.)
                 this.opts.onMembershipChanged?.();
+                // Or the score moved to a new generation while we were away,
+                // and the old one is refused.
+                this.refreshEpoch();
             }
             // Join state first: presence and live ink only go out while joined.
             this.onChannelStatus('live', status);
@@ -310,7 +588,7 @@ export class DocRealtimeChannel {
     private openDb(): void {
         const { supabase, docId } = this.opts;
         // Receive-only: no presence, and nothing is ever sent on it.
-        const dbChannel = supabase.channel(docDbTopic(docId), {
+        const dbChannel = supabase.channel(docDbTopic(docId, this.epoch), {
             config: { private: true, broadcast: { self: false, ack: false } },
         });
         const onDb = ({ payload }: { payload: unknown }) => {
@@ -333,6 +611,8 @@ export class DocRealtimeChannel {
                 this.opts.onScoreAnalysis?.(msg);
             }
         });
+        // Server-authored, so unforgeable here: the takedown moved the score.
+        dbChannel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload));
         dbChannel.on('system', {}, (payload: unknown) => this.onSystem(payload));
         this.dbChannel = dbChannel;
         dbChannel.subscribe((status, err) => {
@@ -377,12 +657,7 @@ export class DocRealtimeChannel {
                 // Whoever was watching is not reachable until the rejoin's
                 // presence sync says so again; a stroke drawn meanwhile is
                 // not streamed (it still lands as a committed row).
-                this.hasRemoteAudience = false;
-                this.pending = [];
-                if (this.flushTimer) {
-                    clearTimeout(this.flushTimer);
-                    this.flushTimer = null;
-                }
+                this.dropLiveAudience();
             }
             this.updateDbFallback();
             this.scheduleRejoin(key);
@@ -603,6 +878,7 @@ export class DocRealtimeChannel {
 
     stop(): void {
         this.stopped = true;
+        this.clearEpochRetry();
         this.leaveDbFallback();
         this.clearRejoinTimer('live');
         this.clearRejoinTimer('db');
@@ -648,7 +924,8 @@ export class DocRealtimeChannel {
         const channel = this.channel;
         // Not while the channel is down: realtime-js would queue the push and
         // replay it on rejoin, and the rejoin announces itself (force) anyway.
-        if (this.stopped || !channel || !this.joined.live) {
+        // Nor while held: the topic may have moved, and lifting announces.
+        if (this.stopped || this.inkHeld || !channel || !this.joined.live) {
             return;
         }
         const force = opts?.force === true;
@@ -696,7 +973,9 @@ export class DocRealtimeChannel {
             this.strokeStreamed = false;
         },
         append: (pts) => {
-            if (!this.meta || !this.hasRemoteAudience) {
+            // Held: a presence sync may say someone is here, but they may be
+            // on a topic the score left. Nothing is buffered for them.
+            if (!this.meta || !this.hasRemoteAudience || this.inkHeld) {
                 return;
             }
             this.pending.push(...pts);
@@ -764,7 +1043,7 @@ export class DocRealtimeChannel {
      * Returns whether the batch went out.
      */
     private send(payload: InkProgressMsg): boolean {
-        if (!this.channel || this.stopped || !this.hasRemoteAudience || !this.isLive()) {
+        if (!this.channel || this.stopped || this.inkHeld || !this.hasRemoteAudience || !this.isLive()) {
             return false;
         }
         void this.channel

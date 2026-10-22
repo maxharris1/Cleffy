@@ -146,6 +146,20 @@ export const fetchMyRole = async (docId: string, userId: string): Promise<Member
     return role;
 };
 
+/**
+ * Whether this account's Academy seat is read-only right now (past its
+ * academy's seat limit: caller_seat_read_only). The server then refuses every
+ * write it makes, on any score, and its live ink; the viewer shows view only.
+ * False for anyone who is not a read-only seat.
+ */
+export const fetchSeatReadOnly = async (): Promise<boolean> => {
+    const { data, error } = await getSupabase().rpc('caller_seat_read_only');
+    if (error) {
+        throw new Error(`Could not load seat: ${error.message}`);
+    }
+    return data === true;
+};
+
 export interface OfflineDocFallback {
     doc: DocumentRow;
     role: MemberRole;

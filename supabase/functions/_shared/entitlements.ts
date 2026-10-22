@@ -48,6 +48,12 @@ export interface Entitlements {
      * the owner's, for an Academy seat). False whenever there is no period to end.
      */
     cancel_at_period_end: boolean;
+    /**
+     * An Academy seat past the studio's effective limit (an override lowered,
+     * cleared or lapsed): view and export only, with READ_ONLY_SEAT_LIMITS.
+     * Optional only because entitlements cached before it existed lack it.
+     */
+    seat_read_only?: boolean;
     limits: EntitlementLimits;
 }
 
@@ -99,6 +105,20 @@ export const STUDENT_LIMITS: EntitlementLimits = {
     pdf_exports: UNLIMITED,
     students: 0,
 };
+
+/**
+ * A read-only Academy seat: nothing new, unlimited export -- the student
+ * ceilings exactly, which resolve_entitlements() reuses as tier_limits('student').
+ */
+export const READ_ONLY_SEAT_LIMITS: EntitlementLimits = STUDENT_LIMITS;
+
+/**
+ * Full access for an Academy (card or Stripe Invoicing) or any send_invoice
+ * subscription this many days after it went past due, unless an admin extended
+ * it. Drift-guarded against
+ * district_grace_ends_at() by tests/billing/districtSeats.test.ts.
+ */
+export const DISTRICT_INVOICE_GRACE_DAYS = 30;
 
 /** The ceilings for any effective tier, purchasable or not. */
 export const limitsFor = (tier: EffectiveTier): EntitlementLimits =>
@@ -285,6 +305,11 @@ export interface SubscriptionLike {
     current_period_end: string | null;
     /** Absent reads as false: the column's default. */
     cancel_at_period_end?: boolean;
+    collection_method?: 'charge_automatically' | 'send_invoice' | null;
+    /** Stamped by subscriptions_track_past_due when the status went past due. */
+    past_due_since?: string | null;
+    /** district_billing.grace_extended_until for the district this pays for. */
+    grace_extended_until?: string | null;
 }
 
 export interface EntitlementInput {
@@ -295,9 +320,37 @@ export interface EntitlementInput {
     studioOwnerIds: string[];
     /** Subscription rows belonging to those studio owners. */
     ownerSubscriptions: SubscriptionLike[];
+    /**
+     * Owners of the studios where the user's seat ranks past the studio's
+     * effective limit (studio_seat_is_active() is false). Absent: none.
+     */
+    readOnlySeatOwnerIds?: string[];
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * subscription_is_live()'s second branch (migration 20261020180900): past due,
+ * inside its grace, on an Academy plan (card or Stripe Invoicing) or on any
+ * Stripe Invoicing plan. `unpaid` is not paying.
+ */
+const isInPastDueGrace = (sub: SubscriptionLike, nowMs: number): boolean => {
+    if (sub.status !== 'past_due' || (sub.tier !== 'academy' && sub.collection_method !== 'send_invoice')) {
+        return false;
+    }
+    const since = sub.past_due_since ? Date.parse(sub.past_due_since) : Number.NaN;
+    const extended = sub.grace_extended_until ? Date.parse(sub.grace_extended_until) : Number.NaN;
+    const ends = Math.max(
+        Number.isFinite(since) ? since + DISTRICT_INVOICE_GRACE_DAYS * DAY_MS : -Infinity,
+        Number.isFinite(extended) ? extended : -Infinity,
+    );
+    return nowMs < ends;
+};
+
 const isLive = (sub: SubscriptionLike, nowMs: number): boolean => {
+    if (isInPastDueGrace(sub, nowMs)) {
+        return true;
+    }
     if (!isEntitlingStatus(sub.status)) {
         return false;
     }
@@ -312,8 +365,10 @@ const TIER_RANK: Record<BillingTier, number> = { free: 0, personal: 1, teacher: 
 
 /**
  * Executable specification of get_entitlements(): own live subscription first
- * (highest tier wins), then a seat in a studio whose owner holds a live Academy
- * subscription (the studios tables keep their v1 names), then free. Founding
+ * (highest tier wins), then an ACTIVE seat in a studio whose owner holds a live
+ * Academy subscription (the studios tables keep their v1 names), then a seat
+ * past its studio's limit (read-only: free tier, READ_ONLY_SEAT_LIMITS), then
+ * free. "Live" includes a past-due Academy or send_invoice subscription inside its grace period. Founding
  * Teacher needs no branch — the webhook stores tier 'teacher' for that price, so
  * a founding subscription is a teacher subscription.
  */
@@ -334,7 +389,8 @@ export const resolveEntitlements = (input: EntitlementInput, nowMs: number): Ent
         };
     }
 
-    const owners = new Set(input.studioOwnerIds);
+    const readOnly = new Set(input.readOnlySeatOwnerIds ?? []);
+    const owners = new Set(input.studioOwnerIds.filter((owner) => !readOnly.has(owner)));
     const seat = input.ownerSubscriptions.find(
         (sub) => owners.has(sub.user_id) && sub.tier === 'academy' && isLive(sub, nowMs),
     );
@@ -347,7 +403,17 @@ export const resolveEntitlements = (input: EntitlementInput, nowMs: number): Ent
             source: 'studio_member',
             current_period_end: seat.current_period_end,
             cancel_at_period_end: seat.cancel_at_period_end === true,
+            seat_read_only: false,
             limits: TIER_LIMITS.academy,
+        };
+    }
+
+    if (readOnly.size > 0) {
+        return {
+            ...freeEntitlements(input.userId),
+            source: 'studio_member',
+            seat_read_only: true,
+            limits: READ_ONLY_SEAT_LIMITS,
         };
     }
 

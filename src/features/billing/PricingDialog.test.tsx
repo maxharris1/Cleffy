@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PricingDialog } from '@/features/billing/PricingDialog';
 
+import { autoRenewalConsentText, purchaseTermsFor } from '../../../supabase/functions/_shared/billingTerms';
+
 const createCheckoutSession = vi.fn();
 const createPortalSession = vi.fn();
 const redirectTo = vi.fn();
@@ -25,11 +27,18 @@ const configurePrices = () => {
     vi.stubEnv('VITE_STRIPE_PRICE_FOUNDING_ANNUAL', 'price_founding_annual');
 };
 
+/** The review step: tick the auto-renewal box, then continue to Stripe. */
+const agreeAndContinue = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByRole('checkbox'));
+    await user.click(screen.getByRole('button', { name: 'Continue to payment' }));
+};
+
 describe('PricingDialog', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         configurePrices();
         vi.stubEnv('VITE_STRIPE_FOUNDING_OFFER', 'false');
+        window.localStorage.clear();
     });
 
     afterEach(() => {
@@ -76,13 +85,14 @@ describe('PricingDialog', () => {
         expect(screen.queryByText('$190')).not.toBeInTheDocument();
     });
 
-    it('sells the roster, and prices it against what a lesson costs', () => {
+    it('sells the roster at one price however many students there are', () => {
         // 'Unlimited students' belongs to the Teacher card, pinned structurally in
-        // tests/billing/limitsInSync.test.ts; the per-student line may sit on that
-        // card or in the dialog footer, so here both only have to reach the DOM.
+        // tests/billing/limitsInSync.test.ts. The old "under $1 per student" line
+        // stopped being true in euros (€21 / 20), so the card no longer prices
+        // per head.
         render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
         expect(screen.getAllByText(/Unlimited students/).length).toBeGreaterThan(0);
-        expect(screen.getAllByText(/under \$1 per student/).length).toBeGreaterThan(0);
+        expect(screen.getAllByText(/one price, however many students/).length).toBeGreaterThan(0);
     });
 
     it('hides the Founding Teacher offer unless the flag is on', () => {
@@ -97,14 +107,20 @@ describe('PricingDialog', () => {
         expect(screen.getByText('$99')).toBeInTheDocument();
     });
 
-    it('starts checkout with the selected price and redirects', async () => {
+    it('starts checkout with the selected price and the ticked consent, and redirects', async () => {
         const user = userEvent.setup();
         createCheckoutSession.mockResolvedValue('https://checkout.stripe.com/session');
         render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
 
         await user.click(screen.getByRole('button', { name: 'Choose Teacher' }));
+        expect(createCheckoutSession).not.toHaveBeenCalled();
+        await agreeAndContinue(user);
 
-        expect(createCheckoutSession).toHaveBeenCalledWith('price_teacher_annual');
+        expect(createCheckoutSession).toHaveBeenCalledWith('price_teacher_annual', {
+            accepted: true,
+            country: 'US',
+            text: autoRenewalConsentText(purchaseTermsFor('teacherAnnual', 'usd')),
+        });
         expect(redirectTo).toHaveBeenCalledWith('https://checkout.stripe.com/session');
     });
 
@@ -115,8 +131,9 @@ describe('PricingDialog', () => {
 
         await user.click(screen.getByRole('button', { name: 'Monthly' }));
         await user.click(screen.getByRole('button', { name: 'Choose Personal' }));
+        await agreeAndContinue(user);
 
-        expect(createCheckoutSession).toHaveBeenCalledWith('price_personal_monthly');
+        expect(createCheckoutSession).toHaveBeenCalledWith('price_personal_monthly', expect.anything());
     });
 
     it('surfaces a checkout failure instead of redirecting', async () => {
@@ -125,9 +142,79 @@ describe('PricingDialog', () => {
         render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
 
         await user.click(screen.getByRole('button', { name: 'Choose Teacher' }));
+        await agreeAndContinue(user);
 
         expect(await screen.findByText('Stripe is down')).toBeInTheDocument();
         expect(redirectTo).not.toHaveBeenCalled();
+    });
+
+    describe('before payment (launch items 13, 15, 17)', () => {
+        it('keeps Continue disabled until the unticked auto-renewal box is ticked', async () => {
+            const user = userEvent.setup();
+            render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            await user.click(screen.getByRole('button', { name: 'Choose Teacher' }));
+
+            const box = screen.getByRole('checkbox', { name: /renews automatically every year/ });
+            expect(box).not.toBeChecked();
+            expect(screen.getByRole('button', { name: 'Continue to payment' })).toBeDisabled();
+            await user.click(box);
+            expect(screen.getByRole('button', { name: 'Continue to payment' })).toBeEnabled();
+        });
+
+        it('names the trader, the price with tax, renewal, cancellation, the refund and the policies', async () => {
+            const user = userEvent.setup();
+            render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            await user.click(screen.getByRole('button', { name: 'Choose Teacher' }));
+
+            expect(screen.getByText(/Cleffy LLC, 245 East 37th Street/)).toBeInTheDocument();
+            expect(screen.getByText(/\$190 per year, plus any applicable sales tax/)).toBeInTheDocument();
+            expect(screen.getByText(/No minimum term/)).toBeInTheDocument();
+            expect(screen.getByText(/Cancel any time from your Account page/)).toBeInTheDocument();
+            expect(screen.getByText(/full refund if you ask within 14 days/)).toBeInTheDocument();
+            expect(screen.getByText(/If you live in the EU or UK/)).toBeInTheDocument();
+            expect(screen.getByRole('link', { name: 'Terms of Service' })).toHaveAttribute('href', '/terms');
+            expect(screen.getByRole('link', { name: 'Refund Policy' })).toHaveAttribute('href', '/refunds');
+        });
+
+        it('prices in euros, VAT included, for a buyer in the EU', async () => {
+            const user = userEvent.setup();
+            render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            await user.click(screen.getByRole('button', { name: 'Monthly' }));
+            await user.selectOptions(screen.getByLabelText('Prices for'), 'DE');
+
+            expect(screen.getByText('€8')).toBeInTheDocument();
+            expect(screen.getByText('€21')).toBeInTheDocument();
+            expect(screen.getByText('€55')).toBeInTheDocument();
+            expect(screen.getAllByText(/VAT incl\./).length).toBeGreaterThan(0);
+        });
+
+        it('prices in pounds for a buyer in the UK', async () => {
+            const user = userEvent.setup();
+            render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            await user.click(screen.getByRole('button', { name: 'Monthly' }));
+            await user.selectOptions(screen.getByLabelText('Prices for'), 'GB');
+
+            expect(screen.getByText('£7')).toBeInTheDocument();
+            expect(screen.getByText('£18')).toBeInTheDocument();
+            expect(screen.getByText('£45')).toBeInTheDocument();
+        });
+
+        it('asks for the box again after the country, and so the price, changes', async () => {
+            const user = userEvent.setup();
+            createCheckoutSession.mockResolvedValue('https://checkout.stripe.com/session');
+            render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            await user.click(screen.getByRole('button', { name: 'Choose Teacher' }));
+            await user.click(screen.getByRole('checkbox'));
+            await user.selectOptions(screen.getByLabelText('Prices for'), 'FR');
+
+            expect(screen.getByRole('checkbox')).not.toBeChecked();
+            await agreeAndContinue(user);
+            expect(createCheckoutSession).toHaveBeenCalledWith('price_teacher_annual', {
+                accepted: true,
+                country: 'FR',
+                text: autoRenewalConsentText(purchaseTermsFor('teacherAnnual', 'eur')),
+            });
+        });
     });
 
     it('explains itself rather than offering broken buttons when billing is unconfigured', () => {

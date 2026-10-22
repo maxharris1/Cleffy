@@ -35,6 +35,14 @@ import { buttonClassName } from '@/ui/classNames';
 import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
 import { ProgressBar } from '@/ui/ProgressBar';
 
+/** The legal documents, as the account menu's last row lists them. */
+const LEGAL_MENU_LINKS = [
+    { to: '/privacy', label: 'Privacy' },
+    { to: '/terms', label: 'Terms' },
+    { to: '/refunds', label: 'Refunds' },
+    { to: '/copyright', label: 'Copyright' },
+] as const;
+
 // Lazy for the same reason as the account route: pricing copy is rarely needed.
 const PricingDialog = lazy(() =>
     import('@/features/billing/PricingDialog').then((m) => ({ default: m.PricingDialog })),
@@ -719,23 +727,18 @@ const AccountMenu = ({
                         {signingOut ? 'Saving changes…' : 'Sign out'}
                     </button>
                     <div className="my-1 border-t border-stone-200" />
-                    <div className="flex gap-1 px-1.5 pb-0.5">
-                        <Link
-                            role="menuitem"
-                            to="/privacy"
-                            onClick={close}
-                            className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
-                        >
-                            Privacy
-                        </Link>
-                        <Link
-                            role="menuitem"
-                            to="/terms"
-                            onClick={close}
-                            className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
-                        >
-                            Terms
-                        </Link>
+                    <div className="flex flex-wrap gap-1 px-1.5 pb-0.5">
+                        {LEGAL_MENU_LINKS.map(({ to, label }) => (
+                            <Link
+                                key={to}
+                                role="menuitem"
+                                to={to}
+                                onClick={close}
+                                className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
+                            >
+                                {label}
+                            </Link>
+                        ))}
                     </div>
                 </div>
             ) : null}

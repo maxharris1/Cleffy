@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { limitAction } from '@/features/billing/limitErrors';
-import { TERMS_OF_SERVICE } from '@/features/legal/legalContent';
+import { legalText, TERMS_OF_SERVICE } from '@/features/legal/legalContent';
 import { RowMenu } from '@/features/library/RowMenu';
 
 /**
@@ -27,7 +27,7 @@ const ownerScoreActions = (): string[] => {
 /** The Terms' clause on what a smaller plan does to scores past its limits. */
 const downgradeClause = (): string => {
     const section = TERMS_OF_SERVICE.sections.find((candidate) => candidate.id === 'plans-and-billing');
-    const texts = section?.blocks.flatMap((block) => (block.kind === 'list' ? block.items : [block.text])) ?? [];
+    const texts = section ? legalText({ sections: [section] }).split('\n') : [];
     return texts.find((text) => text.includes('read-only')) ?? '';
 };
 

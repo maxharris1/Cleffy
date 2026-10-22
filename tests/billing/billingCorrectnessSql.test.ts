@@ -384,12 +384,22 @@ describe('the double-charge guards', () => {
         // under it.
         expect(def).not.toMatch(/holder\s*=\s*null/i);
         expect(def).toMatch(/return\s+found\s*;/i);
+        // With what a replay of the key has to reproduce (Codex finding 1 on
+        // #62): Stripe refuses a key replayed with different parameters, and a
+        // fresh consent id made every replay different.
+        expect(def).toMatch(/consent_id\s*=\s*p_consent_id/i);
+        expect(def).toMatch(/params_hash\s*=\s*p_params_hash/i);
         expect(sql).toMatch(
-            /revoke\s+all\s+on\s+function\s+public\.stage_checkout_attempt\s*\(uuid,\s*text,\s*uuid,\s*uuid,\s*text\)\s+from\s+public,\s*anon,\s*authenticated\s*;/i,
+            /revoke\s+all\s+on\s+function\s+public\.stage_checkout_attempt\s*\(uuid,\s*text,\s*uuid,\s*uuid,\s*text,\s*uuid,\s*text\)\s+from\s+public,\s*anon,\s*authenticated\s*;/i,
         );
         expect(sql).toMatch(
-            /grant\s+execute\s+on\s+function\s+public\.stage_checkout_attempt\s*\(uuid,\s*text,\s*uuid,\s*uuid,\s*text\)\s+to\s+service_role\s*;/i,
+            /grant\s+execute\s+on\s+function\s+public\.stage_checkout_attempt\s*\(uuid,\s*text,\s*uuid,\s*uuid,\s*text,\s*uuid,\s*text\)\s+to\s+service_role\s*;/i,
         );
+        // Spent with the key: recording a session or discarding the key clears
+        // them, so only a staged key with no session is ever replayed.
+        const finish = definition(latestDefining('finish_checkout_attempt'), 'finish_checkout_attempt');
+        expect(finish).toMatch(/consent_id\s*=\s*null/i);
+        expect(finish).toMatch(/params_hash\s*=\s*null/i);
     });
 
     it('keeps the duplicate refund owed in a table, service-role only', () => {
