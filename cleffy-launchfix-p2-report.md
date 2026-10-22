@@ -242,3 +242,35 @@ Checked with `git merge-tree` against the branches pushed at the time of writing
 | P4 (realtime)                                  | not pushed yet                                                                        | `syncEngine.ts` or `ViewerPage.tsx` may overlap if P4 changes realtime wiring there                                             |
 
 Merge order per the packet: P2 goes second, after P1, and there is no file overlap with P1.
+
+## Addendum (06:28 UTC): the PR head moved after this report
+
+- **New PR head:** `b3c475738ec8fefc777fb2ecf8bd579b0c734332`, pushed at 06:21 UTC.
+    - Commit: "fix(ink): hold unsaved ink per account and score, outside the viewer's store".
+    - It came from a **different Claude session** (`Claude-Session: https://claude.ai/code/session_017pX2AtwtqfEAz7JVEUf5bh`), authored as Max Harris, addressing "Codex round 1 on PR #68".
+    - It is a fast-forward on top of `0508174`. This session did not write it and pushed nothing to the PR branch after `0508174`.
+- **What it changes:** it moves held ink into a new `src/sync/inkRecovery.ts`, keyed by account and score. It also touches:
+    - `annotationStore.ts`, `syncEngine.ts`, `session.ts`, `exportAnnotations.ts`, `documentsService.ts`
+    - `InkSaveFailedNotice.tsx` (short copy on phones; refused edits also show the banner)
+    - `PdfViewport.tsx` and the tests
+
+    Of the open questions above, it addresses #2 (refused edits now show the banner), #3 (phone copy) and #4 (a reopened score brings the held marks and banner back).
+
+- **CI on `b3c4757`:** all green.
+
+    | Check                   | Run id (job id)            | Result  |
+    | ----------------------- | -------------------------- | ------- |
+    | checks                  | 39733475574 (119673657452) | success |
+    | supabase-local          | 39733475574 (119673657080) | success |
+    | supabase-drift          | 39733475574 (119673657450) | success |
+    | omr-service             | 39733475574 (119673657382) | success |
+    | checks                  | 39733468371 (119673633813) | success |
+    | supabase-local          | 39733468371 (119673633975) | success |
+    | supabase-drift          | 39733468371 (119673633553) | success |
+    | omr-service             | 39733468371 (119673633771) | success |
+    | Vercel Preview Comments | check 119673890635         | success |
+    | Supabase Preview        | check 119673633020         | skipped |
+
+- **PR state:** still a draft, `mergeable_state: clean`, 5 commits, 28 files.
+- **Not re-verified:** the local check counts, the CSP smoke and the ui-check screenshots above were all run on `0508174`, not on `b3c4757`.
+- **Conflicts:** the follow-up adds `src/sync/inkRecovery.ts` and further edits to `annotationStore.ts` and `syncEngine.ts`. It still leaves `src/sync/wire.ts` and `remoteInkBuffers.ts` alone, so the P3/P4 conflict notes above apply unchanged.
