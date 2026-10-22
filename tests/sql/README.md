@@ -1091,6 +1091,17 @@ card and reservation untouched; the function is the service role's alone. Ends
 with `failures | total`. Proven against the local stack on 2026-10-22: all 12
 checks passed; the proof does not run without the function.
 
+`end_student_sessions_lock_order.sql` proves
+`supabase/migrations/20261022140900_end_student_sessions_lock_order.sql` with
+real concurrent backends (dblink, committed fixtures, removed at the end):
+`end_student_sessions()` waits for a roster row a retention-style revocation
+holds before it touches a token, the revocation then deletes the tokens and
+sessions at once, and the function finishes after it, without a deadlock; the
+function text pins the order (roster row, tokens, sessions, then
+`access_revoked_at`). Ends with `failures | total`. Proven against the local
+stack on 2026-10-22: all 6 checks passed; with 20261020150100's function the
+same interleaving ended in `deadlock detected`.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
