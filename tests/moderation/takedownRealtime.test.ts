@@ -90,8 +90,14 @@ describe('a takedown cuts off viewers already connected', () => {
 
     it('rotates the topics and tells both old ones, with the event the app follows', () => {
         const rotate = latestDefinition('rotate_document_realtime');
-        expect(rotate).toMatch(/v_old_live text := public\.document_live_topic \(p_document\)/);
-        expect(rotate).toMatch(/v_old_db text := public\.document_db_topic \(p_document\)/);
+        // The generation is bumped first, under its row lock, and the hint goes
+        // to the one the bump replaced (20261022120100): two rotations racing
+        // never both tell the generation they started from.
+        const bump = rotate.indexOf('returning e.epoch into v_epoch');
+        expect(bump).toBeGreaterThan(-1);
+        expect(bump).toBeLessThan(rotate.indexOf('realtime.send'));
+        expect(rotate).toMatch(/public\.document_topic_at \('doc-db', p_document, v_epoch - 1\)/);
+        expect(rotate).toMatch(/public\.document_topic_at \('doc', p_document, v_epoch - 1\)/);
         expect(rotate.match(new RegExp(`'${TOPIC_ROTATED_EVENT}', -- event`, 'g'))).toHaveLength(2);
         // The payload the client checks.
         expect(rotate).toMatch(/jsonb_build_object\('document_id', p_document\)/);

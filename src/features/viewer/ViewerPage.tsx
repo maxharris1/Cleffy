@@ -318,17 +318,26 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             const role = roleResult.value;
             const current = stateRef.current;
             // A cache paint is confirmed by the load effect, not here.
-            if (!current || current.provisional || current.unconfirmed || current.role === role) {
+            if (!current || current.provisional || current.unconfirmed) {
                 return false;
             }
-            // Read-only follows from the new role, and the viewport restarts
-            // sync with it — rejoining the channel, which is when Realtime
-            // re-evaluates what this account may send.
+            // Archived or restored with the role unchanged (the realtime
+            // channel asks after either, 20261022120200): the badge and
+            // read-only follow the score, not only the role.
+            const archiveChanged = (current.doc.archived_at === null) !== (doc.archived_at === null);
+            if (current.role === role && !archiveChanged) {
+                return false;
+            }
+            // Read-only follows from the new role or archive state, and the
+            // viewport restarts sync with it — rejoining the channel, which is
+            // when Realtime re-evaluates what this account may send.
             setState((prev) => (prev ? { ...prev, role, doc: { ...prev.doc, archived_at: doc.archived_at } } : prev));
-            // A follow-up check compares against this role, not the one the
-            // ref holds until the next commit.
-            stateRef.current = { ...current, role };
-            setAccessNotice(accessChangedNotice(role));
+            // A follow-up check compares against this, not what the ref holds
+            // until the next commit.
+            stateRef.current = { ...current, role, doc: { ...current.doc, archived_at: doc.archived_at } };
+            if (current.role !== role) {
+                setAccessNotice(accessChangedNotice(role));
+            }
             return false;
         };
 

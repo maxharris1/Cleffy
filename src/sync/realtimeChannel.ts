@@ -109,6 +109,33 @@ export const epochRetryDelayMs = (attempt: number, random: () => number = Math.r
 };
 
 /**
+ * Spread before a `topic_rotated` hint is followed (the generation re-read,
+ * then the rejoin and its gap-fill pull): a rotation tells every member of the
+ * score at once, and one commit may rotate hundreds of scores (a district's
+ * soft delete, a plan lapse archiving a library), so without it every open
+ * device would read, join and pull in the same instant. Uniform over
+ * 0..ROTATION_JITTER_MAX_MS; hints that land while one is waiting join it.
+ */
+export const ROTATION_JITTER_MAX_MS = 2000;
+
+export const rotationJitterMs = (random: () => number = Math.random): number =>
+    Math.round(random() * ROTATION_JITTER_MAX_MS);
+
+/**
+ * How often an open score that is archived asks whether it has been restored
+ * (see waitWhileArchived). Archiving is temporary -- a plan's score cap, lifted
+ * by an upgrade or by archiving another score -- but the realtime policies
+ * refuse every join meanwhile and nothing on a topic can say it is over, so
+ * the channel asks: uniformly every ARCHIVED_RECHECK_MS / 2 .. 3/2 of it (15-45
+ * s), so a plan lapse that archived a library does not bring every open
+ * device back in the same second. One small request per open device.
+ */
+export const ARCHIVED_RECHECK_MS = 30_000;
+
+export const archivedRecheckDelayMs = (random: () => number = Math.random): number =>
+    Math.round(ARCHIVED_RECHECK_MS / 2 + random() * ARCHIVED_RECHECK_MS);
+
+/**
  * How long doc-db:{id} may be out before we stop waiting for it and pull
  * instead. A healthy (re-)join lands well inside this; anything slower means
  * the join is being refused or retried (e.g. the frontend is live before
@@ -166,13 +193,14 @@ export interface DocRealtimeChannelOptions {
      * This user's own access to the document may have changed: the server
      * broadcast a role change or removal for them, or the channel join was
      * refused (Realtime re-checks membership only when a channel joins, so a
-     * refusal on rejoin is the other way a removal shows up). The receiver
-     * re-reads its role rather than trusting either signal.
+     * refusal on rejoin is the other way a removal shows up), or the score
+     * was archived or restored (20261022120200). The receiver re-reads its
+     * role and the score rather than trusting any of these signals.
      */
     onMembershipChanged?: () => void;
     /**
-     * Read the score's realtime topic generation (realtime_topic_epoch,
-     * migration 20261020150100; see TopicEpochRead). A throw counts as
+     * Read the score's realtime topic generation (realtime_topic_access,
+     * migration 20261022120200; see TopicEpochRead). A throw counts as
      * 'failed'. Absent: always generation 0.
      */
     fetchTopicEpoch?: () => Promise<TopicEpochRead>;
@@ -180,14 +208,17 @@ export interface DocRealtimeChannelOptions {
 
 /**
  * One read of a score's topic generation. Only the server's own answer moves
- * the channel, so a failed read is kept apart from both answers rather than
- * standing in for either:
+ * the channel, so a failed read is kept apart from the answers rather than
+ * standing in for any of them:
  *  - 'epoch': this user may open the score, at this generation (0 until a
- *    takedown moves it to fresh topics).
+ *    takedown or a lost membership moves it to fresh topics).
+ *  - 'archived': still a member, but the score is archived, and no realtime
+ *    is allowed on it until it is restored. Temporary: wait and ask again.
  *  - 'denied': a definite no. This user may not open the score (any more).
  *  - 'failed': no answer, which says nothing about access.
  */
-export type TopicEpochRead = { status: 'epoch'; epoch: number } | { status: 'denied' } | { status: 'failed' };
+export type TopicEpochRead =
+    { status: 'epoch'; epoch: number } | { status: 'archived' } | { status: 'denied' } | { status: 'failed' };
 
 const EPOCH_READ_FAILED: TopicEpochRead = { status: 'failed' };
 
@@ -215,22 +246,25 @@ export const docTopic = (docId: string, epoch = 0): string => `doc:${docId}${gen
 export const docDbTopic = (docId: string, epoch = 0): string => `doc-db:${docId}${generation(epoch)}`;
 
 /**
- * The score's topic generation for fetchTopicEpoch.
- *
- * Telling a definite denial from a transient failure: realtime_topic_epoch
- * runs under this request's own token and returns null exactly when
- * document_role() does, i.e. the caller is not (or no longer) a member, a
- * takedown shuts them out (restricted: everyone but the owner; removed:
- * everyone), or the score is gone. That is the check RLS makes, read fresh on
- * every request, so only a response that arrived with no error and a SQL
- * null body is 'denied'.
+ * The score's topic generation for fetchTopicEpoch, from realtime_topic_access
+ * (20261022120200), which runs under this request's own token:
+ *  - null exactly when document_role() is null: the caller is not (or no
+ *    longer) a member, a takedown shuts them out (restricted: everyone but
+ *    the owner; removed: everyone), their student token was revoked, or the
+ *    score is gone. That is the check RLS makes, read fresh on every request,
+ *    so only a response that arrived with no error and a SQL null body is
+ *    'denied'.
+ *  - {"status":"archived"}: a member of an archived score, on which the
+ *    realtime policies refuse every join (20261022120100). 'archived': the
+ *    channel waits and asks again, rather than stop as for a denial.
+ *  - {"status":"open","epoch":n}: generation n.
  *
  * Everything else is 'failed': a throw (offline, aborted), any error object
  * (network, timeout, every HTTP 4xx/5xx, among them a 401 from an expired
  * token that the next refresh fixes and a 404 from a server without the
- * function), and a 2xx body that is not a non-negative integer. None of those
- * says anything about access, so when unsure it is a failure, and a failure
- * after a rotation hint keeps the owner's ink held (fail closed).
+ * function), and a 2xx body that is none of the above. None of those says
+ * anything about access, so when unsure it is a failure, and a failure after
+ * a rotation hint keeps the owner's ink held (fail closed).
  */
 export const fetchRealtimeTopicEpoch = async (
     supabase: TypedSupabaseClient,
@@ -239,7 +273,7 @@ export const fetchRealtimeTopicEpoch = async (
     let data: unknown;
     let error: unknown;
     try {
-        ({ data, error } = await supabase.rpc('realtime_topic_epoch', { p_document: docId }));
+        ({ data, error } = await supabase.rpc('realtime_topic_access', { p_document: docId }));
     } catch {
         return EPOCH_READ_FAILED;
     }
@@ -249,8 +283,15 @@ export const fetchRealtimeTopicEpoch = async (
     if (data === null) {
         return { status: 'denied' };
     }
-    return typeof data === 'number' && Number.isInteger(data) && data >= 0
-        ? { status: 'epoch', epoch: data }
+    if (typeof data !== 'object' || Array.isArray(data)) {
+        return EPOCH_READ_FAILED;
+    }
+    const { status, epoch } = data as { status?: unknown; epoch?: unknown };
+    if (status === 'archived') {
+        return { status: 'archived' };
+    }
+    return status === 'open' && typeof epoch === 'number' && Number.isInteger(epoch) && epoch >= 0
+        ? { status: 'epoch', epoch }
         : EPOCH_READ_FAILED;
 };
 
@@ -284,6 +325,11 @@ export class DocRealtimeChannel {
     /** Failed reads in a row while held (see epochRetryDelayMs); a successful read resets it. */
     private epochRetryAttempts = 0;
     private epochRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    /** A rotation hint's jittered follow-up (see onTopicRotated); while it waits, reads decide nothing. */
+    private rotationTimer: ReturnType<typeof setTimeout> | null = null;
+    /** The server said the score is archived: off both topics, asking again (see waitWhileArchived). */
+    private archived = false;
+    private archivedTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Re-join after a drop (see scheduleRejoin).
     private readonly rejoinTimers: Record<ChannelKey, ReturnType<typeof setTimeout> | null> = { live: null, db: null };
@@ -366,7 +412,9 @@ export class DocRealtimeChannel {
         };
         this.epochCheck = run().then((read) => {
             this.epochCheck = null;
-            if (read && !this.stopped) {
+            // A hint landed meanwhile and its follow-up reads again: this
+            // answer may predate that rotation.
+            if (read && !this.stopped && !this.rotationTimer) {
                 this.applyEpochRead(read);
             }
         });
@@ -375,20 +423,29 @@ export class DocRealtimeChannel {
     /**
      * Only the server's answer moves the channel or lifts the hold:
      *  - 'epoch': move both channels if the generation changed, then let ink go.
+     *    After an archive, join again (the score was restored).
+     *  - 'archived': leave both topics and ask again later (waitWhileArchived).
      *  - 'denied': close everything now (closeOnDenial). Never retried.
-     *  - 'failed': says nothing about access. After a hint, stay held and try
-     *    again with backoff; nothing goes out meanwhile. Otherwise (start, a
-     *    refused join) open generation 0 if nothing is open yet: a fresh join
-     *    is authorized against the current generation, so a wrong guess is
-     *    refused, never admitted, and the refusal asks again.
+     *  - 'failed': says nothing about access. While archived, ask again at the
+     *    archived pace. After a hint, stay held and try again with backoff;
+     *    nothing goes out meanwhile. Otherwise (start, a refused join) open
+     *    generation 0 if nothing is open yet: a fresh join is authorized
+     *    against the current generation, so a wrong guess is refused, never
+     *    admitted, and the refusal asks again.
      */
     private applyEpochRead(read: TopicEpochRead): void {
         if (read.status === 'denied') {
             this.closeOnDenial();
             return;
         }
+        if (read.status === 'archived') {
+            this.waitWhileArchived();
+            return;
+        }
         if (read.status === 'failed') {
-            if (this.inkHeld) {
+            if (this.archived) {
+                this.scheduleArchivedRecheck();
+            } else if (this.inkHeld) {
                 this.scheduleEpochRetry();
             } else if (!this.channel && !this.dbChannel) {
                 this.openLive();
@@ -397,6 +454,9 @@ export class DocRealtimeChannel {
             return;
         }
         this.epochRetryAttempts = 0;
+        const restored = this.archived;
+        this.archived = false;
+        this.clearArchivedRecheck();
         const move = read.epoch !== this.epoch && (this.channel !== null || this.dbChannel !== null);
         if (move) {
             this.moveToEpoch(read.epoch);
@@ -411,6 +471,59 @@ export class DocRealtimeChannel {
         } else if (wasHeld && !move) {
             // Same topics after all (a forged hint): say again what was held back.
             this.trackPresence({ force: true });
+        }
+        if (restored) {
+            // The viewer still shows the score archived (read-only): let it re-read.
+            this.opts.onMembershipChanged?.();
+        }
+    }
+
+    /**
+     * The score is archived (20261022120200): still this user's, but the
+     * realtime policies refuse every join, send and presence on it until it
+     * is restored. Not a denial -- nothing stops for good: leave both topics
+     * (a channel joined before the archive keeps what Realtime cached at
+     * join, so leaving is what stops ink and presence going out on it), hold
+     * ink, and ask again every archivedRecheckDelayMs. Nothing is pulled
+     * meanwhile (no annotation can be written on an archived score); the
+     * restore's joins count as re-joins, so onReconnect pulls whatever was
+     * committed before they landed. The first time, the app is asked to
+     * re-check too, so the viewer shows the archived state.
+     */
+    private waitWhileArchived(): void {
+        const entering = !this.archived;
+        this.archived = true;
+        this.inkHeld = true;
+        this.clearEpochRetry();
+        if (this.channel || this.dbChannel) {
+            this.leaveTopics();
+        } else {
+            // Opened while archived: the first joins after the restore still
+            // follow a gap the open's own pull did not cover.
+            this.everJoined.live = true;
+            this.everJoined.db = true;
+        }
+        this.leaveDbFallback();
+        this.scheduleArchivedRecheck();
+        if (entering) {
+            this.opts.onMembershipChanged?.();
+        }
+    }
+
+    private scheduleArchivedRecheck(): void {
+        if (this.stopped || this.archivedTimer) {
+            return;
+        }
+        this.archivedTimer = setTimeout(() => {
+            this.archivedTimer = null;
+            this.refreshEpoch();
+        }, archivedRecheckDelayMs());
+    }
+
+    private clearArchivedRecheck(): void {
+        if (this.archivedTimer) {
+            clearTimeout(this.archivedTimer);
+            this.archivedTimer = null;
         }
     }
 
@@ -447,14 +560,21 @@ export class DocRealtimeChannel {
         this.opts.onMembershipChanged?.();
     }
 
-    /**
-     * Leave both topics for generation `epoch`'s. Treated as a re-join: once
-     * both are back, onReconnect clears live ink and pulls what was committed
-     * while neither topic was joined.
-     */
+    /** Leave both topics for generation `epoch`'s (see leaveTopics). */
     private moveToEpoch(epoch: number): void {
-        const { supabase } = this.opts;
         this.epoch = epoch;
+        this.leaveTopics();
+        this.openLive();
+        this.openDb();
+    }
+
+    /**
+     * Leave both topics. Whatever joins next is a re-join: once both are
+     * back, onReconnect clears live ink and pulls what was committed while
+     * neither topic was joined.
+     */
+    private leaveTopics(): void {
+        const { supabase } = this.opts;
         const old = [this.channel, this.dbChannel];
         this.channel = null;
         this.dbChannel = null;
@@ -471,18 +591,56 @@ export class DocRealtimeChannel {
                 void supabase.removeChannel(channel).catch(() => undefined);
             }
         }
-        this.openLive();
-        this.openDb();
     }
 
-    /** The server moved this score's topics: stop live ink now, then follow. */
-    private onTopicRotated(payload: unknown): void {
-        if (parseTopicRotated(payload)?.document_id !== this.opts.docId || !this.opts.fetchTopicEpoch) {
+    /**
+     * The server moved this score's topics: stop live ink and presence now,
+     * then follow.
+     *
+     * On the server's own word -- the hint on doc-db:{id}, where no client can
+     * send -- both old topics are left at once, before the new generation is
+     * even read. Realtime keeps the permissions it checked when a channel
+     * joined until that client refreshes its token, and cannot evict anyone,
+     * so a member who just lost the score, if their app ignores the hint,
+     * stays on the old topics for up to an hour (jwt_expiry) able to send and
+     * hear there (20261022120100). Leaving at once is what keeps this device's
+     * presence and anything it would hear out of their reach; the server
+     * already sends only on the new generation.
+     *
+     * The same hint on doc:{id} is left on at once only while doc-db:{id} is
+     * not joined, when it is the only word this device gets. Otherwise any
+     * member could send it there, so it holds and re-reads: a genuine one is
+     * followed by doc-db:{id}'s in the same commit, and a forged one moves
+     * nothing (applyEpochRead lets go on the same topics).
+     *
+     * The re-read and rejoin wait rotationJitterMs, once per burst: further
+     * hints while it waits (the other topic's, a second rotation) join it,
+     * and a read already in flight decides nothing.
+     */
+    private onTopicRotated(payload: unknown, from: RealtimeChannel): void {
+        if (
+            this.stopped ||
+            (from !== this.channel && from !== this.dbChannel) ||
+            parseTopicRotated(payload)?.document_id !== this.opts.docId ||
+            !this.opts.fetchTopicEpoch
+        ) {
             return;
         }
         this.inkHeld = true;
         this.dropLiveAudience();
-        this.refreshEpoch();
+        if (from === this.dbChannel || !this.joined.db) {
+            this.leaveTopics();
+            // Committed rows have no live path until the rejoin: pull if it is slow.
+            this.updateDbFallback();
+        }
+        if (this.rotationTimer) {
+            return;
+        }
+        this.clearEpochRetry();
+        this.rotationTimer = setTimeout(() => {
+            this.rotationTimer = null;
+            this.refreshEpoch();
+        }, rotationJitterMs());
     }
 
     /** Nobody is reachable on doc:{id} until a presence sync says so again. */
@@ -530,8 +688,9 @@ export class DocRealtimeChannel {
             }
         });
 
-        // Any member could forge this one here too; it only makes us re-read.
-        channel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload));
+        // Any member could forge this one here too; it only makes us re-read
+        // (and rejoin, while doc-db:{id} is down: see onTopicRotated).
+        channel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload, channel));
 
         channel.on('presence', { event: 'sync' }, () => {
             const state = channel.presenceState<Record<string, unknown>>();
@@ -611,8 +770,10 @@ export class DocRealtimeChannel {
                 this.opts.onScoreAnalysis?.(msg);
             }
         });
-        // Server-authored, so unforgeable here: the takedown moved the score.
-        dbChannel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload));
+        // Server-authored, so unforgeable here: a takedown or a lost membership moved the score.
+        dbChannel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) =>
+            this.onTopicRotated(payload, dbChannel),
+        );
         dbChannel.on('system', {}, (payload: unknown) => this.onSystem(payload));
         this.dbChannel = dbChannel;
         dbChannel.subscribe((status, err) => {
@@ -800,7 +961,7 @@ export class DocRealtimeChannel {
     }
 
     private async rejoin(key: ChannelKey): Promise<void> {
-        if (this.stopped || this.joined[key]) {
+        if (this.stopped || this.archived || this.joined[key]) {
             return;
         }
         const { supabase } = this.opts;
@@ -820,7 +981,8 @@ export class DocRealtimeChannel {
             // supabase.channel() would hand the dead channel straight back.
             await supabase.removeChannel(old).catch(() => undefined);
         }
-        if (this.stopped) {
+        // Archived meanwhile: the restore opens both channels.
+        if (this.stopped || this.archived) {
             return;
         }
         if (key === 'live') {
@@ -879,6 +1041,11 @@ export class DocRealtimeChannel {
     stop(): void {
         this.stopped = true;
         this.clearEpochRetry();
+        this.clearArchivedRecheck();
+        if (this.rotationTimer) {
+            clearTimeout(this.rotationTimer);
+            this.rotationTimer = null;
+        }
         this.leaveDbFallback();
         this.clearRejoinTimer('live');
         this.clearRejoinTimer('db');

@@ -744,6 +744,12 @@ export type Database = {
                 Args: { p_document: string };
                 Returns: number | null;
             };
+            // The same, with a reason (20261022120200): null when the caller may
+            // not open the score; 'archived' while a member waits for a restore.
+            realtime_topic_access: {
+                Args: { p_document: string };
+                Returns: { status: 'open'; epoch: number } | { status: 'archived' } | null;
+            };
             // Notice and action (20261020150000). The browser only asks and reads;
             // every write is the content-report / content-moderation functions'.
             is_content_moderator: {

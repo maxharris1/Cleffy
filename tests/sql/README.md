@@ -798,6 +798,103 @@ it; a retry or a budget deferral whose next attempt would land past the window
 fails at once; and a forward never attempted has no window. Proven against the
 local stack on 2026-10-22: all 58 checks passed (43 before the fix round).
 
+`realtime_revocation_rotation.sql` proves
+`20261022120000_realtime_revocation_rotation.sql`: every way a member loses a
+score, or loses write on it, moves the score to its next realtime topic
+generation (the takedown's rotation, `20261020150100`), once per score per
+transaction and only at commit (a deferred trigger; the proof fires it with
+`SET CONSTRAINTS … IMMEDIATE`, as COMMIT would). Paths: editor -> viewer
+(`set_document_member_role`, and `assign_score` flipping to view-only),
+`remove_document_member` and `leave_document` in one transaction,
+`revoke_share_link` withdrawing two members, `unassign_score`,
+`end_student_sessions` (a reset) across two scores, an archive (the stamp,
+then the session end, which does not move it again) and the district soft
+delete (`retention_district_run`) of two students sharing a score. After each:
+both old topics are told `topic_rotated`, the member who lost access is refused
+both topics of the new generation (and the old), the members who stay join the
+new one, and a viewer joins it without being able to send live ink. Gaining
+access, a plain revoke and a restore move nothing, a score deleted in the same
+transaction is skipped, and no client role reaches the queue. Needs the local
+stack running (today's `realtime.messages` partition). Proven against the local
+stack on 2026-10-22: all 59 checks passed; with the migration's three queueing
+triggers dropped inside the transaction, 27 of them fail.
+
+Since `20261022120100_realtime_revocation_races.sql` (Codex round 1 on #71) the
+same proof also shows: an archived score gives no member (its owner included)
+a generation, a join, live ink or presence, archiving moves it once at commit,
+and restoring moves nothing and gives realtime back; `document_realtime_epochs`
+holds no foreign key on `documents` (so the commit-time rotation never waits
+on the score) yet a deleted score's generation still goes, after the
+cascades; every assignment and membership insert locks the student's roster
+row first, and an assignment for an archived student is refused under that
+lock whoever writes it; and two rotations in a row tell generation 0, then
+generation 1. Proven against the local stack (Realtime started) on
+2026-10-22: all 78 checks passed; with the pre-fix definitions restored, 9 of
+them fail.
+
+`realtime_revocation_race.sql` proves the races in that migration between two
+(or three) real sessions, in dblink connections as `postgres` that COMMIT their
+own rows (random ids per run, since a deleted score leaves a tombstone; the
+accounts, scores and districts are deleted again at the start and the end). A
+step that must wait is sent asynchronously and the proof polls `pg_locks`
+until that session is blocked before it moves the other on. R1: an archive,
+then an assignment of the same student -- the assignment waits on the roster
+row and is refused once the archive commits. R2: the other way round -- the
+archive waits, and its rotation moves the score just granted. R3: a reset
+(`end_student_sessions`), then an assignment -- it waits and goes through,
+and the token from before the reset is refused the score while a fresh one
+joins. R4: an assignment, then a reset -- the reset waits and moves that
+score. R5: an archive, then the student redeeming a share link -- the
+redemption waits, and the archived student is refused the score with either
+token. R6: one `retention_district_run` soft-deleting two districts between
+an assignment that locked first (the run waits, then moves that score) and
+one that came after (it waits, then is refused); it first checks that only
+its own two districts are due, since the run soft-deletes every due district.
+D1/D2: a member removed, or an editor turned viewer, then the score deleted
+-- no deadlock, and nothing left of the score. C1: two removals rotating one
+score at once -- the second tells generation 1, not generation 0 again. Run it
+against the LOCAL stack only, with Realtime started; pass `-v
+peer_password=...` for anything but the local stack's password. Proven on
+2026-10-22: all 41 checks passed; with the pre-fix definitions restored, 20 of
+them fail (the deadlock aborts the deletion in D1 and D2).
+
+Since `20261022120200_realtime_archive_recovery.sql` (Codex round 2 on #71,
+decision 55) `realtime_revocation_rotation.sql` also shows that archiving is a
+temporary denial: `realtime_topic_access` tells a member of an archived score
+`{"status":"archived"}` (wait), the owner and an editor alike, on the token
+issued before the archive, while a non-member is told null as for any score it
+cannot open; once restored, the same token is told `{"status":"open","epoch":1}`
+and joins generation 1, not 0, sending and tracking there again, with no second
+rotation. It also checks who may call `realtime_topic_access` (signed-in users,
+not anon), that a deleted score answers null, and that `redeem_share_link`
+takes the roster lock before the membership. Proven against the local stack
+(Realtime started) on 2026-10-22: all 88 checks passed.
+
+`realtime_revocation_race.sql` adds H1/H2: a share redemption against the
+district hard delete (`retention_district_run`) of the redeeming student. H1:
+the redemption first, held open -- the hard delete waits on the roster row it
+holds, then deletes the student, no deadlock. H2: the hard delete first,
+stopped by a third session holding the student's account row between its
+roster lock and the account's deletion; the student then redeems a link to a
+score they are already on -- the redemption waits on the roster row before it
+touches the membership, so the hard delete's cascade never waits on it, and
+the redemption fails on the deleted account instead (a foreign-key error, not a
+deadlock). Each first checks that only its own district is due, since the run
+hard-deletes every due district. Its cleanup now also removes what deleting
+its fixtures leaves behind (`document_storage_cleanup`, `district_billing_log`,
+the membership hints in `realtime.messages`), so a run leaves no rows. Proven
+on 2026-10-22: all 53 checks passed, on three runs; with the pre-fix
+`redeem_share_link` restored, H2e fails (PostgreSQL's deadlock detector aborts
+the redemption).
+
+Both proofs need the Realtime container running, not only its schema: the
+schema and `realtime.send` exist without it, but the day's `realtime.messages`
+partition the checks write to is created by Realtime. With that partition
+detached (inside a rolled-back transaction, Realtime stopped),
+`realtime_revocation_rotation.sql` fails 49 of its 88 checks. So they belong
+in a CI job that starts Realtime and checks that the partition exists (P1's
+every-proof `supabase-local` job does both), not in one that excludes it.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

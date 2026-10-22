@@ -15,11 +15,15 @@ import {
     REJOIN_STABLE_MS,
     EPOCH_RETRY_BASE_MS,
     EPOCH_RETRY_MAX_MS,
+    ROTATION_JITTER_MAX_MS,
+    ARCHIVED_RECHECK_MS,
+    archivedRecheckDelayMs,
     docDbTopic,
     docTopic,
     epochRetryDelayMs,
     fetchRealtimeTopicEpoch,
     rejoinDelayMs,
+    rotationJitterMs,
     type DocRealtimeChannelOptions,
     type TopicEpochRead,
 } from '@/sync/realtimeChannel';
@@ -887,8 +891,17 @@ describe('DocRealtimeChannel presence names', () => {
     });
 });
 
-const toRead = (epoch: number | null | undefined): TopicEpochRead =>
-    epoch === undefined ? { status: 'failed' } : epoch === null ? { status: 'denied' } : { status: 'epoch', epoch };
+/** A generation, null a denial, undefined a failed read, 'archived' an archived score. */
+type EpochAnswer = number | null | undefined | 'archived';
+
+const toRead = (epoch: EpochAnswer): TopicEpochRead =>
+    epoch === undefined
+        ? { status: 'failed' }
+        : epoch === null
+          ? { status: 'denied' }
+          : epoch === 'archived'
+            ? { status: 'archived' }
+            : { status: 'epoch', epoch };
 
 /** One stroke, flushed at pen-up without advancing the clock. */
 const scribble = (rt: DocRealtimeChannel, strokeId = 's1'): void => {
@@ -908,13 +921,9 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
 
     /**
      * A channel that asks the generation first; `epochs` answers each ask in
-     * turn, the last one from then on: a number is that generation, null a
-     * denial, undefined a failed read.
+     * turn, the last one from then on (see EpochAnswer).
      */
-    const setupWithEpochs = async (
-        epochs: Array<number | null | undefined>,
-        overrides: Partial<DocRealtimeChannelOptions> = {},
-    ) => {
+    const setupWithEpochs = async (epochs: EpochAnswer[], overrides: Partial<DocRealtimeChannelOptions> = {}) => {
         const answers = [...epochs];
         const fetchTopicEpoch = vi.fn(async () => toRead(answers.length > 1 ? answers.shift() : answers[0]));
         const channels: FakeChannel[] = [];
@@ -969,6 +978,9 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         expect(channels.map((c) => c.topic)).toEqual([`doc:${DOC}`, `doc-db:${DOC}`]);
     });
 
+    /** Past a rotation hint's jittered wait, whatever Math.random said. */
+    const afterJitter = () => vi.advanceTimersByTimeAsync(ROTATION_JITTER_MAX_MS);
+
     it('a takedown moves the owner to the new topics, and leaves the old doc:{id} silent', async () => {
         const { rt, opts, removed, latest } = await setupWithEpochs([0, 1]);
         const live = latest(docTopic(DOC))!;
@@ -983,13 +995,13 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
 
         // The takedown: the server says the topics moved, on doc-db:{id}.
         db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
-        // Ink stops at once, before the new generation is even read: the
-        // collaborator may still be on doc:{id}, whatever its app does.
+        // Both old topics are left at once, before the new generation is even
+        // read: the collaborator may still be on doc:{id}, whatever its app does.
+        expect(removed).toEqual(expect.arrayContaining([live, db]));
         drawFor(rt, 200);
         expect(live.send).not.toHaveBeenCalled();
 
-        await vi.advanceTimersByTimeAsync(0);
-        expect(removed).toEqual(expect.arrayContaining([live, db]));
+        await afterJitter();
         const live1 = latest(docTopic(DOC, 1))!;
         const db1 = latest(docDbTopic(DOC, 1))!;
         expect(live1).toBeDefined();
@@ -1016,7 +1028,7 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         const db = latest(docDbTopic(DOC))!;
         db.status('SUBSCRIBED');
         db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        await afterJitter();
         expect(opts.onMembershipChanged).toHaveBeenCalled();
         expect(channels.some((c) => c.topic.endsWith(':1'))).toBe(false);
     });
@@ -1031,29 +1043,42 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         expect(latest(docDbTopic(DOC, 4))).toBeDefined();
     });
 
-    it('ignores a hint for another score, and an unchanged generation moves nothing', async () => {
-        const { latest, channels, fetchTopicEpoch } = await setupWithEpochs([0]);
+    it('ignores a hint for another score, and a doc:{id} hint that changes no generation moves nothing', async () => {
+        const { latest, channels, removed, fetchTopicEpoch } = await setupWithEpochs([0]);
+        const live = latest(docTopic(DOC))!;
         const db = latest(docDbTopic(DOC))!;
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
         db.broadcast(TOPIC_ROTATED_EVENT, { document_id: 'another-score' });
-        await vi.advanceTimersByTimeAsync(0);
+        await afterJitter();
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
-        db.broadcast(TOPIC_ROTATED_EVENT, { document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        expect(removed).toEqual([]);
+        live.broadcast(TOPIC_ROTATED_EVENT, { document_id: DOC });
+        await afterJitter();
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        expect(removed).toEqual([]);
         expect(channels).toHaveLength(2);
     });
 
     it('reads the generation over PostgREST: only a null answer is a denial, anything unclear a failure', async () => {
         const rpc = vi.fn();
         const supabase = { rpc } as unknown as TypedSupabaseClient;
-        rpc.mockResolvedValueOnce({ data: 2, error: null });
+        rpc.mockResolvedValueOnce({ data: { status: 'open', epoch: 2 }, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'epoch', epoch: 2 });
-        expect(rpc).toHaveBeenCalledWith('realtime_topic_epoch', { p_document: DOC });
-        rpc.mockResolvedValueOnce({ data: 0, error: null });
+        expect(rpc).toHaveBeenCalledWith('realtime_topic_access', { p_document: DOC });
+        rpc.mockResolvedValueOnce({ data: { status: 'open', epoch: 0 }, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'epoch', epoch: 0 });
         // The function ran under this user's token and document_role() said no.
         rpc.mockResolvedValueOnce({ data: null, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'denied' });
+        // A member of an archived score (20261022120200): wait, do not stop.
+        rpc.mockResolvedValueOnce({ data: { status: 'archived' }, error: null });
+        await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'archived' });
+        // Shapes it does not know, the old function's bare integer among them.
+        for (const data of [2, [], 'archived', { status: 'open' }, { status: 'open', epoch: -1 }, { status: 'gone' }]) {
+            rpc.mockResolvedValueOnce({ data, error: null });
+            await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
+        }
         // None of these says anything about access.
         rpc.mockResolvedValueOnce({ data: null, error: { message: 'Could not find the function' } });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
@@ -1063,14 +1088,14 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
         rpc.mockRejectedValueOnce(new Error('offline'));
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
-        rpc.mockResolvedValueOnce({ data: 1.5, error: null });
+        rpc.mockResolvedValueOnce({ data: { status: 'open', epoch: 1.5 }, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
         rpc.mockResolvedValueOnce({ data: undefined, error: null });
         await expect(fetchRealtimeTopicEpoch(supabase, DOC)).resolves.toEqual({ status: 'failed' });
     });
 
     /** Owner and a collaborator on generation 0, the owner's ink reaching it. */
-    const ownerWithCollaborator = async (epochs: Array<number | null | undefined>) => {
+    const ownerWithCollaborator = async (epochs: EpochAnswer[]) => {
         const ctx = await setupWithEpochs(epochs);
         const live = ctx.latest(docTopic(DOC))!;
         const db = ctx.latest(docDbTopic(DOC))!;
@@ -1083,9 +1108,9 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         return { ...ctx, live, db };
     };
 
-    it('a failed read after the hint keeps the hold, sends nothing on the old topic, and lets go only on success', async () => {
+    it('a failed read after the hint keeps the hold and the old topics left, pulling meanwhile, and rejoins only on success', async () => {
         vi.spyOn(Math, 'random').mockReturnValue(1); // the longest delay of each step
-        const { rt, opts, removed, latest, fetchTopicEpoch, live, db } = await ownerWithCollaborator([
+        const { rt, opts, channels, removed, latest, fetchTopicEpoch, live, db } = await ownerWithCollaborator([
             0,
             undefined,
             undefined,
@@ -1093,12 +1118,12 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         ]);
 
         db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        // Left at once; nothing new is opened until a read succeeds.
+        expect(removed).toEqual(expect.arrayContaining([live, db]));
+        await afterJitter();
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
-        // The read failed: still on the old topics, which nobody left.
-        expect(removed).toEqual([]);
-        expect(latest(docTopic(DOC, 1))).toBeUndefined();
-        // The collaborator is still there; the owner draws, and cancels one.
+        expect(channels).toHaveLength(2);
+        // Late presence from the old topic; the owner draws, and cancels one.
         syncPresence(live, 2);
         scribble(rt, 'held-1');
         rt.publisher.start({ strokeId: 'held-2', page: 0, kind: 'stroke', color: '#000000', w: 0.01 });
@@ -1106,17 +1131,16 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         rt.publisher.cancel();
         expect(live.send).not.toHaveBeenCalled();
 
-        // The first retry fails too: still held.
+        // The first retry fails too: still held, still off every topic.
         await vi.advanceTimersByTimeAsync(EPOCH_RETRY_BASE_MS);
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
         scribble(rt, 'held-3');
         expect(live.send).not.toHaveBeenCalled();
-        expect(removed).toEqual([]);
+        expect(channels).toHaveLength(2);
 
-        // The second retry succeeds: the owner moves, and only now lets ink go.
+        // The second retry succeeds: the owner joins generation 1, and only now lets ink go.
         await vi.advanceTimersByTimeAsync(EPOCH_RETRY_BASE_MS * 2);
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
-        expect(removed).toEqual(expect.arrayContaining([live, db]));
         const live1 = latest(docTopic(DOC, 1))!;
         const db1 = latest(docDbTopic(DOC, 1))!;
         live1.status('SUBSCRIBED');
@@ -1127,16 +1151,29 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         expect(inkSent(live1).map((m) => m.strokeId)).toContain('after');
         expect(live.send).not.toHaveBeenCalled();
         expect(opts.onMembershipChanged).not.toHaveBeenCalled();
-        // Nothing left to retry.
+        // Nothing left to retry or poll.
         await vi.advanceTimersByTimeAsync(EPOCH_RETRY_MAX_MS * 2);
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
+        expect(opts.onResync).not.toHaveBeenCalled();
+    });
+
+    it('while a slow read keeps the device off every topic, committed rows are pulled', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(1);
+        const { opts, db } = await ownerWithCollaborator([0, undefined]);
+        db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+        await vi.advanceTimersByTimeAsync(DB_JOIN_GRACE_MS - 1);
+        expect(opts.onResync).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(DB_FALLBACK_POLL_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(2);
     });
 
     it('a denial closes doc:{id} and doc-db:{id} at once, for good, and a connected collaborator gets no ink', async () => {
         const { rt, opts, removed, channels, fetchTopicEpoch, live, db } = await ownerWithCollaborator([0, null]);
 
         db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        await afterJitter();
         // Both old channels are left, not merely muted.
         expect(removed).toEqual(expect.arrayContaining([live, db]));
         expect(removed).toHaveLength(2);
@@ -1173,7 +1210,7 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
 
         // Rotation, then the read fails...
         db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        await afterJitter();
         // ...then the collaborator, still on the old doc:{id}, updates its
         // presence, which is what restored the audience at b8adc513...
         syncPresence(live, 2);
@@ -1188,11 +1225,14 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         rt.stop();
     });
 
-    it('a hint that turns out not to move the score lets go on the same topics, and announces again', async () => {
+    it('a doc:{id} hint that turns out not to move the score lets go on the same topics, and announces again', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(1);
         const { rt, live, removed, fetchTopicEpoch } = await ownerWithCollaborator([0, undefined, 0]);
-        // Any member may send the hint on doc:{id}.
+        // Any member may send the hint on doc:{id}: with doc-db:{id} joined,
+        // it holds and re-reads rather than leave.
         live.broadcast(TOPIC_ROTATED_EVENT, { id: 'forged', document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        expect(removed).toEqual([]);
+        await afterJitter();
         syncPresence(live, 2);
         rt.setPage(2);
         scribble(rt, 'held');
@@ -1205,6 +1245,16 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         expect(live.track).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 }));
         scribble(rt, 'after');
         expect(inkSent(live).map((m) => m.strokeId)).toEqual(['after']);
+    });
+
+    it('a doc:{id} hint leaves at once when doc-db:{id} is not joined, its only word on this device', async () => {
+        const { removed, latest, live, db } = await ownerWithCollaborator([0, 1]);
+        db.status('CHANNEL_ERROR');
+        live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+        expect(removed).toEqual(expect.arrayContaining([live, db]));
+        await afterJitter();
+        expect(latest(docTopic(DOC, 1))).toBeDefined();
+        expect(latest(docDbTopic(DOC, 1))).toBeDefined();
     });
 
     it('jitters each retry between half and all of a ceiling that doubles from 0.5 s to 30 s', () => {
@@ -1221,7 +1271,7 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         vi.spyOn(Math, 'random').mockReturnValue(1);
         const { rt, db, fetchTopicEpoch } = await ownerWithCollaborator([0, undefined]);
         db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        await afterJitter();
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
 
         const waits: number[] = [];
@@ -1269,30 +1319,34 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
             return { ...ctx, live: l, db: d };
         })();
 
-        // A hint, a failed read, a retry waiting 500 ms...
-        db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        // Hints on doc:{id} (doc-db:{id} joined, so the channels stay): a
+        // hint, a failed read, a retry waiting 500 ms...
+        live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+        await afterJitter();
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
         await vi.advanceTimersByTimeAsync(EPOCH_RETRY_BASE_MS - 100);
-        // ...when a newer hint lands: it reads at once (and fails again)...
-        db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm2', document_id: DOC });
-        await vi.advanceTimersByTimeAsync(0);
+        // ...when a newer hint lands: the retry that was waiting is gone, and
+        // the next read waits out the newer hint's jitter.
+        live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm2', document_id: DOC });
+        await vi.advanceTimersByTimeAsync(100);
+        expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(ROTATION_JITTER_MAX_MS - 100);
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
-        // ...and the retry that was waiting is gone: one loop, on the next step.
-        await vi.advanceTimersByTimeAsync(EPOCH_RETRY_BASE_MS);
-        expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
-        await vi.advanceTimersByTimeAsync(EPOCH_RETRY_BASE_MS);
+        // That read failed too; its retry (the backoff's next step) is in
+        // flight when a third hint lands.
+        await vi.advanceTimersByTimeAsync(EPOCH_RETRY_BASE_MS * 2);
         expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
-        // A third hint mid-read: the answer in flight may predate it.
-        db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm3', document_id: DOC });
+        live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm3', document_id: DOC });
         pending.shift()?.({ status: 'epoch', epoch: 0 });
         await vi.advanceTimersByTimeAsync(0);
-        // That answer let nothing go; the read went again.
-        expect(fetchTopicEpoch).toHaveBeenCalledTimes(5);
+        // The answer in flight may predate the third hint: it let nothing go.
         syncPresence(live, 2);
         scribble(rt, 'stale');
         expect(live.send).not.toHaveBeenCalled();
+        expect(removed).toEqual([]);
 
+        await afterJitter();
+        expect(fetchTopicEpoch).toHaveBeenCalledTimes(5);
         pending.shift()?.({ status: 'epoch', epoch: 2 });
         await vi.advanceTimersByTimeAsync(0);
         expect(removed).toEqual(expect.arrayContaining([live, db]));
@@ -1300,5 +1354,446 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
         expect(live.send).not.toHaveBeenCalled();
         rt.stop();
         expect(vi.getTimerCount()).toBe(0);
+    });
+
+    /**
+     * 20261022120100_realtime_revocation_races: a rotation tells every member
+     * of a score at once, and one commit can rotate hundreds of scores, so
+     * each device waits a random 0..2 s before it re-reads and rejoins, and a
+     * burst of hints is one read and one rejoin.
+     */
+    describe('rotation follow-ups are jittered and coalesced (20261022120100)', () => {
+        it('spreads the wait uniformly over 0..2 s', () => {
+            expect(ROTATION_JITTER_MAX_MS).toBe(2000);
+            expect(rotationJitterMs(() => 0)).toBe(0);
+            expect(rotationJitterMs(() => 0.25)).toBe(500);
+            expect(rotationJitterMs(() => 0.999_9)).toBe(2000);
+            expect(rotationJitterMs(() => 1)).toBe(2000);
+        });
+
+        it('waits out the jitter before the read, and makes one read and one rejoin of a burst of hints', async () => {
+            const { opts, channels, fetchTopicEpoch, live, db, latest } = await ownerWithCollaborator([0, 1]);
+            vi.spyOn(Math, 'random').mockReturnValue(0.5);
+            // Both topics' hints, then the doc-db:{id} hint delivered twice.
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm2', document_id: DOC });
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            expect(Math.random).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(ROTATION_JITTER_MAX_MS / 2 - 1);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(1);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            expect(channels.map((c) => c.topic)).toEqual([
+                docTopic(DOC),
+                docDbTopic(DOC),
+                docTopic(DOC, 1),
+                docDbTopic(DOC, 1),
+            ]);
+            latest(docTopic(DOC, 1))!.status('SUBSCRIBED');
+            latest(docDbTopic(DOC, 1))!.status('SUBSCRIBED');
+            // One gap-fill pull, no fallback pull beside it.
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(DB_FALLBACK_POLL_MS * 2);
+            expect(opts.onResync).not.toHaveBeenCalled();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        });
+
+        it('spreads the devices of one score over the window', async () => {
+            const draws = [0, 0.3, 0.7, 1];
+            const devices: Array<Awaited<ReturnType<typeof ownerWithCollaborator>>> = [];
+            for (let i = 0; i < draws.length; i++) {
+                devices.push(await ownerWithCollaborator([0, 1]));
+            }
+            const random = vi.spyOn(Math, 'random');
+            draws.forEach((draw, i) => {
+                random.mockReturnValueOnce(draw);
+                devices[i]!.db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            });
+            const readAt = devices.map(() => -1);
+            for (let t = 0; t <= ROTATION_JITTER_MAX_MS; t += 100) {
+                await vi.advanceTimersByTimeAsync(t === 0 ? 0 : 100);
+                devices.forEach((device, i) => {
+                    if (readAt[i] === -1 && device.fetchTopicEpoch.mock.calls.length === 2) {
+                        readAt[i] = t;
+                    }
+                });
+            }
+            expect(readAt).toEqual([0, 600, 1400, 2000]);
+        });
+
+        it('the hint of a channel already left decides nothing', async () => {
+            const { fetchTopicEpoch, channels, live, db } = await ownerWithCollaborator([0, 1, 2]);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            await afterJitter();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            // Late copies on the generation-0 channels, left since.
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm2', document_id: DOC });
+            await afterJitter();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            expect(channels).toHaveLength(4);
+        });
+
+        it('teardown cancels a waiting follow-up', async () => {
+            const { rt, fetchTopicEpoch, db } = await ownerWithCollaborator([0, 1]);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            rt.stop();
+            await afterJitter();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+            expect(vi.getTimerCount()).toBe(0);
+        });
+    });
+
+    /**
+     * 20261022120200_realtime_archive_recovery (decision 55): archiving is a
+     * temporary denial. A member's open score leaves both topics when it is
+     * archived, asks again every 15-45 s, and joins the current generation by
+     * itself once the score is restored -- no reopen.
+     */
+    describe('an archived score waits, and rejoins on restore (20261022120200)', () => {
+        // Every wait at its longest: one recheck per afterArchivedRecheck().
+        beforeEach(() => {
+            vi.spyOn(Math, 'random').mockReturnValue(1);
+        });
+
+        /** Past one archived recheck (the longest, with Math.random at 1). */
+        const afterArchivedRecheck = () => vi.advanceTimersByTimeAsync((ARCHIVED_RECHECK_MS * 3) / 2);
+
+        it('spreads the rechecks uniformly over 15..45 s', () => {
+            expect(ARCHIVED_RECHECK_MS).toBe(30_000);
+            expect(archivedRecheckDelayMs(() => 0)).toBe(15_000);
+            expect(archivedRecheckDelayMs(() => 0.5)).toBe(30_000);
+            expect(archivedRecheckDelayMs(() => 1)).toBe(45_000);
+        });
+
+        it('an open viewer sees the score archived, then restored, and realtime resumes without a reopen', async () => {
+            const { rt, opts, channels, removed, latest, fetchTopicEpoch, live, db } = await ownerWithCollaborator([
+                0,
+                'archived',
+                'archived',
+                1,
+            ]);
+
+            // The archive rotates the score: the hint on doc-db:{id}.
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            await afterJitter();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            // Archived: nothing is opened, the viewer is asked to re-check
+            // (it shows the score archived), and nothing goes out.
+            expect(channels).toHaveLength(2);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+            syncPresence(live, 2);
+            scribble(rt, 'archived');
+            rt.setPage(2);
+            expect(live.send).not.toHaveBeenCalled();
+            // No row can be written on an archived score: no fallback polling.
+            await vi.advanceTimersByTimeAsync(DB_JOIN_GRACE_MS + DB_FALLBACK_POLL_MS);
+            expect(opts.onResync).not.toHaveBeenCalled();
+
+            // Still archived at the next recheck: still off, nothing new to say.
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(channels).toHaveLength(2);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+
+            // Restored: the next recheck joins the current generation, the same
+            // mounted channel, no reopen.
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
+            const live1 = latest(docTopic(DOC, 1))!;
+            const db1 = latest(docDbTopic(DOC, 1))!;
+            expect(channels.map((c) => c.topic)).toEqual([
+                docTopic(DOC),
+                docDbTopic(DOC),
+                docTopic(DOC, 1),
+                docDbTopic(DOC, 1),
+            ]);
+            // The viewer re-reads, and leaves its archived state.
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(2);
+            live1.status('SUBSCRIBED');
+            db1.status('SUBSCRIBED');
+            // A re-join: one gap-fill pull for what was committed before it landed.
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            // Committed marks, live ink and presence all flow again.
+            db1.broadcast('INSERT', dbChange(row({ seq: 42 })));
+            expect(opts.onDbChange).toHaveBeenCalledWith(expect.objectContaining({ seq: 42 }));
+            live1.broadcast(INK_PROGRESS_EVENT, peerStroke());
+            expect(opts.onRemoteInk).toHaveBeenCalled();
+            expect(live1.track).toHaveBeenCalled();
+            syncPresence(live1, 2);
+            scribble(rt, 'restored');
+            expect(inkSent(live1).map((m) => m.strokeId)).toContain('restored');
+            expect(live.send).not.toHaveBeenCalled();
+            // Nothing left to ask.
+            await vi.advanceTimersByTimeAsync(ARCHIVED_RECHECK_MS * 4);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
+            rt.stop();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('a score opened while archived joins nothing, then joins on restore and pulls the gap', async () => {
+            const { opts, channels, latest, fetchTopicEpoch } = await setupWithEpochs(['archived', 0]);
+            expect(channels).toEqual([]);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            latest(docTopic(DOC))!.status('SUBSCRIBED');
+            latest(docDbTopic(DOC))!.status('SUBSCRIBED');
+            // Rows written after the open's own pull, before these joins.
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(2);
+        });
+
+        it('a failed read while archived asks again at the archived pace, not the retry pace', async () => {
+            const { channels, latest, fetchTopicEpoch, db } = await ownerWithCollaborator([
+                0,
+                'archived',
+                undefined,
+                2,
+            ]);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            await afterJitter();
+            await afterArchivedRecheck();
+            // The failed read opens nothing: generation 0 would only be refused.
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(channels).toHaveLength(2);
+            await vi.advanceTimersByTimeAsync(EPOCH_RETRY_BASE_MS * 4);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
+            expect(latest(docTopic(DOC, 2))).toBeDefined();
+            expect(latest(docDbTopic(DOC, 2))).toBeDefined();
+        });
+
+        it('a denial while archived still stops for good', async () => {
+            const { opts, channels, fetchTopicEpoch, db } = await ownerWithCollaborator([0, 'archived', null]);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            await afterJitter();
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(2);
+            await vi.advanceTimersByTimeAsync(ARCHIVED_RECHECK_MS * 4);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(channels).toHaveLength(2);
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('a device that missed the archive (its re-join refused) waits too, and re-joins nothing meanwhile', async () => {
+            const { opts, channels, removed, fetchTopicEpoch, live, db } = await ownerWithCollaborator([0, 'archived']);
+            // Its socket was down for the hint; realtime-js's re-join is refused.
+            live.status('CHANNEL_ERROR', new Error('Unauthorized'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            // The re-join the drop armed never fires, and nothing is polled.
+            await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS);
+            expect(channels).toHaveLength(2);
+            expect(opts.onResync).not.toHaveBeenCalled();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        });
+
+        it('teardown while archived cancels the recheck', async () => {
+            const { rt, fetchTopicEpoch } = await setupWithEpochs(['archived']);
+            rt.stop();
+            await afterArchivedRecheck();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+            expect(vi.getTimerCount()).toBe(0);
+        });
+    });
+
+    /**
+     * 20261022120000_realtime_revocation_rotation: a member who loses the score
+     * (removed, unassigned, a student whose access ended) or loses write on it
+     * (editor -> viewer) moves it to the next generation, so every member on it
+     * gets the membership hint (for whoever changed) and `topic_rotated` on
+     * both old topics, in the same commit.
+     */
+    describe('when a membership change rotates the score (20261022120000)', () => {
+        /** Each read answers after READ_MS, from `epochs` in turn (the last one from then on). */
+        const READ_MS = 50;
+        const slowReads = (epochs: Array<number | null>) => {
+            const answers = [...epochs];
+            let inFlight = 0;
+            let maxInFlight = 0;
+            const fetchTopicEpoch = vi.fn(
+                () =>
+                    new Promise<TopicEpochRead>((done) => {
+                        inFlight += 1;
+                        maxInFlight = Math.max(maxInFlight, inFlight);
+                        const answer = answers.length > 1 ? answers.shift() : answers[0];
+                        setTimeout(() => {
+                            inFlight -= 1;
+                            done(toRead(answer));
+                        }, READ_MS);
+                    }),
+            );
+            return { fetchTopicEpoch, maxInFlight: () => maxInFlight };
+        };
+
+        const membership = (userId: string, role: string | null) => ({
+            table: 'document_members',
+            document_id: DOC,
+            user_id: userId,
+            role,
+        });
+
+        /** On generation 0 with a collaborator, both topics joined. */
+        const joinedAtZero = async (epochs: Array<number | null>) => {
+            const reads = slowReads(epochs);
+            const ctx = await setupWithEpochs([0], { fetchTopicEpoch: reads.fetchTopicEpoch });
+            await vi.advanceTimersByTimeAsync(READ_MS);
+            const live = ctx.latest(docTopic(DOC))!;
+            const db = ctx.latest(docDbTopic(DOC))!;
+            live.status('SUBSCRIBED');
+            db.status('SUBSCRIBED');
+            syncPresence(live, 2);
+            return { ...ctx, ...reads, live, db };
+        };
+
+        /** Past the jitter and one read. */
+        const afterJitterAndRead = () => vi.advanceTimersByTimeAsync(ROTATION_JITTER_MAX_MS + READ_MS);
+
+        it('a member who keeps access follows it: off the old topics at once, one read, one move, one gap-fill pull', async () => {
+            const { rt, opts, channels, removed, latest, fetchTopicEpoch, maxInFlight, live, db } = await joinedAtZero([
+                0, 1,
+            ]);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+
+            // Someone else was removed: their hint is not this member's business.
+            live.broadcast(MEMBERSHIP_EVENT, membership(PEER, null));
+            expect(opts.onMembershipChanged).not.toHaveBeenCalled();
+
+            // The rotation, told on both old topics in the same commit.
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm2', document_id: DOC });
+            // Off both old topics at once, ink held, whoever may still be on doc:{id}.
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            scribble(rt, 'held');
+            expect(live.send).not.toHaveBeenCalled();
+
+            // Both hints are one follow-up: one read, then the channels open.
+            await afterJitterAndRead();
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            expect(maxInFlight()).toBe(1);
+            // Exactly one new pair of channels: the move is the whole rejoin.
+            expect(channels.map((c) => c.topic)).toEqual([
+                docTopic(DOC),
+                docDbTopic(DOC),
+                docTopic(DOC, 1),
+                docDbTopic(DOC, 1),
+            ]);
+
+            // The gap-fill pull waits for both new topics, so a mark committed
+            // while neither was joined is pulled (with the pull's overlap)
+            // rather than missed between the pull and the join.
+            const live1 = latest(docTopic(DOC, 1))!;
+            const db1 = latest(docDbTopic(DOC, 1))!;
+            live1.status('SUBSCRIBED');
+            expect(opts.onReconnect).not.toHaveBeenCalled();
+            db1.status('SUBSCRIBED');
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            expect(opts.onResync).not.toHaveBeenCalled();
+            db1.broadcast('INSERT', dbChange(row({ seq: 42 })));
+            expect(opts.onDbChange).toHaveBeenCalledWith(expect.objectContaining({ seq: 42 }));
+
+            // Live ink goes on generation 1 only.
+            syncPresence(live1, 2);
+            scribble(rt, 'after');
+            expect(inkSent(live1).map((m) => m.strokeId)).toEqual(['after']);
+            expect(live.send).not.toHaveBeenCalled();
+
+            // Settled: no further read, rejoin or pull is waiting.
+            await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS * 2);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            expect(channels).toHaveLength(4);
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            expect(opts.onMembershipChanged).not.toHaveBeenCalled();
+            rt.stop();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('a removed member stops cleanly: re-checks on its hint, is denied the generation, and leaves both topics for good', async () => {
+            const { rt, opts, channels, removed, fetchTopicEpoch, live, db } = await joinedAtZero([0, null]);
+
+            // The hint for this user, then the rotation in the same commit.
+            live.broadcast(MEMBERSHIP_EVENT, membership(SELF, null));
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            live.broadcast(TOPIC_ROTATED_EVENT, { id: 'm2', document_id: DOC });
+            await afterJitterAndRead();
+
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            expect(removed).toHaveLength(2);
+            expect(channels).toHaveLength(2);
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(2);
+
+            // Whatever still arrives on the dead channels, nothing goes out.
+            syncPresence(live, 2);
+            scribble(rt, 'after');
+            expect(live.send).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS * 4);
+            expect(channels).toHaveLength(2);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            expect(opts.onResync).not.toHaveBeenCalled();
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('an editor made viewer re-checks its role on its hint and follows the rotation (the new join is a viewer’s)', async () => {
+            const { opts, removed, latest, live, db } = await joinedAtZero([0, 1]);
+
+            live.broadcast(MEMBERSHIP_EVENT, membership(SELF, 'viewer'));
+            expect(opts.onMembershipChanged).toHaveBeenCalledTimes(1);
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+
+            // Off the old doc:{id} at once, where its channel kept the
+            // editor's send permission Realtime cached at join, and onto
+            // generation 1, which Realtime authorizes afresh: receive and
+            // presence only.
+            expect(removed).toEqual(expect.arrayContaining([live, db]));
+            await afterJitterAndRead();
+            const live1 = latest(docTopic(DOC, 1))!;
+            const db1 = latest(docDbTopic(DOC, 1))!;
+            live1.status('SUBSCRIBED');
+            db1.status('SUBSCRIBED');
+            expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+            // It announces itself there, inside the presence rate limit's gap.
+            await vi.advanceTimersByTimeAsync(PRESENCE_TRACK_MIN_MS);
+            expect(live1.track).toHaveBeenCalledTimes(1);
+        });
+
+        it('rotations back to back (an archive, then the session end) are followed to the newest generation, one read at a time', async () => {
+            const { opts, channels, latest, fetchTopicEpoch, maxInFlight, db } = await joinedAtZero([0, 1, 2]);
+
+            db.broadcast(TOPIC_ROTATED_EVENT, { id: 'm1', document_id: DOC });
+            await afterJitterAndRead();
+            const live1 = latest(docTopic(DOC, 1))!;
+            const db1 = latest(docDbTopic(DOC, 1))!;
+            live1.status('SUBSCRIBED');
+            db1.status('SUBSCRIBED');
+
+            // The second rotation is told on generation 1.
+            db1.broadcast(TOPIC_ROTATED_EVENT, { id: 'm3', document_id: DOC });
+            live1.broadcast(TOPIC_ROTATED_EVENT, { id: 'm4', document_id: DOC });
+            await afterJitterAndRead();
+            const live2 = latest(docTopic(DOC, 2))!;
+            const db2 = latest(docDbTopic(DOC, 2))!;
+            live2.status('SUBSCRIBED');
+            db2.status('SUBSCRIBED');
+
+            expect(maxInFlight()).toBe(1);
+            // 1 on start, then 1 per rotation (both hints of each are one follow-up).
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(channels.map((c) => c.topic)).toEqual([
+                docTopic(DOC),
+                docDbTopic(DOC),
+                docTopic(DOC, 1),
+                docDbTopic(DOC, 1),
+                docTopic(DOC, 2),
+                docDbTopic(DOC, 2),
+            ]);
+            // One gap-fill pull per move.
+            expect(opts.onReconnect).toHaveBeenCalledTimes(2);
+        });
     });
 });
