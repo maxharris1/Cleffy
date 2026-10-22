@@ -64,21 +64,28 @@ functions. `main`'s 26 files are an unchanged prefix of `dev`'s
 only additions), and every function on `main` still exists on `dev`. So:
 
 - the reset in step 8 replays `main`'s 26 migrations;
-- step 11 pushes the other 70, in three batches: 4, then 60, then 6;
+- step 11 pushes the other 70, in three batches: 4, then 60, then 6 (34 in
+  the third at `d387b69f`, below);
 - step 12 deploys all 23 functions.
 
-Count again on the go-live commit. P1 to P5 add migrations. At their branch
-heads on 2026-10-22, they add 15: P1 adds 9 (`275b188b`), P3 adds 3 (`1c9e8512`),
-P4 adds 1 (`a9e98c92`) and P5 adds 2 (`4ffd856d`). That makes **111**, and step 11's
-third batch **21**. Two of them schedule a cron job, and both land in the third
-batch:
+Count again on the go-live commit. P1 to P5 are merged into `dev`
+(`d387b69f`, 2026-10-22), and they add 28 migrations:
+
+- P1 adds 11, `20261022100000` to `20261022101000`;
+- P3 adds 9, `20261022110000` to `20261022110800`;
+- P4 adds 4, `20261022120000` to `20261022120300`;
+- P5 adds 4: `20261022130000`, `20261022130100`, `20261022130300` and
+  `20261022130400`. There is no `20261022130200`: P5 dropped it before the
+  merge. Never apply or repair a version of that name.
+
+That makes **124** at `d387b69f`, and step 11's third batch **34**. Two of them
+schedule a cron job, and both land in the third batch:
 
 - P5's `retention-content-strikes`, daily at **04:07 UTC**. That makes **six**
   `retention-*` jobs;
 - P3's `support-inbound-retry`, every five minutes.
 
-That is **12** cron jobs in all, against 10 at 47e9b38f (confirm after P1 to
-P5).
+That is **12** cron jobs in all at `d387b69f`, against 10 at 47e9b38f.
 
 **The deploy is manual and gated.** The Supabase GitHub integration's
 **Deploy to production** stays **off** from step 0 until the smoke tests pass
@@ -105,10 +112,11 @@ this runbook loads it back. Max confirms that in writing, right before the
 wipe (step 8). After the wipe, a failure is fixed forward, or the run starts
 again from step 8 (_Abort and recovery_).
 
-Steps 6 to 20 are one sitting. P1 to P5 were still open when this was written.
-Their branch heads are named above. Every name not yet settled on `dev` is
-marked "(confirm after P<N>)". Check each one against what merged, and replace
-it, before you start.
+Steps 6 to 20 are one sitting. P1 to P5 were still open when this was first
+written. Every name that was not yet settled on `dev` has since been checked
+against `dev` at `d387b69f`, with all five merged. If `GOLIVE_SHA` is a later
+commit, check the migrations, functions, secrets and cron jobs named here
+against it again (step 1) before you start.
 
 **If anything fails, stop.** Do not improvise around a failed check. _Abort
 and recovery_, at the end of this section, says what to do at each point.
@@ -140,7 +148,7 @@ It is turned back on in step 19, after the smoke tests pass.
 
 - Merge P1 to P5 into `dev`, then this PR (P6) last. CI must be green on the
   `dev` head that #54 will carry: `checks`, `supabase-local`,
-  `supabase-drift`, `omr-service` and Vercel.
+  `supabase-drift`, `omr-service`, `edge-functions-deno` (P3) and Vercel.
 - Regenerate `scripts/apply-migrations.sql` with `npm run migrations:mirror`
   after each merge. Never hand-merge it.
 - **Pin the go-live commit.** Record the `dev` head SHA that #54 carries, as
@@ -158,9 +166,9 @@ It is turned back on in step 19, after the smoke tests pass.
     - the five `retention-*` jobs.
 
     The commented-out `retention-district` example is not one of them. P3 adds
-    `support-inbound-retry` and P5 adds `retention-content-strikes`, which makes 12.
-    Any other new job changes step 11's batches and step 13's expected list
-    (confirm after P1 to P5).
+    `support-inbound-retry` and P5 adds `retention-content-strikes`, which makes 12
+    at `d387b69f`. Any other new job changes step 11's batches and step 13's
+    expected list.
 
 - Update #54's body. The draft is in this PR's report. The current body still
   says 48 migrations and 15 functions.
@@ -448,21 +456,30 @@ record, these are its settings:
 
 None of these is set for this launch (step 9).
 
-**Preflight: `postgres` may create triggers on `storage.objects` (P1).** P1's
+**Preflight: `postgres` may create triggers on, and lock rows of,
+`storage.objects` (P1).** P1's
 `20261022100800_storage_quota_and_thumbnail_lifecycle.sql` creates two
 triggers on `storage.objects` (`storage_objects_enforce_quota` and
-`thumbnails_record_superseded`), and it lands in step 11's third batch. On
-hosted Supabase, `storage.objects` belongs to `supabase_storage_admin`, so
-check the privilege now, in production's SQL editor:
+`thumbnails_record_superseded`), and `20261022100900` and `20261022101000`
+add three more (`thumbnails_enforce_folder_cap`,
+`storage_objects_charge_insert` and `thumbnails_keep_published_cover`). P1's
+`20261022101000_storage_quota_lock_and_cover_reuse.sql` also locks
+`storage.objects` rows with `SELECT … FOR UPDATE` inside the security-definer
+quota function, whose owner needs `UPDATE` as well as read access. Both land in
+step 11's third batch. On hosted Supabase, `storage.objects` belongs to
+`supabase_storage_admin`, so check both privileges now, in production's SQL
+editor:
 
 ```sql
 select has_table_privilege('postgres', 'storage.objects', 'TRIGGER') as can_create_storage_triggers;
--- must be t (confirm after P1)
+-- must be t
+select has_table_privilege('postgres', 'storage.objects', 'UPDATE') as can_lock_storage_objects;
+-- must be t: 20261022101000 uses SELECT ... FOR UPDATE in the quota function
 ```
 
-If it is `f`, **stop**: the sitting does not start. Resolve the hosted
-privilege first (with Supabase support if need be), and run the check again.
-Step 8 checks it once more before the wipe, and step 11 before batch 1.
+If either is `f`, **stop**: the sitting does not start. Resolve the hosted
+privilege first (with Supabase support if need be), and run both checks again.
+Step 8 runs them once more before the wipe, and step 11 before batch 1.
 
 **Stripe list filters (go-live checklist gate).** The sitting relies on five
 Stripe list filters. Prove each one now, against the live account, with the
@@ -997,9 +1014,10 @@ once more: `writes` must be unchanged. Then read Stripe again, fail-closed:
 ```
 
 It must print its `OK` line. Each subscription it prints must already have a
-row in the reconciliation table. Then run step 4's `storage.objects`
-privilege check once more: it must still be `t`. If it is not, stop here and
-unfreeze (_Abort and recovery_). Nothing is lost yet.
+row in the reconciliation table. Then run step 4's two `storage.objects`
+privilege checks once more (`TRIGGER` and `UPDATE`): both must still be `t`.
+If either is not, stop here and unfreeze (_Abort and recovery_). Nothing is
+lost yet.
 
 **Then Max confirms in writing, right here.** With step 5's snapshot, the
 reconciliation table and step 7.3's counts at hand, Max confirms two things
@@ -1067,7 +1085,7 @@ then reset the database to `main`'s 26 migrations from a staged copy.
     delete from vault.secrets
     where name in ('imslp_sync_url', 'imslp_sync_secret', 'billing_outbox_url', 'billing_outbox_secret',
                    'content_notice_url', 'content_notice_secret', 'district_notice_url', 'district_notice_secret',
-                   'support_inbound_url', 'support_inbound_secret',   -- P3 (confirm after P3)
+                   'support_inbound_url', 'support_inbound_secret',   -- P3
                    'omr_service_url', 'omr_service_secret')
     returning name;
     ```
@@ -1105,7 +1123,7 @@ Set, check and unset these from the worktree, with
 | `BILLING_OUTBOX_SECRET`                                         | **required**, equal to Vault `billing_outbox_secret`                           | `billing-mail-outbox`                                       |
 | `CONTENT_NOTICE_SECRET`                                         | **required**, equal to Vault `content_notice_secret`                           | `content-notices`                                           |
 | `DISTRICT_NOTICE_SECRET`                                        | when district retention starts                                                 | `district-retention-notices`                                |
-| `SUPPORT_RETRY_SECRET` (P3; confirm after P3)                   | **required**, equal to Vault `support_inbound_secret`                          | `resend-inbound`'s retry tick                               |
+| `SUPPORT_RETRY_SECRET` (P3)                                     | **required**, equal to Vault `support_inbound_secret`                          | `resend-inbound`'s retry tick                               |
 | `LOGIN_THROTTLE_SECRET`                                         | optional, recommended (§9)                                                     | student sign-in limiter                                     |
 | `GUEST_EMAIL_SECRET`, `GUEST_EMAIL_FROM`                        | optional                                                                       | guest email codes                                           |
 | `BILLING_EMAIL_FROM`, `BILLING_CANCEL_SECRET`                   | optional                                                                       | billing mail, `/cancel` limiter                             |
@@ -1146,7 +1164,8 @@ supabase secrets list --project-ref jibgwgosihadbjgxdsfe
 provided by the platform.
 
 (Re-audit §4 item 8 has the authoritative required/optional split. This table
-is built from every `Deno.env.get` in `supabase/functions` at 47e9b38f.)
+is built from every `Deno.env.get` in `supabase/functions` at 47e9b38f, and
+checked again at `d387b69f`: no function reads a name it leaves out.)
 
 ### 10. Auth settings — everything except the hook
 
@@ -1191,18 +1210,23 @@ pause each destructive or outbound job **as soon as the batch that schedules
 it commits**. Before every batch, run the `test` line from step 3, then
 `--dry-run`. The dry run must list exactly the files named.
 
-**Before batch 1**, run step 4's preflight once more:
-`select has_table_privilege('postgres', 'storage.objects', 'TRIGGER');` must
-return `t`. If it is `f`, stop before applying any migration, and resolve the
-hosted privilege first. P1's storage triggers in batch 3 need it (confirm
-after P1).
+**Before batch 1**, run step 4's preflight once more. Both must return `t`:
+
+```sql
+select has_table_privilege('postgres', 'storage.objects', 'TRIGGER');
+select has_table_privilege('postgres', 'storage.objects', 'UPDATE');
+```
+
+If either is `f`, stop before applying any migration, and resolve the hosted
+privilege first. P1's storage triggers (`20261022100800`) and its row lock in
+the quota function (`20261022101000`), both in batch 3, need them.
 
 Each scheduling migration first unschedules its job by name, then schedules it
 again. A job re-created that way comes back **active**, so a pause only holds
 if no later migration schedules the same job again. None does, at 47e9b38f
-or at the P1 to P5 heads named at the top of this section (step 1's
-`git grep`). On the local stack (pg_cron 1.6.4), a plain
-`cron.schedule` over a paused job's name kept it paused.
+or at `d387b69f` with P1 to P5 merged (step 1's `git grep`). On the local
+stack (pg_cron 1.6.4), a plain `cron.schedule` over a paused job's name kept
+it paused.
 
 1. **Batch 1: 4 migrations**, up to `20260902120000_imslp_category_index`,
    which schedules `imslp-sync`.
@@ -1248,8 +1272,10 @@ or at the P1 to P5 heads named at the top of this section (step 1's
     are scheduled in this batch and stay active. The first two skip without
     their Vault pair, and the third only recomputes seat state, which is empty.
 
-3. **Batch 3: the rest.** That is 6 at 47e9b38f, plus P1 to P5's 15: 21 in
-   all, at the heads named at the top of this section. It runs from the
+3. **Batch 3: the rest.** That is 6 at 47e9b38f, plus P1 to P5's 28: 34 in
+   all at `d387b69f`. It includes P3's `20261022110700` and `20261022110800`
+   and P5's `20261022130000` to `20261022130400`, which must be in before the
+   new `student-provision` is deployed (below, and step 12). It runs from the
    worktree itself:
 
     ```bash
@@ -1266,45 +1292,130 @@ or at the P1 to P5 heads named at the top of this section (step 1's
     ```sql
     select jobname, cron.alter_job(jobid, active := false) from cron.job
     where jobname = 'retention-content-strikes';
-    -- expect 1 row (confirm after P5)
+    -- expect 1 row
     ```
 
     P3's `support-inbound-retry` is also scheduled in this batch, and it
     stays active. Like `content-notice-retry`, it skips without its Vault
-    pair (`support_inbound_url` / `support_inbound_secret`, step 14). If
-    P1 to P5 schedule any other job, pause it the same way if it deletes data
-    or calls out (confirm after P1 to P5).
+    pair (`support_inbound_url` / `support_inbound_secret`, step 14). P1 to
+    P5 schedule no other job at `d387b69f`. If `GOLIVE_SHA` schedules one,
+    pause it the same way if it deletes data or calls out.
 
-    **Then confirm that P3's three migrations are recorded remotely, before
-    step 12 deploys any function.** P3's Edge Functions, including
+    `retention-district` is not scheduled by any migration, and stays
+    unscheduled: `retention_district_run()` does not run until Max has
+    reviewed its dry-run counts (_Before scheduling `retention-district`_).
+
+    **Then confirm that P3's, P4's and P5's migrations are recorded remotely,
+    before step 12 deploys any function.** P3's Edge Functions, including
     `resend-inbound`, `student-provision` and `delete-account`, need the
-    tables and functions these create. In production's SQL editor:
+    tables and functions P3's migrations create. The new `student-provision`
+    also needs P5's district barrier (`20261022130300`), and the new frontend
+    (step 16) needs P4's `20261022120200` and `20261022120300`. In
+    production's SQL editor:
 
     ```sql
     select version, name from supabase_migrations.schema_migrations
-    where version in ('20261022110000', '20261022110100', '20261022110200')
+    where version in ('20261022110000', '20261022110100', '20261022110200', '20261022110300',
+                      '20261022110400', '20261022110500', '20261022110600', '20261022110700',
+                      '20261022110800',                                                   -- P3
+                      '20261022120000', '20261022120100', '20261022120200', '20261022120300', -- P4
+                      '20261022130000', '20261022130100', '20261022130300', '20261022130400') -- P5
     order by 1;
-    -- exactly 3 rows (confirm after P3):
+    -- exactly 17 rows:
     --   20261022110000  student_claim_reservation
     --   20261022110100  account_deletion_pending
     --   20261022110200  support_inbound_lease
+    --   20261022110300  support_inbound_retry_window
+    --   20261022110400  account_deletion_attempts
+    --   20261022110500  student_code_reset_holder
+    --   20261022110600  account_deletion_barrier
+    --   20261022110700  student_code_reset_worker
+    --   20261022110800  student_code_reset_quarantine
+    --   20261022120000  realtime_revocation_rotation
+    --   20261022120100  realtime_revocation_races
+    --   20261022120200  realtime_archive_recovery
+    --   20261022120300  realtime_rotation_queue_service_role_grant
+    --   20261022130000  district_retention_reattribution
+    --   20261022130100  content_strikes_survive_deletion
+    --   20261022130300  district_retention_late_students
+    --   20261022130400  district_retention_moveout_locks
     ```
 
-    Fewer than three rows means batch 3 did not apply them. **Do not deploy
+    Fewer than 17 rows means batch 3 did not apply them all. **Do not deploy
     any function** (step 12). Fix forward as in _Abort and recovery_, and run
-    the check again.
+    the check again. There is no `20261022130200` (top of this section).
+
+    **P3's code reset: `20261022110700` / `20261022110800` and the
+    `student-provision` deploy go back to back, inside the freeze** (decision
+    64). `20261022110700_student_code_reset_worker` **drops** the old
+    three-argument RPC `public.complete_student_code_reset(uuid, uuid, text)`
+    and replaces it with the five-argument, worker-checked version.
+    `20261022110800_student_code_reset_quarantine` adds
+    `public.end_student_sessions_fenced(uuid, uuid, uuid, bigint)`, which the
+    new `student-provision` calls. A `student-provision` build from before
+    PR #70's fix round 2 calls the dropped RPC, so with one deployed, between
+    this batch and step 12 **every code-method student reset fails** (the
+    teacher sees "The reset did not finish…", and the student's card is held
+    for up to 10 minutes). The build on production at the sitting is
+    `main`'s, from before P3, which was never built for P3's schema: treat
+    its resets as failing too. A new `student-provision` deployed **before**
+    the migrations fails resets as well: its RPCs do not exist yet. Production holds no students after the wipe,
+    and the freeze (step 6) keeps every teacher out, so nothing is in flight.
+    Still, keep the interval between this batch and deploying
+    `student-provision` minimal. Keep the freeze in place, finish the
+    mandatory migration check above and the retention pause, then deploy
+    `student-provision` **first** in step 12, before the remaining functions.
+
+    **P5's district barrier comes first too** (decisions 67 to 69). Every P5
+    migration (`20261022130000`, `130100`, `130300` and `130400`) is in this
+    batch, inside the freeze, before step 12 deploys `student-provision`
+    (decision 68(4)). From `20261022130300` on, a district whose purge has
+    begun (soft deleted) takes no new student, and `student-provision`
+    answers `409 district_deletion_pending`. Two refusals during a district
+    run are expected, and are not faults (decision 69):
+    - a raw admin `UPDATE` of a student's `district_studio_id` can fail at
+      once with SQLSTATE `55P03` and the message `district_busy` while a run
+      holds that district (`20261022130400`). Make roster corrections through
+      `public.admin_set_student_district()`, which waits its turn, or retry
+      the statement in a new transaction;
+    - `admin_set_student_district()` can refuse a correction that raced
+      another one with SQLSTATE `40001`. Retry it.
 
 ### 12. Functions by hand, and the buckets
 
-From the worktree, after batch 3 and its P3 check (step 11.3):
+From the worktree, after batch 3 and its migration check (step 11.3), with
+the freeze still in place. `student-provision` goes **first**, at once, so
+that code resets work again (step 11.3):
 
 ```bash
-supabase functions deploy --project-ref jibgwgosihadbjgxdsfe    # all 23; add --use-api if Docker is not running
+supabase functions deploy student-provision --project-ref jibgwgosihadbjgxdsfe   # first; add --use-api if Docker is not running
+supabase functions deploy --project-ref jibgwgosihadbjgxdsfe    # then all 23; add --use-api if Docker is not running
 ```
+
+If the `student-provision` deploy fails, do not end the freeze: retry the
+deploy. Rolling the function back to an old build does not help: a P3 build
+from before fix round 2 calls an RPC that is gone, and `main`'s build
+predates P3's schema. Deploy `student-claim`, `stripe-checkout`,
+`imslp-download` and `score-analyze`, with their deletion checks, from the
+same commit in the same window: the second command does. Step 18's roster
+smoke test then resets a code student once (expect a new card, and no "did
+not finish" message).
 
 `verify_jwt` comes from each function's block in `supabase/config.toml`. Do not
 pass `--no-verify-jwt`: it would open all 23. Do not pass `--prune` either.
 Every function on `main` still exists on `dev`.
+
+**`supabase/functions/deno.json`** (P3) is the functions' Deno config:
+`{ "nodeModulesDir": "none", "lock": false }`. `nodeModulesDir: "none"` makes
+`npm:` specifiers resolve from Deno's own cache, as the edge runtime does, and
+`lock: false` keeps a `deno.lock` from appearing next to the functions. Leave
+it in place, and do not commit a `deno.lock`. Deno finds its config from the
+working directory, not from the entry file, so CI's `edge-functions-deno` job
+passes it explicitly
+(`deno check --config supabase/functions/deno.json supabase/functions/*/index.ts`).
+Its green run on `GOLIVE_SHA` (step 1) is the type check. After the deploy,
+step 13.5 must show every function `ACTIVE`, and step 18's calls show that
+they boot.
 
 **Buckets.** The wipe emptied the buckets but kept them. Check them against
 `config.toml`:
@@ -1331,7 +1442,7 @@ stated.
    narrowing lives in data, not in a hand edit.
 
     ```sql
-    -- P1's statement, from 20261022100200_deployment_config.sql (confirm after P1)
+    -- P1's statement, from 20261022100200_deployment_config.sql
     insert into public.deployment_config (id, entitling_billing_modes, updated_by)
     values (true, array['live'], 'Max')
     on conflict (id) do update
@@ -1368,16 +1479,17 @@ stated.
         ('imslp_works_building'), ('managed_students'), ('pdf_export_claims'), ('seat_read_only_since'),
         ('share_link_redemptions'), ('stripe_events'), ('studio_seat_override_log'),
         ('studio_seat_overrides'), ('studio_seat_tenures'), ('support_messages'),
-        ('deployment_config'), ('studio_supersede_log'),         -- P1 (confirm after P1)
-        ('student_claim_reservations'), ('account_deletions'),   -- P3 (confirm after P3)
-        ('document_realtime_rotation_queue'),                    -- P4 (confirm after P4)
-        ('district_retention_restores')                          -- P5 (confirm after P5)
+        ('deployment_config'), ('studio_supersede_log'),         -- P1
+        ('student_claim_reservations'), ('account_deletions'),   -- P3
+        ('account_deletion_attempts'), ('student_provision_intents'), -- P3
+        ('document_realtime_rotation_queue'),                    -- P4
+        ('district_retention_restores')                          -- P5
     ),
     client_read (t) as (values
         ('documents'), ('annotations'), ('document_members'), ('share_links'), ('subscriptions'),
         ('billing_customers'), ('studios'), ('studio_members'), ('assignments'), ('practice_notes'),
         ('usage_counters'), ('teacher_attestations'),
-        ('thumbnail_storage_cleanup')                            -- P1 (confirm after P1)
+        ('thumbnail_storage_cleanup')                            -- P1
     )
     select relname as object, 'RLS is off' as problem from tables where not relrowsecurity
     union all
@@ -1396,9 +1508,12 @@ stated.
 
     `server_only` is every public table that a migration explicitly revokes
     from `anon` / `authenticated`. The marked lines are the tables P1 to P5
-    create at their heads. On a local stack with all 111 migrations, the
-    check returned 0 rows. An "undefined table" error means a listed table is
-    missing, which is itself a failure.
+    create, all nine of them at `d387b69f`. On a local stack with the 111
+    migrations of P1 to P5's earlier branch heads, the check returned 0 rows.
+    `account_deletion_attempts` and `student_provision_intents` (P3) were
+    added to the list after that run, from their migrations' revokes. An
+    "undefined table" error means a listed table is missing, which is itself
+    a failure.
 
 4. **`cron.job`, with the pauses required.** Zero rows is a pass. Twelve jobs
    are expected: 10 from 47e9b38f, plus P3's and P5's. At this point,
@@ -1410,11 +1525,11 @@ stated.
     ```sql
     with expected (jobname, active) as (values
         ('billing-mail-outbox', true), ('content-notice-retry', true), ('district-seat-reconcile', true),
-        ('omr-sweep', true), ('support-inbound-retry', true),          -- P3 (confirm after P3)
+        ('omr-sweep', true), ('support-inbound-retry', true),          -- P3
         ('imslp-sync', false), ('retention-archived-students', false),
         ('retention-compact-tombstones', false), ('retention-rate-limits', false),
         ('retention-stale-guests', false), ('retention-support-messages', false),
-        ('retention-content-strikes', false)                            -- P5 (confirm after P5)
+        ('retention-content-strikes', false)                            -- P5
     )
     select coalesce(e.jobname, j.jobname) as jobname,
            case when j.jobname is null then 'missing'
@@ -1471,7 +1586,7 @@ select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v
 select vault.create_secret('<same value as CONTENT_NOTICE_SECRET>', 'content_notice_secret');
 select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/district-retention-notices', 'district_notice_url');
 select vault.create_secret('<same value as DISTRICT_NOTICE_SECRET>', 'district_notice_secret');
--- P3's retry tick posts to resend-inbound (20261022110200_support_inbound_lease.sql; confirm after P3)
+-- P3's retry tick posts to resend-inbound (20261022110200_support_inbound_lease.sql)
 select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/resend-inbound', 'support_inbound_url');
 select vault.create_secret('<same value as SUPPORT_RETRY_SECRET>', 'support_inbound_secret');
 ```
@@ -1480,7 +1595,10 @@ select vault.create_secret('<same value as SUPPORT_RETRY_SECRET>', 'support_inbo
 account with an HMAC whose key is the Vault secret `content_strike_pepper`
 (`20261022130100_content_strikes_survive_deletion.sql`). Without it, deleting
 an account that has an active strike fails, and so does counting strikes once
-keyed ones exist. Every project gets its **own** random value:
+keyed ones exist. **Production must have its own real `content_strike_pepper`
+before launch**: nothing opens (step 20) until it exists and step 18's
+struck-account deletion has passed. The local and CI value is never copied
+to a hosted project. Every project gets its **own** random value:
 
 - production: Max creates it here;
 - the `dev` branch project: Max creates a different one there, once P5 is on
@@ -1541,6 +1659,18 @@ Check it after step 16: as Max, `/admin/reports` opens (it calls
 ### 16. The new frontend, still behind the freeze: merge #54
 
 - Step 4's Vercel env audit is done, and every mismatch is fixed.
+- **P4's migrations `20261022120200_realtime_archive_recovery` and
+  `20261022120300_realtime_rotation_queue_service_role_grant` go with this
+  frontend deploy.** They were applied in step 11's batch 3, inside the
+  freeze, and step 11.3's check showed both recorded remotely. Run that check
+  again now if anything was re-applied since. The new bundle reads a score's
+  realtime generation from `realtime_topic_access()`, which `20261022120200`
+  creates. Against a backend without it, every read fails: the app falls
+  back to the first generation, so a score whose topics have moved gets no
+  realtime, and after a rotation the owner's live ink stays held
+  (`src/sync/realtimeChannel.ts`, `applyEpochRead`). The old bundle reads
+  `realtime_topic_epoch()`, which is unchanged, so applying them first is
+  safe. Never deploy this frontend without them.
 - **Max merges #54** (`dev` → `main`, merge commit). Deploy to production is
   off (step 0), so the merge changes nothing on Supabase. Vercel builds
   `main` and serves it on cleffy.io, which is still refused to everyone but
@@ -1735,8 +1865,11 @@ proves nothing, so stop and run it again.
     - The confirmation email arrives with the model withdrawal form.
     - The Account page shows Teacher.
 - **Roster and invite mail.** Add a code student with the attestation, sign in
-  as them, then archive them: the open score signs them out. Then use Delete
-  student. Then add a student **by email**, to an outside mailbox: the invite
+  as them, then reset their code from the roster once: a new card appears,
+  with no "The reset did not finish…" message (P3, step 12's
+  `student-provision`). Sign in with the new card, then archive them: the
+  open score signs them out. Then use Delete student. Then add a student
+  **by email**, to an outside mailbox: the invite
   arrives from `noreply@cleffy.io` and lands on `/student/welcome`, where the
   student sets a password and signs in. Delete that student too.
 - **Renewal webhook replay.** This checks that a resent event is never
@@ -1822,7 +1955,8 @@ already applied (`supabase migration list --linked`), so the next push to
 **Open when all of these hold:**
 
 - every check in steps 13 and 14, and every smoke test in step 18, passed.
-  That includes the struck-account deletion, which proves the pepper;
+  That includes the Vault secret `content_strike_pepper` on production (step
+  14), and the struck-account deletion, which proves it;
 - the integration is back on (step 19);
 - the live webhook is enabled, and the freeze window is replayed;
 - every row of the reconciliation table has a disposition, and **none says
@@ -1846,6 +1980,9 @@ Then:
     - Stripe → Webhooks, for failed deliveries;
     - Resend, for bounces and the daily count against the plan;
     - the `cron.job_run_details` failures;
+    - the three queries in _Recovery runbooks_ below (orphaned provisioning
+      accounts, half-deleted accounts, `failed` inbound mail). Each should
+      return no rows, and any row is resolved as that section says;
     - Realtime usage (§10);
     - `select count(*) from auth.users` against the sign-ups you expect.
 
@@ -1870,7 +2007,7 @@ select
            < now() - interval '1 day') as rate_limit_rows,
   (select count(*) from public.support_messages where received_at < now() - interval '24 months') as support_messages,
   (select count(*) from public.annotations where deleted_at < now() - interval '90 days') as tombstones,
-  -- P5, retention_purge_content_strikes() (confirm after P5)
+  -- P5, retention_purge_content_strikes()
   (select count(*) from public.content_strikes s
     where s.user_id is null and s.created_at < now() - interval '12 months'
       and (s.subject_key is null
@@ -1880,10 +2017,10 @@ select
                             and n.created_at >= now() - interval '12 months'))) as content_strikes;
 ```
 
-These ran on a local stack with P1 to P5's 111 migrations, and returned 0 in
-every column. With two strikes of a deleted account backdated 13 months, in a
-rolled-back transaction, `content_strikes` counted 2 and
-`retention_purge_content_strikes()` purged 2.
+These ran on a local stack with the 111 migrations of P1 to P5's earlier
+branch heads, and returned 0 in every column. With two strikes of a deleted
+account backdated 13 months, in a rolled-back transaction, `content_strikes`
+counted 2 and `retention_purge_content_strikes()` purged 2.
 
 Then turn on only the jobs whose count was read and expected. Name each one,
 and never use a pattern, so that a job added later cannot be switched on
@@ -1964,29 +2101,170 @@ The step 7 backup is for reference and forensics only. Nothing here loads it.
 
 ### Before scheduling `retention-district`
 
-It stays unscheduled at launch. Schedule it only when all of these hold:
+It stays unscheduled at launch: no migration schedules it, and
+`retention_district_run()` does not run until Max has reviewed the dry-run
+counts (item 3). Schedule it only when all of these hold:
 
-1. **P5 is merged**: migration `20261022130000_district_retention_reattribution`.
-   With it, `admin_set_student_district()` takes a re-attributed student off
-   every other district's purge list. The hard delete also re-checks that the
-   roster row still names the district being purged; a student that fails the
-   check is skipped and logged as `skipped_reattributed`. P5's other migration,
-   `20261022130100_content_strikes_survive_deletion`, keeps copyright strikes
-   after the account is deleted.
+1. **P5's four migrations are applied** (step 11.3; there is no
+   `20261022130200`):
+    - `20261022130000_district_retention_reattribution`. With it,
+      `admin_set_student_district()` takes a re-attributed student off every
+      other district's purge list. The hard delete also re-checks that the
+      roster row still names the district being purged; a student that fails
+      the check is skipped and logged as `skipped_reattributed`.
+    - `20261022130100_content_strikes_survive_deletion` keeps copyright
+      strikes after the account is deleted.
+    - `20261022130300_district_retention_late_students` (decision 67). Once a
+      district is soft deleted, nothing provisions into it or attributes a
+      student to it (`district_provisionable()`, and `student-provision`'s
+      `409 district_deletion_pending`). Every run lists again, archives and
+      signs out a student attributed to it late (logged as
+      `late_students_listed`), and the hard delete lists again under the
+      same lock right before it deletes.
+    - `20261022130400_district_retention_moveout_locks`: the run and every
+      correction lock in one order. While a run holds a district, a raw admin
+      `UPDATE` of a student's district fails at once with `55P03`
+      `district_busy`, and a correction that raced another is refused with
+      `40001`. Both are retried, and roster corrections go through
+      `admin_set_student_district()` (step 11.3, decision 69).
 2. `district-retention-notices` is deployed with `DISTRICT_NOTICE_SECRET`, and
    the Vault pair `district_notice_url` / `district_notice_secret` exists
    (step 14).
-3. **The dry-run counts are read and expected**:
+3. **Max has reviewed the dry-run counts**, and they are expected:
    `select public.retention_district_dry_run();` on production. On a fresh
    production it is empty until a district has a `contract_ends_at`.
 4. **The hourly notice-sender cron** from decision 11 is scheduled. Its job
-   name and schedule are not on P5's branch at 4ffd856d (confirm after P5). Without it, a notice deferred by the
+   name and schedule are not on `dev` at `d387b69f` either: no migration
+   schedules it yet. Without it, a notice deferred by the
    mail budget (`20261021120900`) waits for the next daily purge run, and
    nothing is purged before its notice is sent.
 
 Then schedule it:
 `select cron.schedule('retention-district', '57 3 * * *', $$select public.retention_district_run()$$);`
 After that, add `('retention-district', true)` to the expected list in step 13.4.
+
+Decisions 68 and 69 accept these, once it runs:
+
+- the barrier starts at the soft delete, not at the 14-day notice. During the
+  notice the district is still live and may renew;
+- a teacher's restore during the purge still wins (`20261021120700`);
+- a renewal that lifts the barrier takes effect at the next daily run;
+- a correction in flight can make that day's run pass the district over,
+  even a soft or hard delete that is due. The next run picks it up.
+
+Follow-ups, not launch steps: the hard delete detaching restored students
+(clearing `district_studio_id`, without deleting them), and lifting the
+barrier at once on a renewal.
+
+### Recovery runbooks: provisioning, deletion, inbound mail (P3)
+
+Step 20 watches these three. On a fresh production each query returns no
+rows. Run them in production's SQL editor, as `postgres`.
+
+**The `code_reset_worker` marker stays.** After a code student's reset,
+`app_metadata.code_reset_worker` (an opaque UUID) stays in the student's
+`app_metadata`, and so in their JWT. Under decision 64 it is left there: it is
+harmless, admin-only, and fenced by the reset's epoch and quarantine
+(`20261022110700`, `20261022110800`). Clearing stale markers is a follow-up,
+not a launch step. Do not clear it by hand.
+
+**Orphaned student provisioning accounts.** When a teacher adds a student,
+`student-provision` first records an intent (`public.student_provision_intents`),
+then creates the student's Auth account, then inserts the roster row, and the
+roster insert clears the intent. If a request dies between creating the Auth
+account and the roster insert, and its own undo also fails, an Auth account
+exists with no roster row. Account deletion cleans these up automatically only
+when the account is flagged as that teacher's student. It leaves two cases for
+a person: an account whose student flag never landed (an email invite whose
+`app_metadata` update failed), and a provisioning that was still running when
+the teacher's deletion swept. Expired intents also remain for teachers who
+were never deleted. Find them:
+
+```sql
+select i.roster_id, i.teacher_id, i.auth_email, i.created_at, i.expires_at,
+       f.student_user_id,
+       u.email, u.created_at as account_created_at, u.last_sign_in_at, u.email_confirmed_at,
+       u.raw_app_meta_data ->> 'user_type'  as user_type,
+       u.raw_app_meta_data ->> 'teacher_id' as flagged_teacher,
+       exists (select 1 from auth.users t where t.id = i.teacher_id) as teacher_exists,
+       exists (select 1 from public.managed_students m where m.student_user_id = f.student_user_id) as has_roster_row
+from public.student_provision_intents i
+left join lateral public.student_provision_intents_for (i.teacher_id) f on f.roster_id = i.roster_id
+left join auth.users u on u.id = f.student_user_id
+where i.expires_at < now()
+order by i.created_at;
+```
+
+Only rows with `expires_at` in the past are orphans. A live intent belongs to
+a request that may still be running. Resolve each row:
+
+1. **`student_user_id` is null** (no account was created, or none can be found
+   by address): nothing to delete. Run
+   `select public.finish_student_provision('<roster_id>');`.
+2. **`has_roster_row` is true** (the roster insert did land): not an orphan.
+   Run `select public.finish_student_provision('<roster_id>');`.
+3. **Flagged as this teacher's student** (`user_type = 'student'` and
+   `flagged_teacher = teacher_id`) with **no roster row**: the account belongs
+   to nobody.
+    1. Delete the Auth user (Dashboard → Authentication → Users → the user →
+       Delete, or the admin API `DELETE /auth/v1/admin/users/<student_user_id>`
+       with the service-role key).
+    2. If the deleted account owned any scores, delete their Storage objects
+       under `scores/<student_user_id>/` and `thumbnails/<student_user_id>/`.
+    3. Run `select public.finish_student_provision('<roster_id>');`.
+4. **Not flagged** (`user_type` null, or `flagged_teacher` differs): an email
+   invite whose student flag never landed. Do **not** delete it blindly; it is
+   a real address.
+    - If `last_sign_in_at` and `email_confirmed_at` are both null (the invite
+      was never accepted), delete the Auth user as in case 3, then finish the
+      intent.
+    - If the person has signed in, they now hold an ordinary (non-student)
+      account. Contact the address, or the teacher if `teacher_exists` is
+      true, before deleting anything. If they keep it, just finish the intent.
+5. **`teacher_exists` is false** (the teacher's account was deleted while this
+   provisioning was live or unflagged): handle it as in cases 1 to 4. The
+   intent outlives the teacher on purpose (it has no foreign key), so that
+   this case stays findable.
+
+Never delete a `student_provision_intents` row by hand while its account still
+exists. `finish_student_provision` comes last, after the account is resolved.
+Later, a scheduled sweep could take over cases 1 to 3 (decision 49(6)
+follow-up). Case 4 stays manual.
+
+**Half-deleted accounts** (a deletion's destructive cleanup started and never
+finished). Find them:
+
+```sql
+select d.user_id, d.started_at, d.destructive_started_at, d.updated_at, d.attempts, d.last_error
+from public.account_deletions d
+where d.destructive_started_at is not null
+  and not exists (select 1 from public.account_deletion_attempts a
+                  where a.user_id = d.user_id and a.ended_at is null and a.lease_until > now())
+order by d.destructive_started_at;
+```
+
+The account refuses new scores, students, uploads, joins and checkouts until a
+deletion completes. Check `last_error` (billing, storage, auth) and fix the
+cause. Then ask the person to retry Delete account (it needs their session and
+password). If they cannot be reached, escalate to Max for a service-role
+completion. Never clear the row by hand while data is half-deleted. Untouched
+markers (no `destructive_started_at`, no live attempt) restrict nothing and
+need no action.
+
+**Inbound support mail marked `failed`.** Find it:
+
+```sql
+select id, resend_email_id, from_address, subject, attempts, first_send_attempt_at, forward_error, completed_at
+from public.support_messages
+where status = 'failed'
+order by completed_at desc;
+```
+
+These were not forwarded, or may not have been, and are not retried
+automatically: the 23-hour retry window has passed, or the attempts ran out.
+Read the stored body in the table, and forward it by hand or reply directly.
+Do not requeue a row whose `first_send_attempt_at` is older than 24 hours,
+unless a duplicate in the team inbox is acceptable.
 
 ### Stripe webhook events
 
@@ -2122,8 +2400,8 @@ reads `STRIPE_MODES` and returns which Stripe accounts this backend will serve.
 ## Release checklist — launch fixes (20261007\*)
 
 > **Superseded for the fresh-production path.** The 2026-10 go-live wipes
-> production, resets it to `main`'s 26 migrations and pushes the other 70 by
-> hand (_Go-live 2026-10: fresh production_, above). This checklist assumed pending migrations pushed onto production's
+> production, resets it to `main`'s 26 migrations and pushes the rest (98 at
+> `d387b69f`) by hand (_Go-live 2026-10: fresh production_, above). This checklist assumed pending migrations pushed onto production's
 > existing data. Its reference detail still holds, and the go-live links to
 > it: the per-migration order constraints, the QA-round smoke steps, and the
 > bundle/function race at the merge. Its data-preserving steps do not apply:
