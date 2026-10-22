@@ -81,7 +81,8 @@ export const SignedOutInkNotice = () => {
                     <p className="text-sm leading-relaxed text-stone-600">
                         Each export has only the unsaved marks on that score.
                     </p>
-                    <ul className="mt-3 flex min-h-48 flex-col gap-2">
+                    {/* Room under the rows for an open Export menu and its notice: the dialog scrolls, the menu does not add to it. */}
+                    <ul className="mt-3 flex min-h-80 flex-col gap-2">
                         {scores.map((score) => (
                             <SignedOutScoreRow key={`${score.userId}:${score.docId}`} {...score} />
                         ))}

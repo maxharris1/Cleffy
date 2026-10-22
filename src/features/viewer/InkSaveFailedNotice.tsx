@@ -4,6 +4,7 @@ import type { AnnotationStore } from '@/sync/annotationStore';
 import { subscribeInkRecovery } from '@/sync/inkRecovery';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
+import { CloseIcon } from '@/ui/icons';
 
 interface InkSaveFailedNoticeProps {
     /** The viewer's store; null until the viewport has made it. */
@@ -56,11 +57,11 @@ const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { 
         // is of the score as it is now, and says the erase was overtaken.
         return exportable
             ? {
-                  short: 'Some marks changed elsewhere before saving. Export keeps yours.',
+                  short: 'Some marks changed elsewhere first.',
                   long: 'Some of your unsaved marks were changed elsewhere before this device could save them, so the newer versions are shown. Export a copy to keep yours.',
               }
             : {
-                  short: 'Some changes were overtaken elsewhere before saving.',
+                  short: 'Some changes were overtaken elsewhere.',
                   long: 'Some of your unsaved changes were overtaken by newer ones made elsewhere before this device could save them, so the newer versions are shown. Export keeps a copy of the score as it is.',
               };
     }
@@ -166,8 +167,16 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
             ) : null}
             {state === 'conflicts' ? (
                 <>
-                    <Button size="sm" variant="ghost" className="shrink-0" onClick={() => store.hideConflictNotice()}>
-                        Dismiss
+                    {/* An ×, so three actions fit beside the copy on a phone. */}
+                    <Button
+                        size="sm"
+                        variant="ghost"
+                        className="shrink-0 px-2"
+                        aria-label="Dismiss"
+                        title="Dismiss: hides this, and Export still has your versions"
+                        onClick={() => store.hideConflictNotice()}
+                    >
+                        <CloseIcon size={16} className="shrink-0" />
                     </Button>
                     {/* Only where Export can be offered first. */}
                     {onExport ? (
