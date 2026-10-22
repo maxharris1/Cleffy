@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { AgeGate } from '@/features/auth/ageCheck';
 import { perfMark } from '@/lib/perf';
 import { safePresenceName } from '@/lib/presenceName';
-import { getSupabase } from '@/lib/supabase';
+import { getSupabase, type TypedSupabaseClient } from '@/lib/supabase';
 
 export interface SessionState {
     session: Session | null;
@@ -312,6 +312,44 @@ export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): P
     return { pending, refused, foreign: Math.min(foreign, pending) };
 };
 
+/**
+ * End the session on THIS device whatever the server says.
+ *
+ * `auth.signOut({ scope: 'local' })` POSTs /logout first, and when that cannot
+ * finish it may answer `{ error }` with the session still stored: offline with
+ * an expired access token, the refresh it attempts on the way fails and it
+ * returns before removing anything. It can also throw (the auth lock, a
+ * rejected initialisation). Ignoring either left the next page load signed in
+ * as the account the user had just signed out of — on a shared studio iPad,
+ * the next pupil. So on any failure the stored copies go regardless (each
+ * `*-auth-token` key and the iOS restore cookie, forgetStoredSessions), and a
+ * second local sign-out follows: with nothing stored it makes no request, but
+ * it does clear what the client holds in memory and emits SIGNED_OUT, so
+ * useSession, realtime's token and getSession() all read signed-out in this
+ * tab without a reload. The server-side refresh token is left to expire, as it
+ * would after an ended sign-in. Never throws.
+ */
+const signOutThisDevice = async (supabase: TypedSupabaseClient): Promise<void> => {
+    let failure: unknown;
+    try {
+        const { error } = await supabase.auth.signOut({ scope: 'local' });
+        failure = error;
+    } catch (err) {
+        failure = err ?? new Error('Sign-out threw');
+    }
+    if (!failure) {
+        return;
+    }
+    console.warn('Sign-out could not reach the server; forgetting this device’s session', failure);
+    const { forgetStoredSessions } = await import('@/features/auth/authStorage');
+    forgetStoredSessions();
+    try {
+        await supabase.auth.signOut({ scope: 'local' });
+    } catch {
+        // Storage is already empty, so the next load starts signed out.
+    }
+};
+
 export const signOut = async (): Promise<void> => {
     // Bump the library mutation epoch on BOTH sides of the auth round-trip.
     // The first bump outranks any response already in flight (including the
@@ -348,7 +386,7 @@ export const signOut = async (): Promise<void> => {
     // always passed `{ scope: 'local' }`, and what the privacy policy says
     // happens on sign-out ("removes from that device…", legalContent.ts
     // §device-storage) is now what the code does.
-    await getSupabase().auth.signOut({ scope: 'local' });
+    await signOutThisDevice(getSupabase());
     noteLibraryMutation();
     rememberSession(null);
     await clearAccountCachesFromDevice();
@@ -427,13 +465,7 @@ const signOutEndedSignIn = async (
     const supabase = getSupabase();
     const { data } = await supabase.auth.getSession();
     const { count, keepCloudAnnotations } = await settle(data.session?.user.id ?? null);
-    const { error } = await supabase.auth.signOut({ scope: 'local' });
-    if (error) {
-        // The logout request itself failed (supabase-js then keeps the
-        // session): the stored copy is what signs this browser in, so it goes.
-        const { forgetStoredSessions } = await import('@/features/auth/authStorage');
-        forgetStoredSessions();
-    }
+    await signOutThisDevice(supabase);
     noteLibraryMutation();
     rememberSession(null);
     await clearAccountCachesFromDevice({ keepCloudAnnotations });
