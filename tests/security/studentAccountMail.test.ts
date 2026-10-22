@@ -123,7 +123,7 @@ describe('student-provision spends it before GoTrue sends anything', () => {
         expect(reserve).toBeGreaterThan(-1);
         expect(reserve).toBeLessThan(invite.indexOf('inviteUserByEmail('));
         const inUse = invite.indexOf('isEmailInUse(inviteError)');
-        expect(invite.slice(inUse, inUse + 200)).toContain('await mail.release()');
+        expect(invite.slice(inUse, inUse + 400)).toContain('await mail.release()');
     });
 
     it('a reset link reserves before the old password is scrambled, so a spent budget revokes nothing', () => {

@@ -704,8 +704,14 @@ never be committed against the new code); expiry (a dead holder is taken
 over by a claim or a reset and its late commit and release are no-ops);
 archive blocks a claim's commit but keeps its reservation until the claim
 releases it, so a reset of the archived student waits for it; and no client
-role can call any of it or read the table. Proven against the local stack on
-2026-10-22: all 53 checks passed.
+role can call any of it or read the table. Since the P3 fix round it also
+proves `20261022110500_student_code_reset_holder.sql`: a reset carries a holder
+token, a second reset (no token, or a wrong one) cannot take a live reset over,
+the holder's own token resumes it, only the holder can complete or release it,
+no other path can rotate the code under it, and the paused reset / reset /
+claim interleaving can no longer scramble the student's chosen password; a
+dead reset is taken over only after its TTL. Proven against the local stack on
+2026-10-22: all 73 checks passed (53 before the fix round).
 
 `account_deletion_pending.sql` proves
 `20261022110100_account_deletion_pending.sql` (launchfix P3, SF-13): once
@@ -719,8 +725,24 @@ clears it on `abandoned` only when it is a lone first attempt's -- a retry that
 deletes nothing leaves an earlier part-way attempt's marker in place, and one
 tab abandoning cannot clear the marker a second tab is sweeping under;
 deleting the auth user cascades it away, and a retry for an account already
-gone writes nothing; and no client role can call it or read the table. Proven
-against the local stack on 2026-10-22: all 36 checks passed.
+gone writes nothing; and no client role can call it or read the table.
+
+Since the P3 fix round it proves the final shape, with
+`20261022110400_account_deletion_attempts.sql` (attempt-scoped
+`begin_account_deletion_attempt` / `mark_account_deletion_destructive` /
+`settle_account_deletion_attempt`, the single-counter functions gone): two
+abandoned attempts clear the marker; a crashed attempt stops restricting once
+its lease runs out; an attempt that crashed after cleanup began keeps the
+account restricted (the runbook case) until a retry completes; and
+`20261022110600_account_deletion_barrier.sql`: uploads and overwrites into an
+existing score (scores and thumbnails) are refused while removals are not;
+share-link redemption is refused for a deleting account and into a deleting
+owner's score; a checkout lease cannot be taken or staged, and one taken
+before the marker reads as in flight; a provisioning intent is refused for a
+deleting teacher, finds a crashed provisioning's account by address (never an
+older account), is cleared by the roster insert, and outlives its teacher.
+Proven against the local stack on 2026-10-22: all 89 checks passed (36 before
+the fix round).
 
 `support_inbound_lease.sql` proves `20261022110200_support_inbound_lease.sql`
 (launchfix P3, SF-2 / Codex B1): the first webhook delivery inserts its
@@ -733,12 +755,21 @@ pay for is `forward_deferred` (not an attempt) and `claim_due_support_messages`
 takes it only once due, under a fresh lease that a second run or a webhook
 redelivery cannot share; a redelivery before a row is due is told to wait and
 is not counted as an attempt, and once due it resumes the row. Failed attempts
-back off and, at the attempt cap, are completed with their error; a forward
-whose outcome was unknown is retried with its budget marked as spent (cleared
-once forwarded); store-only and refused rows complete; the state is
-constrained to the three values; the retry tick runs and is scheduled; and no
-client role can call any of it or read the table. Proven against the local
-stack on 2026-10-22: all 43 checks passed.
+back off and, at the attempt cap, are failed (for review) with their error; a
+forward whose outcome was unknown is retried with its kept reservation recorded
+(cleared once forwarded), and the claim no longer tells the retry to skip the
+budget; store-only and refused rows complete; the state is constrained to its
+values; the retry tick runs and is scheduled; and no client role can call any
+of it or read the table.
+
+Since the P3 fix round it also proves
+`20261022110300_support_inbound_retry_window.sql`: the window is 23 hours; the
+first send attempt is recorded and later ones keep it; only the lease holder
+may begin a send; past the window a claimed retry is told not to send and the
+row is `failed`, a later delivery is a duplicate and the retry path never takes
+it; a retry or a budget deferral whose next attempt would land past the window
+fails at once; and a forward never attempted has no window. Proven against the
+local stack on 2026-10-22: all 58 checks passed (43 before the fix round).
 
 ## In CI
 
