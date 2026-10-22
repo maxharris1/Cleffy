@@ -36,6 +36,7 @@ import { PdfProvider, type PdfSource, type StreamedPdfSource } from '@/features/
 import { warmPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
 import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
+import { InkSaveFailedNotice } from '@/features/viewer/InkSaveFailedNotice';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { features } from '@/lib/features';
@@ -215,6 +216,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [playAlongOpen, setPlayAlongOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
+    /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
+    const [exportSignal, setExportSignal] = useState(0);
     const [staleBytes, setStaleBytes] = useState(false);
     const [accessLoss, setAccessLoss] = useState<AccessLoss | null>(null);
     /** "Your access changed" banner after a live role change. */
@@ -966,7 +969,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                   the menu. The row lets it download the PDF when the cache has none.
                 */}
                 {confirmed ? (
-                    <ShareExportMenu docId={docId} doc={state.doc} role={state.role} title={state.doc.title} />
+                    <ShareExportMenu
+                        docId={docId}
+                        doc={state.doc}
+                        role={state.role}
+                        title={state.doc.title}
+                        openSignal={exportSignal}
+                    />
                 ) : null}
                 {confirmed && state.role === 'owner' ? (
                     // "Share" is sharing the score with people (links, who has
@@ -1008,6 +1017,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 ) : null}
                 <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
                 <SyncHeldNotice count={heldCount} reason={held?.reason} />
+                <InkSaveFailedNotice
+                    store={annotationStore}
+                    onExport={confirmed ? () => setExportSignal((n) => n + 1) : undefined}
+                />
                 {staleBytes ? (
                     <div
                         className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
@@ -1152,6 +1165,8 @@ export const SyncDot = ({ status }: { status: SyncStatus | 'waiting' }) => {
 const LocalViewer = ({ docId }: { docId: string }) => {
     const [, forceRender] = useState(0);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
+    /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
+    const [exportSignal, setExportSignal] = useState(0);
     const [reopenError, setReopenError] = useState<string | null>(null);
     const bytes = getLocalDoc(docId);
 
@@ -1225,12 +1240,15 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                     />
                 ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
-                <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly />
+                <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly openSignal={exportSignal} />
             </ViewerHeader>
-            <main className="min-h-0 flex-1">
-                <PdfProvider data={bytes}>
-                    <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />
-                </PdfProvider>
+            <main className="flex min-h-0 flex-1 flex-col">
+                <InkSaveFailedNotice store={annotationStore} onExport={() => setExportSignal((n) => n + 1)} />
+                <div className="min-h-0 flex-1">
+                    <PdfProvider data={bytes}>
+                        <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />
+                    </PdfProvider>
+                </div>
             </main>
         </div>
     );

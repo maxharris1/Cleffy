@@ -53,6 +53,12 @@ interface ShareExportMenuProps {
      * score's id; a local score has no owner to bill.
      */
     localOnly?: boolean;
+    /**
+     * Opens the menu each time it changes: the viewer's "couldn't be
+     * saved" banner offers Export as the way to keep marks this device could
+     * not store.
+     */
+    openSignal?: number;
 }
 
 /** A failure the teacher can act on, worded for them rather than for a log. */
@@ -81,7 +87,15 @@ const describeFailure = (stage: 'source' | 'export', label: string, err: unknown
  * people access (ShareDialog), and one word for both sent people to the wrong
  * one.
  */
-export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = false }: ShareExportMenuProps) => {
+export const ShareExportMenu = ({
+    docId,
+    bytes,
+    doc,
+    role,
+    title,
+    localOnly = false,
+    openSignal = 0,
+}: ShareExportMenuProps) => {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -97,6 +111,13 @@ export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = fa
     const menuRef = useRef<HTMLDivElement | null>(null);
     const focusedPageIndex = useViewerStore((s) => s.focusedPageIndex);
     const { session } = useSession();
+
+    // Adjusted during render, React's pattern for state that follows a prop.
+    const [seenSignal, setSeenSignal] = useState(openSignal);
+    if (openSignal !== seenSignal) {
+        setSeenSignal(openSignal);
+        setOpen(true);
+    }
 
     useEffect(() => {
         if (!open) {

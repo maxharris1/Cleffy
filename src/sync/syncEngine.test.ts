@@ -2863,3 +2863,44 @@ describe('SyncEngine after tombstone compaction', () => {
         expect(server.floorChecks).toBe(2); // the first pull ever had nothing to check
     });
 });
+
+describe('SyncEngine and an edit that could not be written to this device (SF-1)', () => {
+    it('holds the mark back, queued ops and all, until a retry writes the rest', async () => {
+        const statuses: string[] = [];
+        const held = new SyncEngine({
+            db,
+            store,
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+            onStatus: (s) => statuses.push(s),
+        });
+        try {
+            await store.create(makeStroke('a1'));
+            const full = vi
+                .spyOn(db.ops, 'bulkAdd')
+                .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+            await store.update('a1', { color: '#ff0000' }).catch(() => undefined);
+            full.mockRestore();
+            expect(store.hasPersistFailure('a1')).toBe(true);
+
+            await held.flush();
+
+            // The queued create is not all the user did to a1: neither sent nor
+            // decided on, and the score does not claim to be synced.
+            expect(api.inserts).toBe(0);
+            expect(api.fetchManys).toBe(0);
+            expect(await db.ops.count()).toBe(1);
+            expect(statuses.at(-1)).toBe('error');
+
+            await expect(store.retryFailedPersist()).resolves.toBe(true);
+            await held.flush();
+
+            expect(api.rows.get('a1')?.color).toBe('#ff0000');
+            expect(await db.ops.count()).toBe(0);
+            expect(statuses.at(-1)).toBe('synced');
+        } finally {
+            held.stop();
+        }
+    });
+});

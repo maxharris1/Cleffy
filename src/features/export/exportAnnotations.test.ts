@@ -76,3 +76,30 @@ describe('loadExportAnnotations', () => {
         expect((await loadExportAnnotations(DOC, USER)).map((a) => a.id)).toEqual(['kept']);
     });
 });
+
+describe('loadExportAnnotations and marks this device could not store (SF-1)', () => {
+    it('bakes in the viewer’s unsaved version of a mark, including an erase that failed to save', async () => {
+        const store = await drawAs(USER, stroke('kept'), stroke('erased'));
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        try {
+            await store.create(stroke('new')).catch(() => undefined);
+            await store.update('kept', { color: '#ff0000' }).catch(() => undefined);
+            await store.delete('erased').catch(() => undefined);
+
+            const marks = await loadExportAnnotations(DOC, USER);
+
+            // The mirror has the old 'kept', the live 'erased' and no 'new'.
+            expect(new Map(marks.map((a) => [a.id, a.color]))).toEqual(
+                new Map([
+                    ['kept', '#ff0000'],
+                    ['new', '#111111'],
+                ]),
+            );
+        } finally {
+            full.mockRestore();
+            await store.retryFailedPersist();
+        }
+    });
+});

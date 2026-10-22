@@ -231,7 +231,11 @@ const SIGN_OUT_SYNC_TIMEOUT_MS = 8000;
 const SIGN_OUT_SNAPSHOT_TIMEOUT_MS = 3000;
 
 export interface SignOutSyncResult {
-    /** Annotation changes still not on the server; signing out deletes them. */
+    /**
+     * Annotation changes still not on the server; signing out deletes them.
+     * Includes marks an open viewer could not even write to this device
+     * (AnnotationStore.hasPersistFailure), which exist only in its memory.
+     */
     pending: number;
     /** Marks whose change the server refused for good while uploading. */
     refused: number;
@@ -252,6 +256,15 @@ export interface SignOutSyncResult {
  * at all — and then sign-out cannot clear it either.
  */
 export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): Promise<SignOutSyncResult> => {
+    const { unsavedMarkCount } = await import('@/sync/annotationStore');
+    // Read after the upload: an edit whose write failed is not in the outbox,
+    // so the drain's "nothing pending" does not cover it.
+    const outbox = await syncOutboxBeforeSignOut(timeoutMs);
+    const unsaved = unsavedMarkCount();
+    return unsaved > 0 ? { ...outbox, pending: outbox.pending + unsaved } : outbox;
+};
+
+const syncOutboxBeforeSignOut = async (timeoutMs: number): Promise<SignOutSyncResult> => {
     const [
         { getDb },
         { drainCloudOutboxes, foreignCloudOpCount, pendingCloudOpCount },

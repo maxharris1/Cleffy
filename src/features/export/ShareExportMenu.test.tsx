@@ -109,6 +109,15 @@ describe('ShareExportMenu export allowance', () => {
         vi.restoreAllMocks();
     });
 
+    it('opens when the viewer’s “couldn’t be saved” banner asks (openSignal), and only then', () => {
+        const { rerender } = render(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" openSignal={0} />);
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+
+        rerender(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" openSignal={1} />);
+
+        expect(screen.getByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
+    });
+
     it('builds the PDF, then claims, then hands it over only once the claim is granted', async () => {
         rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
         const user = await openMenu();
