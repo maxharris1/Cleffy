@@ -96,6 +96,8 @@ const harness = (
          * round 6 on #62); skewEdge moves it on its own.
          */
         edgeAheadMs?: number;
+        /** account_deletion_pending() for the link's account (launch-fix item 16); clear by default. */
+        deletion?: 'clear' | 'pending' | 'unknown';
     } = {},
 ) => {
     const tokens = new Map<string, StoredToken>();
@@ -112,6 +114,7 @@ const harness = (
     let rows = 0;
     let claims = 0;
     const clock = { now: NOW, edgeAheadMs: options.edgeAheadMs ?? 0 };
+    const account = { deletion: options.deletion ?? ('clear' as 'clear' | 'pending' | 'unknown') };
     const edgeNow = () => clock.now + clock.edgeAheadMs;
     const dbNow = () => clock.now + (options.dbAheadMs ?? 0);
     const deliveries: Delivery[] = [];
@@ -256,6 +259,7 @@ const harness = (
         idempotencyKey: resendIdempotencyKey,
         terms: billingTerms,
         planNameForPrice: (priceId) => (priceId === 'price_teacher_monthly' ? 'Teacher' : null),
+        accountDeletionPending: vi.fn(async () => account.deletion),
         now: edgeNow,
         logError: (code) => errors.push(code),
     };
@@ -356,6 +360,7 @@ const harness = (
         later,
         skewEdge,
         deliveries,
+        account,
     };
 };
 
@@ -1162,12 +1167,160 @@ describe('billing-cancel: using the link', () => {
     });
 });
 
+/**
+ * Launch-fix item 16, decision 70(1): while the link's account is being
+ * deleted, the page leaves Stripe alone (the deletion cancels the subscription)
+ * and leaves the link unspent, so it still works if the deletion is abandoned
+ * -- but a refund request inside the 14 days always goes to support.
+ */
+describe('billing-cancel: while the account is being deleted', () => {
+    const linked = async (options: Parameters<typeof harness>[0] = {}) => {
+        const h = harness(options);
+        await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+        await h.flush();
+        return { ...h, token: tokenFrom(h.sent[0]?.text ?? '') };
+    };
+    const toSupport = (h: { sent: Array<{ to: string; text: string; idempotencyKey: string }> }) =>
+        h.sent.filter((mail) => mail.to === 'support@cleffy.io');
+
+    it('shows the subscription and says the account is being deleted, without reading Stripe', async () => {
+        const h = await linked();
+        h.account.deletion = 'pending';
+        const response = await handleCancel(post({ action: 'peek', token: h.token }), h.deps);
+        expect(response.status).toBe(200);
+        expect(await body(response)).toEqual({
+            email: maskEmail(EMAIL),
+            plan: 'Teacher',
+            status: 'active',
+            periodEnd: '2026-11-20T20:00:00.000Z',
+            alreadyCancelling: false,
+            refundEligible: true,
+            deletionPending: true,
+        });
+        expect(h.deps.accountDeletionPending).toHaveBeenCalledWith(USER);
+        expect(h.deps.liveSubscription).not.toHaveBeenCalled();
+    });
+
+    it('still offers the refund when the deletion has already cancelled the subscription in Stripe', async () => {
+        const h = await linked({ live: { status: 'canceled', cancelling: false, endsAt: null } });
+        h.account.deletion = 'pending';
+        const response = await handleCancel(post({ action: 'peek', token: h.token }), h.deps);
+        expect(response.status).toBe(200);
+        expect(await body(response)).toMatchObject({ deletionPending: true, refundEligible: true });
+    });
+
+    it('sends the refund request, touches no Stripe subscription and leaves the link unspent', async () => {
+        const h = await linked();
+        h.account.deletion = 'pending';
+        const response = await handleCancel(post({ action: 'cancel', token: h.token, requestRefund: true }), h.deps);
+        expect(response.status).toBe(200);
+        expect(await body(response)).toEqual({
+            cancelled: false,
+            deletionPending: true,
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+        expect(h.deps.liveSubscription).not.toHaveBeenCalled();
+        expect(h.deps.consumeToken).not.toHaveBeenCalled();
+        const mails = toSupport(h);
+        expect(mails).toHaveLength(1);
+        expect(mails[0]?.text).toContain('sub_1');
+        expect(mails[0]?.text).toContain('This account is being deleted.');
+        expect(mails[0]?.idempotencyKey).toBe(`billing-refund-request-${await sha256Hex(h.token)}`);
+        // Unspent: the link still opens.
+        expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(200);
+    });
+
+    it('sends nothing to support when no refund was asked for, and still says what happened', async () => {
+        const h = await linked();
+        h.account.deletion = 'pending';
+        const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+        expect(await body(response)).toEqual({
+            cancelled: false,
+            deletionPending: true,
+            refundRequested: false,
+            refundRequestFailed: false,
+        });
+        expect(toSupport(h)).toEqual([]);
+        expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+    });
+
+    it('tells the buyer to write in when the refund request could not be sent', async () => {
+        const h = await linked();
+        h.account.deletion = 'pending';
+        h.deps.sendEmail = async () => ({ outcome: 'rejected', reason: 'http_500' });
+        const response = await handleCancel(post({ action: 'cancel', token: h.token, requestRefund: true }), h.deps);
+        expect(await body(response)).toMatchObject({
+            deletionPending: true,
+            refundRequested: false,
+            refundRequestFailed: true,
+        });
+        expect(h.errors).toContain('refund_request_not_sent');
+    });
+
+    it('sends no refund request once the 14 days are over', async () => {
+        const h = await linked({ firstPurchaseAt: NOW - 20 * DAY });
+        h.account.deletion = 'pending';
+        const response = await handleCancel(post({ action: 'cancel', token: h.token, requestRefund: true }), h.deps);
+        expect(await body(response)).toMatchObject({ deletionPending: true, refundRequested: false });
+        expect(toSupport(h)).toEqual([]);
+    });
+
+    it('deletion abandoned: the same link then cancels at Stripe as usual, and support hears once', async () => {
+        const h = await linked();
+        h.account.deletion = 'pending';
+        await handleCancel(post({ action: 'cancel', token: h.token, requestRefund: true }), h.deps);
+
+        h.account.deletion = 'clear';
+        const response = await handleCancel(post({ action: 'cancel', token: h.token, requestRefund: true }), h.deps);
+        expect(await body(response)).toMatchObject({ cancelled: true, refundRequested: true });
+        expect(h.deps.cancelAtPeriodEnd).toHaveBeenCalledWith('sub_1', 'live');
+        // Both requests carry the link's one key, so Resend mails support once.
+        const keys = new Set(toSupport(h).map((mail) => mail.idempotencyKey));
+        expect(keys.size).toBe(1);
+        // Now it is spent.
+        expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(404);
+    });
+
+    it('refuses with a retry when the check cannot be answered: nothing spent, read, changed or sent', async () => {
+        const h = await linked();
+        h.account.deletion = 'unknown';
+        for (const action of ['peek', 'cancel']) {
+            const response = await handleCancel(post({ action, token: h.token, requestRefund: true }), h.deps);
+            expect(response.status).toBe(503);
+            expect(await body(response)).toMatchObject({ code: 'unavailable' });
+        }
+        expect(h.deps.consumeToken).not.toHaveBeenCalled();
+        expect(h.deps.liveSubscription).not.toHaveBeenCalled();
+        expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+        expect(toSupport(h)).toEqual([]);
+        expect(h.errors).toContain('cancel_deletion_check_failed');
+    });
+
+    it('asks before the link is spent, and a clear account cancels exactly as before', async () => {
+        const h = await linked();
+        const response = await handleCancel(post({ action: 'cancel', token: h.token }), h.deps);
+        expect(await body(response)).toMatchObject({ cancelled: true });
+        const asked = vi.mocked(h.deps.accountDeletionPending).mock.invocationCallOrder[0] ?? Infinity;
+        const spent = vi.mocked(h.deps.consumeToken).mock.invocationCallOrder[0] ?? -Infinity;
+        expect(asked).toBeLessThan(spent);
+    });
+});
+
 describe('billing-cancel/index.ts is wiring only', () => {
     const source = readFileSync(resolve(process.cwd(), 'supabase/functions/billing-cancel/index.ts'), 'utf8');
     const config = readFileSync(resolve(process.cwd(), 'supabase/config.toml'), 'utf8');
 
     it('runs the flow this file tests', () => {
         expect(source).toMatch(/Deno\.serve\(\(req\) =>\s*\n\s*handleCancel\(req, \{/);
+    });
+
+    it('asks account_deletion_pending() for the link’s account, and a failed check is `unknown` (item 16)', () => {
+        const port = source.slice(source.indexOf('accountDeletionPending: async (userId) =>'));
+        expect(port.slice(0, 500)).toContain('await accountDeletionPending(admin(), userId)');
+        expect(port.slice(0, 500)).toMatch(/if \(!pending\.ok\) \{[\s\S]{0,200}?return 'unknown';/);
+        expect(port.slice(0, 500)).toContain("return pending.pending ? 'pending' : 'clear';");
     });
 
     it('cancels at the period end, as the Customer Portal does', () => {

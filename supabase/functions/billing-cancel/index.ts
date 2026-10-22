@@ -4,6 +4,7 @@ import { drainInBackground, sendBillingEmailWithinBudget } from '../_shared/bill
 import * as billingTerms from '../_shared/billingTerms.ts';
 import { handleCancel, type LiveSubscription } from '../_shared/cancelFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { accountDeletionPending } from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import { resendIdempotencyKey } from '../_shared/resendDelivery.ts';
@@ -117,6 +118,19 @@ Deno.serve((req) =>
         planNameForPrice: (priceId) => {
             const slot = priceId ? slotForPrice(priceId) : null;
             return slot ? billingTerms.PLAN_NAMES[slot] : null;
+        },
+        // Launch-fix item 16, decision 70(1): while the account is being
+        // deleted the link leaves Stripe alone and stays unspent, and only the
+        // refund request goes out (cancelFlow.ts deletionPendingCancel). The
+        // one predicate (../_shared/deletionPending.ts); a failed check is
+        // `unknown`, answered with a 503.
+        accountDeletionPending: async (userId) => {
+            const pending = await accountDeletionPending(admin(), userId);
+            if (!pending.ok) {
+                console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+                return 'unknown';
+            }
+            return pending.pending ? 'pending' : 'clear';
         },
         now: () => Date.now(),
         logError: (code, err) => logError('billing-cancel', err, { code }),

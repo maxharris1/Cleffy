@@ -511,6 +511,11 @@ export interface RefundRequestInput {
     mode: string;
     firstPurchaseAtMs: number | null;
     requestedAtMs: number;
+    /**
+     * The account is being deleted (launch-fix item 16): the cancel page left
+     * the subscription alone, because the deletion cancels it.
+     */
+    accountDeletionPending?: boolean;
 }
 
 /** To support@: a buyer asked for the 14-day refund while cancelling. Reply-To is the buyer. */
@@ -525,6 +530,11 @@ export const refundRequestEmail = (input: RefundRequestInput): BillingEmail => {
             `First purchase: ${input.firstPurchaseAtMs !== null ? formatUtc(input.firstPurchaseAtMs) : 'unknown'}`,
             `Requested: ${formatUtc(input.requestedAtMs)}`,
         ].join('\n'),
+        ...(input.accountDeletionPending
+            ? [
+                  'This account is being deleted. The cancel page did not change the subscription, because the deletion cancels it.',
+              ]
+            : []),
         'Refund the payment(s) in the Stripe dashboard and reply to the customer (Reply-To is set to them).',
     ];
     return {
