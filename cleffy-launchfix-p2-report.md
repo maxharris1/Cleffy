@@ -274,3 +274,32 @@ Merge order per the packet: P2 goes second, after P1, and there is no file overl
 - **PR state:** still a draft, `mergeable_state: clean`, 5 commits, 28 files.
 - **Not re-verified:** the local check counts, the CSP smoke and the ui-check screenshots above were all run on `0508174`, not on `b3c4757`.
 - **Conflicts:** the follow-up adds `src/sync/inkRecovery.ts` and further edits to `annotationStore.ts` and `syncEngine.ts`. It still leaves `src/sync/wire.ts` and `remoteInkBuffers.ts` alone, so the P3/P4 conflict notes above apply unchanged.
+
+## Addendum 2 (07:38 UTC): head `1ceeb9d`
+
+- **Two more commits from a third Claude session** (`Claude-Session: https://claude.ai/code/session_01RBfRL6C9njE6etzJM2Didg`), both authored as Max Harris and both fast-forwards:
+    - `7379a8b`: "fix(ink): bound keep-changes sign-out, cancel recovery writes per account, never drop held ink"
+    - `1ceeb9d`: "fix(ink): server rows never overtake on the base seq; guard late snapshot failures after sign-out; tests"
+
+    This session pushed none of them.
+
+- **GitHub Actions on `1ceeb9d`:** all green.
+
+    | Check            | Run id (job id)            | Result  |
+    | ---------------- | -------------------------- | ------- |
+    | checks           | 39740557187 (119696475850) | success |
+    | supabase-local   | 39740557187 (119696475976) | success |
+    | supabase-drift   | 39740557187 (119696475779) | success |
+    | omr-service      | 39740557187 (119696475530) | success |
+    | checks           | 39740551418 (119696456455) | success |
+    | supabase-local   | 39740551418 (119696456491) | success |
+    | supabase-drift   | 39740551418 (119696457059) | success |
+    | omr-service      | 39740551418 (119696456812) | success |
+    | Supabase Preview | check 119696448005         | skipped |
+
+- **Vercel (commit status):** failure. It reads "Deployment rate limited — retry in 24 hours" (`api-deployments-free-per-day`, more than 100 a day).
+    - This is the Vercel account's daily deployment cap on the free plan, which every branch's preview draws on, including the parallel launchfix PRs. It doesn't come from this PR's code.
+    - Earlier previews of this branch (`0508174`, `b3c4757`) built and passed.
+    - It can't be re-run from here. It clears on the first push after the limit resets, or when the plan's limit is raised (a Max step).
+    - I posted one comment saying so: https://github.com/maxharris1/Cleffy/pull/68#issuecomment-6335245400
+- **Not re-verified:** this session has not re-run the local checks, the CSP smoke or the ui-check on `7379a8b` or `1ceeb9d`.
