@@ -303,3 +303,29 @@ Merge order per the packet: P2 goes second, after P1, and there is no file overl
     - It can't be re-run from here. It clears on the first push after the limit resets, or when the plan's limit is raised (a Max step).
     - I posted one comment saying so: https://github.com/maxharris1/Cleffy/pull/68#issuecomment-6335245400
 - **Not re-verified:** this session has not re-run the local checks, the CSP smoke or the ui-check on `7379a8b` or `1ceeb9d`.
+
+## Addendum 3 (09:08 UTC): head `86f632c`, everything green
+
+- **One more commit from the third session** (`session_01RBfRL6C9njE6etzJM2Didg`), a fast-forward authored as Max Harris:
+    - `86f632cec71360dc87dbf4a4626ee9db041d8adc`: "fix(ink): erase-only conflicts offer no Export; keep the export menu in the gutter over a notice"
+
+    This session did not push it.
+
+- **CI on `86f632c`:** all green.
+
+    | Check                   | Run id (job id)                         | Result                               |
+    | ----------------------- | --------------------------------------- | ------------------------------------ |
+    | checks                  | 39752325276 (119735667624)              | success                              |
+    | supabase-local          | 39752325276 (119735668104)              | success                              |
+    | supabase-drift          | 39752325276 (119735668217)              | success                              |
+    | omr-service             | 39752325276 (119735668065)              | success                              |
+    | checks                  | 39752334054 (119735698327)              | success                              |
+    | supabase-local          | 39752334054 (119735698272)              | success                              |
+    | supabase-drift          | 39752334054 (119735698258)              | success                              |
+    | omr-service             | 39752334054 (119735698008)              | success                              |
+    | Vercel Preview Comments | check 119736017404                      | success                              |
+    | Vercel (commit status)  | deployment BpxaCkocYi9kojtm35dE8yfA5ENz | success ("Deployment has completed") |
+    | Supabase Preview        | check 119735659586                      | skipped                              |
+
+- **Vercel:** the rate-limit failure on `1ceeb9d` (Addendum 2) did not recur. The preview built and deployed on this head.
+- **Not re-verified:** as before, this session has not re-run the local checks, the CSP smoke or the ui-check on the later heads.
