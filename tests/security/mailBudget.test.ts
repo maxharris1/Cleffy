@@ -141,8 +141,8 @@ describe('guest-email derives its ceilings from the budget', () => {
     });
 
     it('gets its declared cap in full: the clamp is inert at the declared budget', () => {
-        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 28, windowMs: MAIL_WINDOW_MS.hour });
-        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 150, windowMs: MAIL_WINDOW_MS.day });
+        expect(mailLimit('guestEmailCode', 'hour')).toEqual({ limit: 14, windowMs: MAIL_WINDOW_MS.hour });
+        expect(mailLimit('guestEmailCode', 'day')).toEqual({ limit: 85, windowMs: MAIL_WINDOW_MS.day });
         for (const category of MAIL_CATEGORIES) {
             for (const window of MAIL_WINDOWS) {
                 expect(mailLimit(category, window).limit, `${category}/${window}`).toBe(
@@ -177,12 +177,15 @@ describe('the launch mail split', () => {
         // is also what the merged branches spend: every sender is registered
         // on every branch, whether or not its code has landed there yet.
         expect(LAUNCH_MAIL_SPLIT).toEqual({
-            guestEmailCode: { hour: 28, day: 150 },
+            guestEmailCode: { hour: 14, day: 85 },
             contentReportAck: { hour: 8, day: 35 },
             moderationNotice: { hour: 4, day: 20 },
             billingCancelLink: { hour: 8, day: 40 },
             billingConfirmation: { hour: 7, day: 30 },
             retentionNotice: { hour: 5, day: 25 },
+            // P3 fix round (decision 51): carved out of guestEmailCode.
+            supportInbound: { hour: 8, day: 35 },
+            studentAccountMail: { hour: 6, day: 30 },
         });
         expect(MAIL_CATEGORY_CAPS).toBe(LAUNCH_MAIL_SPLIT);
     });

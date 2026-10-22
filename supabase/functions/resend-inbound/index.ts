@@ -1,4 +1,3 @@
-import { mailBudgetKey } from '../_shared/contentReports.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { mailLimit, MAIL_WINDOWS } from '../_shared/mailBudget.ts';
@@ -8,7 +7,13 @@ import { RESEND_TIMEOUT_MS, resendIdempotencyKey, sendViaResend } from '../_shar
 import { secretsEqual } from '../_shared/secretCompare.ts';
 import { forwardedSubject, inboxTagFor, isOwnForward } from '../_shared/supportMail.ts';
 import { verifySvixSignature } from '../_shared/svixSignature.ts';
-import { type BudgetReservation, handleResendInbound, type InboundMessage, type InboundStore } from './handler.ts';
+import {
+    type BudgetReservation,
+    handleResendInbound,
+    type InboundMessage,
+    type InboundStore,
+    supportInboundBudgetKey,
+} from './handler.ts';
 
 /**
  * Inbound support mail. The control flow — the lease, the budget, the order of
@@ -30,9 +35,9 @@ const env = (name: string): string | undefined => Deno.env.get(name);
  */
 const forwardFrom = (): string => env('SUPPORT_FORWARD_FROM') ?? 'Cleffy support <support@send.cleffy.io>';
 
-/** The forward's share of the mail split: contentReportAck, every window, in its own buckets. */
+/** The forward's share of the mail split: supportInbound, every window, in buckets of its own. */
 const BUDGET = MAIL_WINDOWS.map(
-    (window) => [mailBudgetKey('content-report-ack', window), mailLimit('contentReportAck', window, env)] as const,
+    (window) => [supportInboundBudgetKey(window), mailLimit('supportInbound', window, env)] as const,
 );
 
 const reserveBudget = async (): Promise<BudgetReservation> => {
@@ -64,7 +69,6 @@ const toMessage = (row: Record<string, unknown>, holder: string): InboundMessage
     subject: typeof row['subject'] === 'string' ? row['subject'] : null,
     textBody: typeof row['text_body'] === 'string' ? row['text_body'] : null,
     htmlBody: typeof row['html_body'] === 'string' ? row['html_body'] : null,
-    budgetHeld: row['budget_held'] === true || row['forward_budget_held'] === true,
 });
 
 const store = (): InboundStore | null => {
@@ -140,6 +144,14 @@ const store = (): InboundStore | null => {
                 return null;
             }
             return data === true;
+        },
+        beginSend: async (id, holder) => {
+            const { data, error } = await admin.rpc('begin_support_forward', { p_id: id, p_holder: holder });
+            if (error) {
+                console.error(`begin_support_forward failed for ${id}: ${error.message}`);
+                return null;
+            }
+            return data === 'send' || data === 'expired' || data === 'lost' ? data : null;
         },
     };
 };

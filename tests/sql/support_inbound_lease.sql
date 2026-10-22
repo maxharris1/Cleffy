@@ -4,6 +4,11 @@
 -- lease the old holder can no longer write through; a spent budget defers the
 -- forward to the retry path; failures back off and give up at the attempt cap.
 --
+-- And, for 20261022110300_support_inbound_retry_window.sql: every attempt pays
+-- for itself (the claim no longer hands a retry a held budget), and no send is
+-- made once 23 hours have passed since the first send attempt -- the row is
+-- failed for review instead, and treated as finished by later deliveries.
+--
 -- Runs inside one transaction and ROLLS BACK -- nothing persists. Same harness
 -- and reading as tests/sql/launch_checkout_fixes.sql:
 --
@@ -61,7 +66,8 @@ grant execute on all functions in schema pg_temp to anon, authenticated, service
 
 select pg_temp.as_service();
 -- Nothing else in this database is due while the proofs below run.
-update public.support_messages set next_attempt_at = now() + interval '1 day' where status <> 'completed';
+update public.support_messages set next_attempt_at = now() + interval '1 day'
+where status in ('processing', 'forward_deferred');
 
 -- ===========================================================================
 -- 1. Claim, duplicate, and an interrupted delivery resumed
@@ -145,20 +151,21 @@ update public.support_messages set attempts = public.support_message_max_attempt
 where resend_email_id = 'p3-lease-4';
 select pg_temp.chk('31 the last attempt allowed is taken',
 $q$select count(*) = 1 from public.claim_due_support_messages (10) where resend_email_id = 'p3-lease-4'$q$);
-select pg_temp.chk('32 ... and when it fails too, the row is completed with its error',
+select pg_temp.chk('32 ... and when it fails too, the row is failed (for review) with its error',
 $q$select public.finish_support_message ((select id from pg_temp.msg('p3-lease-4')),
           (select lease_holder from pg_temp.msg('p3-lease-4')), 'retry', 'fetch 503')
-      and (select status = 'completed'
+      and (select status = 'failed'
               and forward_error like 'gave up after ' || public.support_message_max_attempts () || ' attempts%'
            from pg_temp.msg('p3-lease-4'))$q$);
 select pg_temp.claim('u', 'p3-lease-7');
-select pg_temp.chk('33a a forward with an unknown outcome is retried with its budget marked as spent',
+select pg_temp.chk('33a a forward with an unknown outcome is retried, its kept reservation recorded',
 $q$select public.finish_support_message (pg_temp.row_id('u'), pg_temp.holder('u'), 'retry', 'forward outcome unknown',
           null, null, true)
       and (select forward_budget_held from pg_temp.msg('p3-lease-7'))$q$);
 update public.support_messages set next_attempt_at = now() - interval '1 second' where resend_email_id = 'p3-lease-7';
-select pg_temp.chk('33b ... the retry is told so, and must not reserve again',
-$q$select (pg_temp.claim('u2', 'p3-lease-7') ->> 'budget_held') = 'true'$q$);
+select pg_temp.chk('33b ... and the retry is NOT told to skip the budget: every attempt reserves its own',
+$q$select (v ->> 'status') = 'claimed' and not (v ? 'budget_held')
+   from (select pg_temp.claim('u2', 'p3-lease-7') as v) x$q$);
 select pg_temp.chk('33c ... and a later retry without news keeps it; the forward clears it',
 $q$select public.finish_support_message (pg_temp.row_id('u2'), pg_temp.holder('u2'), 'retry', 'fetch 503')
       and (select forward_budget_held from pg_temp.msg('p3-lease-7'))$q$);
@@ -180,7 +187,7 @@ $q$select public.finish_support_message (gen_random_uuid(), gen_random_uuid(), '
 select pg_temp.chk('36 a new row starts processing; the column default changed, and the state is constrained',
 $q$select column_default like '''processing''%' from information_schema.columns
    where table_schema = 'public' and table_name = 'support_messages' and column_name = 'status'$q$);
-select pg_temp.refused('37 ... to the three states',
+select pg_temp.refused('37 ... to the four states',
 $q$update public.support_messages set status = 'lost' where resend_email_id = 'p3-lease-5'$q$, '23514');
 select pg_temp.chk('38 the retry tick runs (and with nothing due, does nothing)',
 $q$select true from (select public.support_inbound_retry_tick ()) x$q$);
@@ -189,6 +196,65 @@ select pg_temp.chk('39 ... and is scheduled',
 $q$select exists (select 1 from cron.job where jobname = 'support-inbound-retry'
                   and command like '%support_inbound_retry_tick%')$q$);
 select pg_temp.as_service();
+
+-- ===========================================================================
+-- 5. The retry window: no send once Resend may have forgotten the key
+-- ===========================================================================
+select pg_temp.chk('50 the window is 23 hours, inside Resend''s 24-hour Idempotency-Key retention',
+$q$select public.support_forward_retry_window () = interval '23 hours'$q$);
+select pg_temp.claim('w', 'p3-window-1');
+select pg_temp.chk('51 the first send attempt is allowed and records when it was made',
+$q$select public.begin_support_forward (pg_temp.row_id('w'), pg_temp.holder('w')) = 'send'
+      and (select first_send_attempt_at is not null from pg_temp.msg('p3-window-1'))$q$);
+update public.support_messages set first_send_attempt_at = now() - interval '1 hour' where resend_email_id = 'p3-window-1';
+select pg_temp.chk('52 a later attempt inside the window may send, and keeps the first time',
+$q$select public.begin_support_forward (pg_temp.row_id('w'), pg_temp.holder('w')) = 'send'
+      and (select first_send_attempt_at < now() - interval '59 minutes' from pg_temp.msg('p3-window-1'))$q$);
+select pg_temp.chk('53 only the lease holder may begin a send',
+$q$select public.begin_support_forward (pg_temp.row_id('w'), gen_random_uuid()) = 'lost'$q$);
+select pg_temp.chk('54 an unknown outcome whose backoff lands inside the window is retried',
+$q$select public.finish_support_message (pg_temp.row_id('w'), pg_temp.holder('w'), 'retry', 'forward outcome unknown',
+          null, null, true)
+      and (select status = 'processing' from pg_temp.msg('p3-window-1'))$q$);
+update public.support_messages
+set first_send_attempt_at = now() - interval '23 hours 1 second', next_attempt_at = now() - interval '1 second'
+where resend_email_id = 'p3-window-1';
+select pg_temp.chk('55 past the window, a claimed retry is told not to send',
+$q$with c as (select pg_temp.claim('w2', 'p3-window-1') as v)
+   select public.begin_support_forward ((v ->> 'id')::uuid, (v ->> 'holder')::uuid) = 'expired' from c$q$);
+select pg_temp.chk('56 ... the row is failed for review, its lease released, its last error kept',
+$q$select status = 'failed' and lease_holder is null and next_attempt_at is null and completed_at is not null
+      and forward_error like 'retry window closed%forward outcome unknown%' and text_body is null
+   from pg_temp.msg('p3-window-1')$q$);
+select pg_temp.chk('57 a later delivery of a failed row is a duplicate, and is not an attempt',
+$q$select (v ->> 'status') = 'duplicate' and (v ->> 'failed') = 'true'
+      and (select attempts = 2 from pg_temp.msg('p3-window-1'))
+   from (select pg_temp.claim('w3', 'p3-window-1') as v) x$q$);
+select pg_temp.chk('58 the retry path never takes a failed row',
+$q$select not exists (select 1 from public.claim_due_support_messages (50) where resend_email_id = 'p3-window-1')$q$);
+select pg_temp.claim('w4', 'p3-window-2');
+update public.support_messages set first_send_attempt_at = now() - interval '22 hours 59 minutes 30 seconds'
+where resend_email_id = 'p3-window-2';
+select pg_temp.chk('59 a retry whose next attempt would land past the window fails now instead of being scheduled',
+$q$select public.finish_support_message (pg_temp.row_id('w4'), pg_temp.holder('w4'), 'retry', 'forward outcome unknown')
+      and (select status = 'failed' and next_attempt_at is null and forward_error like 'retry window closed%'
+           from pg_temp.msg('p3-window-2'))$q$);
+select pg_temp.claim('w5', 'p3-window-3');
+update public.support_messages set first_send_attempt_at = now() - interval '22 hours 50 minutes'
+where resend_email_id = 'p3-window-3';
+select pg_temp.chk('60 so does a budget deferral past the window, for a forward that was already attempted',
+$q$select public.finish_support_message (pg_temp.row_id('w5'), pg_temp.holder('w5'), 'deferred', null, 3600)
+      and (select status = 'failed' from pg_temp.msg('p3-window-3'))$q$);
+select pg_temp.claim('w6', 'p3-window-4');
+select pg_temp.chk('61 a forward never attempted has no window: a long deferral still just defers',
+$q$select public.finish_support_message (pg_temp.row_id('w6'), pg_temp.holder('w6'), 'deferred', null, 172800)
+      and (select status = 'forward_deferred' and first_send_attempt_at is null from pg_temp.msg('p3-window-4'))$q$);
+select pg_temp.chk('62 a failed row cannot be written by a stale holder',
+$q$select not public.save_support_message_body (pg_temp.row_id('w'), pg_temp.holder('w'), 'x', null)
+      and not public.finish_support_message (pg_temp.row_id('w2'), pg_temp.holder('w2'), 'forwarded')$q$);
+select pg_temp.chk('63 the retry tick ignores failed rows',
+$q$select not exists (select 1 from public.support_messages where status = 'failed' and resend_email_id like 'p3-window-%'
+                      and next_attempt_at is not null)$q$);
 
 -- ===========================================================================
 -- 4. Service role only
@@ -200,6 +266,7 @@ select pg_temp.refused('41 ... or claim due ones', $q$select count(*) from publi
 select pg_temp.refused('42 ... or write a body', $q$select public.save_support_message_body (gen_random_uuid(), gen_random_uuid(), 'x', null)$q$, '42501');
 select pg_temp.refused('43 ... or finish one', $q$select public.finish_support_message (gen_random_uuid(), gen_random_uuid(), 'stored')$q$, '42501');
 select pg_temp.refused('44 ... or run the tick', $q$select public.support_inbound_retry_tick ()$q$, '42501');
+select pg_temp.refused('44a ... or begin a send', $q$select public.begin_support_forward (gen_random_uuid(), gen_random_uuid())$q$, '42501');
 select pg_temp.refused('45 ... or read support mail', $q$select count(*) from public.support_messages$q$, '42501');
 select pg_temp.as_anon();
 select pg_temp.refused('46 anon cannot claim a message',

@@ -3,7 +3,6 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { mailBudgetKey } from '../../supabase/functions/_shared/contentReports';
 import { mailLimit } from '../../supabase/functions/_shared/mailBudget';
 import {
     PAYLOAD_TOO_LARGE,
@@ -25,14 +24,16 @@ import {
     type InboundMeta,
     LOOP_GUARD_ERROR,
     SUPPORT_FORWARD_OUTBOX,
+    supportInboundBudgetKey,
     WEBHOOK_BODY_MAX_BYTES,
 } from '../../supabase/functions/resend-inbound/handler';
 import { chunkedRequest } from '../security/chunkedBody';
 
 /**
  * resend-inbound against an in-memory support_messages that behaves like
- * 20261022110200_support_inbound_lease.sql (tests/sql/support_inbound_lease.sql
- * proves the SQL itself), a mail budget, Resend's Received Emails API and its
+ * 20261022110200_support_inbound_lease.sql and
+ * 20261022110300_support_inbound_retry_window.sql
+ * (tests/sql/support_inbound_lease.sql proves the SQL itself), a mail budget, Resend's Received Emails API and its
  * send endpoint. Steps can be paused so a delivery can die mid-way.
  */
 
@@ -41,10 +42,15 @@ const EMAIL_ID = '4ef9a417-02e9-4d39-ad75-9611e0fcc33c';
 const FORWARD_TO = 'inbox@cleffy.example';
 const FORWARD_FROM = 'Cleffy support <support@send.cleffy.io>';
 const RETRY_SECRET = 'retry-secret-for-tests';
+/** support_forward_retry_window(): no send 23 h after the first send attempt. */
+const WINDOW_MS = 23 * 60 * 60_000;
 
 interface Row extends Omit<InboundMessage, 'holder'> {
     holder: string | null;
-    status: 'processing' | 'forward_deferred' | 'completed';
+    status: 'processing' | 'forward_deferred' | 'completed' | 'failed';
+    /** A reservation was kept after an unknown outcome: a record only, never a reason to skip the budget. */
+    budgetHeld: boolean;
+    firstSendAt: number | null;
     leaseUntil: number | null;
     attempts: number;
     nextAttemptAt: number | null;
@@ -102,8 +108,11 @@ class World {
             subject: row.subject,
             textBody: row.textBody,
             htmlBody: row.htmlBody,
-            budgetHeld: row.budgetHeld,
         };
+    }
+
+    private live(row: Row) {
+        return row.status === 'processing' || row.status === 'forward_deferred';
     }
 
     private leased(row: Row) {
@@ -124,6 +133,7 @@ class World {
                     textBody: null,
                     htmlBody: null,
                     budgetHeld: false,
+                    firstSendAt: null,
                     holder: `holder-${++this.ids}`,
                     status: 'processing',
                     leaseUntil: this.now + LEASE_MS,
@@ -137,7 +147,7 @@ class World {
                 this.rows.set(meta.emailId, row);
                 return { status: 'claimed', message: this.message(row) };
             }
-            if (row.status === 'completed') {
+            if (!this.live(row)) {
                 return { status: 'duplicate' };
             }
             if (this.leased(row)) {
@@ -153,10 +163,7 @@ class World {
         claimDue: vi.fn(async (limit: number) =>
             [...this.rows.values()]
                 .filter(
-                    (row) =>
-                        row.status !== 'completed' &&
-                        !this.leased(row) &&
-                        (row.nextAttemptAt ?? row.createdAt) <= this.now,
+                    (row) => this.live(row) && !this.leased(row) && (row.nextAttemptAt ?? row.createdAt) <= this.now,
                 )
                 .slice(0, limit)
                 .map((row) => {
@@ -171,7 +178,7 @@ class World {
                 return null;
             }
             const row = [...this.rows.values()].find((r) => r.id === id);
-            if (!row || row.holder !== holder || row.status === 'completed') {
+            if (!row || row.holder !== holder || !this.live(row)) {
                 return false;
             }
             Object.assign(row, { textBody: text, htmlBody: html });
@@ -185,10 +192,18 @@ class World {
                 detail: { error?: string; retryAfterSec?: number; forwardId?: string; budgetHeld?: boolean } = {},
             ) => {
                 const row = [...this.rows.values()].find((r) => r.id === id);
-                if (!row || row.holder !== holder) {
+                if (!row || row.holder !== holder || !this.live(row)) {
                     return false;
                 }
                 const release = { holder: null, leaseUntil: null };
+                const next =
+                    outcome === 'deferred'
+                        ? this.now + Math.max(detail.retryAfterSec ?? 300, 60) * 1000
+                        : this.now + 60_000 * 2 ** Math.max(row.attempts - 1, 0);
+                const pastWindow =
+                    (outcome === 'deferred' || outcome === 'retry') &&
+                    row.firstSendAt !== null &&
+                    next >= row.firstSendAt + WINDOW_MS;
                 if (outcome === 'forwarded') {
                     Object.assign(row, release, {
                         status: 'completed',
@@ -203,23 +218,45 @@ class World {
                         forwardError: detail.error ?? null,
                         budgetHeld: false,
                     });
+                } else if (pastWindow) {
+                    Object.assign(row, release, {
+                        status: 'failed',
+                        nextAttemptAt: null,
+                        forwardError: `retry window closed before the next attempt; last error: ${detail.error ?? 'unknown'}`,
+                    });
                 } else if (outcome === 'deferred') {
                     Object.assign(row, release, {
                         status: 'forward_deferred',
                         attempts: Math.max(row.attempts - 1, 0),
-                        nextAttemptAt: this.now + Math.max(detail.retryAfterSec ?? 300, 60) * 1000,
+                        nextAttemptAt: next,
                         forwardError: detail.error ?? 'forward deferred: the mail budget is spent',
                     });
                 } else {
                     Object.assign(row, release, {
                         forwardError: detail.error ?? null,
-                        budgetHeld: detail.budgetHeld ?? row.budgetHeld,
-                        nextAttemptAt: this.now + 60_000 * 2 ** Math.max(row.attempts - 1, 0),
+                        budgetHeld: row.budgetHeld || detail.budgetHeld === true,
+                        nextAttemptAt: next,
                     });
                 }
                 return true;
             },
         ),
+        beginSend: vi.fn(async (id: string, holder: string): Promise<'send' | 'expired' | 'lost' | null> => {
+            const row = [...this.rows.values()].find((r) => r.id === id);
+            if (!row || row.holder !== holder || !this.live(row)) {
+                return 'lost';
+            }
+            if (row.firstSendAt === null) {
+                row.firstSendAt = this.now;
+                return 'send';
+            }
+            if (this.now >= row.firstSendAt + WINDOW_MS) {
+                Object.assign(row, { status: 'failed', holder: null, leaseUntil: null, nextAttemptAt: null });
+                row.forwardError = `retry window closed; last error: ${row.forwardError ?? 'none'}`;
+                return 'expired';
+            }
+            return 'send';
+        }),
     };
 
     deps(overrides: Partial<InboundDeps> = {}): InboundDeps {
@@ -394,7 +431,7 @@ describe('resend-inbound: an interrupted first delivery is resumed', () => {
         expect(world.delivered.size).toBe(1);
     });
 
-    it('a forward whose outcome is unknown keeps its budget, answers 502, and the retry replays the same key', async () => {
+    it('a forward whose outcome is unknown keeps its reservation, answers 502, and the retry pays again and replays the same key', async () => {
         const world = new World();
         world.sendResults.push({ outcome: 'unknown', reason: 'network', status: null });
         const first = await call(world, deliver());
@@ -415,9 +452,96 @@ describe('resend-inbound: an interrupted first delivery is resumed', () => {
             `${SUPPORT_FORWARD_OUTBOX}-${EMAIL_ID}`,
         ]);
         expect(world.delivered.size).toBe(1);
-        // It already paid: the retry reserved nothing more.
-        expect(world.budget.reserved).toBe(1);
+        // Every attempt reserves its own place (Codex r1 finding 2): two
+        // reservations, none handed back. An over-count, never an under-count.
+        expect(world.budget.reserved).toBe(2);
+        expect(world.budget.refunds).toBe(0);
         expect(world.row().budgetHeld).toBe(false);
+    });
+
+    it('a held retry after the window resets pays in the new window, so it cannot send a ninth forward in it', async () => {
+        const world = new World();
+        // Hour 1: the first attempt's outcome is unknown; its charge stays in hour 1.
+        world.sendResults.push({ outcome: 'unknown', reason: 'network', status: null });
+        expect((await call(world, deliver())).status).toBe(502);
+        expect(world.budget.reserved).toBe(1);
+
+        // The hour rolls over: a fresh allowance of 8, which 8 new messages use up.
+        world.now += 60 * 60_000;
+        world.budget.remaining = 8;
+        for (let i = 0; i < 8; i += 1) {
+            const id = `fresh-${i}-0000-0000-0000-000000000000`;
+            const fresh = await call(world, deliver(event({ email_id: id })));
+            expect(fresh).toMatchObject({ status: 200, body: { forwarded: true } });
+        }
+        expect(world.budget.remaining).toBe(0);
+        const sendsBefore = world.sends.length;
+
+        // The held message's retry comes due in the same hour: it must pay too,
+        // and there is nothing left, so it is deferred and nothing is sent.
+        const retry = await call(world, deliver());
+        expect(retry).toMatchObject({ status: 200, body: { forwarded: false, reason: 'budget_deferred' } });
+        expect(world.sends.length).toBe(sendsBefore);
+        expect(world.row()).toMatchObject({ status: 'forward_deferred' });
+        // In this hour: the 8 fresh forwards, and nothing else.
+        expect(world.budget.reserved).toBe(9);
+    });
+
+    it('no retry is sent once 23 hours have passed since the first send: the row fails for manual review', async () => {
+        const world = new World();
+        world.sendResults.push({ outcome: 'unknown', reason: 'timeout', status: null });
+        expect((await call(world, deliver())).status).toBe(502);
+        const firstSendAt = world.row().firstSendAt as number;
+
+        // Resend keeps the key for 24 hours; by 23 a replay is no longer safe.
+        world.now = firstSendAt + WINDOW_MS;
+        world.row().nextAttemptAt = world.now - 1;
+        const late = await call(world, deliver());
+        expect(late).toMatchObject({ status: 200, body: { forwarded: false, reason: 'retry_window_closed' } });
+        expect(world.sends).toHaveLength(1);
+        expect(world.row()).toMatchObject({ status: 'failed', holder: null });
+        // This attempt's reservation is handed back: it sent nothing.
+        expect(world.budget.refunds).toBe(1);
+        expect(world.logs.some((line) => line.startsWith('forward_window_closed'))).toBe(true);
+
+        // Finished: a later delivery is a duplicate, and the retry run skips it.
+        expect(await call(world, deliver())).toMatchObject({ status: 200, body: { duplicate: true } });
+        expect(await call(world, retryRun())).toMatchObject({ status: 200, body: { processed: 0 } });
+        expect(world.sends).toHaveLength(1);
+    });
+
+    it('a retry whose backoff would land past the window fails now instead of being scheduled', async () => {
+        const world = new World();
+        world.sendResults.push({ outcome: 'unknown', reason: 'timeout', status: null });
+        await call(world, deliver());
+        const firstSendAt = world.row().firstSendAt as number;
+
+        world.now = firstSendAt + WINDOW_MS - 30_000;
+        world.row().nextAttemptAt = world.now - 1;
+        world.sendResults.push({ outcome: 'unknown', reason: 'timeout', status: null });
+        const retry = await call(world, deliver());
+        expect(retry.status).toBe(502);
+        expect(world.row()).toMatchObject({ status: 'failed', nextAttemptAt: null });
+        expect(await call(world, deliver())).toMatchObject({ body: { duplicate: true } });
+    });
+
+    it('a forward never attempted has no window: a day-long budget deferral still forwards', async () => {
+        const world = new World();
+        world.budget.remaining = 0;
+        await call(world, deliver());
+        expect(world.row().firstSendAt).toBeNull();
+        world.now += 2 * 24 * 60 * 60_000;
+        world.budget.remaining = 8;
+        expect(await call(world, retryRun())).toMatchObject({ body: { processed: 1 } });
+        expect(world.row()).toMatchObject({ status: 'completed' });
+    });
+
+    it('the send is begun after the budget is reserved and before Resend is called, by the lease holder', async () => {
+        const world = new World();
+        const { deps } = await call(world, deliver());
+        const order = (fn: unknown) => (fn as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0] ?? Infinity;
+        expect(order(deps.reserveBudget)).toBeLessThan(order(world.store.beginSend));
+        expect(order(world.store.beginSend)).toBeLessThan(order(deps.send));
     });
 
     it('a body that cannot be fetched answers 502 and is fetched by the next delivery', async () => {
@@ -521,14 +645,28 @@ describe('resend-inbound: the mail budget', () => {
         expect(world.row()).toMatchObject({ status: 'forward_deferred', nextAttemptAt: world.now + 120_000 });
     });
 
-    it('forwards spend the contentReportAck share, in the very buckets content-report acknowledgments use', () => {
+    it("forwards spend a supportInbound share of their own, never the acknowledgments' buckets", () => {
         const source = readFileSync(resolve(process.cwd(), 'supabase/functions/resend-inbound/index.ts'), 'utf8');
-        expect(source).toContain("mailBudgetKey('content-report-ack', window)");
-        expect(source).toContain("mailLimit('contentReportAck', window, env)");
-        expect(mailBudgetKey('content-report-ack', 'hour')).toBe('mail:content-report-ack:hour');
-        // Decision 14: no split change -- the share is still 8/35.
+        expect(source).toContain("supportInboundBudgetKey(window), mailLimit('supportInbound', window, env)");
+        expect(source).not.toContain('contentReportAck');
+        expect(source).not.toContain('content-report-ack');
+        expect(supportInboundBudgetKey('hour')).toBe('mail:support-inbound:hour');
+        expect(supportInboundBudgetKey('day')).toBe('mail:support-inbound:day');
+        // Decision 51: inbound gets 8/35 of its own; acknowledgments keep 8/35.
+        expect(mailLimit('supportInbound', 'hour').limit).toBe(8);
+        expect(mailLimit('supportInbound', 'day').limit).toBe(35);
         expect(mailLimit('contentReportAck', 'hour').limit).toBe(8);
         expect(mailLimit('contentReportAck', 'day').limit).toBe(35);
+    });
+
+    it('a spent inbound budget defers inbound only: the retry run waits, nothing else is touched', async () => {
+        const world = new World();
+        world.budget.remaining = 0;
+        const { deps } = await call(world, deliver());
+        expect(world.row().status).toBe('forward_deferred');
+        // The handler has exactly one budget to ask: its own.
+        expect(deps.reserveBudget).toHaveBeenCalledTimes(1);
+        expect(world.sends).toHaveLength(0);
     });
 });
 

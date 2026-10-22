@@ -612,13 +612,6 @@ const noticeOutcome = (result: ResendResult): Exclude<NoticeOutcome, 'deferred'>
 type Reservation = { ok: true; keys: string[] } | { ok: false; retryAfterSec: number };
 
 /**
- * The edge rate-limit bucket a sender's mail budget is counted in, per window.
- * resend-inbound's forwards spend the content-report-ack share through these
- * same keys (decision 14), so the two can never add up past the split.
- */
-export const mailBudgetKey = (sender: NoticeSender, window: string): string => `mail:${sender}:${window}`;
-
-/**
  * Reserve one unit of a sender's mail budget in every window, or say when
  * there will be some again. A window that refuses hands back what the others
  * reserved: no mail goes out, so none was spent.
@@ -626,7 +619,7 @@ export const mailBudgetKey = (sender: NoticeSender, window: string): string => `
 const takeMailBudget = async (deps: CommonDeps, sender: NoticeSender): Promise<Reservation> => {
     const keys: string[] = [];
     for (const [window, { limit, windowMs }] of Object.entries(deps.mailBudgets[sender])) {
-        const key = mailBudgetKey(sender, window);
+        const key = `mail:${sender}:${window}`;
         const gate = await deps.checkRateLimit(key, limit, windowMs);
         if (!gate.ok) {
             deps.logError(`${key}: the ceiling on this mail was reached; notices stay queued`);
