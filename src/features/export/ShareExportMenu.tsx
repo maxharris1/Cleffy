@@ -321,6 +321,8 @@ export const ShareExportMenu = ({
     // The menu hangs from the button's right edge, which on a phone sits near
     // the middle of the toolbar: widened for a notice it would run off the
     // left of the screen, so nudge it back inside the gutter.
+    // Placed again when the button's label changes ("Exporting…" and back),
+    // which moves that edge under a menu kept open over a notice.
     useLayoutEffect(() => {
         const menu = menuRef.current;
         if (!open || !menu) {
@@ -336,7 +338,7 @@ export const ShareExportMenu = ({
         place();
         window.addEventListener('resize', place);
         return () => window.removeEventListener('resize', place);
-    }, [open, wide]);
+    }, [open, wide, busy]);
 
     return (
         <div ref={rootRef} className="relative">

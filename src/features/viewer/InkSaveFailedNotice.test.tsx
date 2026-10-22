@@ -192,4 +192,24 @@ describe('InkSaveFailedNotice', () => {
         expect(screen.queryByRole('button', { name: 'Export' })).not.toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
     });
+
+    it('when the overtaken change was an erase: says so, with Dismiss and no Export (nothing of it to keep)', async () => {
+        const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
+        await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });
+        const store = await mountStore(db);
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.delete('a1').catch(() => undefined);
+        full.mockRestore();
+        await db.annotations.put({ ...stroke('a1'), seq: 9, color: '#0000ff', pending: 0 });
+        render(<InkSaveFailedNotice store={store} onExport={() => undefined} />);
+        await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+        expect(
+            await screen.findByText(
+                'Some of your unsaved changes were overtaken by newer ones made elsewhere before this device could save them, so the newer versions are shown.',
+            ),
+        ).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Export' })).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();
+    });
 });

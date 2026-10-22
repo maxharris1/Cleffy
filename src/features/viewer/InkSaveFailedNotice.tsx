@@ -51,10 +51,16 @@ const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { 
               };
     }
     if (state === 'conflicts') {
-        return {
-            short: 'Some marks changed elsewhere before saving. Export keeps yours.',
-            long: 'Some of your unsaved marks were changed elsewhere before this device could save them, so the newer versions are shown. Export a copy to keep yours.',
-        };
+        // An overtaken erase has no version of its own for Export to keep.
+        return exportable
+            ? {
+                  short: 'Some marks changed elsewhere before saving. Export keeps yours.',
+                  long: 'Some of your unsaved marks were changed elsewhere before this device could save them, so the newer versions are shown. Export a copy to keep yours.',
+              }
+            : {
+                  short: 'Some changes were overtaken elsewhere before saving.',
+                  long: 'Some of your unsaved changes were overtaken by newer ones made elsewhere before this device could save them, so the newer versions are shown.',
+              };
     }
     if (state === 'held') {
         return retryFailed
@@ -104,6 +110,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
     const refused = useRecoveryCount(store, (s) => s.refusedEditCount);
     const overflow = useRecoveryCount(store, (s) => s.overflowCount);
     const conflicts = useRecoveryCount(store, (s) => s.conflictCount);
+    const exportableConflicts = useRecoveryCount(store, (s) => s.exportableConflictCount);
     const [retrying, setRetrying] = useState(false);
     const [retryFailed, setRetryFailed] = useState(false);
 
@@ -111,7 +118,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
         return null;
     }
     const state: NoticeState = overflow > 0 ? 'overflow' : count > 0 ? 'held' : refused > 0 ? 'refused' : 'conflicts';
-    const exportable = count > 0 || conflicts > 0;
+    const exportable = count > 0 || exportableConflicts > 0;
 
     const retry = async () => {
         setRetrying(true);
