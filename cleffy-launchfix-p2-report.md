@@ -355,3 +355,46 @@ Merge order per the packet: P2 goes second, after P1, and there is no file overl
     | Supabase Preview        | check 119764881541                      | skipped |
 
 - **Not re-verified:** as before, this session has not re-run the local checks, the CSP smoke or the ui-check on the heads after `0508174`.
+
+## Addendum 5 (13:19 UTC): rebased onto new dev; head `7c9c350`, everything green
+
+- **Rebase:** at 13:08 UTC the PR branch was **rebased onto the new `dev` and force-pushed**. This session did neither; the committer reads Max Harris.
+    - New base: `937c915ba45184455a46fdbd16940ceca964b34b`, "Merge pull request #69 from maxharris1/mh/launchfix-p1-db-release-safety", i.e. P1 merged first, which is the packet's merge order.
+    - Old base: `47e9b38f`.
+    - New head: `7c9c350484a6bb9e5983f743e97504306787488e`.
+- **The rebase changed no content.** `git range-diff 47e9b38..0ca6c92 937c915..7c9c350` shows all 10 patches as identical (`=`).
+
+    | Commit      | Before rebase | After rebase |
+    | ----------- | ------------- | ------------ |
+    | BL-5        | `6ee39ac`     | `b0bfaad`    |
+    | SF-5        | `c8f10c9`     | `c15cdd9`    |
+    | SF-16       | `7d2bee1`     | `9b56ff2`    |
+    | SF-1        | `0508174`     | `3aa9f22`    |
+    | Follow-up 1 | `b3c4757`     | `e6d0613`    |
+    | Follow-up 2 | `7379a8b`     | `d3bf7c8`    |
+    | Follow-up 3 | `1ceeb9d`     | `a0c7d69`    |
+    | Follow-up 4 | `86f632c`     | `935668b`    |
+    | Follow-up 5 | `db55cab`     | `03b63f8`    |
+    | Follow-up 6 | `0ca6c92`     | `7c9c350`    |
+
+    The SHAs earlier in this report are the pre-rebase ones.
+
+- **CI on `7c9c350`:** all green.
+
+    | Check                   | Run id (job id)            | Result                     |
+    | ----------------------- | -------------------------- | -------------------------- |
+    | checks                  | 39784936116 (119845499763) | success                    |
+    | supabase-local          | 39784936116 (119845500091) | success                    |
+    | supabase-drift          | 39784936116 (119845500271) | success                    |
+    | omr-service             | 39784936116 (119845500169) | success                    |
+    | checks                  | 39784942681 (119845523441) | success                    |
+    | supabase-local          | 39784942681 (119845523089) | success                    |
+    | supabase-drift          | 39784942681 (119845523270) | success                    |
+    | omr-service             | 39784942681 (119845523314) | success                    |
+    | Vercel Preview Comments | check 119845944545         | success (preview deployed) |
+    | Supabase Preview        | check 119845491250         | skipped                    |
+
+- **PR state:** draft, base `dev` @ `937c915`, `mergeable_state: clean`, 10 commits, 48 files.
+- **Comments:** no review comments. The PR's three comments are two from Vercel and this session's rate-limit note.
+- **This report branch** still sits on the pre-rebase history (`0508174` + report commits). It is a scratch branch and does not need rebasing.
+- **Not re-verified:** as before, this session has not re-run the local checks, the CSP smoke or the ui-check on any head after `0508174`.
