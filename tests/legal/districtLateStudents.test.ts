@@ -130,7 +130,7 @@ describe('the re-list (decision 67(b) and (c))', () => {
 });
 
 describe('20261022130300 reruns and keeps the service role alone', () => {
-    it('sorts after 20261022130000, 130100 and 130200', () => {
+    it('sorts after 20261022130000 and 20261022130100', () => {
         const names = readdirSync(resolve(process.cwd(), 'supabase/migrations'))
             .filter((name) => name.startsWith('202610221'))
             .sort();
