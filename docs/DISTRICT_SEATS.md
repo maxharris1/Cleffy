@@ -111,7 +111,8 @@ to the district's subscription. Schema and reasoning:
     select public.admin_set_studio_seat_override(
         p_studio => (select st.id from public.studios st
                      join auth.users u on u.id = st.owner_id
-                     where u.email = 'admin@district.example'),
+                     where u.email = 'admin@district.example'
+                       and st.superseded_at is null),
         p_seat_limit => 40,
         p_stripe_subscription_id => 'sub_...',
         p_actor => 'Max',
