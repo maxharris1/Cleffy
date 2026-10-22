@@ -630,8 +630,10 @@ Each `\ir`s its migrations to rerun them, so it is psql only.
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
 `supabase/sql-tests/sharing_access_control.sql` through
-`scripts/ci/sql-proof.sh`, which reads both result shapes above. A new proof
-runs there by being added. Any failing check fails the job: there is no list of
+`scripts/ci/sql-proof.sh`, which reads both result shapes above and holds the
+summary to the rows: a `failures | total` proof must print exactly `total`
+check rows, `failures` of them failing, and the harness exactly its `k`
+failing rows. A new proof runs there by being added. Any failing check fails the job: there is no list of
 tolerated failures, and the only exception `.github/workflows/ci.yml` can hold is
 a whole proof skipped with its reason (none). The job also fails, by name, unless
 Realtime is running and has created today's `realtime.messages` partition, which
