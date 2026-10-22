@@ -18204,3 +18204,71 @@ $$;
 revoke all on function public.defer_district_retention_notice (bigint) from public, anon, authenticated;
 
 grant execute on function public.defer_district_retention_notice (bigint) to service_role;
+
+-- ===== supabase/migrations/20261022100000_explicit_service_role_grants.sql =====
+-- Explicit service_role grants on the fifteen public tables that never had one
+-- (launch re-audit BL-3).
+--
+-- Every other public table names service_role in a grant of its own (the core
+-- tables since 20260827140000_core_table_grants.sql). These fifteen only ever
+-- revoked from the client roles and relied on the default ACL for objects
+-- `postgres` creates in `public`, which today gives service_role arwdDxtm. That
+-- default is the platform's to change -- Supabase's announced change to default
+-- grants for new tables (dated 2026-10-30, not verified here) is exactly such a
+-- change -- and a fresh replay onto a project built after it would leave the
+-- service role with `42501 permission denied` on tables the Edge Functions
+-- write directly: billing_customers (stripe-checkout, the webhook),
+-- content_reports, content_notice_outbox and content_moderators (the
+-- content-report and content-moderation functions). The rest are read or
+-- written by SECURITY DEFINER functions, by the service role's admin SQL and
+-- by tests/sql proofs acting as it.
+--
+-- The client roles are left exactly as they are: no grant or revoke here names
+-- anon or authenticated, so the column grants on studios (insert (id,
+-- owner_id, name), update (name)) and practice_notes (update (body, shared,
+-- noted_on)), and every revoke, stand.
+--
+-- `all`, as 20260827140000 grants the core tables: service_role bypasses RLS,
+-- and this is the table-level gate only. Rerunnable: granting a privilege that
+-- is already held is a no-op.
+
+grant all on table public.billing_customers,
+               public.studios,
+               public.studio_members,
+               public.usage_counters,
+               public.assignments,
+               public.practice_notes,
+               public.edge_rate_buckets,
+               public.pdf_export_claims,
+               public.content_moderators,
+               public.content_reports,
+               public.content_takedowns,
+               public.content_strikes,
+               public.content_notice_log,
+               public.content_notice_outbox,
+               public.document_realtime_epochs
+    to service_role;
+
+-- ===== supabase/migrations/20261022100100_billing_lock_tables_client_revoke.sql =====
+-- No client role holds anything on the three billing lock tables (decision 20).
+--
+-- checkout_attempts (20261012120103), subscription_writes (20261012120105) and
+-- duplicate_refunds (20261013120102) are the service role's alone: they are
+-- read and written only by the webhook and stripe-checkout, through
+-- begin/stage/finish/release_checkout_attempt, claim/release_subscription_write
+-- and the duplicate-refund functions, all of which refuse every other caller.
+-- Each migration enabled RLS, added no policy and granted the service role,
+-- but never revoked from the client roles, so they kept whatever the default
+-- ACL for `postgres`-owned tables in `public` hands out. On the local stack
+-- (and any project whose default ACL is permissive) that is arwdDxtm: RLS
+-- still hides every row, but a signed-in or anonymous caller can count the
+-- tables, and TRUNCATE ignores RLS altogether. tests/sql/billing_double_charge.sql
+-- checks 89, 92 and 98 ("or read the attempts table", "or read the write locks
+-- table", "nor read the refund ledger") expect 42501 and failed 3 of 98 there.
+--
+-- Same convention as every other billing table: revoke from public, anon and
+-- authenticated; the service role's own grant is untouched. Rerunnable.
+
+revoke all on table public.checkout_attempts from public, anon, authenticated;
+revoke all on table public.subscription_writes from public, anon, authenticated;
+revoke all on table public.duplicate_refunds from public, anon, authenticated;
