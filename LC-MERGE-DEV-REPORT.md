@@ -209,7 +209,112 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
     - Typecheck ❌, with **only** the same `districtSeats.test.ts` error. So once that is
       fixed at the #61 step, nothing else is expected to block #64.
 
-## Final state
+## Final state (continuation run)
+
+- **All four PRs are merged into `dev`**, in order, as merge commits:
+
+    | PR | Branch | Reviewed SHA | Conflict-resolution merge on the PR branch | Merge commit on dev |
+    | --- | --- | --- | --- | --- |
+    | #63 | `mh/launch-legal-pages` | `c12b023` | none | `9b106e0ccaf9b0e407baab4c04b066ec77a248e5` |
+    | #62 | `mh/launch-checkout` | `553f5d2` | `438ad800fd1d07b351db7e15dd25bbff94573efb` | `225bd64afb5a61502f3308c5018b1df0cceab7cd` |
+    | #61 | `mh/district-seats` | `a472674` | `8a6022ca72ddd39414e9f53ea1637673d78dc183` (+ approved test stubs) | `6adde0551a4a882bfd997e7e2b53770fe806939c` |
+    | #64 | `mh/launch-consent` | `82d32c7` | `420c19ea6fc3d88e2d3bc839724708f105ff7e63` | `208cb5ffc9e339f15059b1bd07629e9d2cd563ec` |
+
+- `dev` is at **`208cb5ffc9e339f15059b1bd07629e9d2cd563ec`**. All four reviewed SHAs are
+  ancestors of it (checked with `git merge-base --is-ancestor`), and each is the first
+  parent of its PR's final head.
+- **Migration mirror: 96 files, 94 mirrored** (the two `*_imslp_works_catalog.sql` files are
+  omitted by design), as expected.
+- **Recoverability job count: 10**, as expected: billing-mail-outbox, content-notice-retry,
+  district-seat-reconcile, imslp-sync, omr-sweep, and retention-archived-students,
+  retention-compact-tombstones, retention-rate-limits, retention-stale-guests,
+  retention-support-messages.
+- **Byte parity with #62 (`553f5d2`) on dev's final tree**, by git blob SHA:
+  `_shared/mailBudget.ts` (`beb4df8`), `_shared/resendDelivery.ts` (`6993439`),
+  `_shared/legalVersions.ts` (`3b360d9`), `tests/security/mailBudget.test.ts` (`59581e2`),
+  `tests/security/resendDelivery.test.ts` (`ba32020`). All identical.
+- **district_billing:** `tests/billing/districtBillingCanonical.test.ts` pins sha256
+  `a3043de59252d4191331b137fedb8192f3cdc206db2a222be8e35d7b913b60be`, and it passes on dev's
+  final tree (locally and in CI), together with `tests/legal/districtBillingCanonical.test.ts`.
+- **Dev CI on `208cb5f` (the final merge commit, push run 39699644176): all green.**
+  `checks` ✅ (lint, typecheck, test, build), **`supabase-local` ✅** (all migrations on a
+  local stack, cancel-link store test, SQL proofs), `supabase-drift` ✅, `omr-service` ✅.
+  Dev CI on `6adde05` (#61 merge, run 39698701326) was also all green, including
+  supabase-local. No flake re-runs were needed anywhere in the continuation run.
+- `main` is unchanged at `cf1e968`. PR #54 was not touched.
+
+## Hosted dev Supabase (`qdbnlrgylelelvwbkvnm`) and Vercel (observed only, from GitHub)
+
+I read only GitHub Actions job logs and check-run output. I did not connect to, query or
+write to any hosted Supabase project, and I did not use the Supabase CLI or MCP.
+
+- **The `supabase-drift` job does not look at hosted dev.** Its log shows
+  `SUPABASE_PROJECT_REF: jibgwgosihadbjgxdsfe`, i.e. it compares the branch with **prod**,
+  read-only. So GitHub Actions logs carry no migration history for hosted dev. What it does
+  show, for prod, on `208cb5f`: "migrations: 96 in this branch, 27 applied on
+  jibgwgosihadbjgxdsfe" (69 listed as "pending, will apply on merge", from
+  `20260830120000_library_bootstrap_and_perf.sql` through
+  `20261021120900_district_notice_mail_budget.sql`), and "functions: 23 in this branch,
+  13 live on jibgwgosihadbjgxdsfe" (not yet live: billing-cancel, billing-mail-outbox,
+  content-moderation, content-notices, content-report, delete-account,
+  district-retention-notices, guest-email-confirm, guest-email-start, imslp-sync). It
+  ends "clean: this branch and the live project agree", which means no drift, not that
+  anything was applied. Prod still has 27 migrations applied, the same as before the
+  merges, so nothing reached prod.
+- **The repo has one workflow, `CI` (`.github/workflows/ci.yml`), and no job in it deploys.**
+  Anything that reaches hosted dev comes from the Supabase GitHub integration (Branching).
+  `supabase/config.toml` maps `[remotes.dev]` to `project_id = "qdbnlrgylelelvwbkvnm"`.
+- **Supabase Preview check:** on the PR heads (`8a6022c`, `420c19e`) it was `skipped`, with
+  the output "This git branch is not associated with any Supabase Branch." The earlier run
+  saw it **succeed on the dev merge commits `9b106e0` and `225bd64`**, with empty output. For
+  `6adde05` and `208cb5f` I couldn't read the check run on GitHub: the tools I have list
+  check runs only for a PR's head, and the only PR whose head is `dev` is #54, which I left
+  alone. **So GitHub, as far as I can read it, does not show which migrations hosted dev has
+  applied, or whether its edge functions deployed.** If the integration behaved as it did
+  for #63 and #62, it ran on `6adde05` and `208cb5f` too, and may have applied #61's and
+  #64's migrations (20261020180400–181200 and 20261021120000–120900, including the 5
+  retention cron jobs) and `config.toml` to hosted dev. Max should check the dev project's
+  migration history and its functions list in the dashboard, and look at the retention
+  counts before 03:17 UTC (decision 7; #64's hosted step 4). #64 sets the
+  `before_user_created` hook to `enabled = false` for dev, so a branch deploy doesn't switch
+  it on.
+- **Vercel:** `Vercel Preview Comments` ✅ on both PR heads, and `vercel[bot]` updated the
+  Preview deployment comment on each PR (e.g. #61's preview at 00:13:20Z). These are
+  Preview deployments. `main` hasn't moved, so no Production deployment came from this
+  work. Whether a dev alias (e.g. dev.cleffy.io) now serves `208cb5f` depends on Vercel's
+  branch settings, which I can't see from GitHub.
+
+## Open questions for Max
+
+1. **Hosted dev Supabase:** confirm in the dashboard what the integration applied after
+   the #61 and #64 merges, and whether functions deployed (see above). GitHub doesn't show
+   it. Before 03:17 UTC, check the retention counts, or pause the retention cron on dev if
+   it was applied.
+2. Still open from the decisions file: the small dev PR revoking the anon/authenticated
+   grants (decisions 20 and 37), and adding the district SQL proofs to the supabase-local
+   job. I did neither (out of scope).
+3. `SETUP_SUPABASE.md` and `src/sync/annotationStore.ts` are not Prettier-formatted. Both
+   predate this work, and CI doesn't check formatting. I left them.
+
+## Environment (continuation run)
+
+- Ran in session `session_01ErrKnv9K1mRHTRiY4JAUVF`, in the Cleffy cloud environment
+  **`env_01WAd3yiz3qpSnsofpyEwCh2`** (`anthropic_cloud`), not Sandbox. I confirmed it at the
+  start with `get_session`.
+- I didn't start the local Supabase stack, because CI's supabase-local covered the DB steps.
+  So no `cloud:down` was needed. I didn't touch any hosted Supabase project, Stripe (live
+  or test) or secret. I sent no messages to any session or person.
+- Pushes in the continuation run, all fast-forward:
+    - `mh/district-seats`: `a472674` → `8a6022c`
+    - `mh/launch-consent`: `82d32c7` → `420c19e`
+    - `claude/lc-merge-dev-report`: report updates only.
+
+    Nothing was force-pushed. `dev` changed only through the GitHub merges of #61 and #64.
+    Every commit is authored as Max Harris <drumaxter@gmail.com>.
+
+## The earlier run's final state (history, from before the continuation)
+
+### Final state at the earlier stop
 
 - `dev` is at **`225bd64afb5a61502f3308c5018b1df0cceab7cd`**: #63 and #62 are merged; #61 and
   #64 are not. Migrations on dev: 77 files, 75 mirrored. Recoverability job count on dev: 4. The expected 96/94 and 10 depend on #61 and #64.
@@ -223,7 +328,7 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
   **`supabase-local` ✅**, `supabase-drift` ✅ and `omr-service` ✅ (push and PR runs),
   Vercel Preview Comments ✅, Supabase Preview ✅.
 
-## Automatic deployments (observed only; I applied nothing)
+### Automatic deployments (observed only; I applied nothing)
 
 - **Hosted dev Supabase (`qdbnlrgylelelvwbkvnm`): it probably deployed.** The Supabase
   GitHub integration's **"Supabase Preview" check ran and succeeded on both dev merge
@@ -245,7 +350,7 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
   serves `225bd64` depends on Vercel's branch-alias settings, which I can't see from here.
 - Prod Supabase (`jibgwgosihadbjgxdsfe`), `main`, PR #54 and live Stripe: untouched.
 
-## Open questions for Max
+### Open questions for Max
 
 1. **Approve the two-line test fix for #61** (above): put it in the #61 conflict-resolution
    merge commit, or land it on dev first. After that, #61 then #64 should go through as
@@ -255,7 +360,7 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
 3. `SETUP_SUPABASE.md` is not Prettier-formatted on dev. That predates this work, and CI
    doesn't check it. I left it as it was.
 
-## Environment
+### Environment
 
 - Ran in the Cleffy cloud environment **`env_01WAd3yiz3qpSnsofpyEwCh2`**
   (`anthropic_cloud`), not Sandbox. I confirmed it at the start with `get_session` for this
@@ -270,3 +375,5 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
     Nothing was force-pushed, and nothing was pushed directly to `dev`.
 
 STATUS: STOPPED typecheck-failed #61 (checks would fail: tests/billing/districtSeats.test.ts WebhookStore mock lacks #62's recordPurchaseNotice/recordCancellationNotice; the fix is a code change beyond conflict resolution and needs approval). #63 and #62 are merged into dev; #61 and #64 are not merged.
+
+STATUS2: COMPLETE
