@@ -10,6 +10,7 @@ import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { supabaseQuotaBackend } from '../_shared/quota.ts';
 import { loginThrottleSecret } from '../_shared/rateLimit.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 import { endStudentSessions } from '../_shared/studentSessions.ts';
 import {
     formatLoginCode,
@@ -135,12 +136,13 @@ type Gate = { ok: true } | { ok: false; response: Response };
 
 type OwnedRoster = { ok: true; row: RosterRow } | { ok: false; response: Response };
 
-const readBody = async (req: Request): Promise<ProvisionBody | null> => {
-    try {
-        return (await req.json()) as ProvisionBody;
-    } catch {
-        return null;
+/** The body, null when it is not a JSON object, or 'too_large' past the control cap. */
+const readBody = async (req: Request): Promise<ProvisionBody | null | 'too_large'> => {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? 'too_large' : null;
     }
+    return isJsonObject(read.value) ? (read.value as ProvisionBody) : null;
 };
 
 /**
@@ -895,6 +897,9 @@ Deno.serve(async (req) => {
     }
 
     const body = await readBody(req);
+    if (body === 'too_large') {
+        return jsonResponse(PAYLOAD_TOO_LARGE, 413);
+    }
     if (!body) {
         return jsonResponse({ error: 'Invalid JSON body' }, 400);
     }

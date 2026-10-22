@@ -19,6 +19,7 @@ import {
     type StripeMode,
 } from '../_shared/stripe.ts';
 import { holdsRunningSubscription } from '../_shared/stripeEvents.ts';
+import { readCappedJson } from '../_shared/readCappedJson.ts';
 
 /**
  * Creates a Stripe Checkout session for a subscription price and maps
@@ -58,6 +59,7 @@ const billing = (mode: StripeMode) => {
 Deno.serve((req) =>
     handleCheckout(req, {
         json: jsonResponse,
+        readJson: readCappedJson,
         options: optionsResponse,
         clientKey,
         checkRateLimit,

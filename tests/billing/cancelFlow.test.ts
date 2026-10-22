@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Delivery, SendResult } from '../../supabase/functions/_shared/billingOutbox';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import {
+    BODY_MAX_BYTES,
     CANCEL_LINK_SEND_MARGIN_S,
     CANCEL_LINK_TTL_MS,
     deliverCancelLink,
@@ -22,6 +23,9 @@ import {
 import { resendIdempotencyKey, sendViaResend } from '../../supabase/functions/_shared/resendDelivery';
 import { liveSubscriptionOf } from '../../supabase/functions/_shared/stripeEvents';
 import type { StripeMode } from '../../supabase/functions/_shared/stripeMode';
+import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
+import { chunkedJson } from '../security/chunkedBody';
+import { CONTROL_BODY_MAX_BYTES, PAYLOAD_TOO_LARGE } from '../../supabase/functions/_shared/readCappedJson';
 import { FakeResend } from './fakeResend';
 
 /**
@@ -177,6 +181,7 @@ const harness = (
     const cancellableSubscription = vi.fn(async () => subscription);
     const deps: CancelDeps = {
         json,
+        readJson: readCappedJson,
         options: () => new Response(null, { status: 204 }),
         clientKey: () => '203.0.113.7',
         checkRateLimit: async (key, limit, windowMs) => {
@@ -1318,5 +1323,19 @@ describe("reading Stripe's subscription for the cancel page (stripeEvents.ts liv
         const fn = readFileSync(resolve(process.cwd(), 'supabase/functions/billing-cancel/index.ts'), 'utf8');
         expect(fn).toContain('liveSubscriptionOf(sub)');
         expect(fn).not.toMatch(/cancelAt !== null/);
+    });
+});
+
+describe('billing-cancel body cap', () => {
+    it('answers 413 to a chunked body past the control cap', async () => {
+        expect(BODY_MAX_BYTES).toBe(CONTROL_BODY_MAX_BYTES);
+        const h = harness();
+        const response = await handleCancel(
+            chunkedJson({ action: 'start', email: 'ada@example.com' }, BODY_MAX_BYTES + 1),
+            h.deps,
+        );
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual(PAYLOAD_TOO_LARGE);
+        expect(h.sent).toHaveLength(0);
     });
 });

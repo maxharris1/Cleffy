@@ -11,6 +11,7 @@ import {
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 import { expireOpenCheckoutSessions, servedModes, stripeClient } from '../_shared/stripe.ts';
 
 /**
@@ -44,13 +45,13 @@ interface DeleteBody {
     password?: unknown;
 }
 
-const readBody = async (req: Request): Promise<DeleteBody | null> => {
-    try {
-        const parsed = await req.json();
-        return parsed && typeof parsed === 'object' ? (parsed as DeleteBody) : null;
-    } catch {
-        return null;
+/** The body, null when it is not a JSON object, or 'too_large' past the control cap. */
+const readBody = async (req: Request): Promise<DeleteBody | null | 'too_large'> => {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? 'too_large' : null;
     }
+    return isJsonObject(read.value) ? (read.value as DeleteBody) : null;
 };
 
 const isStripeMissing = (err: unknown): boolean =>
@@ -358,6 +359,9 @@ Deno.serve(async (req) => {
     }
 
     const body = await readBody(req);
+    if (body === 'too_large') {
+        return jsonResponse(PAYLOAD_TOO_LARGE, 413);
+    }
     if (!body || body.confirm !== DELETE_CONFIRMATION) {
         return jsonResponse({ error: `Type ${DELETE_CONFIRMATION} to confirm`, code: 'confirmation_required' }, 400);
     }

@@ -1,6 +1,7 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
+import { PAYLOAD_TOO_LARGE, readCappedText, WEBHOOK_BODY_MAX_BYTES } from '../_shared/readCappedJson.ts';
 import { forwardedSubject, inboxTagFor, isOwnForward } from '../_shared/supportMail.ts';
 import { type SvixFailure, verifySvixSignature } from '../_shared/svixSignature.ts';
 
@@ -82,8 +83,15 @@ Deno.serve(async (req) => {
     }
 
     // The RAW body — verification is over the exact bytes Svix signed, so this
-    // must be read before (and instead of) any JSON parsing.
-    const rawBody = await req.text();
+    // must be read before (and instead of) any JSON parsing. Capped as it
+    // streams: the signature is checked over exactly the bytes read here.
+    const raw = await readCappedText(req, WEBHOOK_BODY_MAX_BYTES);
+    if (!raw.ok) {
+        return raw.status === 413
+            ? jsonResponse(PAYLOAD_TOO_LARGE, 413)
+            : jsonResponse({ error: 'Could not read the body' }, 400);
+    }
+    const rawBody = raw.value;
     const check = await verifySvixSignature(
         rawBody,
         {

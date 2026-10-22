@@ -1,5 +1,6 @@
 import type * as BillingTerms from './billingTerms.ts';
 import type { LEGAL_VERSIONS } from './legalVersions.ts';
+import type * as ReadCapped from './readCappedJson.ts';
 import type { StripeMode } from './stripeMode.ts';
 import type * as StripeEvents from './stripeEvents.ts';
 
@@ -375,6 +376,11 @@ export interface CheckoutDeps {
     /** _shared/legalVersions.ts: the policy versions a consent records. */
     legalVersions: Pick<typeof LEGAL_VERSIONS, 'terms' | 'refunds'>;
     json: (body: unknown, status?: number) => Response;
+    /**
+     * _shared/readCappedJson.ts's readCappedJson, passed in because this file
+     * takes no runtime imports: the body read with a streamed cap.
+     */
+    readJson: typeof ReadCapped.readCappedJson;
     options: () => Response;
     clientKey: (req: Request) => string;
     checkRateLimit: (
@@ -914,6 +920,14 @@ interface CheckoutRequestBody {
  * Free signup stays card-free -- the free tier is simply "no subscriptions row"
  * -- so nothing here runs until a teacher chooses to pay.
  */
+/**
+ * The cap on a request body, counted as it streams (Content-Length is not
+ * trusted): readCappedJson.ts's CONTROL_BODY_MAX_BYTES. Past it the answer
+ * is 413 with PAYLOAD_TOO_LARGE, before anything is parsed.
+ */
+export const BODY_MAX_BYTES = 16 * 1024;
+const PAYLOAD_TOO_LARGE = { error: 'Request body too large', code: 'payload_too_large' } as const;
+
 export const handleCheckout = async (req: Request, deps: CheckoutDeps): Promise<Response> => {
     if (req.method === 'OPTIONS') {
         return deps.options();
@@ -936,12 +950,14 @@ export const handleCheckout = async (req: Request, deps: CheckoutDeps): Promise<
         return caller;
     }
 
-    let body: CheckoutRequestBody;
-    try {
-        body = (await req.json()) as CheckoutRequestBody;
-    } catch {
+    const read = await deps.readJson(req, BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? deps.json(PAYLOAD_TOO_LARGE, 413) : deps.json({ error: 'Invalid JSON body' }, 400);
+    }
+    if (!read.value || typeof read.value !== 'object' || Array.isArray(read.value)) {
         return deps.json({ error: 'Invalid JSON body' }, 400);
     }
+    const body = read.value as CheckoutRequestBody;
 
     // Which Stripe account this buyer belongs to is decided by where they are
     // browsing, never by anything they send: cleffy.io is the live account,

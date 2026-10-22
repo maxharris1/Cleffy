@@ -1,4 +1,5 @@
 import type * as LoginThrottle from '../_shared/loginThrottle.ts';
+import type * as ReadCapped from '../_shared/readCappedJson.ts';
 import type * as StudentCodes from '../_shared/studentCodes.ts';
 
 /**
@@ -133,6 +134,11 @@ export interface StudentLoginBackend {
 
 export interface StudentLoginDeps {
     json: (body: unknown, status?: number) => Response;
+    /**
+     * _shared/readCappedJson.ts's readCappedJson, passed in because this file
+     * takes no runtime imports: the body read with a streamed cap.
+     */
+    readJson: typeof ReadCapped.readCappedJson;
     options: () => Response;
     clientKey: (req: Request) => string;
     checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
@@ -154,6 +160,14 @@ export interface StudentLoginDeps {
     sleep: (ms: number) => Promise<void>;
     logError: (message: string) => void;
 }
+
+/**
+ * The cap on a request body, counted as it streams (Content-Length is not
+ * trusted): readCappedJson.ts's CONTROL_BODY_MAX_BYTES. Past it the answer
+ * is 413 with PAYLOAD_TOO_LARGE, before anything is parsed.
+ */
+export const BODY_MAX_BYTES = 16 * 1024;
+const PAYLOAD_TOO_LARGE = { error: 'Request body too large', code: 'payload_too_large' } as const;
 
 export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): Promise<Response> => {
     const { json, throttle } = deps;
@@ -179,15 +193,12 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
         return json({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
 
-    let body: { username?: unknown; password?: unknown; captchaToken?: unknown };
-    try {
-        body = await req.json();
-    } catch {
-        return json({ error: 'Invalid JSON body' }, 400);
+    const read = await deps.readJson(req, BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? json(PAYLOAD_TOO_LARGE, 413) : json({ error: 'Invalid JSON body' }, 400);
     }
-    if (!body || typeof body !== 'object') {
-        body = {};
-    }
+    const body: { username?: unknown; password?: unknown; captchaToken?: unknown } =
+        read.value && typeof read.value === 'object' && !Array.isArray(read.value) ? read.value : {};
 
     // Stored usernames are canonical-lowercase, so normalizing here means the
     // capital a phone keyboard adds is not a way to fail. Shape only, and never

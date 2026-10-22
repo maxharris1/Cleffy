@@ -26,6 +26,7 @@
  * the two index.ts files are only the wiring.
  */
 
+import type * as ReadCapped from './readCappedJson.ts';
 import type { ResendResult } from './resendDelivery.ts';
 
 // ---------------------------------------------------------------------------
@@ -550,6 +551,11 @@ export type MailBudget = { hour: { limit: number; windowMs: number }; day: { lim
 
 export interface CommonDeps {
     json: (body: unknown, status?: number) => Response;
+    /**
+     * _shared/readCappedJson.ts's readCappedJson, passed in because this file
+     * takes no runtime imports: the body read with a streamed cap.
+     */
+    readJson: typeof ReadCapped.readCappedJson;
     options: () => Response;
     clientKey: (req: Request) => string;
     checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
@@ -701,13 +707,23 @@ const deliveryOf = (outcomes: Map<string, Exclude<Delivery, 'skipped'>>, id: str
 /** How many notices one request delivers, its own first: enough to clear a small backlog, never a long wait. */
 const DELIVER_PER_REQUEST = 5;
 
-const readBody = async (req: Request): Promise<Record<string, unknown> | null> => {
-    try {
-        const body: unknown = await req.json();
-        return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
-    } catch {
-        return null;
+/**
+ * The cap on a report or moderation body, counted as it streams (Content-Length
+ * is not trusted). Above readCappedJson.ts's 16 KiB control cap on purpose:
+ * REPORT_FIELD_LIMITS allow about 20,000 characters of text, and a character
+ * can take several bytes once UTF-8 and JSON-escaped, plus the captcha token.
+ */
+export const REPORT_BODY_MAX_BYTES = 128 * 1024;
+const PAYLOAD_TOO_LARGE = { error: 'Request body too large', code: 'payload_too_large' } as const;
+
+/** The body as an object; null for anything else, 'too_large' past REPORT_BODY_MAX_BYTES. */
+const readBody = async (req: Request, deps: CommonDeps): Promise<Record<string, unknown> | null | 'too_large'> => {
+    const read = await deps.readJson(req, REPORT_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? 'too_large' : null;
     }
+    const body = read.value;
+    return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
 };
 
 const tooMany = (json: CommonDeps['json'], retryAfterSec: number): Response =>
@@ -760,7 +776,10 @@ export const handleContentReport = async (req: Request, deps: ContentReportDeps)
         return tooMany(json, ipGate.retryAfterSec);
     }
 
-    const body = await readBody(req);
+    const body = await readBody(req, deps);
+    if (body === 'too_large') {
+        return json(PAYLOAD_TOO_LARGE, 413);
+    }
     const parsed = parseContentReport(body);
     if (!parsed.ok) {
         return json(CONTENT_REPORT_ERRORS.invalid(parsed.field, parsed.error), 422);
@@ -888,7 +907,11 @@ export const handleContentModeration = async (req: Request, deps: ContentModerat
         return json({ error: 'Moderators only.', code: 'not_moderator' }, 403);
     }
 
-    const body = (await readBody(req)) ?? {};
+    const read = await readBody(req, deps);
+    if (read === 'too_large') {
+        return json(PAYLOAD_TOO_LARGE, 413);
+    }
+    const body = read ?? {};
     const invalid = (field: string, error: string) => json({ error, code: 'invalid_request', field }, 422);
 
     const deliver = async (ids: Array<string | null>) =>

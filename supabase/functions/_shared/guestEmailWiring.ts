@@ -4,6 +4,7 @@ import { logError } from './errorReporting.ts';
 import type { GuestCaller, GuestEmailMessage } from './guestEmail.ts';
 import { checkRateLimit, clientKey, serviceClient } from './rateLimit.ts';
 import { type ResendResult, sendViaResend } from './resendDelivery.ts';
+import { readCappedJson } from './readCappedJson.ts';
 
 /**
  * What guest-email-start and guest-email-confirm run against — the Deno half
@@ -19,6 +20,7 @@ const mailFrom = (): string => Deno.env.get('GUEST_EMAIL_FROM') ?? 'Cleffy <nore
 
 export const common = {
     json: jsonResponse,
+    readJson: readCappedJson,
     options: optionsResponse,
     clientKey,
     checkRateLimit,

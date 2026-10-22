@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import * as billingTerms from '../../supabase/functions/_shared/billingTerms';
 import { LEGAL_VERSIONS } from '../../supabase/functions/_shared/legalVersions';
 import {
+    BODY_MAX_BYTES,
     CHECKOUT_ATTEMPT_STALE_AFTER,
     CHECKOUT_ATTEMPT_STALE_AFTER_MS,
     checkoutIdempotencyKey,
@@ -22,6 +23,9 @@ import {
     EDGE_FUNCTION_WALL_CLOCK_MS as WEBHOOK_WALL_CLOCK_MS,
     holdsRunningSubscription,
 } from '../../supabase/functions/_shared/stripeEvents';
+import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
+import { chunkedJson } from '../security/chunkedBody';
+import { CONTROL_BODY_MAX_BYTES, PAYLOAD_TOO_LARGE } from '../../supabase/functions/_shared/readCappedJson';
 
 /**
  * The checkout flow, run for real against a fake Stripe that models open
@@ -373,6 +377,7 @@ const harness = (
     const consents: Array<ConsentRecord & { id: string; sessionId: string | null }> = [];
     const deps: CheckoutDeps = {
         json,
+        readJson: readCappedJson,
         options: () => new Response(null, { status: 204 }),
         clientKey: () => '203.0.113.9',
         checkRateLimit: vi.fn(async () => {
@@ -1635,5 +1640,28 @@ describe('stripe-checkout/index.ts is wiring only', () => {
         // reader of the SQL sees only finish_checkout_attempt, so the nulls are
         // asserted here.
         expect(source).toMatch(/p_attempt_id: null,\s*\n\s*p_price_id: null,\s*\n\s*p_session_id: null,/);
+    });
+});
+
+describe('stripe-checkout body cap', () => {
+    it('answers 413 to a chunked body past the control cap, before Stripe is called', async () => {
+        expect(BODY_MAX_BYTES).toBe(CONTROL_BODY_MAX_BYTES);
+        const h = harness();
+        const response = await handleCheckout(
+            chunkedJson({ priceId: 'price_teacher_annual' }, BODY_MAX_BYTES + 1, {
+                url: 'https://edge.test/functions/v1/stripe-checkout',
+                headers: { Origin: 'https://cleffy.io', Authorization: 'Bearer jwt' },
+            }),
+            h.deps,
+        );
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual(PAYLOAD_TOO_LARGE);
+        expect(h.params).toHaveLength(0);
+    });
+
+    it('refuses a JSON body that is not an object', async () => {
+        const h = harness();
+        expect((await handleCheckout(post(null), h.deps)).status).toBe(400);
+        expect((await handleCheckout(post([1, 2]), h.deps)).status).toBe(400);
     });
 });

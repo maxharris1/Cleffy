@@ -14,6 +14,7 @@ import { LEGAL_OPERATOR } from './legalVersions.ts';
 import { mailLimit } from './mailBudget.ts';
 import { resendIdempotencyKey, sendViaResend, type ResendResult } from './resendDelivery.ts';
 import { checkRateLimit, clientKey, refundRateLimit, serviceClient } from './rateLimit.ts';
+import { readCappedJson } from './readCappedJson.ts';
 
 /**
  * What content-report and content-moderation run against — the Deno half of
@@ -56,6 +57,7 @@ const toNotice = (row: Record<string, unknown>): OutboxNotice | null => {
 
 export const common = {
     json: jsonResponse,
+    readJson: readCappedJson,
     options: optionsResponse,
     clientKey,
     checkRateLimit,

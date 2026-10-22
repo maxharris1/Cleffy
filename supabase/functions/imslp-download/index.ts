@@ -29,6 +29,7 @@ import {
 import { buildImslpProvenance } from '../_shared/imslpProvenance.ts';
 import { wikitextFromMwPage } from '../_shared/imslpWorkPage.ts';
 import { enforce, refund } from '../_shared/quota.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -147,7 +148,16 @@ Deno.serve(async (req) => {
         );
     }
 
-    let body: {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413
+            ? jsonResponse(PAYLOAD_TOO_LARGE, 413)
+            : jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    if (!isJsonObject(read.value)) {
+        return jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    const body = read.value as {
         filename?: string;
         acceptedDisclaimer?: boolean;
         documentId?: string;
@@ -155,11 +165,6 @@ Deno.serve(async (req) => {
         create?: boolean;
         title?: string;
     };
-    try {
-        body = await req.json();
-    } catch {
-        return jsonResponse({ error: 'Invalid JSON body' }, 400);
-    }
 
     const filename = typeof body.filename === 'string' ? body.filename.trim() : '';
     if (!filename || !filename.toLowerCase().endsWith('.pdf')) {

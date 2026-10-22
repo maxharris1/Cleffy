@@ -6,6 +6,7 @@ import * as throttle from '../_shared/loginThrottle.ts';
 import { loginThrottleSecret } from '../_shared/rateLimit.ts';
 import { normalizeUsername, USERNAME_RE } from '../_shared/studentCodes.ts';
 import { handleStudentLogin, type StudentLoginBackend } from './handler.ts';
+import { readCappedJson } from '../_shared/readCappedJson.ts';
 
 /**
  * Student sign-in by username and password. The control flow — gates, their
@@ -93,6 +94,7 @@ const backend = (): StudentLoginBackend | null => {
 Deno.serve((req) =>
     handleStudentLogin(req, {
         json: jsonResponse,
+        readJson: readCappedJson,
         options: optionsResponse,
         clientKey,
         checkRateLimit,
