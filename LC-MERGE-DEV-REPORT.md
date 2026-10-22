@@ -8,6 +8,22 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
 - `dev` at the start: `282b30ab956a2f6d2dc04d9e1aa7c6477a894ec9`.
 - All four PR heads matched their reviewed SHAs on both `origin` and GitHub at the start.
 
+## Continuation run
+
+- Started 2026-10-22 ~00:10Z (2026-10-21 ~8:10 PM ET) in session
+  `session_01ErrKnv9K1mRHTRiY4JAUVF`, environment **`env_01WAd3yiz3qpSnsofpyEwCh2`**
+  (`anthropic_cloud`, the Cleffy cloud environment, not Sandbox; confirmed with
+  `get_session`).
+- It continues the stopped run below: #63 and #62 are already merged and are not redone.
+  It does #61 and then #64, with Max's approved test-only stub fix (Cleffy decision 41) in
+  #61's conflict-resolution merge commit.
+- At the start: `dev` = `225bd64afb5a61502f3308c5018b1df0cceab7cd`; `mh/district-seats` =
+  `a472674a7d86990642271506bbb8b7c5cc92ac5e` and `mh/launch-consent` =
+  `82d32c7052846f1b7827cea2eac48e3cd3152ad9`, both equal to their reviewed SHAs on origin
+  and on GitHub (both PRs open, draft, base `dev`).
+- The sections for #61 and #64 below are updated after each merge. The earlier run's
+  stop line near the end of this file is kept as history.
+
 ## 1. #63 `mh/launch-legal-pages`: merged
 
 - Reviewed SHA: `c12b0230be6c9b2b14bb8ae8dcd3681e17f0a78a`. It was still the head on
