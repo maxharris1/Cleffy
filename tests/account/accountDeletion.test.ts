@@ -108,6 +108,11 @@ class FakeWorld {
     private attemptIds = 0;
     failBeginDeletion = false;
     failMarkDestructive = false;
+    /** checkout_attempts: a live lease another tab took before the marker. */
+    checkoutLeaseLive = false;
+    failCheckoutCheck = false;
+    /** student_provision_intents: provisionings with no roster row (yet). */
+    intents: Array<{ rosterId: string; teacherId: string; studentUserId: string | null; live: boolean }> = [];
     stored: Array<StoredSubscriptionRef & { userId: string }> = [];
     stripe: Record<StripeMode, FakeStripe | null> = { live: new FakeStripe(this.log), test: new FakeStripe(this.log) };
 
@@ -234,6 +239,21 @@ class FakeWorld {
                 if (!marker.destructive && ![...marker.active.values()].some((until) => until > this.now)) {
                     this.pending.delete(userId);
                 }
+            },
+            checkoutInFlight: async () => {
+                if (this.failCheckoutCheck) {
+                    throw new Error('db down');
+                }
+                this.log.push('checkout-check');
+                return this.checkoutLeaseLive;
+            },
+            provisionIntents: async (teacherId) =>
+                this.intents
+                    .filter((intent) => intent.teacherId === teacherId)
+                    .map(({ rosterId, studentUserId, live }) => ({ rosterId, studentUserId, live })),
+            clearProvisionIntent: async (rosterId) => {
+                this.log.push(`intent-cleared:${rosterId}`);
+                this.intents = this.intents.filter((intent) => intent.rosterId !== rosterId);
             },
             billingCustomers: async (userId) => {
                 if (this.failBillingRead) {
@@ -1028,5 +1048,71 @@ describe('the pending marker (account_deletions)', () => {
         expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
         expect(world.pending.has(TEACHER)).toBe(false);
         expect(world.users.has(TEACHER)).toBe(false);
+    });
+});
+
+describe('the barrier beyond scores and roster rows (20261022110600)', () => {
+    it('refuses while a checkout from another tab is in flight: nothing deleted, marker cleared', async () => {
+        const world = payingTeacher();
+        world.checkoutLeaseLive = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 409, code: 'checkout_in_progress' });
+        expect(world.log.some((entry) => entry.startsWith('stripe.'))).toBe(false);
+        expect(world.documents.has('doc-1')).toBe(true);
+        expect(world.pending.has(TEACHER)).toBe(false);
+        // The check comes after the marker, so no new lease could have started meanwhile.
+        expect(world.log.indexOf(`pending:${TEACHER}`)).toBeLessThan(world.log.indexOf('checkout-check'));
+
+        world.checkoutLeaseLive = false;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+    });
+
+    it('a checkout check that fails stops the deletion before billing, as abandoned', async () => {
+        const world = payingTeacher();
+        world.failCheckoutCheck = true;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({
+            ok: false,
+            code: 'billing_cancel_failed',
+        });
+        expect(world.log.some((entry) => entry.startsWith('stripe.'))).toBe(false);
+        expect(world.pending.has(TEACHER)).toBe(false);
+    });
+
+    it('deletes the account a crashed provisioning made before its roster row, and clears the intent', async () => {
+        const world = new FakeWorld();
+        // createUser landed; the request died before the roster insert.
+        world.users.set('orphan', { userType: 'student', teacherId: TEACHER });
+        world.intents.push({ rosterId: 'roster-orphan', teacherId: TEACHER, studentUserId: 'orphan', live: false });
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 1 } });
+        expect(world.users.has('orphan')).toBe(false);
+        expect(world.intents).toEqual([]);
+    });
+
+    it('keeps a live intent with no account yet (its provisioning undoes itself), and clears a stale one', async () => {
+        const world = new FakeWorld();
+        world.intents.push(
+            { rosterId: 'in-flight', teacherId: TEACHER, studentUserId: null, live: true },
+            { rosterId: 'long-dead', teacherId: TEACHER, studentUserId: null, live: false },
+        );
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['in-flight']);
+    });
+
+    it('leaves an intent naming an account that is not flagged as this teacher’s student, for review', async () => {
+        const world = new FakeWorld();
+        world.users.set('unflagged', { userType: null, teacherId: null });
+        world.intents.push({ rosterId: 'invite-1', teacherId: TEACHER, studentUserId: 'unflagged', live: false });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.users.has('unflagged')).toBe(true);
+        expect(world.intents).toHaveLength(1);
+        expect(world.log.some((entry) => entry.includes('not flagged as their student'))).toBe(true);
+    });
+
+    it('clears an intent whose account is already gone', async () => {
+        const world = new FakeWorld();
+        world.intents.push({ rosterId: 'undone', teacherId: TEACHER, studentUserId: 'already-deleted', live: false });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.intents).toEqual([]);
     });
 });

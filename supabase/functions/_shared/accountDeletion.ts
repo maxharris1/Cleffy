@@ -39,6 +39,11 @@
  *     half-deleted account cannot grow while the person retries; when the auth
  *     user goes, the marker cascades with it.
  *
+ *  1c. Refuse while a checkout another tab started is still in flight: it took
+ *     its lease before the marker (which now refuses any new one) and could
+ *     open a Stripe session after both billing sweeps. Nothing is deleted; the
+ *     person tries again once it has finished or gone stale (5 minutes).
+ *
  *  2. Stop the money FIRST, and completely, before a single row is touched.
  *     Every subscription the caller has, in every Stripe account (live and
  *     test, see stripeMode.ts) we hold a customer for, is cancelled immediately,
@@ -53,7 +58,10 @@
  *     archive or pay for them, so they go too (each the same way: their own
  *     scores — none, by policy, but checked — then the auth user, whose FK
  *     cascades take the roster row, assignments and practice notes). Only an
- *     account still flagged as a student of THIS teacher is deleted.
+ *     account still flagged as a student of THIS teacher is deleted. That
+ *     includes accounts a provisioning made that never got their roster row
+ *     (student_provision_intents, 20261022110600): registered before the Auth
+ *     account was created, so a crash in between is found here, not orphaned.
  *
  *  4. Delete every score the caller OWNS: Storage objects first (both buckets),
  *     then the row, whose FK cascades take members, share links, annotations,
@@ -132,6 +140,14 @@ export interface StudentAccountRef {
     teacherId: string | null;
 }
 
+export interface ProvisionIntent {
+    rosterId: string;
+    /** The Auth account the provisioning created; null when none was found. */
+    studentUserId: string | null;
+    /** True while the request that registered it may still be running. */
+    live: boolean;
+}
+
 export interface StripeSubscriptionRef {
     id: string;
     status: string;
@@ -182,12 +198,28 @@ export interface DeletionPorts {
         outcome: 'abandoned' | 'failed',
         code: DeletionFailureCode,
     ) => Promise<void>;
+    /**
+     * checkout_attempt_in_flight(): whether a checkout from another tab holds a
+     * live attempt lease. Asked once the marker is in place, so no new lease can
+     * start (20261022110600_account_deletion_barrier.sql); one that started
+     * before could still open a Stripe session after the billing sweeps, so the
+     * deletion does not go on while it is live. Throws on failure.
+     */
+    checkoutInFlight: (userId: string) => Promise<boolean>;
     billingCustomers: (userId: string) => Promise<StripeCustomerRef[]>;
     storedSubscriptions: (userId: string) => Promise<StoredSubscriptionRef[]>;
     /** Null when no usable key is configured for that account. */
     stripeFor: (mode: StripeMode) => StripePort | null;
     /** student_user_id of every roster row this teacher owns, archived or not. */
     managedStudents: (teacherId: string) => Promise<string[]>;
+    /**
+     * student_provision_intents_for(): provisionings of this teacher that have
+     * no roster row (yet), with the Auth account each made, if any, and whether
+     * the request that wrote it can still be running.
+     */
+    provisionIntents: (teacherId: string) => Promise<ProvisionIntent[]>;
+    /** finish_student_provision(): the intent is cleaned up. */
+    clearProvisionIntent: (rosterId: string) => Promise<void>;
     /**
      * The auth user behind a roster row, as the admin API reports it: its
      * admin-set app_metadata flag and owning teacher. Null when the auth user no
@@ -235,6 +267,7 @@ export interface DeletionSummary {
 export type DeletionFailureCode =
     | 'managed_student'
     | 'deletion_unavailable'
+    | 'checkout_in_progress'
     | 'billing_unavailable'
     | 'billing_cancel_failed'
     | 'student_delete_failed'
@@ -482,6 +515,43 @@ export const purgeManagedStudents = async (
             students += 1;
         }
     }
+
+    // Accounts a provisioning created that never got a roster row
+    // (student_provision_intents): a request that crashed between the Auth
+    // create and the roster insert, or whose undo failed. The same check
+    // before anything irreversible: only a student of THIS teacher goes.
+    for (const intent of await ports.provisionIntents(teacherId)) {
+        if (!intent.studentUserId) {
+            // Nothing was created. A provisioning still running keeps its
+            // intent: its roster insert is refused by the marker, and it undoes
+            // its own account.
+            if (!intent.live) {
+                await ports.clearProvisionIntent(intent.rosterId);
+            }
+            continue;
+        }
+        const account = await ports.studentAccount(intent.studentUserId);
+        if (!account) {
+            await ports.clearProvisionIntent(intent.rosterId);
+            continue;
+        }
+        if (account.userType !== 'student' || account.teacherId !== teacherId) {
+            // An invite whose student flag never landed, or an account that is
+            // not this teacher's: left for a person (the intent stays on record).
+            ports.log(
+                `provisioning ${intent.rosterId} of ${teacherId} names ${intent.studentUserId}, which is not ` +
+                    'flagged as their student; leaving it, and its intent, for review',
+            );
+            continue;
+        }
+        const purged = await purgeOwnedDocuments(intent.studentUserId, ports);
+        objects += purged.objects;
+        await ports.deleteStudiosAndMemberships(intent.studentUserId);
+        if ((await closeAuthUser(intent.studentUserId, ports)) === 'deleted') {
+            students += 1;
+        }
+        await ports.clearProvisionIntent(intent.rosterId);
+    }
     return { students, objects };
 };
 
@@ -586,6 +656,34 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
         }
         return failure;
     };
+
+    // A checkout another tab started before the marker could still open a
+    // Stripe session behind both billing sweeps. The marker now refuses any new
+    // one; wait for (refuse while) the one in flight.
+    let checkoutBusy: boolean;
+    try {
+        checkoutBusy = await ports.checkoutInFlight(caller.userId);
+    } catch (err) {
+        return settle(
+            'abandoned',
+            fail(
+                502,
+                'billing_cancel_failed',
+                'We could not check your billing, so nothing has been deleted. Please try again, or contact support.',
+                err,
+            ),
+        );
+    }
+    if (checkoutBusy) {
+        return settle(
+            'abandoned',
+            fail(
+                409,
+                'checkout_in_progress',
+                'A checkout is open in another tab or window. Close it, wait a few minutes, and try again. Nothing has been deleted.',
+            ),
+        );
+    }
 
     const billing = await cancelBilling(caller.userId, ports);
     if (!billing.ok) {

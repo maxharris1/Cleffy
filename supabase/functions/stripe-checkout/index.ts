@@ -180,6 +180,11 @@ Deno.serve((req) =>
                 p_stale_after: CHECKOUT_ATTEMPT_STALE_AFTER,
             });
             if (error) {
+                // The account-deletion barrier's refusal
+                // (20261022110600_account_deletion_barrier.sql), not a failure.
+                if (error.code === '55000' && /account_deletion_pending/.test(error.message ?? '')) {
+                    return { ok: false, reason: 'deletion_pending' };
+                }
                 return { ok: false, reason: 'error', error };
             }
             const row = (data as CheckoutAttemptRow[] | null)?.[0];

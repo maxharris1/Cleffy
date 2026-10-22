@@ -348,12 +348,51 @@ const reserveStudentMail = (teacherId: string, recipient: string) =>
         recipient,
     );
 
-/** Deletes an account create just made; its roster row, if any, goes with it by cascade. */
-const undoCreatedStudent = async (admin: SupabaseClient, studentUserId: string): Promise<void> => {
+/**
+ * The provisioning ended with nothing left behind: its intent
+ * (20261022110600_account_deletion_barrier.sql) goes. Best effort: an intent
+ * left over is only a record a deletion or a person checks and drops.
+ */
+const finishProvision = async (admin: SupabaseClient, rosterId: string): Promise<void> => {
+    const { error } = await admin.rpc('finish_student_provision', { p_roster_id: rosterId });
+    if (error) {
+        console.error(`could not clear provisioning intent ${rosterId}: ${error.message}`);
+    }
+};
+
+/**
+ * Records the Auth account a provisioning just created on its intent, so a
+ * crash from here on leaves a row naming it. 'gone' when the intent was swept
+ * (the teacher's deletion began): the caller undoes the account.
+ */
+const attachProvision = async (
+    admin: SupabaseClient,
+    rosterId: string,
+    studentUserId: string,
+): Promise<'ok' | 'gone' | 'error'> => {
+    const { data, error } = await admin.rpc('attach_student_provision', {
+        p_roster_id: rosterId,
+        p_student_user: studentUserId,
+    });
+    if (error) {
+        console.error(`could not record the account of provisioning ${rosterId}: ${error.message}`);
+        return 'error';
+    }
+    return data === true ? 'ok' : 'gone';
+};
+
+/**
+ * Deletes an account create just made; its roster row, if any, goes with it by
+ * cascade. Once it is gone the provisioning's intent goes too; if it cannot be
+ * deleted the intent stays, naming the orphan.
+ */
+const undoCreatedStudent = async (admin: SupabaseClient, studentUserId: string, rosterId: string): Promise<void> => {
     const { error } = await admin.auth.admin.deleteUser(studentUserId);
     if (error) {
         logError('student-provision', error, { code: 'orphaned_auth_user' });
+        return;
     }
+    await finishProvision(admin, rosterId);
 };
 
 /**
@@ -385,8 +424,18 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
     if (createError || !created.user) {
         // Logged rather than returned: an auth error can name the synthetic
         // address, which is an implementation detail even the teacher never sees.
+        // The intent stays: if GoTrue did create the account, a deletion finds
+        // it by its address.
         console.error(`student account creation failed for ${userId}: ${createError?.message ?? 'no user returned'}`);
         return jsonResponse({ error: 'Could not create the student account' }, 502);
+    }
+
+    const attached = await attachProvision(admin, rosterId, created.user.id);
+    if (attached !== 'ok') {
+        await undoCreatedStudent(admin, created.user.id, rosterId);
+        return attached === 'gone'
+            ? jsonResponse(DELETION_PENDING, 409)
+            : jsonResponse({ error: 'Could not create the student account' }, 502);
     }
 
     const { error: insertError } = await admin.from('managed_students').insert({
@@ -409,6 +458,8 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         const { error: cleanupError } = await admin.auth.admin.deleteUser(created.user.id);
         if (cleanupError) {
             logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: created.user.id });
+        } else {
+            await finishProvision(admin, rosterId);
         }
         return isDeletionPending(insertError)
             ? jsonResponse(DELETION_PENDING, 409)
@@ -418,7 +469,7 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
     // A student whose attestation went unrecorded is undone like a missing
     // roster row: the record is the point of asking.
     if (!(await recordAttestation(admin, userId, rosterId, 'create', attestation))) {
-        await undoCreatedStudent(admin, created.user.id);
+        await undoCreatedStudent(admin, created.user.id, rosterId);
         return jsonResponse({ error: 'Could not record the age confirmation' }, 502);
     }
 
@@ -446,6 +497,7 @@ const createEmailStudent = async (
     // The invitation's place in the mail budget, before GoTrue sends it.
     const mail = await reserveStudentMail(userId, studentEmail);
     if (!mail.ok) {
+        await finishProvision(admin, rosterId);
         return jsonResponse(studentMailRefusal(mail), 429);
     }
 
@@ -460,8 +512,10 @@ const createEmailStudent = async (
         // student who already has a Cleffy account, and both are fixed in the
         // form rather than by retrying.
         if (inviteError && isEmailInUse(inviteError)) {
-            // GoTrue refused before sending anything: the place goes back.
+            // GoTrue refused before sending anything (or creating an account):
+            // the place goes back, and so does the intent.
             await mail.release();
+            await finishProvision(admin, rosterId);
             return jsonResponse(
                 { error: 'That email address already has a Cleffy account', code: 'email_in_use' },
                 409,
@@ -469,6 +523,14 @@ const createEmailStudent = async (
         }
         console.error(`student invite failed for ${userId}: ${inviteError?.message ?? 'no user returned'}`);
         return jsonResponse({ error: 'Could not send the invitation' }, 502);
+    }
+
+    const attached = await attachProvision(admin, rosterId, invited.user.id);
+    if (attached !== 'ok') {
+        await undoCreatedStudent(admin, invited.user.id, rosterId);
+        return attached === 'gone'
+            ? jsonResponse(DELETION_PENDING, 409)
+            : jsonResponse({ error: 'Could not create the student account' }, 502);
     }
 
     // inviteUserByEmail cannot set app_metadata, so the flag that makes this
@@ -485,6 +547,8 @@ const createEmailStudent = async (
         const { error: cleanupError } = await admin.auth.admin.deleteUser(invited.user.id);
         if (cleanupError) {
             logError('student-provision', cleanupError, { code: 'unflagged_student', studentUserId: invited.user.id });
+        } else {
+            await finishProvision(admin, rosterId);
         }
         return jsonResponse({ error: 'Could not create the student account' }, 502);
     }
@@ -506,6 +570,8 @@ const createEmailStudent = async (
         const { error: cleanupError } = await admin.auth.admin.deleteUser(invited.user.id);
         if (cleanupError) {
             logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: invited.user.id });
+        } else {
+            await finishProvision(admin, rosterId);
         }
         return isDeletionPending(insertError)
             ? jsonResponse(DELETION_PENDING, 409)
@@ -513,7 +579,7 @@ const createEmailStudent = async (
     }
 
     if (!(await recordAttestation(admin, userId, rosterId, 'create', attestation))) {
-        await undoCreatedStudent(admin, invited.user.id);
+        await undoCreatedStudent(admin, invited.user.id, rosterId);
         return jsonResponse({ error: 'Could not record the age confirmation' }, 502);
     }
 
@@ -528,18 +594,6 @@ const createEmailStudent = async (
 };
 
 const createStudent = async (admin: SupabaseClient, userId: string, body: ProvisionBody): Promise<Response> => {
-    // Before any account is created: a deletion in progress would refuse the
-    // roster row anyway (and the account would be undone), so say so up front.
-    // The trigger stays the authority for a deletion that starts after this.
-    const { data: pending, error: pendingError } = await admin.rpc('account_deletion_pending', { p_user: userId });
-    if (pendingError) {
-        console.error(`could not check for a pending deletion of ${userId}: ${pendingError.message}`);
-        return jsonResponse({ error: 'Could not create the student account' }, 502);
-    }
-    if (pending === true) {
-        return jsonResponse(DELETION_PENDING, 409);
-    }
-
     // EXPLICIT, and defaulted rather than required so existing callers keep
     // working: reading the method off the presence of `studentEmail` would let a
     // stray field flip a child onto the email path, which is the one decision in
@@ -606,6 +660,25 @@ const createStudent = async (admin: SupabaseClient, userId: string, body: Provis
         attestation: checked.attestation,
         districtStudioId: district.districtStudioId,
     };
+
+    // The intent, durably, BEFORE any Auth account exists
+    // (20261022110600_account_deletion_barrier.sql). Refused while the
+    // teacher's account is being deleted, so no student can be created that the
+    // deletion would not see; and a request that dies after the account is made
+    // leaves this row naming it, for the deletion (or a person) to clean up.
+    // The roster row clears it, by trigger, in the same transaction.
+    const { data: begun, error: beginError } = await admin.rpc('begin_student_provision', {
+        p_teacher: userId,
+        p_roster_id: rosterId,
+        p_auth_email: method === 'email' ? studentEmail : syntheticStudentEmail(rosterId),
+    });
+    if (beginError) {
+        console.error(`could not register the provisioning for ${userId}: ${beginError.message}`);
+        return jsonResponse({ error: 'Could not create the student account' }, 502);
+    }
+    if (begun !== 'ok') {
+        return jsonResponse(DELETION_PENDING, 409);
+    }
 
     return method === 'email'
         ? await createEmailStudent(admin, userId, { ...spec, studentEmail, redirectTo })

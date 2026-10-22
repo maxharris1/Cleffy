@@ -169,6 +169,28 @@ const ports = (admin: SupabaseClient): DeletionPorts => ({
             throw new Error(`could not settle the deletion marker: ${error.message}`);
         }
     },
+    checkoutInFlight: async (userId) => {
+        const { data, error } = await admin.rpc('checkout_attempt_in_flight', { p_user: userId });
+        if (error) {
+            throw new Error(`could not check for a checkout in flight: ${error.message}`);
+        }
+        return data === true;
+    },
+    provisionIntents: async (teacherId) => {
+        const { data, error } = await admin.rpc('student_provision_intents_for', { p_teacher: teacherId });
+        if (error) {
+            throw new Error(`could not read provisioning intents: ${error.message}`);
+        }
+        return ((data ?? []) as Array<{ roster_id: string; student_user_id: string | null; live: boolean }>).map(
+            (row) => ({ rosterId: row.roster_id, studentUserId: row.student_user_id, live: row.live === true }),
+        );
+    },
+    clearProvisionIntent: async (rosterId) => {
+        const { error } = await admin.rpc('finish_student_provision', { p_roster_id: rosterId });
+        if (error) {
+            throw new Error(`could not clear provisioning intent ${rosterId}: ${error.message}`);
+        }
+    },
     billingCustomers: async (userId) => {
         const { data, error } = await admin
             .from('billing_customers')

@@ -10,6 +10,7 @@ import {
     BODY_MAX_BYTES,
     CHECKOUT_ATTEMPT_STALE_AFTER,
     CHECKOUT_ATTEMPT_STALE_AFTER_MS,
+    CHECKOUT_DELETION_PENDING,
     checkoutIdempotencyKey,
     EDGE_FUNCTION_WALL_CLOCK_MS,
     handleCheckout,
@@ -1315,6 +1316,23 @@ describe('stripe-checkout flow', () => {
             expect(h.deps.createSession).not.toHaveBeenCalled();
             expect(h.errors).toEqual(['checkout_attempt_lock_failed']);
             // Nothing was taken, so nothing is released.
+            expect(h.deps.releaseAttempt).not.toHaveBeenCalled();
+        });
+
+        it('refuses, as 409 account_deletion_pending, when the account is being deleted', async () => {
+            // 20261022110600_account_deletion_barrier.sql refuses the lease, so
+            // no session can be opened behind the deletion's billing sweeps.
+            const h = harness({ customerId: 'cus_1' });
+            (h.deps.beginAttempt as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+                ok: false,
+                reason: 'deletion_pending',
+            });
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(409);
+            expect(await body(response)).toEqual(CHECKOUT_DELETION_PENDING);
+            expect(h.deps.createSession).not.toHaveBeenCalled();
             expect(h.deps.releaseAttempt).not.toHaveBeenCalled();
         });
 
