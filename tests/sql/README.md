@@ -1016,12 +1016,13 @@ Auth create and the attach is still found; a separate signup after the window,
 an account from before it, and another intent's recorded account at the same
 address are not; a recorded account is named as before. It also proves
 `20261022140400_student_provision_intent_proven.sql` (launch-fix follow-up 18):
-the new `proven` column, the only thing account deletion's automatic cleanup
-deletes on, is true only for DEPLOY.md's proof (A), a recorded account made
-inside the window; never for an address match, a recorded account made outside
-the window, or one already deleted. Ends with `failures | total`. Proven
-against the local stack on 2026-10-22: all 13 checks passed; the first 8 with
-20261022140300 alone, of which 3 failed with 20261022110600's function.
+`student_provision_intents_proven()` names the same accounts and adds `proven`,
+the only thing account deletion's automatic cleanup deletes on, true only for
+DEPLOY.md's proof (A), a recorded account made inside the window; never for an
+address match, a recorded account made outside the window, or one already
+deleted. Ends with `failures | total`. Proven against the local stack on
+2026-10-22: all 14 checks passed; the first 8 with 20261022140300 alone, of
+which 3 failed with 20261022110600's function.
 
 `superseded_studio_rotation.sql` proves, with Realtime running, that
 superseding a studio (`20261022100300`, P1) rotates every score it takes from a

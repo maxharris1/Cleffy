@@ -1362,8 +1362,9 @@ it paused.
 
     Their deploy order: `20261022140800` before the new `student-provision`
     (its email reset calls `complete_student_email_reset`), `20261022140400`
-    right before the new `delete-account` (it reads the new `proven` column;
-    an older `delete-account` ignores it), and `20261022140600` with or before
+    before the new `delete-account` (it calls the new
+    `student_provision_intents_proven()`; an older `delete-account` keeps
+    calling `student_provision_intents_for()`), and `20261022140600` with or before
     the new frontend (the storage-full message calls `my_storage_usage`;
     without it the message has no numbers). Step 12's order (migrations
     first, `student-provision` first among the functions) already gives all
@@ -2265,12 +2266,12 @@ The two account columns are kept apart on purpose:
   provisioning intent for the same address. It is shown for information only
   and is never enough to delete anything, whatever its window, flag or sign-in
   fields show. An intent shows on more than one row when several accounts
-  match. Account deletion follows the same rule on its own: its
-  `student_provision_intents_for()` names an address match only inside the
-  intent's window and never another intent's recorded account
-  (`20261022140300`), and it deletes an account only when its `proven` column,
-  proof (A) below, is true (`20261022140400`). An account named by address
-  alone is left, with its intent, for this runbook.
+  match. Account deletion follows the same rule on its own: it names an address
+  match only inside the intent's window and never another intent's recorded
+  account (`20261022140300`), and it deletes an account only when
+  `student_provision_intents_proven()` says `proven`, proof (A) below
+  (`20261022140400`). An account named by address alone is left, with its
+  intent, for this runbook.
 - The window runs from one minute before the intent's `created_at` (the
   fallback's own allowance) to its `expires_at`, after which the request that
   wrote the intent can no longer be running.

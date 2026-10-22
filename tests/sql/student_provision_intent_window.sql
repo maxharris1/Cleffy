@@ -25,9 +25,10 @@
 --   w7/w8  accounts at expires_at exactly (named) and a second later (not)
 --   w9  recorded, but the account was made a year before the intent
 --
--- And 20261022140400: `proven` (DEPLOY.md's proof (A), the only thing the
--- automatic cleanup in delete-account deletes on) is true only for a recorded
--- account made inside the window: never for an address match.
+-- And 20261022140400: student_provision_intents_proven()'s `proven`
+-- (DEPLOY.md's proof (A), the only thing the automatic cleanup in
+-- delete-account deletes on) is true only for a recorded account made inside
+-- the window: never for an address match. It names the same accounts.
 
 begin;
 
@@ -175,7 +176,7 @@ select pg_temp.holds (
 );
 
 create function pg_temp.proven (p_intent text) returns boolean language sql as $$
-    select i.proven from public.student_provision_intents_for (pg_temp.u ('a1')) i
+    select i.proven from public.student_provision_intents_proven (pg_temp.u ('a1')) i
     where i.roster_id = pg_temp.r (p_intent);
 $$;
 
@@ -196,7 +197,7 @@ select pg_temp.holds (
 
 select pg_temp.holds (
     'proven: an intent naming nothing (w2, w3, w4, w8) is never proven',
-    $q$select bool_and(not i.proven) from public.student_provision_intents_for (pg_temp.u ('a1')) i
+    $q$select bool_and(not i.proven) from public.student_provision_intents_proven (pg_temp.u ('a1')) i
        where i.roster_id in (pg_temp.r ('b2'), pg_temp.r ('b3'), pg_temp.r ('b4'), pg_temp.r ('b8'))$q$
 );
 
@@ -214,10 +215,20 @@ select pg_temp.holds (
 reset role;
 
 select pg_temp.holds (
-    'the function keeps its service-role-only grant',
-    $q$select has_function_privilege('service_role', 'public.student_provision_intents_for(uuid)', 'execute')
-          and not has_function_privilege('authenticated', 'public.student_provision_intents_for(uuid)', 'execute')
-          and not has_function_privilege('anon', 'public.student_provision_intents_for(uuid)', 'execute')$q$
+    'student_provision_intents_proven names the same account for every intent as student_provision_intents_for',
+    $q$select not exists (
+           (select roster_id, student_user_id, live from public.student_provision_intents_for (pg_temp.u ('a1')))
+           except
+           (select roster_id, student_user_id, live from public.student_provision_intents_proven (pg_temp.u ('a1'))))
+       and (select count(*) from public.student_provision_intents_proven (pg_temp.u ('a1'))) = 9$q$
+);
+
+select pg_temp.holds (
+    'both functions are the service role''s alone',
+    $q$select bool_and(has_function_privilege('service_role', f, 'execute')
+                    and not has_function_privilege('authenticated', f, 'execute')
+                    and not has_function_privilege('anon', f, 'execute'))
+       from unnest(array['public.student_provision_intents_for(uuid)', 'public.student_provision_intents_proven(uuid)']) f$q$
 );
 
 -- ---------------------------------------------------------------------------

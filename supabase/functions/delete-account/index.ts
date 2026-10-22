@@ -177,7 +177,7 @@ const ports = (admin: SupabaseClient): DeletionPorts => ({
         return data === true;
     },
     provisionIntents: async (teacherId) => {
-        const { data, error } = await admin.rpc('student_provision_intents_for', { p_teacher: teacherId });
+        const { data, error } = await admin.rpc('student_provision_intents_proven', { p_teacher: teacherId });
         if (error) {
             throw new Error(`could not read provisioning intents: ${error.message}`);
         }
@@ -192,7 +192,7 @@ const ports = (admin: SupabaseClient): DeletionPorts => ({
             rosterId: row.roster_id,
             studentUserId: row.student_user_id,
             live: row.live === true,
-            // Absent before 20261022140400: nothing is proven, nothing deleted.
+            // student_provision_intents_proven (20261022140400): only proof (A).
             proven: row.proven === true,
         }));
     },

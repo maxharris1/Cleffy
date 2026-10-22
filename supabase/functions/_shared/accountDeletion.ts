@@ -223,7 +223,7 @@ export interface DeletionPorts {
     /** student_user_id of every roster row this teacher owns, archived or not. */
     managedStudents: (teacherId: string) => Promise<string[]>;
     /**
-     * student_provision_intents_for(): provisionings of this teacher that have
+     * student_provision_intents_proven(): provisionings of this teacher that have
      * no roster row (yet), with the Auth account each made, if any, and whether
      * the request that wrote it can still be running.
      */

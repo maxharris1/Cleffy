@@ -26386,25 +26386,26 @@ grant execute on function public.student_provision_intents_for (uuid) to service
 -- one proof that permits deleting, (A): the account is the one the intent
 -- recorded (attach_student_provision()) and it was created inside the window.
 --
--- The function now says so in a new column, proven: true only for (A). The
--- automatic cleanup deletes only a proven account; one named by address alone,
--- or recorded but made outside the window, is left, with its intent, for a
--- person (the runbook). student_user_id still names whichever account the
--- intent points at, for the log and the runbook.
+-- student_provision_intents_proven() says so: the same rows and columns as
+-- student_provision_intents_for() (20261022140300), plus proven, true only
+-- for (A). The automatic cleanup deletes only a proven account; one named by
+-- address alone, or recorded but made outside the window, is left, with its
+-- intent, for a person (the runbook). student_user_id still names whichever
+-- account the intent points at, for the log and the runbook.
 --
--- The column changes the function's result type, so it is dropped and created
--- again, in one transaction with nothing in between. delete-account reads the
--- new column; an older delete-account ignores it (deploy the new one right
--- after this migration). A newer delete-account against a database without
--- this migration reads no proven column, treats every intent as unproven and
--- deletes nothing through intents: the safe side.
+-- A new function rather than a fourth column on the old one: changing a
+-- function's result type needs a DROP, and an ordered replay of the earlier
+-- migrations over this database (CI's re-apply step, a recovery) would then
+-- stop at 20261022110600's CREATE OR REPLACE of the old shape.
+-- student_provision_intents_for() stays as 20261022140300 left it, for an
+-- older delete-account. delete-account calls the new one: deploy it after
+-- this migration (an older database has no such function, and the deletion
+-- then stops with deletion_unavailable rather than delete on an address).
 --
--- Rerunnable: dropped if present and created again with the same privileges.
+-- Rerunnable: created or replaced with the same signature and privileges.
 
-drop function if exists public.student_provision_intents_for (uuid);
-
--- 20261022140300's definition, plus proven.
-create function public.student_provision_intents_for (p_teacher uuid)
+-- 20261022140300's student_provision_intents_for(), plus proven.
+create or replace function public.student_provision_intents_proven (p_teacher uuid)
 returns table (roster_id uuid, student_user_id uuid, live boolean, proven boolean)
 language sql stable security definer
 set search_path = public as $$
@@ -26434,11 +26435,11 @@ set search_path = public as $$
     order by i.created_at;
 $$;
 
-revoke all on function public.student_provision_intents_for (uuid) from public, anon, authenticated;
+revoke all on function public.student_provision_intents_proven (uuid) from public, anon, authenticated;
 
-grant execute on function public.student_provision_intents_for (uuid) to service_role;
+grant execute on function public.student_provision_intents_proven (uuid) to service_role;
 
--- DEPLOY: deploy delete-account right after this migration (see above).
+-- DEPLOY: apply before deploying delete-account (it calls this; see above).
 
 -- ===== supabase/migrations/20261022140500_thumbnail_publish_lock_order.sql =====
 -- Thumbnails: a publish and a multi-object removal take their locks in one

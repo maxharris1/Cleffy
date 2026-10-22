@@ -78,7 +78,8 @@ describe('deletion-pending wiring', () => {
     it('delete-account binds the barrier ports: checkout in flight, provisioning intents', () => {
         const source = read('supabase/functions/delete-account/index.ts');
         expect(source).toContain("admin.rpc('checkout_attempt_in_flight', { p_user: userId })");
-        expect(source).toContain("admin.rpc('student_provision_intents_for', { p_teacher: teacherId })");
+        // The variant with proof (A), 20261022140400: nothing else is deleted on.
+        expect(source).toContain("admin.rpc('student_provision_intents_proven', { p_teacher: teacherId })");
         expect(source).toContain("admin.rpc('finish_student_provision', { p_roster_id: rosterId })");
     });
 

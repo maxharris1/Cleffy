@@ -76,21 +76,24 @@ jobs:
                   echo "::error::Realtime did not create today's realtime.messages partition"
                   exit 1
             # A recovery replays migrations over a database that already has
-            # them; these must apply again cleanly, in order. Launchfix P3's
-            # (2026102211xxxx) too: none of their functions, triggers or
-            # policies is redefined by a later migration, so replaying them
-            # leaves the schema the proofs below expect.
-            - name: Re-apply the cancel-link, launchfix P1 and launchfix P3 migrations
+            # them; these must apply again cleanly, in order. The cancel-link
+            # five, then every migration from launchfix P1 (20261022100000)
+            # to the newest, in filename order: P1, P3, P4, P5 and the
+            # follow-ups. Replaying through the newest leaves the latest
+            # definition of every function a later migration redefines, so the
+            # proofs below run against the schema a recovery ends on.
+            - name: Re-apply the cancel-link migrations and every migration from launchfix P1 on
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-                  for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock \
-                      20261022100000_explicit_service_role_grants 20261022100100_billing_lock_tables_client_revoke 20261022100200_deployment_config 20261022100300_one_studio_per_owner 20261022100400_storage_object_names 20261022100500_storage_bucket_limits \
-                      20261022100600_superseded_studio_followups 20261022100700_client_table_privileges 20261022100800_storage_quota_and_thumbnail_lifecycle 20261022100900_storage_cleanup_markers_and_thumbnail_cap \
-                      20261022101000_storage_quota_lock_and_cover_reuse \
-                      20261022110000_student_claim_reservation 20261022110100_account_deletion_pending 20261022110200_support_inbound_lease 20261022110300_support_inbound_retry_window \
-                      20261022110400_account_deletion_attempts 20261022110500_student_code_reset_holder 20261022110600_account_deletion_barrier 20261022110700_student_code_reset_worker \
-                      20261022110800_student_code_reset_quarantine; do
+                  for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock; do
                       psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "supabase/migrations/${migration}.sql"
+                  done
+                  for file in supabase/migrations/*.sql; do
+                      if [[ "$(basename "$file")" < 20261022100000 ]]; then
+                          continue
+                      fi
+                      echo "re-applying ${file}"
+                      psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$file"
                   done
             - name: Cancel-link store test (billingCancelStore.ts against the local stack)
               run: |
