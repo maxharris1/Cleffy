@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { noteRetryAfter } from '@/lib/retryAfter';
+import type * as SupabaseModule from '@/lib/supabase';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb, type PendingOp, type PendingOpType } from '@/sync/db';
@@ -25,6 +26,18 @@ import {
 } from '@/sync/syncEngine';
 import type { AnnotationInsert, AnnotationRow, AnnotationUpdate } from '@/types/database';
 import type { Annotation } from '@/types/models';
+
+// Hermetic whatever a developer's .env.local holds (cloud:up / local:up write
+// one): with it, a day snapshot's upload went to the real local stack, and
+// undici's timers landed among the retry timers the backoff test captures.
+// Every engine here talks to an injected api; nothing reaches Supabase.
+vi.mock('@/lib/supabase', async (importOriginal) => ({
+    ...(await importOriginal<typeof SupabaseModule>()),
+    isSupabaseConfigured: () => false,
+    getSupabase: () => {
+        throw new Error('Supabase is not configured in this test');
+    },
+}));
 
 const DOC = 'c0ffee00-0000-4000-8000-000000000001';
 const USER = 'user-1';
