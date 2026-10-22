@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     checkDistrictChoice,
     type DistrictRpc,
+    isDistrictDeletionPending,
     readDistrictChoice,
 } from '../../supabase/functions/_shared/districtProvision';
 
@@ -52,6 +53,51 @@ describe('the district a student is provisioned for', () => {
         expect(await checkDistrictChoice(client, 'teacher', DISTRICT)).toMatchObject({ ok: false, status: 502 });
         const { client: silent } = rpcAnswering(null);
         expect(await checkDistrictChoice(silent, 'teacher', DISTRICT)).toMatchObject({ ok: false, status: 403 });
+    });
+
+    it('answers 409 district_deletion_pending to the district’s own teacher once its purge has begun', async () => {
+        // 20261022130300: district_provisionable says no, and the refusal says why.
+        const rpc = vi.fn(async (fn: string) =>
+            fn === 'district_provisionable'
+                ? { data: false, error: null }
+                : { data: 'district_deletion_pending', error: null },
+        );
+        const client = { rpc } as unknown as DistrictRpc;
+        expect(await checkDistrictChoice(client, 'teacher', DISTRICT)).toEqual({
+            ok: false,
+            status: 409,
+            code: 'district_deletion_pending',
+            error: 'This district is being deleted, so no new students can be added to it.',
+        });
+        expect(rpc).toHaveBeenLastCalledWith('district_provision_refusal', {
+            p_teacher: 'teacher',
+            p_studio: DISTRICT,
+        });
+    });
+
+    it('asks why only when refused, and fails closed when it cannot tell', async () => {
+        const { client, rpc } = rpcAnswering(true);
+        await checkDistrictChoice(client, 'teacher', DISTRICT);
+        expect(rpc).toHaveBeenCalledTimes(1);
+        const failing = vi.fn(async (fn: string) =>
+            fn === 'district_provisionable' ? { data: false, error: null } : { data: null, error: { message: 'down' } },
+        );
+        expect(
+            await checkDistrictChoice({ rpc: failing } as unknown as DistrictRpc, 'teacher', DISTRICT),
+        ).toMatchObject({ ok: false, status: 502, code: 'district_unavailable' });
+        const outside = vi.fn(async (fn: string) =>
+            fn === 'district_provisionable' ? { data: false, error: null } : { data: 'not_in_district', error: null },
+        );
+        expect(
+            await checkDistrictChoice({ rpc: outside } as unknown as DistrictRpc, 'teacher', DISTRICT),
+        ).toMatchObject({ ok: false, status: 403, code: 'not_in_district' });
+    });
+
+    it('recognises the roster trigger’s refusal (55000 district_deletion_pending), and only that', () => {
+        expect(isDistrictDeletionPending({ code: '55000', message: 'district_deletion_pending' })).toBe(true);
+        expect(isDistrictDeletionPending({ code: '55000', message: 'account_deletion_pending' })).toBe(false);
+        expect(isDistrictDeletionPending({ code: '42501', message: 'district_deletion_pending' })).toBe(false);
+        expect(isDistrictDeletionPending(null)).toBe(false);
     });
 
     it('refuses anything that is not a studio id', () => {

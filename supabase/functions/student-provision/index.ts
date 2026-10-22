@@ -8,7 +8,12 @@ import {
     accountDeletionPending,
     DELETION_CHECK_UNAVAILABLE,
 } from '../_shared/deletionPending.ts';
-import { checkDistrictChoice, type DistrictRpc } from '../_shared/districtProvision.ts';
+import {
+    checkDistrictChoice,
+    DISTRICT_DELETION_PENDING,
+    type DistrictRpc,
+    isDistrictDeletionPending,
+} from '../_shared/districtProvision.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements } from '../_shared/entitlements.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
@@ -91,7 +96,10 @@ import {
  * (`districtStudioId`) and the teacher owns or holds a seat in it
  * (../_shared/districtProvision.ts). Naming none provisions a private student,
  * seated teacher or not; the district's contract-end purge never touches one
- * (20261021120800_district_student_attribution.sql).
+ * (20261021120800_district_student_attribution.sql). A district whose purge
+ * has begun takes no new students: 409 `district_deletion_pending`, from the
+ * check before any write or from the roster insert's trigger
+ * (20261022130300_district_retention_late_students.sql).
  *
  * 'delete' is for good: the student's markings are scrubbed (tombstoned, and
  * cut out of lesson-history snapshots — 20261021120200), then the auth user
@@ -501,7 +509,9 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         }
         return isDeletionPending(insertError)
             ? jsonResponse(DELETION_PENDING, 409)
-            : jsonResponse({ error: 'Could not create the student roster row' }, 502);
+            : isDistrictDeletionPending(insertError)
+              ? jsonResponse(DISTRICT_DELETION_PENDING, 409)
+              : jsonResponse({ error: 'Could not create the student roster row' }, 502);
     }
 
     // A student whose attestation went unrecorded is undone like a missing
@@ -613,7 +623,9 @@ const createEmailStudent = async (
         }
         return isDeletionPending(insertError)
             ? jsonResponse(DELETION_PENDING, 409)
-            : jsonResponse({ error: 'Could not create the student roster row' }, 502);
+            : isDistrictDeletionPending(insertError)
+              ? jsonResponse(DISTRICT_DELETION_PENDING, 409)
+              : jsonResponse({ error: 'Could not create the student roster row' }, 502);
     }
 
     if (!(await recordAttestation(admin, userId, rosterId, 'create', attestation))) {

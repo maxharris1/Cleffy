@@ -178,6 +178,7 @@ set local client_min_messages = warning;
 \ir ../../supabase/migrations/20261021120900_district_notice_mail_budget.sql
 \ir ../../supabase/migrations/20261022130000_district_retention_reattribution.sql
 \ir ../../supabase/migrations/20261022130100_content_strikes_survive_deletion.sql
+\ir ../../supabase/migrations/20261022130300_district_retention_late_students.sql
 
 reset client_min_messages;
 
@@ -210,6 +211,16 @@ select pg_temp.chk ('13 the latest definitions win: the run, the correction and 
                like '%district_retention_restores%'
        and pg_get_functiondef('public.active_content_strikes(uuid)'::regprocedure) like '%subject_key_version%'
        and to_regprocedure('public.content_strike_subject_key(text)') is null$q$);
+
+select pg_temp.chk ('13b and the late-student fix''s: the barrier, the sweep and the locked re-list', $q$
+    select pg_get_functiondef('public.managed_students_district_attribution()'::regprocedure)
+               like '%district_deletion_pending%'
+       and pg_get_functiondef('public.district_provisionable(uuid, uuid)'::regprocedure)
+               like '%district_provision_refusal%'
+       and pg_get_functiondef('public.retention_district_run(timestamptz, int)'::regprocedure)
+               like '%district_retention_list_late%'
+       and pg_get_functiondef('public.admin_set_student_district(uuid, uuid, text)'::regprocedure)
+               like '%district_deletion_pending%'$q$);
 
 select pg_temp.chk ('14 one of each: strike triggers, retention jobs', $q$
     select (select count(*) = 1 from pg_trigger
