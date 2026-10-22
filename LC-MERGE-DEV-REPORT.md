@@ -142,10 +142,50 @@ Max authorized this on 2026-10-21. This report is updated after each merge.
     or on dev in a small PR. It needs Max's (or Codex's) OK, because it is code outside the
     reviewed heads.
 
-## 4. #64 `mh/launch-consent`: not started
+## 4. #64 `mh/launch-consent`: merged (continuation run)
 
-- Reviewed SHA: `82d32c7052846f1b7827cea2eac48e3cd3152ad9`. It is unchanged, and I pushed
-  nothing to it.
+- Reviewed SHA: `82d32c7052846f1b7827cea2eac48e3cd3152ad9`. It was still the head on
+  origin and on GitHub right before I touched the branch (after #61 merged).
+- I merged `origin/dev` (`6adde05`, with #61) into the branch:
+    - **Conflict-resolution merge commit `420c19ea6fc3d88e2d3bc839724708f105ff7e63`**, with
+      parents `82d32c7` (the reviewed head, first parent) and `6adde05`. Authored by Max
+      Harris. It went to `mh/launch-consent` as a fast-forward push.
+    - Conflicted files (the same six as the earlier rehearsal) and how I resolved them:
+        - `scripts/apply-migrations.sql`: regenerated with `npm run migrations:mirror`
+          (**96 files, 94 mirrored**).
+        - `tests/migrationRecoverability.test.ts`: union of the job map, **10 jobs**:
+          billing-mail-outbox, content-notice-retry, district-seat-reconcile, imslp-sync,
+          omr-sweep, retention-archived-students, retention-compact-tombstones,
+          retention-rate-limits, retention-stale-guests, retention-support-messages. #62's
+          static block is kept; both sides' explanatory comments are kept.
+        - `src/sync/syncEngine.ts`: the `applyServerRow` gate is
+          `!this.watermarkHeld && state?.checkedSeq !== undefined && row.seq > state.watermarkSeq`,
+          writing `{ ...state, docId, watermarkSeq: row.seq }`. Both comments are kept. #63's
+          noteGap/hold/release, #64's compaction-floor check and `checkedSeq` saving, and
+          #61's read-only-seat hold all came through the auto-merge untouched. Both adapters
+          are kept (`fetchResyncFloor`, `fetchSeatReadOnly`).
+        - `src/sync/syncEngine.test.ts`: #64's `checkedSeq` assertion is kept, with #63's
+          note that the watermark is held until the first pull.
+        - `src/sync/realtimeChannel.test.ts`: both sides' tests are kept (#64's presence-names
+          test, then #63's takedown-topic tests), with #63's `TopicEpochRead` shape.
+        - `src/types/database.ts`: both RPC types (`annotation_resync_floor`,
+          `caller_seat_read_only`).
+    - No other change. (`src/sync/annotationStore.ts` is not Prettier-formatted, but it is
+      byte-identical to #64's reviewed head and CI doesn't check formatting, so I left it.)
+- Local checks on `420c19e`: `lint:check` ✅, `typecheck` ✅, `test` ✅ (219 files passed,
+  5 skipped; 3381 tests passed, 13 skipped, including both
+  `districtBillingCanonical.test.ts` files and the recoverability test), `build` ✅.
+- CI on `420c19e` (push and pull_request runs, 39699108773 and 39699111889): `checks` ✅,
+  **`supabase-local` ✅**, `supabase-drift` ✅, `omr-service` ✅, Vercel Preview Comments ✅,
+  Supabase Preview skipped. No flake re-runs were needed.
+- Marked ready for review, then merged with `merge_method=merge` (with
+  `expectedHeadSha=420c19e`) at 2026-10-22 00:25:54Z.
+- **Merge commit on dev: `208cb5ffc9e339f15059b1bd07629e9d2cd563ec`**, with parents
+  `6adde05` (dev) and `420c19e`. GitHub shows #64 merged into `dev`. Dev's tree equals
+  `420c19e`'s tree.
+
+### The earlier run's rehearsal of #64 (history)
+
 - To save time later, I rehearsed the final merge in a scratch worktree. #64 at
   `82d32c7` merged with a local, unpushed #61 resolution (`6e7b836`, tree `064d762`, the
   same tree the real #61 merge produced). Nothing from the rehearsal was pushed.
