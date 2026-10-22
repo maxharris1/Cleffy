@@ -1,6 +1,6 @@
 # Cleffy launchfix P6 fix4 report: PR #67 orphaned-provisioning runbook (Codex REVISE on bc070bd)
 
-**Status:** Blocked
+**Status:** Complete
 
 - Repo: maxharris1/Cleffy, PR #67 (draft, base `dev`, branch `mh/launchfix-p6-golive-docs`). Draft state, base, title and body unchanged.
 - Starting head: `bc070bd407bc7e96109f28830ed3263ae78f154c` (bc070bd4), on dev `d387b69f8de13dd468aaa2b6242b4c66685f95ae`. Confirmed at start (local HEAD and `origin/mh/launchfix-p6-golive-docs`) and again right before the push.
@@ -126,7 +126,31 @@ Author and committer: Max Harris <drumaxter@gmail.com>. `git show --stat 614824f
 
 ## CI on the final head 614824f
 
-Interim copy: CI on 614824f was still running when this was pushed (pull_request run 39834035752; push runs 39834030756 and 39834026782). This report will be updated on this branch once every check finishes.
+All 17 check runs on 614824f finished, and every one passed (Supabase Preview was skipped, as it was at bc070bd4). The commit status (Vercel) is `success`. Read through the REST API at 19:20 UTC on 2026-10-22.
+
+| Workflow run   | Event            | Run status                 | Job                     | Result                   | Job id       |
+| -------------- | ---------------- | -------------------------- | ----------------------- | ------------------------ | ------------ |
+| 39834035752    | pull_request     | completed / success        | checks                  | success                  | 120017489102 |
+| 39834035752    | pull_request     |                            | supabase-local          | success                  | 120017489183 |
+| 39834035752    | pull_request     |                            | edge-functions-deno     | success                  | 120017489246 |
+| 39834035752    | pull_request     |                            | supabase-drift          | success                  | 120017489379 |
+| 39834035752    | pull_request     |                            | omr-service             | success                  | 120017488756 |
+| 39834030756    | push             | completed / success        | checks                  | success                  | 120017475585 |
+| 39834030756    | push             |                            | supabase-local          | success                  | 120017475574 |
+| 39834030756    | push             |                            | edge-functions-deno     | success                  | 120017475462 |
+| 39834030756    | push             |                            | supabase-drift          | success                  | 120017475085 |
+| 39834030756    | push             |                            | omr-service             | success                  | 120017475756 |
+| 39834026782    | push (duplicate) | **stuck at `in_progress`** | checks                  | success (done 18:48:52Z) | 120017459715 |
+| 39834026782    | push (duplicate) |                            | supabase-local          | success                  | 120017459265 |
+| 39834026782    | push (duplicate) |                            | edge-functions-deno     | success                  | 120017459915 |
+| 39834026782    | push (duplicate) |                            | supabase-drift          | success                  | 120017459883 |
+| 39834026782    | push (duplicate) |                            | omr-service             | success                  | 120017460052 |
+| (Vercel app)   |                  |                            | Vercel Preview Comments | success                  | 120017762989 |
+| (Supabase app) |                  |                            | Supabase Preview        | skipped                  | 120017764714 |
+
+- Vercel commit status: `success`, "Deployment has completed" (https://vercel.com/maxs-projectsd/cleffy/ByTyC3JCaHy4dRNtqrRqTbiQBYJ5). No rate limit, so no Vercel action was needed and none was taken.
+- **Anomaly, not a failure:** GitHub started **two** `push` CI runs for the one push (39834026782 at 18:44:34Z and 39834030756 at 18:44:36Z; bc070bd4 had one). All five jobs of 39834026782 passed by 18:48:52Z, but the run and its check suite still read `in_progress` at 19:20Z (`updated_at` frozen at 18:44:46Z). No job is running or failing; the run's status just never updated. I did not re-run or cancel it (no CI kicking). The duplicate run 39834030756 for the same commit completed `success`.
+- Empty app check suites (google-cloud-build, cursor, claude: `queued` with 0 check runs) look the same at bc070bd4. They are not CI.
 
 ## Follow-ups (not done here)
 
@@ -137,7 +161,7 @@ Interim copy: CI on 614824f was still running when this was pushed (pull_request
 ## Open questions for Max
 
 1. Proof (A) treats the recorded id plus an in-window `created_at` as enough, even for an unflagged account (case 4). Is that the standard you want, or should case 4 additionally require the email path's `invited_at` (a GoTrue column dev does not write itself, so I did not use it as proof)?
-2. CI produced **two** `push` runs for the same commit on the PR branch (see the CI section). I pushed once. Probably a duplicate webhook delivery; flagging it in case it matters.
+2. CI started **two** `push` runs for the one push. One (39834026782) still shows `in_progress` at run level although all five of its jobs passed (see the CI section). If a merge gate reads the run-level state rather than the check runs, it may need a re-run of that run by Max; I did not touch it.
 
 ## Couldn't do / not done
 
