@@ -1023,6 +1023,16 @@ the window, or one already deleted. Ends with `failures | total`. Proven
 against the local stack on 2026-10-22: all 13 checks passed; the first 8 with
 20261022140300 alone, of which 3 failed with 20261022110600's function.
 
+`superseded_studio_rotation.sql` proves, with Realtime running, that
+superseding a studio (`20261022100300`, P1) rotates every score it takes from a
+member (P4's superseded-studio follow-up): `20261022100600` archives a member
+left on a capped plan past the cap, and the archive rotates each archived score
+once (`20261022120100`), telling both old topics, so it admits no join; the
+scores the member keeps, and a member under the cap, are not rotated. No
+migration was needed. Same harness as `superseded_studio_members.sql` with the
+rotation proof's `at_commit()`; ends with `failures | total`. Proven against the
+local stack on 2026-10-22: all 10 checks passed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

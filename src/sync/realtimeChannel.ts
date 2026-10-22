@@ -136,6 +136,15 @@ export const archivedRecheckDelayMs = (random: () => number = Math.random): numb
     Math.round(ARCHIVED_RECHECK_MS / 2 + random() * ARCHIVED_RECHECK_MS);
 
 /**
+ * While archived, the tab coming back into view, gaining focus or coming back
+ * online asks at once instead of waiting out the recheck (P4 follow-up): the
+ * moment someone looks at the score again is when a restore matters. At most
+ * once per ARCHIVED_WAKE_MIN_MS, so a burst of focus and visibility events is
+ * one request.
+ */
+export const ARCHIVED_WAKE_MIN_MS = 5_000;
+
+/**
  * How long doc-db:{id} may be out before we stop waiting for it and pull
  * instead. A healthy (re-)join lands well inside this; anything slower means
  * the join is being refused or retried (e.g. the frontend is live before
@@ -330,6 +339,9 @@ export class DocRealtimeChannel {
     /** The server said the score is archived: off both topics, asking again (see waitWhileArchived). */
     private archived = false;
     private archivedTimer: ReturnType<typeof setTimeout> | null = null;
+    /** When a focus, visibility or online event last asked (see ARCHIVED_WAKE_MIN_MS). */
+    private lastWakeAt = -Infinity;
+    private wakeListening = false;
 
     // Re-join after a drop (see scheduleRejoin).
     private readonly rejoinTimers: Record<ChannelKey, ReturnType<typeof setTimeout> | null> = { live: null, db: null };
@@ -365,6 +377,36 @@ export class DocRealtimeChannel {
     private presenceTrackTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(private opts: DocRealtimeChannelOptions) {}
+
+    /** Archived: the tab is back in view, focused or online, so ask now (ARCHIVED_WAKE_MIN_MS). */
+    private readonly onWake = (): void => {
+        if (!this.archived || this.stopped) {
+            return;
+        }
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+            return;
+        }
+        const now = Date.now();
+        if (now - this.lastWakeAt < ARCHIVED_WAKE_MIN_MS) {
+            return;
+        }
+        this.lastWakeAt = now;
+        this.clearArchivedRecheck();
+        this.refreshEpoch();
+    };
+
+    private listenForWake(listen: boolean): void {
+        if (typeof window === 'undefined' || listen === this.wakeListening) {
+            return;
+        }
+        this.wakeListening = listen;
+        const method = listen ? 'addEventListener' : 'removeEventListener';
+        window[method]('focus', this.onWake);
+        window[method]('online', this.onWake);
+        if (typeof document !== 'undefined') {
+            document[method]('visibilitychange', this.onWake);
+        }
+    }
 
     start(): void {
         if (!this.opts.fetchTopicEpoch) {
@@ -457,6 +499,7 @@ export class DocRealtimeChannel {
         const restored = this.archived;
         this.archived = false;
         this.clearArchivedRecheck();
+        this.listenForWake(false);
         const move = read.epoch !== this.epoch && (this.channel !== null || this.dbChannel !== null);
         if (move) {
             this.moveToEpoch(read.epoch);
@@ -494,6 +537,7 @@ export class DocRealtimeChannel {
         const entering = !this.archived;
         this.archived = true;
         this.inkHeld = true;
+        this.listenForWake(true);
         this.clearEpochRetry();
         if (this.channel || this.dbChannel) {
             this.leaveTopics();
@@ -1042,6 +1086,7 @@ export class DocRealtimeChannel {
         this.stopped = true;
         this.clearEpochRetry();
         this.clearArchivedRecheck();
+        this.listenForWake(false);
         if (this.rotationTimer) {
             clearTimeout(this.rotationTimer);
             this.rotationTimer = null;

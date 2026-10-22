@@ -17,6 +17,7 @@ import {
     EPOCH_RETRY_MAX_MS,
     ROTATION_JITTER_MAX_MS,
     ARCHIVED_RECHECK_MS,
+    ARCHIVED_WAKE_MIN_MS,
     archivedRecheckDelayMs,
     docDbTopic,
     docTopic,
@@ -1530,6 +1531,64 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
             expect(fetchTopicEpoch).toHaveBeenCalledTimes(4);
             rt.stop();
             expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('tab focus asks at once while archived, so a restore resumes without waiting out the recheck', async () => {
+            const { channels, latest, fetchTopicEpoch } = await setupWithEpochs(['archived', 1]);
+            expect(channels).toEqual([]);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
+
+            window.dispatchEvent(new Event('focus'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            expect(latest(docTopic(DOC, 1))).toBeDefined();
+            expect(latest(docDbTopic(DOC, 1))).toBeDefined();
+
+            // Restored: nothing listens any more, and no recheck is left.
+            window.dispatchEvent(new Event('focus'));
+            window.dispatchEvent(new Event('online'));
+            await vi.advanceTimersByTimeAsync(ARCHIVED_RECHECK_MS * 4);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        });
+
+        it('coming back online or into view asks too, at most once per ARCHIVED_WAKE_MIN_MS, never while hidden', async () => {
+            const { rt, fetchTopicEpoch } = await setupWithEpochs(['archived', 'archived', 'archived', 'archived']);
+            window.dispatchEvent(new Event('online'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+
+            // A burst: focus and visibility right after are the same request.
+            window.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('visibilitychange'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+
+            await vi.advanceTimersByTimeAsync(ARCHIVED_WAKE_MIN_MS);
+            const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+            document.dispatchEvent(new Event('visibilitychange'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+            visibility.mockReturnValue('visible');
+            document.dispatchEvent(new Event('visibilitychange'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            visibility.mockRestore();
+
+            // Stopped: nothing asks again, whatever the window does.
+            rt.stop();
+            await vi.advanceTimersByTimeAsync(ARCHIVED_WAKE_MIN_MS);
+            window.dispatchEvent(new Event('focus'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(3);
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('focus does nothing while the score is not archived', async () => {
+            const { fetchTopicEpoch } = await setupWithEpochs([0]);
+            window.dispatchEvent(new Event('focus'));
+            window.dispatchEvent(new Event('online'));
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fetchTopicEpoch).toHaveBeenCalledTimes(1);
         });
 
         it('a score opened while archived joins nothing, then joins on restore and pulls the gap', async () => {

@@ -40,9 +40,10 @@ import type { AnnotationRow } from '@/types/database';
  *
  * It creates its own throwaway accounts and scores and deletes them after,
  * with the takedowns, the notices they queued and the scores' storage cleanup
- * rows. Two things it causes are out of the API's reach and are left to the
- * local stack: the hints the server broadcast (realtime.messages, dropped
- * with their daily partition) and GoTrue's audit log of the sign-ups.
+ * rows. Two things it causes are out of the API's reach: the hints the
+ * server broadcast (realtime.messages, dropped with their daily partition)
+ * and GoTrue's audit log of the sign-ups. `bash scripts/live-tests-cleanup.sh`
+ * removes both from the local stack after a run.
  */
 const URL = process.env.CLEFFY_LIVE_SUPABASE_URL ?? '';
 const ANON = process.env.CLEFFY_LIVE_ANON_KEY ?? '';
