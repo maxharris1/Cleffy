@@ -1,5 +1,14 @@
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
+/**
+ * What a refused upload says. Storage answers an upload that would take the
+ * owner past their storage quota (20261022100800) with `storage_quota_exceeded`.
+ */
+export const uploadFailureMessage = (message: string): string =>
+    /storage_quota_exceeded/.test(message)
+        ? 'Upload failed: your storage is full. Delete scores you no longer need (archived ones count too) or upgrade for more space.'
+        : `Upload failed: ${message}`;
+
 /** Above this size, use the resumable (TUS) endpoint per Supabase guidance. */
 const TUS_THRESHOLD_BYTES = 6 * 1024 * 1024;
 
@@ -25,7 +34,7 @@ export const uploadPdfToStorage = async (
             .from('scores')
             .upload(objectPath, file, { contentType: 'application/pdf', upsert: true });
         if (error) {
-            throw new Error(`Upload failed: ${error.message}`);
+            throw new Error(uploadFailureMessage(error.message));
         }
         onProgress?.({ loaded: file.size, total: file.size });
         return;
@@ -57,7 +66,8 @@ export const uploadPdfToStorage = async (
             },
             onProgress: (loaded, total) => onProgress?.({ loaded, total }),
             onSuccess: () => resolve(),
-            onError: (err) => reject(err),
+            onError: (err) =>
+                reject(/storage_quota_exceeded/.test(err.message) ? new Error(uploadFailureMessage(err.message)) : err),
         });
         // Resume a previous attempt of the same file when possible.
         void upload.findPreviousUploads().then((previous) => {

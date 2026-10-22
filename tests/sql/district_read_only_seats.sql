@@ -505,7 +505,7 @@ select pg_temp.holds (
 select pg_temp.allowed (
     'and the viewer''s cover backfill (thumbnails, not an edit) still lands',
     $q$insert into storage.objects (bucket_id, name, owner)
-       values ('thumbnails', 'd1700000-0000-4000-8000-0000000000d6/1.jpg', 'd1700000-0000-4000-8000-0000000000b6')$q$
+       values ('thumbnails', 'd1700000-0000-4000-8000-0000000000d6/0.jpg', 'd1700000-0000-4000-8000-0000000000b6')$q$
 );
 
 select pg_temp.removes (

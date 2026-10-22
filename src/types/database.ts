@@ -102,6 +102,17 @@ export type DocumentStorageCleanupRow = {
     deleted_at: string;
 };
 
+/**
+ * A thumbnail a newer revision of the same score replaced. Written and removed
+ * only by triggers on storage.objects; the owner reads it to remove the object.
+ */
+export type ThumbnailStorageCleanupRow = {
+    object_name: string;
+    document_id: string;
+    owner_id: string;
+    superseded_at: string;
+};
+
 export type ImportStatusValue = 'prompted' | 'declined' | 'imported';
 
 export type DocumentImportRow = {
@@ -614,6 +625,13 @@ export type Database = {
             document_storage_cleanup: {
                 // Trigger-written tombstones; clients only read and delete them.
                 Row: DocumentStorageCleanupRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
+            thumbnail_storage_cleanup: {
+                // Trigger-written and trigger-cleared; clients only read them.
+                Row: ThumbnailStorageCleanupRow;
                 Insert: never;
                 Update: never;
                 Relationships: [];

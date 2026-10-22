@@ -81,9 +81,74 @@ export const publishThumbnail = async (docId: string, rev: number, blob: Blob): 
             return false;
         }
         const { error: rowError } = await supabase.from('documents').update({ thumb_rev: rev }).eq('id', docId);
-        return !rowError;
+        if (rowError) {
+            return false;
+        }
+        void purgeSupersededThumbnails({ docId, keepRev: rev });
+        return true;
     } catch {
         return false;
+    }
+};
+
+/** Superseded covers looked at per purge. */
+const PURGE_BATCH = 100;
+
+/**
+ * Remove covers a newer revision has replaced. The database lists them in
+ * thumbnail_storage_cleanup (20261022100800) whenever a cover is written and
+ * drops each row as its object goes; until they are gone, a folder holding one
+ * cover besides the latest takes no newer one. A score's published revision
+ * (`keepRev` for one score, else its thumb_rev) is never removed, even when
+ * listed: its row update may not have landed. Never throws: what is left is
+ * retried on the next library visit (sweepPendingStorageCleanup).
+ */
+export const purgeSupersededThumbnails = async (
+    target: { docId: string; keepRev: number } | { ownerId: string },
+): Promise<void> => {
+    try {
+        const supabase = getSupabase();
+        const listed =
+            'docId' in target
+                ? supabase
+                      .from('thumbnail_storage_cleanup')
+                      .select('object_name, document_id')
+                      .eq('document_id', target.docId)
+                : supabase
+                      .from('thumbnail_storage_cleanup')
+                      .select('object_name, document_id')
+                      .eq('owner_id', target.ownerId);
+        const { data: rows, error } = await listed.order('superseded_at', { ascending: true }).limit(PURGE_BATCH);
+        if (error || !rows || rows.length === 0) {
+            return;
+        }
+        const published = new Map<string, number | null>();
+        if ('docId' in target) {
+            published.set(target.docId, target.keepRev);
+        } else {
+            const ids = [...new Set(rows.map((row) => row.document_id))];
+            const { data: docs, error: docsError } = await supabase
+                .from('documents')
+                .select('id, thumb_rev')
+                .in('id', ids);
+            if (docsError) {
+                return;
+            }
+            for (const doc of docs ?? []) {
+                published.set(doc.id, doc.thumb_rev);
+            }
+        }
+        const stale = rows
+            .filter((row) => {
+                const rev = published.get(row.document_id);
+                return rev == null || row.object_name !== thumbnailObjectPath(row.document_id, rev);
+            })
+            .map((row) => row.object_name);
+        if (stale.length > 0) {
+            await supabase.storage.from(BUCKET).remove(stale);
+        }
+    } catch {
+        // The next library visit tries again.
     }
 };
 

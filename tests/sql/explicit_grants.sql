@@ -95,6 +95,7 @@ insert into t_client_expected values
 ('studios', 'authenticated', 'SELECT INSERT(id,name,owner_id) UPDATE(name)'),
 ('subscriptions', 'authenticated', 'SELECT'),
 ('teacher_attestations', 'authenticated', 'SELECT'),
+('thumbnail_storage_cleanup', 'authenticated', 'SELECT'),
 ('usage_counters', 'authenticated', 'SELECT');
 
 -- The fifteen tables BL-3 names.

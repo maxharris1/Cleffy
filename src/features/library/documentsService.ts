@@ -5,6 +5,7 @@ import {
 } from '@/features/imslp/imslpApi';
 import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { getThumbnail } from '@/features/library/thumbnailService';
+import { purgeSupersededThumbnails } from '@/features/library/thumbnailRemote';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 import { noteLibraryMutationCommitted, noteLibraryMutation } from '@/features/library/libraryCache';
@@ -552,7 +553,8 @@ const SWEEP_BATCH = 20;
 
 /**
  * Finish storage cleanups an earlier delete could not (offline, a refused
- * request, a tab closed mid-way). Detached and best-effort: the caller never
+ * request, a tab closed mid-way), and remove covers a newer revision replaced
+ * (purgeSupersededThumbnails). Detached and best-effort: the caller never
  * waits on it and nothing the user sees depends on it.
  *
  * The batch is a random draw from the oldest candidates rather than the
@@ -584,6 +586,9 @@ export const sweepPendingStorageCleanup = async (userId: string): Promise<void> 
         }
     } catch {
         // Next page load tries again.
+    } finally {
+        // Covers a newer revision replaced, on scores that still exist.
+        await purgeSupersededThumbnails({ ownerId: userId });
     }
 };
 

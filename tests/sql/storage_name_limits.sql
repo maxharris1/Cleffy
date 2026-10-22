@@ -66,8 +66,11 @@ select set_config('storage.allow_delete_query', 'true', true);
 
 -- 1 owns score 10 (lower-case id, as every id the app makes is).
 insert into auth.users (id, email) values (pg_temp.u(1), 'owner@storagenames.test');
-insert into public.documents (id, owner_id, title, storage_path)
-values (pg_temp.u(10), pg_temp.u(1), 'Names', pg_temp.u(10)::text || '/original.pdf');
+-- At content_rev 17, so revisions 0..17 are ones it has had: 20261022100800
+-- refuses a thumbnail for a revision the score never reached
+-- (storage_quota.sql proves that cap).
+insert into public.documents (id, owner_id, title, storage_path, content_rev)
+values (pg_temp.u(10), pg_temp.u(1), 'Names', pg_temp.u(10)::text || '/original.pdf', 17);
 -- An object from before the policies, under a name the app never writes.
 insert into storage.objects (bucket_id, name, owner) values ('scores', pg_temp.u(10)::text || '/stray.bin', pg_temp.u(1));
 
@@ -82,7 +85,8 @@ select pg_temp.allowed('03 scores: an upsert over original.pdf (upload with upse
 select pg_temp.allowed('04 thumbnails: {id}/0.jpg and {id}/17.jpg', pg_temp.put('thumbnails', :'doc' || '/0.jpg') || ', (''thumbnails'', ''' || :'doc' || '/17.jpg'', ''' || pg_temp.u(1) || ''')', 2);
 select pg_temp.allowed('05 thumbnails: an upsert over {id}/17.jpg',
     pg_temp.put('thumbnails', :'doc' || '/17.jpg') || $q$ on conflict (bucket_id, name collate "C") where archived_at is null do update set metadata = '{"size": 2}'$q$);
-select pg_temp.allowed('06 thumbnails: the largest int rev', pg_temp.put('thumbnails', :'doc' || '/2147483647.jpg'));
+-- The largest int is a valid NAME; 20261022100800's revision cap refuses it.
+select pg_temp.refused('06 thumbnails: the largest int rev is a valid name, but past the revision cap', pg_temp.put('thumbnails', :'doc' || '/2147483647.jpg'), '42501');
 
 -- ---- anything else in the owner's own folder
 select pg_temp.refused('10 scores: another name', pg_temp.put('scores', :'doc' || '/notes.txt'), '42501');

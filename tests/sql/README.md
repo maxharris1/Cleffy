@@ -596,6 +596,23 @@ studio grants no seat, active or read-only, and takes no invite. 30 checks.
 `scores/{id}/original.pdf`, `scores/{id}/pre-import-original.pdf` and
 `thumbnails/{id}/{rev}.jpg` (insert, upsert, move), a client cannot create an
 archived score, and both buckets carry their size and type limits. 32 checks.
+Check 06 now expects the largest int revision to be refused: it is a valid
+name, but past `20261022100800`'s revision cap.
+
+`storage_quota.sql` proves
+`20261022100800_storage_quota_and_thumbnail_lifecycle.sql` (A2; Codex round 1
+on #69, MAJOR 3): the per-owner byte quota comes from
+`deployment_config.storage_quota_bytes` by plan tier (defaults 500 MiB free,
+5 GiB paid; the column takes only known tiers and positive integers); a write
+past it is refused with `storage_quota_exceeded` (42501), the Storage API's
+real write and a client's size-less test insert alike, counting archived
+scores' files and a deleted score's leftovers until purged, never counting an
+upserted object twice and never refusing a write that does not grow an
+object; a new thumbnail puts the folder's other objects on
+`thumbnail_storage_cleanup`, which clears itself as they are removed; a client
+may write a thumbnail only while its folder holds at most one other object and
+only for a revision from 0 to the score's `content_rev` (at most 1,000,000);
+and the migration ledgers covers superseded before it. 62 checks.
 
 `superseded_studio_members.sql` proves
 `20261022100600_superseded_studio_followups.sql` (Codex round 1 on #69, MAJOR 1
