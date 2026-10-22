@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { CHECKOUT_ATTEMPT_STALE_AFTER } from '../../supabase/functions/_shared/checkoutFlow';
+import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../../supabase/functions/_shared/deletionPending';
 
 /**
  * The deletion-pending marker (20261022110100_account_deletion_pending.sql)
@@ -73,8 +74,8 @@ describe('deletion-pending wiring', () => {
     it('stripe-checkout reads the barrier’s refusal of the lease as deletion_pending, not a failure', () => {
         const source = read('supabase/functions/stripe-checkout/index.ts');
         const begin = source.slice(source.indexOf('beginAttempt: async'));
-        expect(begin.slice(0, 900)).toMatch(/error\.code === '55000' && \/account_deletion_pending\//);
-        expect(begin.slice(0, 900)).toContain("reason: 'deletion_pending'");
+        expect(begin.slice(0, 1500)).toMatch(/error\.code === '55000' && \/account_deletion_pending\//);
+        expect(begin.slice(0, 1500)).toContain("reason: 'deletion_pending'");
     });
 
     it('the barrier covers Storage writes in both buckets, memberships, checkout leases and provisioning', () => {
@@ -108,5 +109,86 @@ describe('deletion-pending wiring', () => {
         expect(sql).toMatch(
             /before insert on public\.managed_students\s+for each row execute function public\.refuse_insert_during_account_deletion/,
         );
+    });
+});
+
+describe('service-role writers ask account_deletion_pending() first (Codex r2 on #70)', () => {
+    const rpcAnswering = (answer: { data: unknown; error: unknown } | Error) =>
+        vi.fn(async () => {
+            if (answer instanceof Error) {
+                throw answer;
+            }
+            return answer;
+        });
+
+    it('the helper asks the one predicate, and fails closed', async () => {
+        const pending = rpcAnswering({ data: true, error: null });
+        expect(await accountDeletionPending({ rpc: pending }, 'user-1')).toEqual({ ok: true, pending: true });
+        expect(pending).toHaveBeenCalledWith('account_deletion_pending', { p_user: 'user-1' });
+        expect(await accountDeletionPending({ rpc: rpcAnswering({ data: false, error: null }) }, 'u')).toEqual({
+            ok: true,
+            pending: false,
+        });
+        // Only a literal true is pending; an error or a throw is no answer at all.
+        expect(await accountDeletionPending({ rpc: rpcAnswering({ data: null, error: null }) }, 'u')).toEqual({
+            ok: true,
+            pending: false,
+        });
+        expect(
+            await accountDeletionPending({ rpc: rpcAnswering({ data: null, error: { message: 'boom' } }) }, 'u'),
+        ).toEqual({ ok: false, message: 'boom' });
+        expect(await accountDeletionPending({ rpc: rpcAnswering(new Error('down')) }, 'u')).toEqual({
+            ok: false,
+            message: 'down',
+        });
+        expect(ACCOUNT_DELETION_PENDING.code).toBe('account_deletion_pending');
+    });
+
+    /** `check` comes before `first` in `body`, and both exist. */
+    const before = (body: string, check: string, first: string) => {
+        const at = body.indexOf(check);
+        expect(at, check).toBeGreaterThan(-1);
+        expect(body.indexOf(first), first).toBeGreaterThan(at);
+    };
+
+    it('student-provision: before any action runs (Auth writes no trigger can refuse)', () => {
+        const source = read('supabase/functions/student-provision/index.ts');
+        const serve = source.slice(source.indexOf('Deno.serve('));
+        before(serve, 'await accountDeletionPending(admin, userId)', 'switch (body.action)');
+        expect(serve).toContain('jsonResponse(ACCOUNT_DELETION_PENDING, 409)');
+    });
+
+    it('stripe-checkout: before the lease, and so before any Stripe customer or session', () => {
+        const source = read('supabase/functions/stripe-checkout/index.ts');
+        const begin = source.slice(source.indexOf('beginAttempt: async'));
+        before(begin, 'await accountDeletionPending(billing(mode).admin, userId)', "rpc('begin_checkout_attempt'");
+        expect(begin.slice(0, 900)).toContain(
+            "if (pending.pending) {\n                return { ok: false, reason: 'deletion_pending' };",
+        );
+    });
+
+    it('imslp-download: before the import runs (quota, licence cache, documents row, upload)', () => {
+        const source = read('supabase/functions/imslp-download/index.ts');
+        before(source, 'await accountDeletionPending(admin, userId)', 'await runImslpImport(');
+        expect(source).toContain('jsonResponse(ACCOUNT_DELETION_PENDING, 409)');
+    });
+
+    it('score-analyze: before the owner is metered or a job is enqueued for them', () => {
+        const source = read('supabase/functions/score-analyze/index.ts');
+        before(source, 'await accountDeletionPending(admin, doc.owner_id as string)', 'await enforce(admin');
+        before(source, 'await accountDeletionPending(admin, doc.owner_id as string)', "rpc('omr_enqueue_job'");
+    });
+
+    it('a failed check is a refusal, never a pass', () => {
+        for (const path of [
+            'supabase/functions/student-provision/index.ts',
+            'supabase/functions/stripe-checkout/index.ts',
+            'supabase/functions/imslp-download/index.ts',
+            'supabase/functions/score-analyze/index.ts',
+        ]) {
+            const source = read(path);
+            const at = source.indexOf('await accountDeletionPending(');
+            expect(source.slice(at, at + 400), path).toMatch(/if \(!pending\.ok\) \{[\s\S]{0,250}?return /);
+        }
     });
 });

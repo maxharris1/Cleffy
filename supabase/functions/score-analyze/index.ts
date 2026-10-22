@@ -1,6 +1,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../_shared/deletionPending.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
@@ -102,6 +103,17 @@ Deno.serve(async (req) => {
     const admin = serviceClient();
     if (!admin) {
         return jsonResponse({ ok: false, code: 'service_unreachable' }, 502);
+    }
+
+    // The job is the owner's (it is metered and stored against them), so no
+    // run starts for a score whose owner's account is being deleted
+    // (../_shared/deletionPending.ts).
+    const pending = await accountDeletionPending(admin, doc.owner_id as string);
+    if (!pending.ok) {
+        return jsonResponse({ ok: false, code: 'service_unreachable' }, 502);
+    }
+    if (pending.pending) {
+        return jsonResponse({ ok: false, ...ACCOUNT_DELETION_PENDING }, 409);
     }
 
     // Gate BEFORE dispatch, against the OWNER. A refused run costs nothing and

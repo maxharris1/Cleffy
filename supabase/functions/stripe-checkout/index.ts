@@ -2,6 +2,7 @@ import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts'
 import * as billingTerms from '../_shared/billingTerms.ts';
 import { CHECKOUT_ATTEMPT_STALE_AFTER, handleCheckout } from '../_shared/checkoutFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { accountDeletionPending } from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { LEGAL_VERSIONS } from '../_shared/legalVersions.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
@@ -174,6 +175,16 @@ Deno.serve((req) =>
         // an empty set when another request holds it, which is the one case the
         // flow must not read as an error: it is a double-submit, not a failure.
         beginAttempt: async (userId, mode) => {
+            // Asked first, before the lease and so before any Stripe customer or
+            // session (../_shared/deletionPending.ts); the lease's own trigger
+            // below is the in-transaction backstop.
+            const pending = await accountDeletionPending(billing(mode).admin, userId);
+            if (!pending.ok) {
+                return { ok: false, reason: 'error', error: new Error(pending.message) };
+            }
+            if (pending.pending) {
+                return { ok: false, reason: 'deletion_pending' };
+            }
             const { data, error } = await billing(mode).admin.rpc('begin_checkout_attempt', {
                 p_user: userId,
                 p_mode: mode,
