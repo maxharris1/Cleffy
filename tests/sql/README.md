@@ -1102,6 +1102,16 @@ function text pins the order (roster row, tokens, sessions, then
 stack on 2026-10-22: all 6 checks passed; with 20261020150100's function the
 same interleaving ended in `deadlock detected`.
 
+`sweep_stale_account_deletions.sql` proves
+`supabase/migrations/20261022141000_sweep_stale_account_deletions.sql`
+(decision 49(6)'s sweep): `sweep_stale_account_deletions()` closes attempts
+whose lease ran out (`abandoned`, `lease_expired`), deletes the markers no
+cleanup touched and no attempt holds (settle's own rule), keeps a live
+attempt's marker, keeps and reports a half-deleted marker (and does not report
+one a live attempt is finishing), is idempotent, and is the service role's
+alone. Ends with `failures | total`. Proven against the local stack on
+2026-10-22: all 10 checks passed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

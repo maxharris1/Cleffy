@@ -1345,6 +1345,30 @@ it paused.
     any function** (step 12). Fix forward as in _Abort and recovery_, and run
     the check again. There is no `20261022130200` (top of this section).
 
+    **The launch-fix follow-ups (PR #72), when merged before the sitting.**
+    Batch 3 pushes them too (they sort after P5). Check them the same way:
+
+    ```sql
+    select version, name from supabase_migrations.schema_migrations
+    where version between '20261022140000' and '20261022141000'
+    order by 1;
+    -- exactly 11 rows: 140000 district_retention_restore_hand_on,
+    -- 140100 district_retention_detach_kept, 140200 district_barrier_lifts_on_renewal,
+    -- 140300 student_provision_intent_window, 140400 student_provision_intent_proven,
+    -- 140500 thumbnail_publish_lock_order, 140600 my_storage_usage,
+    -- 140700 clear_stale_code_reset_markers, 140800 student_email_reset_fence,
+    -- 140900 end_student_sessions_lock_order, 141000 sweep_stale_account_deletions
+    ```
+
+    Their deploy order: `20261022140800` before the new `student-provision`
+    (its email reset calls `complete_student_email_reset`), `20261022140400`
+    right before the new `delete-account` (it reads the new `proven` column;
+    an older `delete-account` ignores it), and `20261022140600` with or before
+    the new frontend (the storage-full message calls `my_storage_usage`;
+    without it the message has no numbers). Step 12's order (migrations
+    first, `student-provision` first among the functions) already gives all
+    three. Nothing in them is scheduled.
+
     **P3's code reset: `20261022110700` / `20261022110800` and the
     `student-provision` deploy go back to back, inside the freeze** (decision
     64). `20261022110700_student_code_reset_worker` **drops** the old
@@ -2399,8 +2423,15 @@ deletion completes. Check `last_error` (billing, storage, auth) and fix the
 cause. Then ask the person to retry Delete account (it needs their session and
 password). If they cannot be reached, escalate to Max for a service-role
 completion. Never clear the row by hand while data is half-deleted. Untouched
-markers (no `destructive_started_at`, no live attempt) restrict nothing and
-need no action.
+markers (no `destructive_started_at`, no live attempt) restrict nothing.
+`select public.sweep_stale_account_deletions();` (`20261022141000`, decision
+49(6)) removes them, closes attempts whose lease ran out, never touches a
+half-deleted row, and reports how many half-deleted rows wait for this runbook
+(`half_deleted`, `oldest_half_deleted`). It is safe to run at any time; nothing
+schedules it. To run it daily:
+`select cron.schedule('account-deletions-sweep', '41 4 * * *', $$select public.sweep_stale_account_deletions()$$);`
+(then add `('account-deletions-sweep', true)` to the expected list in step
+13.4).
 
 **Inbound support mail marked `failed`.** Find it:
 
