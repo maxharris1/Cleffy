@@ -64,17 +64,27 @@ const handlerBody = (name: string): string => {
 
 describe('student-provision ends sessions where it revokes', () => {
     it('reset: on both paths, after the scramble and before anything is handed out', () => {
+        // The email path, inline.
         const body = handlerBody('resetStudentAccess');
-        const scrambles = [...body.matchAll(/password: generateProvisionPassword\(\)/g)].map((m) => m.index ?? -1);
-        const ends = [...body.matchAll(/endStudentSessions\(admin, row\.student_user_id\)/g)].map((m) => m.index ?? -1);
-        // The email path and the code path each scramble, then end sessions.
-        expect(scrambles).toHaveLength(2);
-        expect(ends).toHaveLength(2);
-        expect(ends[0]).toBeGreaterThan(scrambles[0] ?? Infinity);
-        expect(ends[1]).toBeGreaterThan(scrambles[1] ?? Infinity);
-        // Before the reset mail goes out, and before a new code is minted.
-        expect(ends[0]).toBeLessThan(body.indexOf('signInWithOtp'));
-        expect(ends[1]).toBeLessThan(body.indexOf('generateLoginCode()'));
+        const scramble = body.indexOf('password: generateProvisionPassword()');
+        const ends = body.indexOf('endStudentSessions(admin, row.student_user_id)');
+        expect(scramble).toBeGreaterThan(-1);
+        expect(ends).toBeGreaterThan(scramble);
+        expect(ends).toBeLessThan(body.indexOf('signInWithOtp'));
+        // The code path runs in ../_shared/studentCodeReset.ts (since P3 fix
+        // round 2): its ports bind the scramble and endStudentSessions, and the
+        // worker ends the sessions after the scramble and before a code is minted.
+        const source = readFileSync(resolve(process.cwd(), 'supabase/functions/student-provision/index.ts'), 'utf8');
+        const ports = source.slice(
+            source.indexOf('const codeResetPorts = '),
+            source.indexOf('const resetStudentAccess'),
+        );
+        expect(ports).toContain('password: generateProvisionPassword()');
+        expect(ports).toContain('endStudentSessions(admin, studentUserId)');
+        const worker = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/studentCodeReset.ts'), 'utf8');
+        const run = worker.slice(worker.indexOf('export const runCodeReset'));
+        expect(run.indexOf('ports.endSessions(')).toBeGreaterThan(run.indexOf('ports.scramblePassword('));
+        expect(run.indexOf('ports.endSessions(')).toBeLessThan(run.indexOf('ports.mintCode('));
     });
 
     it('archive: after the stamp and the ban', () => {
