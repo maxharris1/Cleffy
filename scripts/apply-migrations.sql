@@ -26942,7 +26942,11 @@ grant execute on function public.end_student_sessions (uuid) to service_role;
 --     counted and named for a person, as the runbook says, since only a
 --     completed deletion may clear it.
 -- Idempotent: a second run changes nothing. At most p_limit markers per run
--- (default 500), oldest first. Returns
+-- (default 500), oldest first, counting only markers with something to do: an
+-- attempt to close, or a marker to delete (PR #72 fix 4). A half-deleted
+-- marker whose attempts are all closed, or a marker an attempt still holds, is
+-- passed over before the limit, so old ones never fill every run and starve
+-- newer abandoned markers; the half-deleted are still counted below. Returns
 --   {"attempts_closed": n, "markers_cleared": n, "half_deleted": n,
 --    "oldest_half_deleted": <user_id or null>}.
 --
@@ -26962,7 +26966,18 @@ declare
     v_cleared integer := 0;
 begin
     for v_user in
+        -- What the loop below would do, read without the lock (and checked
+        -- again under it): close an attempt, or delete the marker.
         select d.user_id from public.account_deletions d
+        where exists (
+                  select 1 from public.account_deletion_attempts a
+                  where a.user_id = d.user_id and a.ended_at is null and a.lease_until <= now()
+              )
+           or (d.destructive_started_at is null
+               and not exists (
+                   select 1 from public.account_deletion_attempts a
+                   where a.user_id = d.user_id and a.ended_at is null and a.lease_until > now()
+               ))
         order by d.started_at, d.user_id
         limit greatest(coalesce(p_limit, 500), 0)
     loop

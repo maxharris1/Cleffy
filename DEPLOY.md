@@ -2434,7 +2434,9 @@ markers (no `destructive_started_at`, no live attempt) restrict nothing.
 `select public.sweep_stale_account_deletions();` (`20261022141000`, decision
 49(6)) removes them, closes attempts whose lease ran out, never touches a
 half-deleted row, and reports how many half-deleted rows wait for this runbook
-(`half_deleted`, `oldest_half_deleted`). It is safe to run at any time; nothing
+(`half_deleted`, `oldest_half_deleted`). Its limit (500 a run) counts only rows
+it has something to do for, so half-deleted rows waiting here never hold back
+newer abandoned ones. It is safe to run at any time; nothing
 schedules it. To run it daily:
 `select cron.schedule('account-deletions-sweep', '41 4 * * *', $$select public.sweep_stale_account_deletions()$$);`
 (then add `('account-deletions-sweep', true)` to the expected list in step

@@ -8,6 +8,11 @@
 --   c  half-deleted (destructive cleanup began); its attempt crashed
 --   d  no cleanup began; its attempt ended (abandoned) but the marker stayed
 --   e  half-deleted; an attempt is live (a retry finishing it)
+-- And, for the limit (PR #72 fix 4), after those:
+--   f, g  half-deleted long ago, their crashed attempts already closed: only
+--         reported, nothing left to do
+--   h  live: an attempt is under way
+--   i  no cleanup began; its attempt crashed (newer than f, g and h)
 \set ON_ERROR_STOP on
 begin;
 create temp table t_results (name text, ok boolean, detail text);
@@ -98,6 +103,34 @@ select pg_temp.chk('08 once b''s attempt has crashed as well, the next run close
 set local role authenticated;
 select pg_temp.refused('09 no client may run it', $q$select public.sweep_stale_account_deletions ()$q$, '42501');
 reset role;
+-- The limit counts only markers with something to do: f, g (reported
+-- only) and h (live) are older than i, and never fill a bounded run.
+insert into auth.users (id, email)
+select pg_temp.u(n), 'sad-' || n || '@example.invalid' from generate_series(6, 9) n;
+insert into public.account_deletions (user_id, started_at, destructive_started_at) values
+(pg_temp.u(6), now() - interval '30 days', now() - interval '30 days'),
+(pg_temp.u(7), now() - interval '29 days', now() - interval '29 days'),
+(pg_temp.u(8), now() - interval '28 days', null),
+(pg_temp.u(9), now() - interval '1 hour', null);
+insert into public.account_deletion_attempts (user_id, started_at, lease_until, ended_at, outcome, error) values
+(pg_temp.u(6), now() - interval '30 days', now() - interval '30 days' + interval '10 minutes', now() - interval '29 days', 'abandoned', 'lease_expired'),
+(pg_temp.u(7), now() - interval '29 days', now() - interval '29 days' + interval '10 minutes', now() - interval '28 days', 'abandoned', 'lease_expired'),
+(pg_temp.u(8), now() - interval '1 minute', now() + interval '9 minutes', null, null, null),
+(pg_temp.u(9), now() - interval '1 hour', now() - interval '50 minutes', null, null, null);
+set local role service_role;
+insert into t_ran select 'bounded_1', public.sweep_stale_account_deletions (1);
+insert into t_ran select 'bounded_2', public.sweep_stale_account_deletions (1);
+reset role;
+select pg_temp.chk('11 bounded runs (p_limit 1) reach the newer crashed marker i past the older reported-only and live ones', $q$
+    select (select (v ->> 'attempts_closed')::int = 1 and (v ->> 'markers_cleared')::int = 1 from t_ran where k = 'bounded_1')
+       and not pg_temp.marked(9)
+       and not exists (select 1 from public.account_deletion_attempts where user_id = pg_temp.u(9))$q$);
+select pg_temp.chk('12 ... and leave f, g (still reported) and h (live) as they were; the next bounded run has nothing to do', $q$
+    select pg_temp.marked(6) and pg_temp.marked(7) and pg_temp.marked(8) and pg_temp.open_attempts(8) = 1
+       and (select (v ->> 'attempts_closed')::int = 0 and (v ->> 'markers_cleared')::int = 0
+                   and (v ->> 'half_deleted')::int = (select half_deleted from t_baseline) + 3
+            from t_ran where k = 'bounded_2')$q$);
+
 select pg_temp.chk('10 it is the service role''s alone', $q$
     select has_function_privilege('service_role', 'public.sweep_stale_account_deletions(integer)', 'execute')
        and not has_function_privilege('anon', 'public.sweep_stale_account_deletions(integer)', 'execute')

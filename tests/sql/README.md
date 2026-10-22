@@ -1127,8 +1127,11 @@ whose lease ran out (`abandoned`, `lease_expired`), deletes the markers no
 cleanup touched and no attempt holds (settle's own rule), keeps a live
 attempt's marker, keeps and reports a half-deleted marker (and does not report
 one a live attempt is finishing), is idempotent, and is the service role's
-alone. Ends with `failures | total`. Proven against the local stack on
-2026-10-22: all 10 checks passed.
+alone. Its limit counts only markers with something to do (PR #72 fix 4):
+bounded runs (`p_limit` 1) reach a newer crashed marker past older
+reported-only half-deleted ones and a live one, which stay as they were. Ends
+with `failures | total`. Proven against the local stack on 2026-10-22: all 12
+checks passed; check 11 fails with the first version of the function.
 
 ## In CI
 
