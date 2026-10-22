@@ -107,6 +107,22 @@ const RequestLink = ({ notice }: { notice?: string }) => {
     );
 };
 
+/** What became of the refund request, if one was asked for. */
+const RefundOutcome = ({ result }: { result: CancelResult }) => (
+    <>
+        {result.refundRequested ? (
+            <p className="mt-3 text-center text-sm text-stone-700">
+                We’ve passed your refund request to our support team, who will reply by email.
+            </p>
+        ) : null}
+        {result.refundRequestFailed ? (
+            <ErrorText className="mt-3 text-center">
+                We could not send your refund request. Please email {TRADER.supportEmail} to ask for it.
+            </ErrorText>
+        ) : null}
+    </>
+);
+
 /** Answers after which the link is no use, so the page asks for a new one (cancelFlow.ts CANCEL_ERRORS). */
 const LINK_DONE = new Set(['link_invalid', 'nothing_to_cancel', 'not_cancelled']);
 
@@ -134,11 +150,11 @@ const ConfirmCancel = ({ token }: { token: string }) => {
         };
     }, [token]);
 
-    const cancel = async () => {
+    const cancel = async (requestRefund = refund) => {
         setBusy(true);
         setError(null);
         try {
-            setResult(await confirmCancel(token, refund));
+            setResult(await confirmCancel(token, requestRefund));
         } catch (err) {
             // A link that ran out or was spent -- even by this press, when
             // Stripe then failed -- cannot be tried again: offer a new one.
@@ -162,6 +178,21 @@ const ConfirmCancel = ({ token }: { token: string }) => {
         );
     }
 
+    if (result && !result.cancelled) {
+        return (
+            <BrandShell
+                title="Your account is being deleted"
+                subtitle="Deleting your account cancels your subscription, so nothing was changed here."
+            >
+                <RefundOutcome result={result} />
+                <p className="mt-3 text-center text-sm text-stone-600">
+                    If the deletion does not go through, use this link again, or ask for a new one, to cancel.
+                </p>
+                <SupportLine />
+            </BrandShell>
+        );
+    }
+
     if (result) {
         const ends = formatWhen(result.endsAt);
         return (
@@ -170,16 +201,7 @@ const ConfirmCancel = ({ token }: { token: string }) => {
                 subtitle={`Cancelled ${formatWhen(result.cancelledAt) ?? 'just now'}. You won’t be charged again.`}
             >
                 {ends ? <p className="text-center text-sm text-stone-700">You keep full access until {ends}.</p> : null}
-                {result.refundRequested ? (
-                    <p className="mt-3 text-center text-sm text-stone-700">
-                        We’ve passed your refund request to our support team, who will reply by email.
-                    </p>
-                ) : null}
-                {result.refundRequestFailed ? (
-                    <ErrorText className="mt-3 text-center">
-                        We could not send your refund request. Please email {TRADER.supportEmail} to ask for it.
-                    </ErrorText>
-                ) : null}
+                <RefundOutcome result={result} />
                 <p className="mt-3 text-center text-sm text-stone-600">
                     A confirmation is on its way to your email. Changed your mind? Resume from your Account page before
                     then.
@@ -199,6 +221,39 @@ const ConfirmCancel = ({ token }: { token: string }) => {
 
     const periodEnd = formatWhen(summary.periodEnd);
     const plan = summary.plan ? `Cleffy ${summary.plan}` : 'Your Cleffy subscription';
+    if (summary.deletionPending) {
+        // Launch-fix item 16: the deletion cancels the subscription itself, so
+        // the only thing left to ask for here is the refund.
+        return (
+            <BrandShell title="Cancel your subscription" subtitle={summary.email ? `For ${summary.email}` : undefined}>
+                <section className="rounded-2xl border border-stone-200 bg-white p-4 text-sm text-stone-700">
+                    <p className="font-medium text-stone-900">{plan}</p>
+                    <p className="mt-1">
+                        This account is being deleted. Deleting it cancels this subscription, so there is nothing to
+                        cancel here.
+                    </p>
+                </section>
+                {summary.refundEligible ? (
+                    <>
+                        <p className="mt-4 text-sm text-stone-700">
+                            You are within {REFUND_WINDOW_DAYS} days of your first purchase, so you can still ask for a
+                            full refund.
+                        </p>
+                        {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
+                        <Button
+                            variant="danger"
+                            className="mt-5 w-full"
+                            disabled={busy}
+                            onClick={() => void cancel(true)}
+                        >
+                            {busy ? 'Sending…' : 'Request a full refund'}
+                        </Button>
+                    </>
+                ) : null}
+                <SupportLine />
+            </BrandShell>
+        );
+    }
     return (
         <BrandShell title="Cancel your subscription" subtitle={summary.email ? `For ${summary.email}` : undefined}>
             <section className="rounded-2xl border border-stone-200 bg-white p-4 text-sm text-stone-700">

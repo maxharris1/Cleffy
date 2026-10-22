@@ -57,17 +57,30 @@ export interface CancelSummary {
     periodEnd: string | null;
     alreadyCancelling: boolean;
     refundEligible: boolean;
+    /**
+     * The account is being deleted (launch-fix item 16): the deletion cancels
+     * the subscription, so the page offers only the refund request.
+     */
+    deletionPending?: boolean;
 }
 
 export const peekCancel = (token: string): Promise<CancelSummary> => call({ action: 'peek', token });
 
-export interface CancelResult {
-    cancelled: true;
-    cancelledAt: string;
-    endsAt: string | null;
-    refundRequested: boolean;
-    refundRequestFailed: boolean;
-}
+export type CancelResult =
+    | {
+          cancelled: true;
+          cancelledAt: string;
+          endsAt: string | null;
+          refundRequested: boolean;
+          refundRequestFailed: boolean;
+      }
+    | {
+          /** The account is being deleted: nothing was changed here, the link is still good. */
+          cancelled: false;
+          deletionPending: true;
+          refundRequested: boolean;
+          refundRequestFailed: boolean;
+      };
 
 export const confirmCancel = (token: string, requestRefund: boolean): Promise<CancelResult> =>
     call({ action: 'cancel', token, requestRefund });

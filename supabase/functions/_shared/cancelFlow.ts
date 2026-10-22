@@ -272,6 +272,11 @@ export interface CancelDeps {
     idempotencyKey: IdempotencyKey;
     terms: Pick<typeof BillingTerms, 'refundRequestEmail' | 'withinRefundWindow' | 'TRADER'>;
     planNameForPrice: (priceId: string | null) => string | null;
+    /**
+     * account_deletion_pending() for the link's account (deletionPending.ts),
+     * launch-fix item 16. `unknown` is a check that could not be answered.
+     */
+    accountDeletionPending: (userId: string) => Promise<'clear' | 'pending' | 'unknown'>;
     now: () => number;
     logError: (code: string, err: unknown) => void;
 }
@@ -590,10 +595,59 @@ const summaryOf = (deps: CancelDeps, resolved: Resolved, subscription: Cancellab
     refundEligible: deps.terms.withinRefundWindow(resolved.firstPurchaseAt, deps.now()),
 });
 
+/**
+ * While the link's account is being deleted (launch-fix item 16, decision
+ * 70(1)). The deletion cancels every subscription itself, immediately, so the
+ * page leaves Stripe alone; and the link is NOT spent, so if the deletion is
+ * abandoned the same link -- or a new one -- cancels as usual. What it still
+ * does is the one thing the deletion does not: a refund request inside the 14
+ * days goes to support, because withdrawing is the buyer's legal right whatever
+ * happens to the account. The answer says plainly that nothing was cancelled
+ * here, and why.
+ *
+ * Nothing here reads Stripe: by now the deletion has usually cancelled the
+ * subscription already, and the page would otherwise answer "nothing to
+ * cancel" and never reach the refund request. The mirror says which
+ * subscription; the webhook leaves it alone while the deletion is pending.
+ */
+const deletionPendingSummary = (deps: CancelDeps, resolved: Resolved, mirrored: CancellableSubscription) => ({
+    ...summaryOf(deps, resolved, mirrored),
+    deletionPending: true,
+});
+
+const deletionPendingCancel = async (
+    deps: CancelDeps,
+    body: Record<string, unknown>,
+    resolved: Resolved,
+    mirrored: CancellableSubscription,
+): Promise<Response> => {
+    const refund = await requestRefund(deps, body, resolved, mirrored, true);
+    return deps.json({ cancelled: false, deletionPending: true, ...refund });
+};
+
+/** What the deletion check answered, or the 503 for one it could not make. */
+const deletionCheck = async (deps: CancelDeps, resolved: Resolved): Promise<'clear' | 'pending' | Response> => {
+    const answer = await deps.accountDeletionPending(resolved.row.userId);
+    if (answer === 'unknown') {
+        deps.logError('cancel_deletion_check_failed', new Error('account_deletion_pending() did not answer'));
+        return deps.json(CANCEL_ERRORS.unavailable, 503);
+    }
+    return answer;
+};
+
 const peekCancel = async (deps: CancelDeps, body: Record<string, unknown>): Promise<Response> => {
     const resolved = await resolveToken(deps, body.token);
     if (resolved instanceof Response) {
         return resolved;
+    }
+    if (resolved.mirrored) {
+        const deletion = await deletionCheck(deps, resolved);
+        if (deletion instanceof Response) {
+            return deletion;
+        }
+        if (deletion === 'pending') {
+            return deps.json(deletionPendingSummary(deps, resolved, resolved.mirrored));
+        }
     }
     let subscription: CancellableSubscription | null;
     try {
@@ -615,6 +669,14 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     }
     if (!resolved.mirrored) {
         return deps.json(CANCEL_ERRORS.nothingToCancel, 404);
+    }
+    // Before the link is spent or Stripe is read (decision 70(1)).
+    const deletion = await deletionCheck(deps, resolved);
+    if (deletion instanceof Response) {
+        return deletion;
+    }
+    if (deletion === 'pending') {
+        return deletionPendingCancel(deps, body, resolved, resolved.mirrored);
     }
 
     // The link first, before any Stripe call or the refund request (Codex
@@ -671,6 +733,22 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     }
 
     const cancelledAt = new Date(deps.now()).toISOString();
+    const refund = await requestRefund(deps, body, resolved, subscription, false);
+    return deps.json({ cancelled: true, cancelledAt, endsAt, ...refund });
+};
+
+/**
+ * The refund request to support, when the buyer asked for it inside the 14
+ * days. The same for a cancel and for an account being deleted (launch-fix
+ * item 16), which says so in the request.
+ */
+const requestRefund = async (
+    deps: CancelDeps,
+    body: Record<string, unknown>,
+    resolved: Resolved,
+    subscription: CancellableSubscription,
+    accountDeletionPending: boolean,
+): Promise<{ refundRequested: boolean; refundRequestFailed: boolean }> => {
     const wantsRefund = body.requestRefund === true;
     const refundEligible = deps.terms.withinRefundWindow(resolved.firstPurchaseAt, deps.now());
     let refundRequested = false;
@@ -685,10 +763,12 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
                 mode: resolved.row.mode,
                 firstPurchaseAtMs: resolved.firstPurchaseAt,
                 requestedAtMs: deps.now(),
+                accountDeletionPending,
             }),
-            // Keyed by this link's hash: one request per spent link, never
-            // the address. Resend answers a repeat under it without mailing
-            // support again.
+            // Keyed by this link's hash: one request per link, never the
+            // address. Resend answers a repeat under it without mailing
+            // support again -- also a second press while the account is
+            // being deleted, which leaves the link unspent.
             {
                 replyTo: resolved.email,
                 tag: 'refund_request',
@@ -703,15 +783,11 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
             deps.logError('refund_request_not_sent', new Error(`${sent.outcome}: ${sent.reason}`));
         }
     }
-
-    return deps.json({
-        cancelled: true,
-        cancelledAt,
-        endsAt,
+    return {
         refundRequested,
         // Said so the page can tell the buyer to email support themselves.
         refundRequestFailed: wantsRefund && refundEligible && !refundRequested,
-    });
+    };
 };
 
 /**
