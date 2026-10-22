@@ -32,7 +32,8 @@ vi.mock('@/lib/supabase', () => ({
 
 vi.mock('@/features/auth/session', () => ({
     syncBeforeSignOut: () => syncBeforeSignOut(),
-    clearAccountCachesFromDevice: () => clearAccountCachesFromDevice(),
+    clearAccountCachesFromDevice: (...args: unknown[]) => clearAccountCachesFromDevice(...args),
+    signedInUserId: () => Promise.resolve('guest-1'),
 }));
 
 vi.mock('@/sync/backgroundDrain', () => ({
@@ -217,6 +218,8 @@ describe('deleteGuestProfile', () => {
         // The background drain is stopped before the clear, or a flush in
         // flight would write the guest's synced marks back afterwards.
         expect(order).toEqual(['sync', 'delete', 'stop drains', 'clear']);
+        // Only the guest's held ink goes: another account's in this tab is that account's.
+        expect(clearAccountCachesFromDevice).toHaveBeenCalledWith({ userId: 'guest-1' });
         expect(callEdgeFunction).toHaveBeenCalledWith('delete-account', { confirm: DELETE_ACCOUNT_CONFIRMATION });
         expect(signOut).not.toHaveBeenCalled();
         expect(localStorage.getItem('sb-project-auth-token')).toBeNull();

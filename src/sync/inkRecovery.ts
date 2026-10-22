@@ -19,16 +19,24 @@ import type { Annotation } from '@/types/models';
  *
  * Latest wins per mark: an edit of a held mark is written together with the
  * held ops it builds on (persistOps), so once it succeeds none of them is
- * left to override it. A held mark another write on this device has since
- * replaced in the mirror is dropped (supersededBy).
+ * left to override it. A held mark that a newer version has overtaken since
+ * (another tab's edit, stored or uploaded; a collaborator's, on the server)
+ * is never written over it: it leaves Retry and stays for Export only, as a
+ * conflict (see overtakes).
+ *
+ * Every write is bound to its account's epoch (see epochOf): sign-out moves
+ * it on, and any write of that account's still on its way — a Retry spanning
+ * the sign-out, a chunk of a long write, one stalled behind a blocked
+ * database — then writes nothing, checked inside its own transaction.
  */
 
 export type CommitOp =
     | { type: 'create'; annotation: Annotation }
     | { type: 'update'; annotation: Annotation; prev: Annotation }
-    | { type: 'delete'; annotation: Annotation }
-    /** baseDeletedAt: the tombstone being undone — see PendingOp.baseDeletedAt. */
-    | { type: 'restore'; annotation: Annotation; baseDeletedAt: string | null };
+    /** prev: the mark before the erase (what a newer version is told from; see baseOf). */
+    | { type: 'delete'; annotation: Annotation; prev?: Annotation }
+    /** baseDeletedAt: the tombstone being undone — see PendingOp.baseDeletedAt. prev: that tombstone. */
+    | { type: 'restore'; annotation: Annotation; baseDeletedAt: string | null; prev?: Annotation };
 
 /** A local edit and the account it was made under (PendingOp.userId), fixed when it was made. */
 export interface AuthoredOp {
@@ -41,6 +49,8 @@ export interface OpenStore {
     readonly docId: string;
     readonly authorId: string | null;
     liveAnnotations(): Annotation[];
+    /** Its account's held ink was cleared (sign-out, here or in another tab): forget what it drew of it. */
+    accountInkCleared(): void;
 }
 
 interface RecoveryEntry {
@@ -51,6 +61,12 @@ interface RecoveryEntry {
     ops: AuthoredOp[];
     /** How many held ops each mark has. */
     marks: Map<string, number>;
+    /**
+     * The newest held version of marks a newer version overtook before they
+     * could be written (see overtakes): never written over it, so out of
+     * Retry, but this account's own edit all the same — Export keeps it.
+     */
+    conflicts: Map<string, Annotation>;
     /**
      * The live set before the first edit whose day-start snapshot could not
      * be written, and the day it was for: the day's true starting point,
@@ -64,34 +80,91 @@ interface RecoveryEntry {
      * never applied — but the banner says so until storage works again.
      */
     refused: number;
+    /**
+     * Edits not made because holding them would pass MAX_HELD_SCORES or
+     * MAX_HELD_OPS (see admits): undone on screen, and said so, never held
+     * by dropping something older.
+     */
+    overflow: number;
     /** Writes of this entry's ops run one at a time, so a held op is never in two writes at once. */
     chain: Promise<void>;
-    touchedAt: number;
 }
 
 /** Ops per mirror + outbox transaction: one per row is too slow, one per 30k-op import starves readers. */
 export const PERSIST_CHUNK = 4000;
 
 /**
- * Scores with held ink kept at once. Past it the score touched longest ago
- * that no viewer has open goes, with a warning: only a reload would free it
- * otherwise, and each can hold a whole import.
+ * Scores with held ink (or a refused edit) kept at once, open ones included.
+ * Past it a new score's failed edits are not held but undone, with the
+ * banner and Export (see admits): nothing already held is ever dropped to
+ * make room, since memory is its only copy.
  */
 export const MAX_HELD_SCORES = 20;
 
-/** Held ops across every score before the oldest unopened scores go (see MAX_HELD_SCORES). */
+/**
+ * Held marks across every score — ops, owed starting points and conflicts
+ * alike — before new failed edits are undone instead of held (see MAX_HELD_SCORES).
+ */
 export const MAX_HELD_OPS = 100_000;
+
+/** How long Retry waits on the server for the marks' current versions before it goes on without them. */
+export const SERVER_CHECK_TIMEOUT_MS = 3000;
 
 const entries = new Map<string, RecoveryEntry>();
 const listeners = new Set<() => void>();
 const openStores = new Set<OpenStore>();
-let clock = 0;
+/** Per account, moved on whenever its held ink is cleared (see epochOf). */
+const epochs = new Map<string | null, number>();
 /** Local edits applied in memory whose write has not finished (AnnotationStore.hasUnsavedEdit). */
 let inFlight = 0;
 
 const keyOf = (userId: string | null, docId: string): string => JSON.stringify([userId, docId]);
 
 const entryFor = (userId: string | null, docId: string): RecoveryEntry | undefined => entries.get(keyOf(userId, docId));
+
+/**
+ * The account's write epoch. A write captures it when it starts, and writes
+ * nothing once it has moved on (clearAccountInk): sign-out, here or in
+ * another tab, ends every write of that account's still on its way.
+ */
+const epochOf = (userId: string | null): number => {
+    if (!epochs.has(userId)) {
+        epochs.set(userId, 0);
+    }
+    return epochs.get(userId) ?? 0;
+};
+
+/**
+ * A write's guard: true while `userId`'s epoch is still the one it was
+ * when this was called. A store takes it when an edit is made (persistOps).
+ */
+export const boundTo = (userId: string | null): (() => boolean) => {
+    const epoch = epochOf(userId);
+    return () => epochOf(userId) === epoch;
+};
+
+/** A write its account's sign-out overtook: it wrote nothing, and nothing of it is held. */
+export class RecoveryCancelled extends Error {
+    constructor() {
+        super('The account signed out before this could be written');
+        this.name = 'RecoveryCancelled';
+    }
+}
+
+/**
+ * Failed edits that could not be held either: holding them would pass the
+ * registry's bounds (see admits). Nothing of them is written or held, so the
+ * store undoes them on screen; the banner says so and offers Export.
+ */
+export class HeldInkFull extends Error {
+    constructor(
+        readonly ops: CommitOp[],
+        readonly cause: unknown,
+    ) {
+        super('Too many unsaved marks on this device to keep another');
+        this.name = 'HeldInkFull';
+    }
+}
 
 const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string): RecoveryEntry => {
     const key = keyOf(userId, docId);
@@ -103,21 +176,27 @@ const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string): Rec
             db,
             ops: [],
             marks: new Map(),
+            conflicts: new Map(),
             startingPoint: null,
             refused: 0,
+            overflow: 0,
             chain: Promise.resolve(),
-            touchedAt: ++clock,
         };
         entries.set(key, entry);
     }
     entry.db = db;
-    entry.touchedAt = ++clock;
     return entry;
 };
 
 /** Drop an entry with nothing left to hold or say. */
 const pruneEntry = (entry: RecoveryEntry): void => {
-    if (entry.ops.length === 0 && !entry.startingPoint && entry.refused === 0) {
+    if (
+        entry.ops.length === 0 &&
+        entry.conflicts.size === 0 &&
+        !entry.startingPoint &&
+        entry.refused === 0 &&
+        entry.overflow === 0
+    ) {
         if (entries.get(keyOf(entry.userId, entry.docId)) === entry) {
             entries.delete(keyOf(entry.userId, entry.docId));
         }
@@ -152,6 +231,29 @@ export const heldMarkCount = (userId: string | null, docId: string): number => e
 /** Edits refused for want of a day snapshot (see RecoveryEntry.refused). */
 export const refusedEditCount = (userId: string | null, docId: string): number => entryFor(userId, docId)?.refused ?? 0;
 
+/** Edits undone because the registry was full (see RecoveryEntry.overflow). */
+export const overflowCount = (userId: string | null, docId: string): number => entryFor(userId, docId)?.overflow ?? 0;
+
+/** Held marks a newer version overtook: Export only (see RecoveryEntry.conflicts). */
+export const conflictCount = (userId: string | null, docId: string): number =>
+    entryFor(userId, docId)?.conflicts.size ?? 0;
+
+/** This account's held versions of overtaken marks on this score, tombstones included. */
+export const conflictMarksFor = (userId: string | null, docId: string): Annotation[] => [
+    ...(entryFor(userId, docId)?.conflicts.values() ?? []),
+];
+
+/** The user has seen the conflicts, and exported them or not: they go (the banner's Dismiss). */
+export const dismissConflicts = (userId: string | null, docId: string): void => {
+    const entry = entryFor(userId, docId);
+    if (!entry || entry.conflicts.size === 0) {
+        return;
+    }
+    entry.conflicts.clear();
+    pruneEntry(entry);
+    changed();
+};
+
 /**
  * The newest held version of each of this account's marks on this score —
  * tombstones included, so an erase that failed to save still leaves the mark
@@ -169,40 +271,146 @@ export const heldMarksFor = (userId: string | null, docId: string): Annotation[]
     return [...latest.values()];
 };
 
+/** Each held mark's base (see baseOf) and newest held version: what overtakes() weighs a row against. */
+export const heldChainsFor = (
+    userId: string | null,
+    docId: string,
+): Map<string, { base: Annotation | null; latest: Annotation }> => {
+    const entry = entryFor(userId, docId);
+    return entry ? chainsOf(entry.ops) : new Map();
+};
+
+const chainsOf = (ops: readonly AuthoredOp[]): Map<string, { base: Annotation | null; latest: Annotation }> => {
+    const chains = new Map<string, { base: Annotation | null; latest: Annotation }>();
+    for (const { op } of ops) {
+        const chain = chains.get(op.annotation.id);
+        if (chain) {
+            chain.latest = op.annotation;
+        } else {
+            chains.set(op.annotation.id, { base: baseOf(op), latest: op.annotation });
+        }
+    }
+    return chains;
+};
+
 /**
- * Marks with held ops on scores of this account, for the sign-out warning.
- * Device-only scores (no account) are left out: sign-out does not clear them.
+ * Marks with held ops (or held conflicts) on scores of this account, for the
+ * sign-out warning. Device-only scores (no account) are left out: sign-out
+ * does not clear them.
  */
 export const unsavedMarkCount = (userId?: string | null): number => {
     let count = 0;
     for (const entry of entries.values()) {
         if (entry.userId !== null && (userId === undefined || entry.userId === userId)) {
-            count += entry.marks.size;
+            count += entry.marks.size + entry.conflicts.size;
         }
     }
     return count;
 };
 
-/**
- * A mirror row a later write on this device made (still queued, and newer
- * than the held version): it replaces the held one, so a stale failed edit,
- * or a failed erase, never overrides it. A row from the server does not:
- * local intent wins until it uploads, as everywhere in the store.
- */
-export const supersededBy = (held: Annotation, row: LocalAnnotation | undefined): boolean =>
-    !!row && row.pending === 1 && row.updatedAt > held.updatedAt;
+/** Scores of this account's with held ink (or held conflicts), for the ended-sign-in prompt. */
+export const heldDocIds = (userId: string): string[] =>
+    [...entries.values()]
+        .filter((entry) => entry.userId === userId && entry.marks.size + entry.conflicts.size > 0)
+        .map((entry) => entry.docId);
 
-/** Forget these marks' held ops (superseded; see supersededBy). */
-export const evictHeldMarks = (userId: string | null, docId: string, ids: Iterable<string>): void => {
+/**
+ * The version a mark's first held op was made on — what writing it would
+ * replace — or null for a mark the held ops create.
+ */
+export const baseOf = (op: CommitOp): Annotation | null => {
+    switch (op.type) {
+        case 'create':
+            return null;
+        case 'update':
+            return op.prev;
+        case 'delete':
+            return op.prev ?? { ...op.annotation, deletedAt: null };
+        case 'restore':
+            return op.prev ?? { ...op.annotation, deletedAt: op.baseDeletedAt };
+        default: {
+            const _exhaustive: never = op;
+            return _exhaustive;
+        }
+    }
+};
+
+/**
+ * JSON with object keys in one order: jsonb does not keep the order a
+ * payload was sent in (as syncEngine's canonicalJson).
+ */
+const canonicalJson = (value: unknown): string =>
+    JSON.stringify(value, (_key, v: unknown) =>
+        v && typeof v === 'object' && !Array.isArray(v)
+            ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+            : v,
+    );
+
+/** What a version of a mark shows: where, what, and whether it is erased. */
+const contentOf = (a: Annotation): string => canonicalJson([a.page, a.kind, a.color, a.payload, !!a.deletedAt]);
+
+/**
+ * Whether `row` — the mirror's or the server's copy of a held mark — is a
+ * version made since the held edits' `base` that is newer than them, so the
+ * held ones must not be written over it (or, for an erase, hide it).
+ *
+ * The same content as the base (nothing changed since; an echo of this
+ * device's own earlier write) or as the held version (already there) is
+ * not. A row the server has numbered past the base (seq) is: a collaborator's
+ * edit, or another tab's that has uploaded. A row on the same seq with other
+ * content is another tab's local edit on the same server version, ordered by
+ * this device's own clock. A row numbered below the base is an older copy.
+ * A held create has no base: no other version of a new mark can exist.
+ */
+export const overtakes = (row: Annotation | undefined, base: Annotation | null, latest: Annotation): boolean => {
+    if (!row || !base) {
+        return false;
+    }
+    const content = contentOf(row);
+    if (content === contentOf(base) || content === contentOf(latest)) {
+        return false;
+    }
+    if (row.seq !== base.seq) {
+        return row.seq > base.seq;
+    }
+    return row.updatedAt > latest.updatedAt;
+};
+
+/**
+ * These rows (the mirror's, or the server's) overtook some of the account's
+ * held marks: those leave Retry for Export (RecoveryEntry.conflicts), and
+ * their ids are returned for the store to draw the newer version.
+ */
+export const settleOvertaken = (
+    userId: string | null,
+    docId: string,
+    rows: ReadonlyMap<string, Annotation | undefined>,
+): string[] => {
     const entry = entryFor(userId, docId);
     if (!entry) {
-        return;
+        return [];
     }
+    const overtaken = [...chainsOf(entry.ops)]
+        .filter(([id, { base, latest }]) => overtakes(rows.get(id), base, latest))
+        .map(([id]) => id);
+    moveToConflicts(entry, overtaken);
+    return overtaken;
+};
+
+const moveToConflicts = (entry: RecoveryEntry, ids: Iterable<string>): void => {
     const gone = new Set([...ids].filter((id) => entry.marks.has(id)));
     if (gone.size === 0) {
         return;
     }
-    entry.ops = entry.ops.filter((held) => !gone.has(held.op.annotation.id));
+    const kept: AuthoredOp[] = [];
+    for (const held of entry.ops) {
+        if (gone.has(held.op.annotation.id)) {
+            entry.conflicts.set(held.op.annotation.id, held.op.annotation);
+        } else {
+            kept.push(held);
+        }
+    }
+    entry.ops = kept;
     gone.forEach((id) => entry.marks.delete(id));
     pruneEntry(entry);
     changed();
@@ -235,31 +443,79 @@ export const startingPointWritten = (userId: string | null, docId: string): void
     changed();
 };
 
-/** Hold ops whose write failed. `startingPoint`: the day snapshot that failed with them, when one did. */
+/** Everything held across every score, by the measure of MAX_HELD_OPS. */
+const heldWeight = (): number => {
+    let total = 0;
+    for (const entry of entries.values()) {
+        total += entry.ops.length + entry.conflicts.size + (entry.startingPoint?.live.length ?? 0);
+    }
+    return total;
+};
+
+/** Scores holding anything, by the measure of MAX_HELD_SCORES (an entry with only `overflow` holds nothing). */
+const heldScores = (): number =>
+    [...entries.values()].filter(
+        (entry) => entry.ops.length + entry.conflicts.size > 0 || entry.startingPoint || entry.refused > 0,
+    ).length;
+
+/**
+ * Whether `adding` more held marks fit for this account's score: the bounds
+ * apply to every score, open or not, refused-only or not. Nothing already
+ * held is ever dropped to make room.
+ */
+const admits = (userId: string | null, docId: string, adding: number): boolean => {
+    const entry = entryFor(userId, docId);
+    const holding = !!entry && (entry.ops.length + entry.conflicts.size > 0 || !!entry.startingPoint || entry.refused > 0);
+    if (!holding && heldScores() >= MAX_HELD_SCORES) {
+        return false;
+    }
+    return heldWeight() + adding <= MAX_HELD_OPS;
+};
+
+/**
+ * Hold ops whose write failed. `startingPoint`: the day snapshot that failed
+ * with them, when one did. Returns the ops it could not hold (see admits):
+ * the caller undoes them on screen; their score's banner says so.
+ */
 export const holdOps = (
     db: ScribblerDb,
     docId: string,
     ops: AuthoredOp[],
     startingPoint: Annotation[] | null = null,
-): void => {
+): AuthoredOp[] => {
     if (ops.length === 0) {
-        return;
+        return [];
     }
     const byAuthor = new Map<string | null, AuthoredOp[]>();
     for (const held of ops) {
-        byAuthor.set(held.author, [...(byAuthor.get(held.author) ?? []), held]);
+        const authored = byAuthor.get(held.author);
+        if (authored) {
+            authored.push(held);
+        } else {
+            byAuthor.set(held.author, [held]);
+        }
     }
+    const refused: AuthoredOp[] = [];
     for (const [author, authored] of byAuthor) {
+        const owes = startingPoint && !entryFor(author, docId)?.startingPoint ? startingPoint : null;
+        if (!admits(author, docId, authored.length + (owes?.length ?? 0))) {
+            ensureEntry(db, author, docId).overflow += new Set(authored.map((held) => held.op.annotation.id)).size;
+            refused.push(...authored);
+            continue;
+        }
         const entry = ensureEntry(db, author, docId);
         for (const held of authored) {
             appendHeld(entry, held);
         }
-        if (startingPoint && !entry.startingPoint) {
-            entry.startingPoint = { live: startingPoint, day: localDateString() };
+        if (owes) {
+            entry.startingPoint = { live: owes, day: localDateString() };
         }
     }
-    enforceCap();
+    if (refused.length > 0) {
+        console.warn(`Too many unsaved marks on this device: ${refused.length} new edits were not kept`);
+    }
     changed();
+    return refused;
 };
 
 /**
@@ -283,6 +539,8 @@ const appendHeld = (entry: RecoveryEntry, held: AuthoredOp): void => {
             break;
         }
     }
+    // A newer edit of a mark held as a conflict is the user's latest word on it.
+    entry.conflicts.delete(id);
     entry.ops.push(held);
     entry.marks.set(id, (entry.marks.get(id) ?? 0) + 1);
 };
@@ -305,58 +563,106 @@ const releaseHeld = (entry: RecoveryEntry, written: readonly AuthoredOp[]): void
         }
     }
     entry.ops = kept;
+    if (kept.length === 0) {
+        // Room again: new failed edits can be held.
+        entry.overflow = 0;
+    }
 };
 
-/** A day snapshot that failed for an edit of an existing mark, which was refused (see RecoveryEntry.refused). */
+/**
+ * A day snapshot that failed for an edit of an existing mark, which was
+ * refused (see RecoveryEntry.refused). Its starting point is kept only when
+ * it fits (see admits); the edit was refused either way.
+ */
 export const noteRefusedEdit = (
     db: ScribblerDb,
     userId: string | null,
     docId: string,
     startingPoint: Annotation[],
 ): void => {
+    const fits = admits(userId, docId, entryFor(userId, docId)?.startingPoint ? 0 : startingPoint.length);
     const entry = ensureEntry(db, userId, docId);
     entry.refused += 1;
-    entry.startingPoint ??= { live: startingPoint, day: localDateString() };
+    if (fits) {
+        entry.startingPoint ??= { live: startingPoint, day: localDateString() };
+    }
     changed();
 };
 
-/** One atomic mirror + outbox write, each op stamped with its own author. */
-const writeOps = async (db: ScribblerDb, docId: string, slice: readonly AuthoredOp[]): Promise<void> => {
-    const rows: LocalAnnotation[] = slice.map(({ op }) => ({ ...op.annotation, pending: 1 }));
-    const queuedAt = new Date().toISOString();
-    const opRows = slice.map(({ op, author }): PendingOp => ({
-        docId,
-        type: op.type,
-        annotationId: op.annotation.id,
-        annotation: op.annotation,
-        queuedAt,
-        ...(op.type === 'restore' ? { baseDeletedAt: op.baseDeletedAt } : {}),
-        ...(author ? { userId: author } : {}),
-    }));
-    await db.transaction('rw', db.annotations, db.ops, async () => {
+/**
+ * One atomic mirror + outbox write, each op stamped with its own author.
+ * `live` is checked inside the transaction, before and between its writes:
+ * once the account's epoch has moved on (sign-out), it throws and the whole
+ * transaction rolls back. `check`, given the chunk's current mirror rows,
+ * names marks a newer version has overtaken (see overtakes): their ops are
+ * left out. Returns what it wrote and what it left out.
+ */
+const writeOps = async (
+    db: ScribblerDb,
+    docId: string,
+    slice: readonly AuthoredOp[],
+    live: () => boolean,
+    check?: (rows: ReadonlyMap<string, LocalAnnotation | undefined>) => Set<string>,
+): Promise<{ written: AuthoredOp[]; overtaken: Set<string> }> =>
+    db.transaction('rw', db.annotations, db.ops, async () => {
+        if (!live()) {
+            throw new RecoveryCancelled();
+        }
+        let overtaken = new Set<string>();
+        if (check) {
+            const ids = [...new Set(slice.map((held) => held.op.annotation.id))];
+            const found = await db.annotations.bulkGet(ids);
+            overtaken = check(new Map(ids.map((id, i) => [id, found[i]])));
+        }
+        const written = slice.filter((held) => !overtaken.has(held.op.annotation.id));
+        const rows: LocalAnnotation[] = written.map(({ op }) => ({ ...op.annotation, pending: 1 }));
+        const queuedAt = new Date().toISOString();
+        const opRows = written.map(({ op, author }): PendingOp => ({
+            docId,
+            type: op.type,
+            annotationId: op.annotation.id,
+            annotation: op.annotation,
+            queuedAt,
+            ...(op.type === 'restore' ? { baseDeletedAt: op.baseDeletedAt } : {}),
+            ...(author ? { userId: author } : {}),
+        }));
         await db.annotations.bulkPut(rows);
+        if (!live()) {
+            throw new RecoveryCancelled();
+        }
         await db.ops.bulkAdd(opRows);
+        return { written, overtaken };
     });
-};
 
 /**
  * Write a store's edits, made by `author`: the durable mirror + outbox,
  * atomically per chunk. An edit of a mark with held ops goes out behind
  * them, in the same write, so the outbox never has a mark's newer op without
  * the older one it builds on, and once it lands nothing older is held to
- * override it. What could not be written is held, and the error rethrown.
+ * override it. What could not be written is held, and the error rethrown —
+ * or, past the registry's bounds, HeldInkFull names what was not held.
+ * Bound to the author's epoch as it was when the edit was made (`live`,
+ * from boundTo; else from the call): a sign-out before it runs, or between
+ * its chunks, ends it with RecoveryCancelled, writing and holding nothing
+ * more.
  */
-export const persistOps = (db: ScribblerDb, author: string | null, docId: string, ops: CommitOp[]): Promise<void> => {
+export const persistOps = (
+    db: ScribblerDb,
+    author: string | null,
+    docId: string,
+    ops: CommitOp[],
+    live: () => boolean = boundTo(author),
+): Promise<void> => {
     const fresh = ops.map((op): AuthoredOp => ({ op, author }));
     const entry = entryFor(author, docId);
     if (!entry) {
-        return writeQueue(db, author, docId, [], fresh);
+        return writeQueue(db, author, docId, [], fresh, live);
     }
     const run = entry.chain.then(() => {
         const ids = new Set(ops.map((op) => op.annotation.id));
         const current = entryFor(author, docId);
         const carried = current ? current.ops.filter((held) => ids.has(held.op.annotation.id)) : [];
-        return writeQueue(db, author, docId, carried, fresh);
+        return writeQueue(db, author, docId, carried, fresh, live);
     });
     entry.chain = run.catch(() => undefined);
     return run;
@@ -368,13 +674,17 @@ const writeQueue = async (
     docId: string,
     carried: AuthoredOp[],
     fresh: AuthoredOp[],
+    live: () => boolean,
 ): Promise<void> => {
     const queue = [...carried, ...fresh];
     let written = 0;
     try {
+        if (!live()) {
+            throw new RecoveryCancelled();
+        }
         for (; written < queue.length; written += PERSIST_CHUNK) {
             const chunk = queue.slice(written, written + PERSIST_CHUNK);
-            await writeOps(db, docId, chunk);
+            await writeOps(db, docId, chunk, live);
             const entry = entryFor(author, docId);
             if (entry && carried.length > 0) {
                 releaseHeld(entry, chunk);
@@ -383,51 +693,115 @@ const writeQueue = async (
             }
         }
     } catch (err) {
+        if (!live()) {
+            // Signed out meanwhile: what it was writing went with the account.
+            throw err instanceof RecoveryCancelled ? err : new RecoveryCancelled();
+        }
         // Chunks before this one committed; this one rolled back whole. The
-        // carried ops it had are still held; the fresh ones join them.
+        // carried ops it had are still held; the fresh ones join them, if
+        // they fit.
         const carriedSet = new Set(carried);
-        holdOps(
+        const refused = holdOps(
             db,
             docId,
             queue.slice(written).filter((held) => !carriedSet.has(held)),
         );
+        if (refused.length > 0) {
+            throw new HeldInkFull(
+                refused.map((held) => held.op),
+                err,
+            );
+        }
         throw err;
     }
 };
 
 export interface RetryResult {
-    /** Every held op, and any owed day snapshot, is written. */
+    /** Every held op, and any owed day snapshot, is written (or left for Export, overtaken). */
     ok: boolean;
     /** Marks whose held ops this retry wrote. */
     wrote: string[];
+    /** Marks a newer version had overtaken: left for Export, and drawn as that version (see overtakes). */
+    overtaken: string[];
+}
+
+export interface RetryOptions {
+    /**
+     * The server's current versions of these marks, or null when it cannot
+     * say (offline, an error): a version it has numbered past a held edit's
+     * base overtakes it (see overtakes). Without it, the mirror alone decides.
+     */
+    serverRows?: (ids: string[]) => Promise<Annotation[] | null>;
 }
 
 /**
  * Write this account's held ops on this score again, oldest first, after the
  * day snapshot they owe. Each op goes out under the account that made it.
+ * A held edit or erase a newer version has overtaken — on the server, or in
+ * this device's mirror, checked in the same transaction as the write — is
+ * not replayed over it, but kept for Export (RecoveryEntry.conflicts).
  * `ok` false: a write failed again, and what was not written is still held.
+ * Bound to the account's epoch at the call (see persistOps).
  */
-export const retryHeld = (userId: string | null, docId: string): Promise<RetryResult> => {
+export const retryHeld = (userId: string | null, docId: string, options: RetryOptions = {}): Promise<RetryResult> => {
     const entry = entryFor(userId, docId);
     if (!entry) {
-        return Promise.resolve({ ok: true, wrote: [] });
+        return Promise.resolve({ ok: true, wrote: [], overtaken: [] });
     }
-    const run = entry.chain.then(() => writeHeld(entry));
+    const live = boundTo(userId);
+    const run = entry.chain.then(() => writeHeld(entry, live, options));
     entry.chain = run.then(() => undefined);
     return run;
 };
 
-const writeHeld = async (entry: RecoveryEntry): Promise<RetryResult> => {
+/** The server's versions of `ids`, or nothing once it has taken SERVER_CHECK_TIMEOUT_MS. */
+const askServer = async (
+    serverRows: NonNullable<RetryOptions['serverRows']>,
+    ids: string[],
+): Promise<Map<string, Annotation>> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        const rows = await Promise.race([
+            serverRows(ids).catch(() => null),
+            new Promise<null>((resolve) => {
+                timer = setTimeout(() => resolve(null), SERVER_CHECK_TIMEOUT_MS);
+            }),
+        ]);
+        return new Map((rows ?? []).map((row) => [row.id, row]));
+    } finally {
+        clearTimeout(timer);
+    }
+};
+
+const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: RetryOptions): Promise<RetryResult> => {
+    if (!live()) {
+        // Signed out while it waited: nothing of it may be written now.
+        return { ok: false, wrote: [], overtaken: [] };
+    }
     if (entries.get(keyOf(entry.userId, entry.docId)) !== entry) {
-        // Cleared while it waited (sign-out): nothing of it may be written now.
-        return { ok: true, wrote: [] };
+        // Let go while it waited (the score closed for good): nothing left to write.
+        return { ok: true, wrote: [], overtaken: [] };
     }
     const wrote: string[] = [];
+    const overtaken: string[] = [];
     let ok = true;
     try {
+        if (options.serverRows) {
+            const edited = [...chainsOf(entry.ops)].filter(([, { base }]) => base).map(([id]) => id);
+            if (edited.length > 0) {
+                const server = await askServer(options.serverRows, edited);
+                if (!live()) {
+                    throw new RecoveryCancelled();
+                }
+                overtaken.push(...settleOvertaken(entry.userId, entry.docId, server));
+            }
+        }
         const owed = owedStartingPoint(entry.userId, entry.docId);
         if (owed) {
-            await ensureDayStartingSnapshot(entry.db, entry.docId, owed);
+            await ensureDayStartingSnapshot(entry.db, entry.docId, owed, null, live);
+        }
+        if (!live()) {
+            throw new RecoveryCancelled();
         }
         entry.startingPoint = null;
         entry.refused = 0;
@@ -437,43 +811,90 @@ const writeHeld = async (entry: RecoveryEntry): Promise<RetryResult> => {
             if (chunk.length === 0) {
                 break;
             }
-            await writeOps(entry.db, entry.docId, chunk);
-            releaseHeld(entry, chunk);
-            wrote.push(...chunk.map((held) => held.op.annotation.id));
+            const chains = chainsOf(entry.ops);
+            const result = await writeOps(entry.db, entry.docId, chunk, live, (rows) => {
+                const out = new Set<string>();
+                for (const [id, row] of rows) {
+                    const chain = chains.get(id);
+                    if (chain && overtakes(row, chain.base, chain.latest)) {
+                        out.add(id);
+                    }
+                }
+                return out;
+            });
+            releaseHeld(entry, result.written);
+            moveToConflicts(entry, result.overtaken);
+            wrote.push(...result.written.map((held) => held.op.annotation.id));
+            overtaken.push(...result.overtaken);
         }
     } catch (err) {
+        if (err instanceof RecoveryCancelled || !live()) {
+            // Signed out meanwhile: the entry went with the account.
+            return { ok: false, wrote: [...new Set(wrote)], overtaken };
+        }
         console.warn('Retrying the unsaved marks failed', err);
         ok = false;
     }
+    if (ok) {
+        entry.overflow = 0;
+    }
     pruneEntry(entry);
     changed();
-    return { ok, wrote: [...new Set(wrote)] };
+    return { ok, wrote: [...new Set(wrote)], overtaken: [...new Set(overtaken)] };
 };
 
 /**
  * Write every held op of this account's, on every score (retryHeld), before
  * a sign-out that keeps the account's queued changes for its next sign-in
- * (signOutKeepingChanges): written, they are kept with the rest. Never throws.
+ * (signOutKeepingChanges): written, they are kept with the rest. Never
+ * throws. The caller bounds the wait: a stalled database never settles it,
+ * and the sign-out's clearAccountInk then cancels what is still on its way.
  */
 export const retryAccountInk = async (userId: string): Promise<void> => {
     const docs = [...entries.values()].filter((entry) => entry.userId === userId).map((entry) => entry.docId);
     for (const docId of docs) {
-        await retryHeld(userId, docId);
+        await retryHeld(userId, docId).catch(() => undefined);
     }
 };
 
 /**
- * Sign-out: forget every account's held ink and refused edits (the signed-out
- * account's, after its warning; any other account's left from before). The
- * next account in this tab must not see, export or retry them. Device-only
- * scores' entries stay, as their marks do.
+ * Sign-out: forget the signed-out account's held ink, conflicts and refused
+ * edits (after its warning), end every write of its still on its way (its
+ * epoch moves on), and have each open viewer drawing for it forget what it
+ * drew. Another account's held ink in this tab stays for that account. Told
+ * to the other tabs of this browser too, which share the sign-out (see
+ * listenToOtherTabs). `userId` undefined: the sign-out could not tell whose
+ * session it ended, so every account's goes. Device-only scores' entries
+ * stay, as their marks do.
  */
-export const clearAccountInk = (): void => {
+export const clearAccountInk = (userId?: string | null): void => {
+    if (userId === null) {
+        return;
+    }
+    dropAccountInk(userId);
+    tellOtherTabs(userId);
+};
+
+const dropAccountInk = (userId: string | undefined): void => {
+    const matches = (who: string | null) => who !== null && (userId === undefined || who === userId);
     let any = false;
     for (const [key, entry] of entries) {
-        if (entry.userId !== null) {
+        if (matches(entry.userId)) {
             entries.delete(key);
             any = true;
+        }
+    }
+    if (userId !== undefined) {
+        epochs.set(userId, epochOf(userId) + 1);
+    }
+    for (const who of [...epochs.keys()]) {
+        if (userId === undefined && matches(who)) {
+            epochs.set(who, epochOf(who) + 1);
+        }
+    }
+    for (const store of [...openStores]) {
+        if (matches(store.authorId)) {
+            store.accountInkCleared();
         }
     }
     if (any) {
@@ -495,28 +916,86 @@ export const forgetDocInk = (docId: string): void => {
     }
 };
 
-/** Keep the registry bounded (MAX_HELD_SCORES, MAX_HELD_OPS), sparing scores a viewer has open. */
-const enforceCap = (): void => {
-    const total = () => [...entries.values()].reduce((sum, entry) => sum + entry.ops.length, 0);
-    if (entries.size <= MAX_HELD_SCORES && total() <= MAX_HELD_OPS) {
-        return;
-    }
-    const open = new Set([...openStores].map((store) => keyOf(store.authorId, store.docId)));
-    const oldestFirst = [...entries.entries()]
-        .filter(([key]) => !open.has(key))
-        .sort(([, a], [, b]) => a.touchedAt - b.touchedAt);
-    for (const [key, entry] of oldestFirst) {
-        if (entries.size <= MAX_HELD_SCORES && total() <= MAX_HELD_OPS) {
-            break;
-        }
-        console.warn(`Dropping ${entry.marks.size} unsaved marks on a score not open, to bound memory`);
-        entries.delete(key);
+const CHANNEL_NAME = 'cleffy:ink-recovery';
+/** The storage-event fallback for a browser without BroadcastChannel. */
+export const SIGNED_OUT_STORAGE_KEY = 'cleffy:ink-recovery:signed-out';
+
+interface SignedOutMessage {
+    type: 'account-ink-cleared';
+    /** Absent: whose session ended was not known — every account's. */
+    userId?: string;
+}
+
+const isSignedOutMessage = (value: unknown): value is SignedOutMessage =>
+    !!value &&
+    typeof value === 'object' &&
+    (value as SignedOutMessage).type === 'account-ink-cleared' &&
+    ((value as SignedOutMessage).userId === undefined || typeof (value as SignedOutMessage).userId === 'string');
+
+let channel: BroadcastChannel | null = null;
+
+/** Another tab signed this account out: its held ink here goes too, and its writes here stop. */
+const onOtherTabSignedOut = (value: unknown): void => {
+    if (isSignedOutMessage(value)) {
+        dropAccountInk(value.userId);
     }
 };
 
 /**
+ * Sign-out is the browser's, not the tab's: every other tab of this app
+ * hears of it, by BroadcastChannel, or by a storage event where there is
+ * none. Never throws.
+ */
+const tellOtherTabs = (userId: string | undefined): void => {
+    const message: SignedOutMessage = { type: 'account-ink-cleared', ...(userId ? { userId } : {}) };
+    try {
+        if (channel) {
+            channel.postMessage(message);
+            return;
+        }
+        if (typeof localStorage !== 'undefined') {
+            // A storage event fires in the other tabs only when the value changes.
+            localStorage.setItem(SIGNED_OUT_STORAGE_KEY, JSON.stringify({ ...message, at: crypto.randomUUID() }));
+            localStorage.removeItem(SIGNED_OUT_STORAGE_KEY);
+        }
+    } catch {
+        // No way to reach the other tabs: their own auth state still signs them out.
+    }
+};
+
+const listenToOtherTabs = (): void => {
+    if (typeof window === 'undefined') {
+        return;
+    }
+    window.addEventListener('storage', (event: StorageEvent) => {
+        if (event.key !== SIGNED_OUT_STORAGE_KEY || !event.newValue) {
+            return;
+        }
+        try {
+            onOtherTabSignedOut(JSON.parse(event.newValue));
+        } catch {
+            // Not ours.
+        }
+    });
+    if (typeof BroadcastChannel !== 'function') {
+        return;
+    }
+    try {
+        channel = new BroadcastChannel(CHANNEL_NAME);
+        channel.onmessage = (event: MessageEvent) => onOtherTabSignedOut(event.data);
+        // Node (the tests) would otherwise keep running for it.
+        (channel as BroadcastChannel & { unref?: () => void }).unref?.();
+    } catch {
+        channel = null;
+    }
+};
+
+listenToOtherTabs();
+
+/**
  * An open viewer's store: export reads its memory when the database cannot
- * be read (see openMarksFor), and the cap spares its score. Returns the
+ * be read (see openMarksFor), and a sign-out clearing its account's ink
+ * has it forget what it drew (OpenStore.accountInkCleared). Returns the
  * unregister, for the viewer's unmount.
  */
 export const registerOpenStore = (store: OpenStore): (() => void) => {
@@ -546,8 +1025,9 @@ export const noteEditsInFlight = (delta: number): void => {
     syncUnloadGuard();
 };
 
-/** Ink a reload or closing the tab would lose: a write still on its way, or held. */
-export const hasUnsavedInk = (): boolean => inFlight > 0 || [...entries.values()].some((e) => e.ops.length > 0);
+/** Ink a reload or closing the tab would lose: a write still on its way, held, or held for Export. */
+export const hasUnsavedInk = (): boolean =>
+    inFlight > 0 || [...entries.values()].some((e) => e.ops.length > 0 || e.conflicts.size > 0);
 
 const onBeforeUnload = (event: BeforeUnloadEvent): void => {
     // The browser shows its own "leave site?" prompt; the text is not used.
@@ -581,6 +1061,7 @@ const syncUnloadGuard = (): void => {
 export const resetInkRecoveryForTests = (): void => {
     entries.clear();
     openStores.clear();
+    epochs.clear();
     inFlight = 0;
     changed();
 };

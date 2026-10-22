@@ -634,6 +634,21 @@ export class SyncEngine {
         });
         // Ink the store could not write: the status says so (see drain).
         this.deps.store.setHeldHook(() => this.requestFlush());
+        // Its Retry asks the server whether a newer version overtook a held
+        // mark, and draws the server's version of any that one did.
+        this.deps.store.setRetryHooks({
+            serverRows: async (ids) => {
+                const { data, error } = await this.withAuth(() => this.deps.api.fetchMany(this.deps.docId, ids));
+                return error || !data ? null : data.map(fromServerRow);
+            },
+            overtaken: (ids) => {
+                if (!this.stopped) {
+                    void this.applyDeferred(ids)
+                        .then(() => (this.stopped ? undefined : this.askAgain(ids)))
+                        .catch((err: unknown) => console.warn('Could not refresh overtaken marks', err));
+                }
+            },
+        });
         window.addEventListener('online', this.onlineListener);
         window.addEventListener('offline', this.offlineListener);
         activeEngines.set(this.deps.docId, this);
@@ -650,6 +665,7 @@ export class SyncEngine {
         this.stopped = true;
         this.deps.store.setDirtyHook(null);
         this.deps.store.setHeldHook(null);
+        this.deps.store.setRetryHooks(null);
         window.removeEventListener('online', this.onlineListener);
         window.removeEventListener('offline', this.offlineListener);
         if (activeEngines.get(this.deps.docId) === this) {

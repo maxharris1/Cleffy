@@ -141,13 +141,16 @@ export const GUEST_DELETED_PATH = `${ACCOUNT_DELETED_PATH}?guest=1`;
  * deleted locally, when the server did not finish.
  */
 export const deleteGuestProfile = async (): Promise<void> => {
-    const { clearAccountCachesFromDevice, syncBeforeSignOut } = await import('@/features/auth/session');
+    const { clearAccountCachesFromDevice, signedInUserId, syncBeforeSignOut } = await import(
+        '@/features/auth/session'
+    );
     await syncBeforeSignOut().catch(() => undefined);
+    const userId = await signedInUserId();
     await requestAccountDeletion();
     forgetLocalSession();
     await stopLocalWriters();
     try {
-        await clearAccountCachesFromDevice();
+        await clearAccountCachesFromDevice({ userId });
     } catch {
         // IndexedDB unavailable: there is nothing cached to clear.
     }

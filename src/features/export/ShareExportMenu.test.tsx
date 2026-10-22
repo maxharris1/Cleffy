@@ -279,6 +279,7 @@ describe('ShareExportMenu export allowance', () => {
             0,
             expect.any(String),
             teacher.user.id,
+            expect.any(Function),
         );
         expect(rpc).not.toHaveBeenCalled();
     });

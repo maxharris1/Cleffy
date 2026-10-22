@@ -230,6 +230,47 @@ const SIGN_OUT_SYNC_TIMEOUT_MS = 8000;
 /** How long sign-out waits for pending lesson-history snapshots. */
 const SIGN_OUT_SNAPSHOT_TIMEOUT_MS = 3000;
 
+/**
+ * How long an ended sign-in's sign-out (signOutKeepingChanges) waits on
+ * this device's storage — writing ink it could not store before, then each
+ * later step — before it signs out regardless. A stalled IndexedDB never
+ * answers, and the ended session must not stay installed waiting on it.
+ */
+export const SIGN_OUT_STORAGE_TIMEOUT_MS = 5000;
+
+/** `work`, or `fallback` once `ms` have passed without it settling (or when it fails). */
+const within = async <T>(work: Promise<T>, ms: number, fallback: T): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            work.catch(() => fallback),
+            new Promise<T>((resolve) => {
+                timer = setTimeout(() => resolve(fallback), ms);
+            }),
+        ]);
+    } finally {
+        clearTimeout(timer);
+    }
+};
+
+/**
+ * The account signed in in this tab, for clearing what is its own at
+ * sign-out: the stored session's, else the last one this tab saw (an
+ * expired session whose refresh failed reads as none). Undefined when
+ * neither says.
+ */
+export const signedInUserId = async (): Promise<string | undefined> => {
+    try {
+        const { data } = await getSupabase().auth.getSession();
+        if (data.session) {
+            return data.session.user.id;
+        }
+    } catch {
+        // Fall back on what this tab last saw.
+    }
+    return knownSession?.user.id;
+};
+
 export interface SignOutSyncResult {
     /**
      * Annotation changes still not on the server; signing out deletes them.
@@ -377,6 +418,9 @@ export const signOut = async (): Promise<void> => {
         import('@/sync/backgroundDrain'),
     ]);
     noteLibraryMutation();
+    // Whose held ink to clear (clearAccountCachesFromDevice), asked while the
+    // session is still here.
+    const userId = await signedInUserId();
     // A snapshot upload still in flight from syncBeforeSignOut (it is raced
     // against a timer, not awaited) must not write this account's day
     // snapshot back into Dexie after the clear below.
@@ -402,7 +446,7 @@ export const signOut = async (): Promise<void> => {
     await signOutThisDevice(getSupabase());
     noteLibraryMutation();
     rememberSession(null);
-    await clearAccountCachesFromDevice();
+    await clearAccountCachesFromDevice({ userId });
 };
 
 /**
@@ -423,6 +467,13 @@ export const signOut = async (): Promise<void> => {
  * Local scope: the server has already ended the sessions, and a global
  * sign-out would only say so again. Resolves to how many queued changes were
  * kept (0 when the outbox cannot be read).
+ *
+ * Ink this device could not store yet gets one more try first, for at most
+ * SIGN_OUT_STORAGE_TIMEOUT_MS: written, it is kept with the rest. Whatever
+ * is still unwritten then goes with the sign-out, and every write of it still
+ * on its way is cancelled (inkRecovery.clearAccountInk) so none lands after.
+ * The caller offers Export of it before this (EndedSignInInkPrompt): until
+ * the sign-out completes, export still finds it.
  */
 export const signOutKeepingChanges = async (): Promise<number> => {
     const [{ getDb }, { stampOwnCloudOps }, { retryAccountInk }] = await Promise.all([
@@ -433,12 +484,10 @@ export const signOutKeepingChanges = async (): Promise<number> => {
     // Before the PDFs (and with them the legacy ownership test) are cleared.
     return signOutEndedSignIn(async (userId) => {
         if (userId) {
-            // Ink this device could not store yet: written now, it is kept
-            // with the rest; still unwritten, it goes with the sign-out.
-            await retryAccountInk(userId);
+            await within(retryAccountInk(userId), SIGN_OUT_STORAGE_TIMEOUT_MS, undefined);
         }
         return {
-            count: userId ? await stampOwnCloudOps(getDb(), userId).catch(() => 0) : 0,
+            count: userId ? await within(stampOwnCloudOps(getDb(), userId), SIGN_OUT_STORAGE_TIMEOUT_MS, 0) : 0,
             keepCloudAnnotations: true,
         };
     });
@@ -460,10 +509,10 @@ export const signOutDeletedAccount = async (): Promise<number> => {
     ]);
     return signOutEndedSignIn(async (userId) => {
         const db = getDb();
-        const discarded = userId ? await dropOwnCloudOps(db, userId).catch(() => 0) : 0;
+        const discarded = userId ? await within(dropOwnCloudOps(db, userId), SIGN_OUT_STORAGE_TIMEOUT_MS, 0) : 0;
         // Unreadable reads as "something is waiting": keeping marks nobody
         // will draw costs a little storage, clearing them could lose them.
-        const othersWaiting = await pendingCloudOpCount(db).catch(() => 1);
+        const othersWaiting = await within(pendingCloudOpCount(db), SIGN_OUT_STORAGE_TIMEOUT_MS, 1);
         return { count: discarded, keepCloudAnnotations: othersWaiting > 0 };
     });
 };
@@ -472,7 +521,10 @@ export const signOutDeletedAccount = async (): Promise<number> => {
  * What signOutKeepingChanges and signOutDeletedAccount share: stop every
  * writer, settle the outbox (`settle`, before the PDFs and with them the
  * legacy ownership test are cleared), sign out locally, and clear the
- * account's caches. Resolves to `settle`'s count.
+ * account's caches. Resolves to `settle`'s count. No storage step can hold
+ * it: `settle` bounds its own, and the cache clear is waited on for
+ * SIGN_OUT_STORAGE_TIMEOUT_MS at most (the account's held ink, in memory,
+ * goes at once, before any wait).
  */
 const signOutEndedSignIn = async (
     settle: (userId: string | null) => Promise<{ count: number; keepCloudAnnotations: boolean }>,
@@ -487,12 +539,16 @@ const signOutEndedSignIn = async (
     stopSnapshotWrites();
     stopAllBackgroundDrains();
     const supabase = getSupabase();
-    const { data } = await supabase.auth.getSession();
-    const { count, keepCloudAnnotations } = await settle(data.session?.user.id ?? null);
+    const userId = (await signedInUserId()) ?? null;
+    const { count, keepCloudAnnotations } = await settle(userId);
     await signOutThisDevice(supabase);
     noteLibraryMutation();
     rememberSession(null);
-    await clearAccountCachesFromDevice({ keepCloudAnnotations });
+    await within(
+        clearAccountCachesFromDevice({ keepCloudAnnotations, userId: userId ?? undefined }),
+        SIGN_OUT_STORAGE_TIMEOUT_MS,
+        undefined,
+    );
     return count;
 };
 
@@ -502,15 +558,20 @@ const signOutEndedSignIn = async (
  * app's preferences are not the account's and stay. Also the tail of deleting
  * a guest profile (accountDeletion.ts), which ends the same way.
  * `keepCloudAnnotations` keeps the marks, their outbox, watermarks and day
- * snapshots (signOutKeepingChanges).
+ * snapshots (signOutKeepingChanges). `userId`: the account signing out
+ * (undefined when that could not be told; see clearAccountInk).
  */
-export const clearAccountCachesFromDevice = async ({ keepCloudAnnotations = false } = {}): Promise<void> => {
+export const clearAccountCachesFromDevice = async ({
+    keepCloudAnnotations = false,
+    userId,
+}: { keepCloudAnnotations?: boolean; userId?: string } = {}): Promise<void> => {
     // Marks a viewer could not store, held in this tab's memory: callers ask
     // first (syncBeforeSignOut counts them), and the next account in this
     // tab must neither see, export nor retry them. Never in Dexie, so kept
-    // annotations cannot keep them.
+    // annotations cannot keep them. Only this account's: another account's
+    // held ink in this tab stays for that account. The other tabs hear too.
     const { clearAccountInk } = await import('@/sync/inkRecovery');
-    clearAccountInk();
+    clearAccountInk(userId);
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
     const { clearCloudAnnotationData } = await import('@/sync/signOutSync');
