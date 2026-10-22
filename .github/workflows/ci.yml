@@ -33,8 +33,8 @@ jobs:
     #
     # LOCAL stack only: `supabase start` on this runner, the migrations it
     # applies, and the demo keys it prints. No repository secrets, no hosted
-    # project, no link. Scoped to these proofs; billing_double_charge.sql is
-    # left to its own PR (decision 20). No browser is installed or run.
+    # project, no link. Every SQL proof runs here (decision 37 / SF-16). No
+    # browser is installed or run.
     supabase-local:
         runs-on: ubuntu-latest
         timeout-minutes: 25
@@ -48,16 +48,21 @@ jobs:
             - uses: supabase/setup-cli@v1
               with:
                   version: 2.121.0
-            # Only what these proofs touch: Postgres, Auth (the store test
-            # creates accounts), PostgREST and the gateway in front of them.
+            # Only what the proofs touch: Postgres, Auth (the store test
+            # creates accounts), PostgREST and the gateway in front of them,
+            # Realtime (it creates the day's realtime.messages partition the
+            # broadcast checks read, as on a developer's stack) and Storage
+            # (its own migrations bring storage.objects to the schema the
+            # storage checks write, as on every hosted project).
             - name: Start the local Supabase stack and apply every migration
-              run: supabase start -x studio,imgproxy,mailpit,realtime,storage-api,edge-runtime,logflare,vector,supavisor,postgres-meta
+              run: supabase start -x studio,imgproxy,mailpit,edge-runtime,logflare,vector,supavisor,postgres-meta
             # A recovery replays migrations over a database that already has
             # them; these must apply again cleanly, in order.
-            - name: Re-apply the cancel-link migrations
+            - name: Re-apply the cancel-link and launchfix P1 migrations
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-                  for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock; do
+                  for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock \
+                      20261022100000_explicit_service_role_grants 20261022100100_billing_lock_tables_client_revoke 20261022100200_deployment_config 20261022100300_one_studio_per_owner 20261022100400_storage_object_names 20261022100500_storage_bucket_limits; do
                       psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "supabase/migrations/${migration}.sql"
                   done
             - name: Cancel-link store test (billingCancelStore.ts against the local stack)
@@ -67,12 +72,54 @@ jobs:
                   CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
                   CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
                       npx vitest run tests/billing/cancelLinkStore.test.ts
-            - name: Checkout and cancel-link SQL proofs
+            # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
+            # sharing proof beside the migrations. A new proof runs by being
+            # added -- this file changes only to skip one, which needs a reason.
+            # Every proof runs even after one fails, and the step fails at the
+            # end, so one red run shows them all.
+            - name: SQL proofs (tests/sql/*.sql and supabase/sql-tests/sharing_access_control.sql)
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-                  for proof in cancel_link_lifetime cancel_link_tombstones cancel_link_db_clock cancel_link_tombstone_race cancel_link_read_db_clock cancel_link_save_after_insert cancel_link_consume_db_clock checkout_consents launch_checkout_fixes; do
-                      bash scripts/ci/sql-proof.sh "$DB_URL" "tests/sql/${proof}.sql"
+
+                  # Whole proofs not run here: name -> reason. None today.
+                  declare -A SKIP=()
+
+                  # Checks known to fail, by the number they print with. The proof
+                  # still runs; any OTHER failing check fails the job, and a listed
+                  # check that passes is reported so the entry can go. Each entry
+                  # was failing on dev 47e9b38f before launchfix P1 touched
+                  # anything, and is for the proof's owner to settle:
+                  declare -A KNOWN=(
+                      # 49, 59, 60, 62: written against a stand-in for #63's
+                      # rotate_document_realtime. With #63 merged the sweep really
+                      # rotates the score's topics, so check 49 sees a rotation it
+                      # expects not to, and the later joins on generation-0
+                      # doc:{id} (presence, live ink) are refused by the
+                      # current-generation realtime policy. Realtime: launchfix P4.
+                      [district_read_only_seats]="49,59,60,62"
+                      # 22, 24: expect a reset student's write to match no row;
+                      # 20261021120400's statement trigger now refuses it outright
+                      # (42501 "access has been withdrawn"), which is stricter.
+                      [student_access_revocation]="22,24"
+                  )
+
+                  failed=""
+                  for proof in tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql; do
+                      name="$(basename "$proof" .sql)"
+                      if [ -n "${SKIP[$name]+x}" ]; then
+                          echo "::notice file=${proof}::skipped: ${SKIP[$name]}"
+                          continue
+                      fi
+                      echo "::group::${proof}"
+                      if ! bash scripts/ci/sql-proof.sh "$DB_URL" "$proof" "${KNOWN[$name]:-}"; then
+                          failed="${failed} ${proof}"
+                      fi
+                      echo "::endgroup::"
                   done
+                  if [ -n "$failed" ]; then
+                      echo "::error::SQL proofs failed:${failed}"
+                      exit 1
+                  fi
 
     omr-service:
         runs-on: ubuntu-latest

@@ -312,6 +312,12 @@ SECURITY INVOKER and would otherwise answer 42501 before it reached the lease
 check. Proven against PostgreSQL 17.11 on 2026-10-12 (53 checks) and again, with
 the review's additions, on 2026-10-13: all 98 checks passed.
 
+Decision 20 (launchfix P1, `20261022100100_billing_lock_tables_client_revoke.sql`)
+revoked the client roles' default-ACL grants on `checkout_attempts`,
+`subscription_writes` and `duplicate_refunds`, which checks 89, 92 and 98
+caught on the local stack: all 98 checks pass there since 2026-10-22, and CI
+runs it.
+
 `cancel_link_lifetime.sql` proves
 `supabase/migrations/20261020160300_cancel_link_token_lifetime.sql` (Codex round
 4 on #62): a cancel link's expiry is fixed on its `billing_mail_outbox` row when
@@ -548,3 +554,50 @@ service role's SELECT, and nothing for any client role). Proven against the
 local stack on 2026-10-21 with this branch's migrations: all 12 checks passed,
 and `district_retention.sql` (26), `district_student_scope.sql` (22) and
 `launch_consent.sql` (43) still pass under the narrowed grant.
+
+## Launchfix P1: DB release safety
+
+`explicit_grants.sql` proves `20261022100000_explicit_service_role_grants.sql`
+(BL-3) and `20261022100100` (decision 20): the service role reads every public
+table and holds full DML on all but five deliberately narrowed ones; anon and
+authenticated hold exactly a pinned list, column grants included (pinned
+against the local stack, whose default ACL is permissive -- run it there); and
+with the default ACL revoked in the transaction, the fifteen BL-3 tables,
+stripped of what the default gave the service role, get it back from the
+migration alone, the client roles unchanged. 14 checks.
+`tests/security/explicitServiceRoleGrants.test.ts` holds every table a
+migration creates to an explicit service_role grant.
+
+`deployment_config.sql` proves `20261022100200_deployment_config.sql` (BL-2):
+unset, test- and live-mode subscriptions both entitle; with the config at
+`{live}` a test-mode one (or a seat under a test-mode Academy) resolves free
+while a live one entitles, in the same session; clearing it restores both;
+the table is one service-role-only row of a non-empty subset of
+`{live,test}`; `entitling_billing_modes()` is STABLE and nothing indexes on it;
+and applied over production's hand-narrowed body the migration carries `{live}`
+into the table first. 34 checks.
+
+`one_studio_per_owner.sql` proves `20261022100300_one_studio_per_owner.sql`
+(BL-4): the backfill keeps a district's studio (billing record or seat
+override) over an older one, else the oldest, supersedes and logs the rest
+with their member counts and deletes nothing; a second live studio is refused
+with `studio_exists` (and by the unique index with triggers off); a superseded
+studio grants no seat, active or read-only, and takes no invite. 30 checks.
+
+`storage_name_limits.sql` proves `20261022100400_storage_object_names.sql` and
+`20261022100500_storage_bucket_limits.sql` (SF-3): an owner writes only
+`scores/{id}/original.pdf`, `scores/{id}/pre-import-original.pdf` and
+`thumbnails/{id}/{rev}.jpg` (insert, upsert, move), a client cannot create an
+archived score, and both buckets carry their size and type limits. 32 checks.
+
+Each `\ir`s its migrations to rerun them, so it is psql only.
+
+## In CI
+
+The `supabase-local` job runs every `tests/sql/*.sql` and
+`supabase/sql-tests/sharing_access_control.sql` through
+`scripts/ci/sql-proof.sh`, which reads both result shapes above. A new proof
+runs there by being added. `.github/workflows/ci.yml` keeps the exceptions, each
+with its reason: whole proofs skipped (none) and checks known to fail by number
+(`district_read_only_seats` 49, 59, 60, 62 and `student_access_revocation` 22,
+24, both failing on dev 47e9b38f before launchfix P1).
