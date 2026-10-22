@@ -5,6 +5,8 @@
 - Repo: maxharris1/Cleffy, PR #67 (draft, base `dev`, branch `mh/launchfix-p6-golive-docs`). Draft state, base, title and body unchanged.
 - Starting head: `bc070bd407bc7e96109f28830ed3263ae78f154c` (bc070bd4), on dev `d387b69f8de13dd468aaa2b6242b4c66685f95ae`. Confirmed at start (local HEAD and `origin/mh/launchfix-p6-golive-docs`) and again right before the push.
 - **New PR #67 head: `614824fb759160fc9ffdd0931b3932a3f33a9534` (614824f).**
+- **PR #67's head moved after my push. It is now `1cf2c2c9c3ab75672f906fdd4f2902b7dd8b5de3`**, see "Later commit on the PR branch (not mine)" below. Everything in this report about fixes, line numbers and checks describes my head 614824f.
+
 - Environment: Cleffy cloud environment `env_01WAd3yiz3qpSnsofpyEwCh2` (from `get_session`: `environment_id` = env_01WAd3yiz3qpSnsofpyEwCh2, `environment_kind` = anthropic_cloud). Not Sandbox.
 - Date: 2026-10-22.
 
@@ -152,6 +154,18 @@ All 17 check runs on 614824f finished, and every one passed (Supabase Preview wa
 - **Anomaly, not a failure:** GitHub started **two** `push` CI runs for the one push (39834026782 at 18:44:34Z and 39834030756 at 18:44:36Z; bc070bd4 had one). All five jobs of 39834026782 passed by 18:48:52Z, but the run and its check suite still read `in_progress` at 19:20Z (`updated_at` frozen at 18:44:46Z). No job is running or failing; the run's status just never updated. I did not re-run or cancel it (no CI kicking). The duplicate run 39834030756 for the same commit completed `success`.
 - Empty app check suites (google-cloud-build, cursor, claude: `queued` with 0 check runs) look the same at bc070bd4. They are not CI.
 
+## Later commit on the PR branch (not mine)
+
+At 19:20Z, while finishing this report, I found `origin/mh/launchfix-p6-golive-docs` (and PR #67's head) at `1cf2c2c9c3ab75672f906fdd4f2902b7dd8b5de3`. That is one commit on top of my 614824f (a fast-forward; 614824f is its parent): author Max Harris <drumaxter@gmail.com>, 2026-10-22T19:13:29Z, "DEPLOY.md: drop proof B from orphaned provisioning runbook", DEPLOY.md only (+30/−27). I did not write it, and I made no further push to the PR branch. What it changes in the same section:
+
+- It drops proof **(B)** (an unrecorded email candidate flagged as this teacher's student, inside the window). **(A)** is now the only proof: the account is `recorded_user_id`, it still exists, and it was created inside the window. Reason given in the text: a later live request for the same teacher and address can create, attach and flag its own account before its roster insert, so a flagged candidate can belong to another intent.
+- Email candidates are "for information only and never enough to delete anything". A comment saying so is added to the find query.
+- Case 3 is now "Proven (A), flagged…". Case 5 now covers every email candidate on an unrecorded intent, flagged or not, inside the window or not.
+
+So at the current PR head, the MAJOR 1 proof list in this report reads: **(A) only**. The MAJOR 2 Storage steps and the MINOR rule are unchanged from 614824f, but line numbers after about DEPLOY.md:2231 shift by up to +3.
+
+CI on 1cf2c2c (read-only check): pull_request run 39838223334 completed/success and push run 39838216425 completed/success. All 5 jobs in each passed: checks, supabase-local, edge-functions-deno, supabase-drift, omr-service. Vercel Preview Comments passed, Supabase Preview was skipped, and the Vercel status is success ("Deployment has completed").
+
 ## Follow-ups (not done here)
 
 1. **Hard time bound on `student_provision_intents_for()`'s email fallback** (20261022110600:231-236): bound it to `u.created_at <= i.expires_at` (the intent's window), so account deletion's automatic sweep cannot resolve a stale unattached intent to a later independent signup at the same address. Its flag check (accountDeletion.ts:538) already limits automatic deletion to accounts flagged as that teacher's student, but the bound belongs in the SQL. Needs a migration; out of scope for a docs-only fix.
@@ -160,7 +174,7 @@ All 17 check runs on 614824f finished, and every one passed (Supabase Preview wa
 
 ## Open questions for Max
 
-1. Proof (A) treats the recorded id plus an in-window `created_at` as enough, even for an unflagged account (case 4). Is that the standard you want, or should case 4 additionally require the email path's `invited_at` (a GoTrue column dev does not write itself, so I did not use it as proof)?
+1. 1cf2c2c (not mine) has since dropped proof (B); please confirm that is the intended final standard. Proof (A) treats the recorded id plus an in-window `created_at` as enough, even for an unflagged account (case 4). Is that the standard you want, or should case 4 additionally require the email path's `invited_at` (a GoTrue column dev does not write itself, so I did not use it as proof)?
 2. CI started **two** `push` runs for the one push. One (39834026782) still shows `in_progress` at run level although all five of its jobs passed (see the CI section). If a merge gate reads the run-level state rather than the check runs, it may need a re-run of that run by Max; I did not touch it.
 
 ## Couldn't do / not done
