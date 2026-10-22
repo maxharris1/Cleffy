@@ -81,6 +81,7 @@ const ownerDevice = (
     failEpochReads: () => boolean = () => false,
 ) => {
     const rows: AnnotationRow[] = [];
+    const inks: InkProgressMsg[] = [];
     const epochReads: Array<TopicEpochRead['status']> = [];
     let membershipChecks = 0;
     const supabase = client as unknown as TypedSupabaseClient;
@@ -88,7 +89,7 @@ const ownerDevice = (
         supabase,
         docId,
         self: { userId, name, color: '#123456', page: 0, isAnonymous: false },
-        onRemoteInk: () => undefined,
+        onRemoteInk: (msg) => inks.push(msg),
         onDbChange: (row) => rows.push(row),
         onPeers: () => undefined,
         onReconnect: () => undefined,
@@ -105,7 +106,7 @@ const ownerDevice = (
         },
     });
     channel.start();
-    return { channel, rows, epochReads, membershipChecks: () => membershipChecks };
+    return { channel, rows, inks, epochReads, membershipChecks: () => membershipChecks };
 };
 
 const joinedTopics = (client: SupabaseClient): string[] =>
@@ -350,14 +351,12 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
         // A score of its own, at generation 0.
         const scoreId = crypto.randomUUID();
         extraDocIds.push(scoreId);
-        const { error: docError } = await admin
-            .from('documents')
-            .insert({
-                id: scoreId,
-                owner_id: ownerId,
-                title: 'Live epoch hold',
-                storage_path: `${scoreId}/original.pdf`,
-            });
+        const { error: docError } = await admin.from('documents').insert({
+            id: scoreId,
+            owner_id: ownerId,
+            title: 'Live epoch hold',
+            storage_path: `${scoreId}/original.pdf`,
+        });
         expect(docError).toBeNull();
         const { error: memberError } = await admin
             .from('document_members')
@@ -471,5 +470,194 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
 
         a.channel.stop();
         collab.channel.stop();
+    }, 120_000);
+
+    /**
+     * 20261022120000: losing access rotates the score too, not only a
+     * takedown. The removed member's channels and the demoted editor's channel
+     * were joined before the change and ignore every hint.
+     */
+    it('a member removed while connected hears nothing more, and an editor made viewer reaches nobody', async () => {
+        const o2 = await signedIn(admin, `owner2-${tag}@takedown.test`);
+        const stay = await signedIn(admin, `stay-${tag}@takedown.test`);
+        const demoted = await signedIn(admin, `demoted-${tag}@takedown.test`);
+        userIds.push(o2.id, stay.id, demoted.id);
+        extraClients.push(o2.client, stay.client, demoted.client);
+        const scoreId = crypto.randomUUID();
+        extraDocIds.push(scoreId);
+        const { error: docError } = await admin.from('documents').insert({
+            id: scoreId,
+            owner_id: o2.id,
+            title: 'Live revocation',
+            storage_path: `${scoreId}/original.pdf`,
+        });
+        expect(docError).toBeNull();
+        const { error: memberError } = await admin.from('document_members').insert([
+            { document_id: scoreId, user_id: collaboratorId, role: 'editor' },
+            { document_id: scoreId, user_id: stay.id, role: 'editor' },
+            { document_id: scoreId, user_id: demoted.id, role: 'editor' },
+        ]);
+        expect(memberError).toBeNull();
+
+        /** A raw channel that never leaves, never re-checks, and is present. */
+        const adversary = (client: SupabaseClient, userId: string, topic: string, key: string) => {
+            const heard: InkProgressMsg[] = [];
+            const committed: string[] = [];
+            let status = '';
+            const channel = client.channel(topic, {
+                config: { private: true, broadcast: { self: false }, presence: { key } },
+            });
+            channel.on('broadcast', { event: INK_PROGRESS_EVENT }, ({ payload }) =>
+                heard.push(payload as InkProgressMsg),
+            );
+            channel.on('broadcast', { event: 'INSERT' }, ({ payload }) =>
+                committed.push((payload as { record: { id: string } }).record.id),
+            );
+            channel.subscribe((s) => {
+                status = s;
+                if (s === 'SUBSCRIBED' && topic.startsWith('doc:')) {
+                    void channel.track({ userId, name: key, color: '#000', page: 0, isAnonymous: false });
+                }
+            });
+            const ink = (strokeId: string) =>
+                channel.send({
+                    type: 'broadcast',
+                    event: INK_PROGRESS_EVENT,
+                    payload: {
+                        strokeId,
+                        userId,
+                        page: 0,
+                        kind: 'stroke',
+                        color: '#000000',
+                        w: 0.01,
+                        pts: [0.3, 0.3, 0.5],
+                        done: true,
+                    } satisfies InkProgressMsg,
+                });
+            return { heard, committed, ink, status: () => status };
+        };
+        const removedLive = adversary(collaborator, collaboratorId, docTopic(scoreId), 'removed');
+        const removedDb = adversary(collaborator, collaboratorId, docDbTopic(scoreId), 'removed-db');
+        const demotedLive = adversary(demoted.client, demoted.id, docTopic(scoreId), 'demoted');
+
+        // The owner and the member who stays run the app's own channel.
+        const ownerApp = ownerDevice(o2.client, scoreId, o2.id, 'Owner');
+        const stayApp = ownerDevice(stay.client, scoreId, stay.id, 'Stays');
+        const scoreTopics = (client: SupabaseClient) => joinedTopics(client).filter((topic) => topic.includes(scoreId));
+        const onGeneration = (client: SupabaseClient, n: number) => {
+            const topics = scoreTopics(client);
+            return topics.includes(docTopic(scoreId, n)) && topics.includes(docDbTopic(scoreId, n));
+        };
+        await waitFor(
+            'everyone to join generation 0',
+            () =>
+                [removedLive, removedDb, demotedLive].every((c) => c.status() === 'SUBSCRIBED') &&
+                onGeneration(o2.client, 0) &&
+                onGeneration(stay.client, 0),
+        );
+        await sleep(1500);
+        stroke(ownerApp, 'before');
+        await waitFor('the removed member and the demoted editor to hear the owner before', () =>
+            [removedLive, demotedLive].every((c) => c.heard.some((m) => m.strokeId === 'before')),
+        );
+        await demotedLive.ink('demoted-before');
+        await waitFor('the owner to hear the editor before', () =>
+            ownerApp.inks.some((m) => m.strokeId === 'demoted-before'),
+        );
+
+        // The owner removes a member (its own request, so its own commit).
+        const { error: removeError } = await o2.client.rpc('remove_document_member', {
+            p_document: scoreId,
+            p_user: collaboratorId,
+        });
+        expect(removeError).toBeNull();
+        await waitFor(
+            'the owner and the member who stays to move to generation 1',
+            () => onGeneration(o2.client, 1) && onGeneration(stay.client, 1),
+        );
+        expect(ownerApp.membershipChecks()).toBe(0);
+        // Still subscribed where it was: Realtime never evicted it.
+        expect(joinedTopics(collaborator)).toEqual(expect.arrayContaining([docTopic(scoreId), docDbTopic(scoreId)]));
+        await sleep(1500);
+
+        const heardBefore = removedLive.heard.length;
+        for (let i = 0; i < 3; i++) {
+            stroke(ownerApp, `after-remove-${i}`);
+            await sleep(120);
+        }
+        // More marks than the pull's overlap: the member who stays gets every one.
+        const ids: string[] = Array.from({ length: 60 }, () => crypto.randomUUID());
+        const { error: insertError } = await o2.client.from('annotations').insert(
+            ids.map((id) => ({
+                id,
+                document_id: scoreId,
+                page: 0,
+                kind: 'stroke' as const,
+                color: '#000000',
+                payload: { pts: [0, 0, 1], w: 0.01 },
+                created_by: o2.id,
+            })),
+        );
+        expect(insertError).toBeNull();
+        await waitFor('the member who stays to receive all 60 committed marks', () =>
+            ids.every((id) => stayApp.rows.some((row) => row.id === id)),
+        );
+        await waitFor('the member who stays to hear the owner on generation 1', () =>
+            stayApp.inks.some((m) => m.strokeId === 'after-remove-2'),
+        );
+        await sleep(1000);
+        // Not one batch of ink and not one committed mark reached the removed member.
+        expect(removedLive.heard.slice(heardBefore)).toEqual([]);
+        expect(removedDb.committed.filter((id) => ids.includes(id))).toEqual([]);
+        expect(await fetchRealtimeTopicEpoch(collaborator as unknown as TypedSupabaseClient, scoreId)).toEqual({
+            status: 'denied',
+        });
+        let refused = '';
+        const sneak = collaborator.channel(docDbTopic(scoreId, 1), { config: { private: true } });
+        sneak.subscribe((s) => {
+            refused = s;
+        });
+        await waitFor('the removed member join on generation 1 to be refused', () => refused === 'CHANNEL_ERROR');
+        await collaborator.removeChannel(sneak);
+
+        // The demoted editor's old channel kept the send permission Realtime
+        // cached at join; the owner moves, so it reaches nobody.
+        const { error: roleError } = await o2.client.rpc('set_document_member_role', {
+            p_document: scoreId,
+            p_user: demoted.id,
+            p_role: 'viewer',
+        });
+        expect(roleError).toBeNull();
+        await waitFor(
+            'the owner and the member who stays to move to generation 2',
+            () => onGeneration(o2.client, 2) && onGeneration(stay.client, 2),
+        );
+        await sleep(1500);
+        const ownerInksBefore = ownerApp.inks.length;
+        for (let i = 0; i < 3; i++) {
+            await demotedLive.ink(`demoted-old-${i}`);
+            await sleep(120);
+        }
+        // Joining generation 2 afresh, it is a viewer: it may join, not send.
+        const fresh = adversary(demoted.client, demoted.id, docTopic(scoreId, 2), 'demoted-fresh');
+        await waitFor('the demoted viewer to join generation 2', () => fresh.status() === 'SUBSCRIBED');
+        for (let i = 0; i < 3; i++) {
+            await fresh.ink(`demoted-new-${i}`);
+            await sleep(120);
+        }
+        // The owner's own ink still reaches the member who stays...
+        stroke(ownerApp, 'after-demote');
+        await waitFor('the member who stays to hear the owner on generation 2', () =>
+            stayApp.inks.some((m) => m.strokeId === 'after-demote'),
+        );
+        await sleep(1500);
+        // ...and nothing the demoted viewer sent reached anyone.
+        expect(ownerApp.inks.slice(ownerInksBefore).filter((m) => m.userId === demoted.id)).toEqual([]);
+        expect(
+            stayApp.inks.filter((m) => m.strokeId.startsWith('demoted-old') || m.strokeId.startsWith('demoted-new')),
+        ).toEqual([]);
+
+        ownerApp.channel.stop();
+        stayApp.channel.stop();
     }, 120_000);
 });
