@@ -141,6 +141,22 @@ const removeFolder = async (admin: SupabaseClient, bucket: string, prefix: strin
 };
 
 const ports = (admin: SupabaseClient): DeletionPorts => ({
+    beginDeletion: async (userId) => {
+        const { error } = await admin.rpc('begin_account_deletion', { p_user: userId });
+        if (error) {
+            throw new Error(`could not mark the deletion pending: ${error.message}`);
+        }
+    },
+    settleDeletion: async (userId, outcome, code) => {
+        const { error } = await admin.rpc('settle_account_deletion', {
+            p_user: userId,
+            p_outcome: outcome,
+            p_error: code,
+        });
+        if (error) {
+            throw new Error(`could not settle the deletion marker: ${error.message}`);
+        }
+    },
     billingCustomers: async (userId) => {
         const { data, error } = await admin
             .from('billing_customers')

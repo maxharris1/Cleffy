@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     cancelBilling,
     deleteAccount,
+    MAX_SWEEP_PASSES,
     type DeletionCaller,
     type DeletionPorts,
     type StoredSubscriptionRef,
@@ -92,6 +93,9 @@ class FakeWorld {
     studios = new Map<string, string>(); // studio -> owner
     seats = new Set<string>(); // `${studioId}:${userId}`
     customers: Array<StripeCustomerRef & { userId: string }> = [];
+    /** account_deletions: user -> the marker, as 20261022110100 keeps it. */
+    pending = new Map<string, { attempts: number; lastError: string | null }>();
+    failBeginDeletion = false;
     stored: Array<StoredSubscriptionRef & { userId: string }> = [];
     stripe: Record<StripeMode, FakeStripe | null> = { live: new FakeStripe(this.log), test: new FakeStripe(this.log) };
 
@@ -111,7 +115,16 @@ class FakeWorld {
     /** Runs once, the first time a document listing happens — "another tab". */
     onFirstDocumentListing: (() => void) | null = null;
 
+    /** documents_refuse_during_account_deletion / managed_students_refuse_during_account_deletion. */
+    private refuseWhilePending(owner: string) {
+        if (this.pending.has(owner)) {
+            this.log.push(`refused:${owner}`);
+            throw new Error('account_deletion_pending');
+        }
+    }
+
     addDocument(id: string, owner: string, withThumbnail = true) {
+        this.refuseWhilePending(owner);
         this.documents.set(id, owner);
         this.memberships.add(`${id}:${owner}`);
         this.objects.add(`scores/${id}/original.pdf`);
@@ -121,6 +134,7 @@ class FakeWorld {
     }
 
     addStudent(id: string, teacher: string, user: Partial<FakeUser> = {}) {
+        this.refuseWhilePending(teacher);
         this.users.set(id, { userType: 'student', teacherId: teacher, ...user });
         this.roster.set(id, teacher);
     }
@@ -128,6 +142,7 @@ class FakeWorld {
     /** ON DELETE CASCADE / SET NULL, as the schema declares them. */
     private cascadeUser(userId: string) {
         this.users.delete(userId);
+        this.pending.delete(userId);
         for (const [student, teacher] of this.roster) {
             if (student === userId || teacher === userId) {
                 this.roster.delete(student);
@@ -150,6 +165,31 @@ class FakeWorld {
 
     ports(): DeletionPorts {
         return {
+            beginDeletion: async (userId) => {
+                if (this.failBeginDeletion) {
+                    throw new Error('db down');
+                }
+                if (!this.users.has(userId)) {
+                    return;
+                }
+                const marker = this.pending.get(userId);
+                this.pending.set(userId, {
+                    attempts: (marker?.attempts ?? 0) + 1,
+                    lastError: marker?.lastError ?? null,
+                });
+                this.log.push(`pending:${userId}`);
+            },
+            settleDeletion: async (userId, outcome, code) => {
+                this.log.push(`settle:${outcome}:${code}`);
+                if (outcome === 'abandoned') {
+                    this.pending.delete(userId);
+                } else {
+                    const marker = this.pending.get(userId);
+                    if (marker) {
+                        marker.lastError = code;
+                    }
+                }
+            },
             billingCustomers: async (userId) => {
                 if (this.failBillingRead) {
                     throw new Error('db down');
@@ -529,13 +569,21 @@ describe('what goes with the account', () => {
         expect(world.log.indexOf('auth:student-1')).toBeLessThan(world.log.indexOf(`auth:${TEACHER}`));
     });
 
-    it('sweeps up a score uploaded from another tab while the deletion ran', async () => {
+    it('refuses a score uploaded from another tab while the deletion runs, so nothing is left behind', async () => {
         const world = new FakeWorld();
         world.addDocument('doc-1', TEACHER);
-        world.onFirstDocumentListing = () => world.addDocument('late-upload', TEACHER);
+        let refused: unknown = null;
+        world.onFirstDocumentListing = () => {
+            try {
+                world.addDocument('late-upload', TEACHER);
+            } catch (err) {
+                refused = err;
+            }
+        };
         const result = await deleteAccount(teacher(), world.ports());
-        expect(result).toMatchObject({ ok: true, summary: { documentsDeleted: 2 } });
-        expect(world.objects.size).toBe(0);
+        expect(String(refused)).toContain('account_deletion_pending');
+        expect(result).toMatchObject({ ok: true, summary: { documentsDeleted: 1 } });
+        expect(world.holdsNothingFor(TEACHER)).toBe(true);
     });
 });
 
@@ -733,5 +781,94 @@ describe('billing after the account is gone', () => {
             summary: { lateBillingSweep: 'done', lateSubscriptionsCanceled: 0, subscriptionsCanceled: 1 },
         });
         expect(result.ok && 'lateBillingFailure' in result).toBe(false);
+    });
+});
+
+describe('the pending marker (account_deletions)', () => {
+    it('is written before billing is touched or anything is deleted', async () => {
+        const world = payingTeacher();
+        await deleteAccount(teacher(), world.ports());
+        const pending = world.log.indexOf(`pending:${TEACHER}`);
+        expect(pending).toBe(0);
+        expect(pending).toBeLessThan(world.log.findIndex((entry) => entry.startsWith('stripe.')));
+        expect(pending).toBeLessThan(world.log.indexOf('row:doc-1'));
+    });
+
+    it('refuses a student provisioned mid-delete, and the sweep still closes every account', async () => {
+        const world = new FakeWorld();
+        world.addStudent('student-1', TEACHER);
+        let refused: unknown = null;
+        world.onFirstDocumentListing = () => {
+            try {
+                world.addStudent('student-late', TEACHER);
+            } catch (err) {
+                refused = err;
+            }
+        };
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(String(refused)).toContain('account_deletion_pending');
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 1 } });
+        expect(world.users.has('student-late')).toBe(false);
+        expect(world.roster.size).toBe(0);
+    });
+
+    it('sweeps until a pass finds nothing: the second pass confirms, there is no third', async () => {
+        const world = payingTeacher();
+        const listings: number[] = [];
+        const ports = world.ports();
+        const ownedDocuments = ports.ownedDocuments;
+        ports.ownedDocuments = async (userId) => {
+            const ids = await ownedDocuments(userId);
+            if (userId === TEACHER) {
+                listings.push(ids.length);
+            }
+            return ids;
+        };
+        expect(await deleteAccount(teacher(), ports)).toMatchObject({ ok: true });
+        expect(listings).toEqual([1, 0]);
+        expect(MAX_SWEEP_PASSES).toBeGreaterThanOrEqual(2);
+    });
+
+    it('stops at the bound if rows keep appearing (a bug), and still closes the account', async () => {
+        const world = new FakeWorld();
+        let n = 0;
+        const ports = world.ports();
+        ports.ownedDocuments = async () => [`ghost-${(n += 1)}`];
+        const result = await deleteAccount(teacher(), ports);
+        expect(result).toMatchObject({ ok: true, summary: { documentsDeleted: MAX_SWEEP_PASSES } });
+        expect(world.log.some((entry) => entry.includes(`after ${MAX_SWEEP_PASSES} sweeps`))).toBe(true);
+    });
+
+    it('is cleared when billing cannot be stopped: nothing was deleted, and the account works as before', async () => {
+        const world = payingTeacher();
+        world.failBillingRead = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(world.pending.has(TEACHER)).toBe(false);
+        expect(world.log).toContain('settle:abandoned:billing_cancel_failed');
+        expect(() => world.addDocument('new-score', TEACHER)).not.toThrow();
+    });
+
+    it('is kept, with the error, when the deletion stops part-way; the retry finishes and it goes with the account', async () => {
+        const world = payingTeacher();
+        world.failAuthDelete = true;
+        const first = await deleteAccount(teacher(), world.ports());
+        expect(first).toMatchObject({ ok: false, code: 'auth_delete_failed' });
+        expect(world.pending.get(TEACHER)).toEqual({ attempts: 1, lastError: 'auth_delete_failed' });
+        expect(() => world.addDocument('while-half-deleted', TEACHER)).toThrow('account_deletion_pending');
+
+        world.failAuthDelete = false;
+        const retry = await deleteAccount(teacher(), world.ports());
+        expect(retry).toMatchObject({ ok: true, summary: { authUser: 'deleted' } });
+        expect(world.pending.has(TEACHER)).toBe(false);
+    });
+
+    it('a marker that cannot be written stops the deletion before anything else', async () => {
+        const world = payingTeacher();
+        world.failBeginDeletion = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'deletion_unavailable' });
+        expect(world.log.some((entry) => entry.startsWith('stripe.'))).toBe(false);
+        expect(world.documents.has('doc-1')).toBe(true);
     });
 });

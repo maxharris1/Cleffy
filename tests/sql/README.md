@@ -687,6 +687,37 @@ ends in `deadlock detected`.
 
 Each `\ir`s its migrations to rerun them, so it is psql only.
 
+## Launchfix P3: edge hardening
+
+`student_claim_reservation.sql` proves
+`20261022110000_student_claim_reservation.sql` (launchfix P3, SF-11): a
+student claim reserves its roster row, bound to the card's `login_code_hash`,
+before student-claim writes any password, and `complete_student_claim` commits
+only while the row still carries that hash and the reservation is still the
+caller's. The interleavings are written statement by statement: one claim
+start to finish; two claims on one card (the second is `busy` and never
+replaces the first's reservation; a taken username is 23505 with the
+reservation kept); a claim against a teacher's reset both ways round (the
+reset is `busy` during a claim and rotating the code under a live claim is
+refused with 55006; a claim is `busy` during a reset, and the old hash can
+never be committed against the new code); expiry (a dead holder is taken
+over by a claim or a reset and its late commit and release are no-ops);
+archive clears a reservation; and no client role can call any of it or read
+the table. Proven against the local stack on 2026-10-22: all 52 checks passed.
+
+`account_deletion_pending.sql` proves
+`20261022110100_account_deletion_pending.sql` (launchfix P3, SF-13): once
+`begin_account_deletion` has written the marker (holding the account's
+advisory lock exclusively until it commits), a new score or roster row for
+that account is refused with 55000 whoever inserts it (service role, or the
+owner's own tab), while other accounts and updates to existing rows are
+unaffected and every insert takes the shared lock; a retry counts its attempt;
+`settle_account_deletion` keeps the marker with its error on `failed` and
+clears it on `abandoned`; deleting the auth user cascades it away, and a retry
+for an account already gone writes nothing; and no client role can call it or
+read the table. Proven against the local stack on 2026-10-22: all 29 checks
+passed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
