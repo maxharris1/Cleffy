@@ -327,11 +327,23 @@ select pg_temp.removed (
     2
 );
 
-select pg_temp.removed (
-    'library: ...then clear the tombstone',
-    'public.document_storage_cleanup',
-    $q$document_id = 'c1b0d000-0000-4000-8000-000000000004'$q$,
-    1
+-- 20261022100900: the tombstone is what keeps the bytes on the owner's
+-- quota, so a client cannot delete it; the server clears it once both
+-- folders are empty.
+select pg_temp.refused (
+    'library: ...the former owner cannot delete the tombstone itself',
+    $q$delete from public.document_storage_cleanup where document_id = 'c1b0d000-0000-4000-8000-000000000004'$q$,
+    '42501'
+);
+
+select pg_temp.holds (
+    'library: ...the server clears it, the folders being empty',
+    $q$select public.finish_document_storage_cleanup ('c1b0d000-0000-4000-8000-000000000004')$q$
+);
+
+select pg_temp.holds (
+    'library: ...and the tombstone is gone',
+    $q$select count(*) = 0 from public.document_storage_cleanup where document_id = 'c1b0d000-0000-4000-8000-000000000004'$q$
 );
 
 select pg_temp.removed (

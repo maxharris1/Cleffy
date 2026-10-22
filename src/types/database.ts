@@ -102,6 +102,19 @@ export type DocumentStorageCleanupRow = {
     deleted_at: string;
 };
 
+/**
+ * A thumbnail a newer revision of the same score replaced. Written and removed
+ * only by triggers on storage.objects; the owner reads it to remove the object.
+ */
+export type ThumbnailStorageCleanupRow = {
+    object_name: string;
+    document_id: string;
+    owner_id: string;
+    superseded_at: string;
+    /** Set once a client was told to remove it; a claimed cover is never published. */
+    claimed_at: string | null;
+};
+
 export type ImportStatusValue = 'prompted' | 'declined' | 'imported';
 
 export type DocumentImportRow = {
@@ -436,6 +449,12 @@ export type StudioRow = {
      */
     seat_limit: number;
     created_at: string;
+    /**
+     * Set on all but one of an owner's studios when 20261022100300 made it one
+     * live studio per owner. Server-written only; a superseded studio grants no
+     * seat and takes no invite.
+     */
+    superseded_at: string | null;
 };
 
 export type StudioInsert = {
@@ -606,8 +625,16 @@ export type Database = {
                 Relationships: [];
             };
             document_storage_cleanup: {
-                // Trigger-written tombstones; clients only read and delete them.
+                // Trigger-written tombstones; clients only read them, and the
+                // server clears them (finish_document_storage_cleanup).
                 Row: DocumentStorageCleanupRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
+            thumbnail_storage_cleanup: {
+                // Trigger-written and trigger-cleared; clients only read them.
+                Row: ThumbnailStorageCleanupRow;
                 Insert: never;
                 Update: never;
                 Relationships: [];
@@ -752,6 +779,19 @@ export type Database = {
             document_storage_cleanup_pending: {
                 Args: { folder: string };
                 Returns: boolean;
+            };
+            // Clears the caller's tombstone once both folders are empty (or the
+            // score is live again); false while anything is still stored.
+            finish_document_storage_cleanup: {
+                Args: { p_document_id: string };
+                Returns: boolean;
+            };
+            // Claims (and names) the covers the caller may remove now: the
+            // superseded ones, or with p_writing_rev every one but the
+            // published revision and that one. At most 100 scores.
+            claim_superseded_thumbnails: {
+                Args: { p_document_ids: string[]; p_writing_rev?: number };
+                Returns: string[];
             };
             redeem_share_link: {
                 Args: { p_token: string };

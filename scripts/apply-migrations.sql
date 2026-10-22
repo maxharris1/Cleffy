@@ -18204,3 +18204,2151 @@ $$;
 revoke all on function public.defer_district_retention_notice (bigint) from public, anon, authenticated;
 
 grant execute on function public.defer_district_retention_notice (bigint) to service_role;
+
+-- ===== supabase/migrations/20261022100000_explicit_service_role_grants.sql =====
+-- Explicit service_role grants on the fifteen public tables that never had one
+-- (launch re-audit BL-3).
+--
+-- Every other public table names service_role in a grant of its own (the core
+-- tables since 20260827140000_core_table_grants.sql). These fifteen only ever
+-- revoked from the client roles and relied on the default ACL for objects
+-- `postgres` creates in `public`, which today gives service_role arwdDxtm. That
+-- default is the platform's to change -- Supabase's announced change to default
+-- grants for new tables (dated 2026-10-30, not verified here) is exactly such a
+-- change -- and a fresh replay onto a project built after it would leave the
+-- service role with `42501 permission denied` on tables the Edge Functions
+-- write directly: billing_customers (stripe-checkout, the webhook),
+-- content_reports, content_notice_outbox and content_moderators (the
+-- content-report and content-moderation functions). The rest are read or
+-- written by SECURITY DEFINER functions, by the service role's admin SQL and
+-- by tests/sql proofs acting as it.
+--
+-- The client roles are left exactly as they are: no grant or revoke here names
+-- anon or authenticated, so the column grants on studios (insert (id,
+-- owner_id, name), update (name)) and practice_notes (update (body, shared,
+-- noted_on)), and every revoke, stand.
+--
+-- `all`, as 20260827140000 grants the core tables: service_role bypasses RLS,
+-- and this is the table-level gate only. Rerunnable: granting a privilege that
+-- is already held is a no-op.
+
+grant all on table public.billing_customers,
+               public.studios,
+               public.studio_members,
+               public.usage_counters,
+               public.assignments,
+               public.practice_notes,
+               public.edge_rate_buckets,
+               public.pdf_export_claims,
+               public.content_moderators,
+               public.content_reports,
+               public.content_takedowns,
+               public.content_strikes,
+               public.content_notice_log,
+               public.content_notice_outbox,
+               public.document_realtime_epochs
+    to service_role;
+
+-- ===== supabase/migrations/20261022100100_billing_lock_tables_client_revoke.sql =====
+-- No client role holds anything on the three billing lock tables (decision 20).
+--
+-- checkout_attempts (20261012120103), subscription_writes (20261012120105) and
+-- duplicate_refunds (20261013120102) are the service role's alone: they are
+-- read and written only by the webhook and stripe-checkout, through
+-- begin/stage/finish/release_checkout_attempt, claim/release_subscription_write
+-- and the duplicate-refund functions, all of which refuse every other caller.
+-- Each migration enabled RLS, added no policy and granted the service role,
+-- but never revoked from the client roles, so they kept whatever the default
+-- ACL for `postgres`-owned tables in `public` hands out. On the local stack
+-- (and any project whose default ACL is permissive) that is arwdDxtm: RLS
+-- still hides every row, but a signed-in or anonymous caller can count the
+-- tables, and TRUNCATE ignores RLS altogether. tests/sql/billing_double_charge.sql
+-- checks 89, 92 and 98 ("or read the attempts table", "or read the write locks
+-- table", "nor read the refund ledger") expect 42501 and failed 3 of 98 there.
+--
+-- Same convention as every other billing table: revoke from public, anon and
+-- authenticated; the service role's own grant is untouched. Rerunnable.
+
+revoke all on table public.checkout_attempts from public, anon, authenticated;
+revoke all on table public.subscription_writes from public, anon, authenticated;
+revoke all on table public.duplicate_refunds from public, anon, authenticated;
+
+-- ===== supabase/migrations/20261022100200_deployment_config.sql =====
+-- Which Stripe account's subscriptions entitle, read from configuration rather
+-- than from a function body (launch re-audit BL-2).
+--
+-- 20260828180000_billing_stripe_mode.sql ships entitling_billing_modes() as
+-- array['live', 'test'], and production's narrowing to array['live'] was a
+-- hand-applied `create or replace` (DEPLOY.md §0 / R1) that exists in no
+-- migration. So a fresh replay onto a wiped production -- the release plan --
+-- comes back entitling test-mode subscriptions, and Stripe's published test
+-- card buys a real plan until someone remembers to narrow it again; and any
+-- later migration that redefined the function would quietly undo the narrowing
+-- the same way.
+--
+-- The narrowing now lives in data: a service-role-only singleton,
+-- public.deployment_config, whose entitling_billing_modes column the function
+-- reads. Unset (no row, or a null column) keeps today's answer, {live,test},
+-- which is right for every database but production. Production's step, run
+-- once against jibgwgosihadbjgxdsfe after the replay (P6 documents it):
+--
+--   insert into public.deployment_config (id, entitling_billing_modes, updated_by)
+--   values (true, array['live'], 'Max')
+--   on conflict (id) do update
+--   set entitling_billing_modes = excluded.entitling_billing_modes,
+--       updated_by = excluded.updated_by,
+--       updated_at = now();
+--
+-- Applied in place over a database whose function body was narrowed by hand,
+-- this migration carries that narrowing into the table before it replaces the
+-- body (the DO block below), so applying it to today's production keeps
+-- test-mode subscriptions out rather than letting them back in.
+--
+-- The function goes from IMMUTABLE to STABLE: its answer now depends on a
+-- table, and an immutable function may be folded into a cached plan and keep
+-- answering what the row said when the plan was made. Nothing indexes on it,
+-- no constraint, generated column or policy calls it (checked against the
+-- local stack on 2026-10-22 through pg_depend, pg_index, pg_constraint and
+-- pg_policy; tests/sql/deployment_config.sql checks again), and every caller
+-- -- subscription_is_live(), resolve_entitlements(), the seat-override
+-- functions -- is itself STABLE or VOLATILE, so nothing that calls it has to
+-- change. SECURITY DEFINER so an invoker-rights caller (subscription_is_live()
+-- is one) can read the row without any client being granted the table.
+--
+-- Rerunnable: the table and its constraint are guarded, the function is
+-- replaced, and the carry-over only acts while no row exists.
+
+create table if not exists public.deployment_config (
+    -- One row: the key can only be true.
+    id boolean primary key default true check (id),
+    entitling_billing_modes text[],
+    updated_at timestamptz not null default now(),
+    updated_by text not null default 'unknown'
+);
+
+alter table public.deployment_config drop constraint if exists deployment_config_entitling_billing_modes_check;
+
+-- Null means unset. An empty list would entitle nobody, which no deployment
+-- wants, and anything but the two account names would match no subscription.
+alter table public.deployment_config
+add constraint deployment_config_entitling_billing_modes_check check (
+    entitling_billing_modes is null
+    or (
+        cardinality(entitling_billing_modes) > 0
+        and entitling_billing_modes <@ array['live', 'test']::text[]
+        and array_position(entitling_billing_modes, null) is null
+    )
+);
+
+alter table public.deployment_config enable row level security;
+
+revoke all on table public.deployment_config from public, anon, authenticated;
+grant all on table public.deployment_config to service_role;
+
+-- A body narrowed by hand (production) is carried into the table before the
+-- body is replaced. Only while no row exists: once one does, the row is the
+-- configuration and this migration's rerun must not overwrite it.
+do $$
+declare
+    v_modes text[];
+begin
+    if exists (select 1 from public.deployment_config) then
+        return;
+    end if;
+    if to_regprocedure('public.entitling_billing_modes()') is null then
+        return;
+    end if;
+    execute 'select public.entitling_billing_modes ()' into v_modes;
+    if v_modes is distinct from array['live', 'test']::text[] then
+        insert into public.deployment_config (id, entitling_billing_modes, updated_by)
+        values (true, v_modes, 'migration 20261022100200 (carried from the function body)');
+        raise notice 'deployment_config: carried entitling_billing_modes % from the existing function body', v_modes;
+    end if;
+end;
+$$;
+
+create or replace function public.entitling_billing_modes () returns text[] language sql stable security definer
+set search_path = public as $$
+select coalesce(
+    (select c.entitling_billing_modes from public.deployment_config c where c.id),
+    array['live', 'test']::text[]
+)
+$$;
+
+-- The grants 20260828180000 set, unchanged.
+revoke all on function public.entitling_billing_modes () from public;
+revoke all on function public.entitling_billing_modes () from anon;
+
+-- ===== supabase/migrations/20261022100300_one_studio_per_owner.sql =====
+-- One live studio per owner (launch re-audit BL-4, Codex A1).
+--
+-- Nothing stopped an owner holding several studios: studios has no unique
+-- owner (20260826193902_billing.sql), studios_insert asks only that the row be
+-- the caller's own, studio_invite_member checks only that the caller resolves
+-- to Academy, and the seat cap is per studio (studios_enforce_seat_limit,
+-- 20261020180400; studio_seat_is_active, 20261020180500). So one $49 Academy
+-- subscription could seat four teachers in each of as many studios as its
+-- owner cared to create.
+--
+-- (a) An owner who already has several keeps one: the studio a district is
+--     billed or has its seat count on (a district_billing or
+--     studio_seat_overrides row), else the oldest -- ties by id.
+-- (b) The others get the new studios.superseded_at. Nothing is deleted: the
+--     rows, their members and anything keyed on them stay, and an admin can
+--     still read or move them.
+-- (c) Each superseded studio is logged, with how many members it had, in
+--     public.studio_supersede_log (service role only, no foreign key, so it
+--     outlives the studio), and raised as a notice.
+-- (d) A partial unique index keeps it at one live studio per owner.
+-- (e) A second live studio is refused with `studio_exists` (studios_refuse_second_live,
+--     before the index would answer with a bare 23505), seats cannot be added
+--     to a superseded studio, and resolve_entitlements() reads no seat --
+--     active or read-only -- from a superseded studio, so its members resolve
+--     as if they had never been seated there.
+--
+-- What is deliberately left alone, for review: the district functions still
+-- visit every studio an owner has (subscriptions_follow_district, the
+-- retention candidates), which a superseded studio only reaches if it has its
+-- own district_billing row -- possible only for an owner who had two
+-- districts; and seat_grace_deadline (20261020181100) still reads every
+-- studio a member belongs to for the live-ink deadline.
+--
+-- Rerunnable: the column, table, index and trigger are guarded, the backfill
+-- only considers live studios (so a second run finds one per owner and does
+-- nothing), and the functions are replaced.
+
+alter table public.studios add column if not exists superseded_at timestamptz;
+
+create table if not exists public.studio_supersede_log (
+    id bigint generated by default as identity primary key,
+    -- No foreign keys: the log outlives the studio and the owner.
+    studio_id uuid not null,
+    owner_id uuid not null,
+    kept_studio_id uuid not null,
+    member_count int not null,
+    studio_created_at timestamptz not null,
+    reason text not null,
+    logged_at timestamptz not null default now()
+);
+
+alter table public.studio_supersede_log enable row level security;
+
+revoke all on table public.studio_supersede_log from public, anon, authenticated;
+grant all on table public.studio_supersede_log to service_role;
+
+-- ---------------------------------------------------------------------------
+-- (a)-(c) Backfill
+-- ---------------------------------------------------------------------------
+do $$
+declare
+    v_row record;
+begin
+    for v_row in
+        with ranked as (
+            select st.id, st.owner_id, st.created_at,
+                   exists (select 1 from public.district_billing b where b.studio_id = st.id)
+                       or exists (select 1 from public.studio_seat_overrides o where o.studio_id = st.id) as is_district,
+                   row_number() over (
+                       partition by st.owner_id
+                       order by exists (select 1 from public.district_billing b where b.studio_id = st.id)
+                                    or exists (select 1 from public.studio_seat_overrides o where o.studio_id = st.id) desc,
+                                st.created_at, st.id
+                   ) as position
+            from public.studios st
+            where st.superseded_at is null
+        )
+        select r.id, r.owner_id, r.created_at, k.id as kept_id, k.is_district as kept_is_district,
+               (select count(*)::int from public.studio_members sm where sm.studio_id = r.id) as members
+        from ranked r
+        join ranked k on k.owner_id = r.owner_id and k.position = 1
+        where r.position > 1
+        order by r.owner_id, r.position
+    loop
+        insert into public.studio_supersede_log (studio_id, owner_id, kept_studio_id, member_count, studio_created_at, reason)
+        values (
+            v_row.id, v_row.owner_id, v_row.kept_id, v_row.members, v_row.created_at,
+            case when v_row.kept_is_district then 'kept the district studio' else 'kept the oldest studio' end
+        );
+
+        update public.studios st set superseded_at = now() where st.id = v_row.id;
+
+        raise notice 'studio % of owner % superseded (% members); kept %',
+            v_row.id, v_row.owner_id, v_row.members, v_row.kept_id;
+    end loop;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- (d) One live studio per owner
+-- ---------------------------------------------------------------------------
+create unique index if not exists studios_one_live_per_owner on public.studios (owner_id) where superseded_at is null;
+
+-- ---------------------------------------------------------------------------
+-- (e) Refuse a second one, with a code the client can show
+-- ---------------------------------------------------------------------------
+-- The index alone would refuse it too, but as a bare 23505 naming an index.
+-- The per-owner advisory lock makes two concurrent creates queue here, and the
+-- second (a fresh snapshot per statement) then sees the first's committed row.
+create or replace function public.studios_refuse_second_live () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if new.superseded_at is not null then
+        return new;
+    end if;
+
+    perform pg_advisory_xact_lock (hashtext('cleffy.studios_owner'), hashtext(new.owner_id::text));
+
+    if exists (
+        select 1 from public.studios st
+        where st.owner_id = new.owner_id
+          and st.superseded_at is null
+          and st.id <> new.id
+    ) then
+        raise exception 'studio_exists'
+            using errcode = 'P0001',
+                  detail = json_build_object('code', 'studio_exists')::text,
+                  hint = 'You already have an academy.';
+    end if;
+
+    return new;
+end;
+$$;
+
+revoke all on function public.studios_refuse_second_live () from public;
+revoke all on function public.studios_refuse_second_live () from anon;
+revoke all on function public.studios_refuse_second_live () from authenticated;
+
+drop trigger if exists studios_refuse_second_live on public.studios;
+
+create trigger studios_refuse_second_live before insert or update of owner_id, superseded_at on public.studios
+for each row execute function public.studios_refuse_second_live ();
+
+-- Redefined verbatim from 20260826193902_billing.sql except for the
+-- superseded_at check: a superseded studio takes no new seats.
+create or replace function public.studio_invite_member (p_studio uuid, p_email text) returns uuid language plpgsql security definer
+set search_path = public as $$
+declare
+    v_caller uuid := auth.uid();
+    v_owner uuid;
+    v_superseded timestamptz;
+    v_target uuid;
+begin
+    if v_caller is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    select st.owner_id, st.superseded_at into v_owner, v_superseded from public.studios st where st.id = p_studio;
+    if v_owner is null or v_owner <> v_caller then
+        raise exception 'only the studio owner can add seats' using errcode = '42501';
+    end if;
+
+    if v_superseded is not null then
+        raise exception 'this academy has been superseded and takes no new seats'
+            using errcode = '42501',
+                  detail = json_build_object('code', 'studio_superseded')::text;
+    end if;
+
+    -- Owning a studio is not the same as paying for one, and anyone may create a
+    -- studio row. Without this, the distinct "no Cleffy account" raise below is a
+    -- free, unrate-limited oracle over auth.users for any signed-in caller -- and
+    -- a way to push a stranger into a studio they never joined. Seats only exist
+    -- on Academy, so that is where the lookup lives.
+    if (public.get_entitlements () ->> 'tier') is distinct from 'academy' then
+        raise exception 'an Academy subscription is required to add seats'
+            using errcode = '42501',
+                  detail = json_build_object('code', 'academy_required')::text;
+    end if;
+
+    select u.id into v_target from auth.users u where lower(u.email) = lower(trim(p_email)) limit 1;
+    if v_target is null then
+        raise exception 'no Cleffy account with that email'
+            using errcode = 'P0002',
+                  detail = json_build_object('code', 'user_not_found')::text;
+    end if;
+
+    -- The owner already holds a seat implicitly; adding a row for them would
+    -- double-count against seat_limit.
+    if v_target = v_owner then
+        raise exception 'the studio owner already holds a seat'
+            using errcode = 'P0001',
+                  detail = json_build_object('code', 'owner_already_seated')::text;
+    end if;
+
+    insert into public.studio_members (studio_id, user_id)
+    values (p_studio, v_target)
+    on conflict (studio_id, user_id) do nothing;
+
+    return v_target;
+end;
+$$;
+
+-- Unchanged from 20260826193902.
+revoke all on function public.studio_invite_member (uuid, text) from public;
+revoke all on function public.studio_invite_member (uuid, text) from anon;
+grant execute on function public.studio_invite_member (uuid, text) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- resolve_entitlements(): seats in live studios only
+-- ---------------------------------------------------------------------------
+-- The 20261020180500_district_seat_cap_and_grace.sql definition verbatim,
+-- except that both seat lookups -- the active seat that entitles and the
+-- read-only seat past the limit -- join the studio and skip a superseded one.
+create or replace function public.resolve_entitlements (p_user uuid) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_user uuid := p_user;
+    v_tier text := 'free';
+    v_status text;
+    v_source text := 'none';
+    v_period_end timestamptz;
+    v_cancelling boolean := false;
+    v_read_only boolean := false;
+    v_sub record;
+begin
+    if v_user is null then
+        raise exception 'resolve_entitlements requires p_user' using errcode = '22023';
+    end if;
+
+    perform 1
+    from auth.users u
+    where u.id = v_user
+      and u.raw_app_meta_data ->> 'user_type' = 'student';
+
+    if found then
+        return jsonb_build_object(
+            'user_id', v_user,
+            'tier', 'student',
+            'status', null::text,
+            'source', 'managed',
+            'current_period_end', null::timestamptz,
+            'cancel_at_period_end', false,
+            'seat_read_only', false,
+            'limits', public.tier_limits ('student')
+        );
+    end if;
+
+    -- Own subscription first. Highest tier wins if somehow more than one is live.
+    select s.tier, s.status, s.current_period_end, s.cancel_at_period_end
+    into v_sub
+    from public.subscriptions s
+    where s.user_id = v_user
+      and public.subscription_is_live (s)
+    order by case s.tier when 'academy' then 3 when 'teacher' then 2 when 'personal' then 1 else 0 end desc,
+             s.current_period_end desc nulls last
+    limit 1;
+
+    if found then
+        v_tier := v_sub.tier;
+        v_status := v_sub.status;
+        v_period_end := v_sub.current_period_end;
+        v_cancelling := v_sub.cancel_at_period_end;
+        v_source := 'subscription';
+    else
+        -- An active seat in a live academy whose owner is paying.
+        select s.status, s.current_period_end, s.cancel_at_period_end
+        into v_sub
+        from public.studio_members sm
+        join public.studios st on st.id = sm.studio_id
+        join public.subscriptions s on s.user_id = st.owner_id
+        where sm.user_id = v_user
+          and st.superseded_at is null
+          and s.tier = 'academy'
+          and public.subscription_is_live (s)
+          and public.studio_seat_is_active (sm.studio_id, v_user)
+        order by s.current_period_end desc nulls last
+        limit 1;
+
+        if found then
+            v_tier := 'academy';
+            v_status := v_sub.status;
+            v_period_end := v_sub.current_period_end;
+            v_cancelling := v_sub.cancel_at_period_end;
+            v_source := 'studio_member';
+        else
+            -- A seat past the limit: kept, readable, exportable -- and nothing new.
+            -- Only a studio over its limit can rank anyone past it, and only an
+            -- override that lapsed, shrank or went can leave one over.
+            perform 1
+            from public.studio_members sm
+            join public.studios st on st.id = sm.studio_id
+            where sm.user_id = v_user
+              and st.superseded_at is null
+              and not public.studio_seat_is_active (sm.studio_id, v_user);
+
+            if found then
+                v_read_only := true;
+                v_source := 'studio_member';
+            end if;
+        end if;
+    end if;
+
+    return jsonb_build_object(
+        'user_id', v_user,
+        'tier', v_tier,
+        'status', v_status,
+        'source', v_source,
+        'current_period_end', v_period_end,
+        'cancel_at_period_end', coalesce(v_cancelling, false),
+        'seat_read_only', v_read_only,
+        -- tier_limits('student') is zero on everything one creates and unlimited
+        -- on export: exactly "view and export only".
+        'limits', case when v_read_only then public.tier_limits ('student') else public.tier_limits (v_tier) end
+    );
+end;
+$$;
+
+-- Unchanged from 20261020180500.
+revoke all on function public.resolve_entitlements (uuid) from public;
+revoke all on function public.resolve_entitlements (uuid) from anon;
+revoke all on function public.resolve_entitlements (uuid) from authenticated;
+grant execute on function public.resolve_entitlements (uuid) to service_role;
+
+-- ===== supabase/migrations/20261022100400_storage_object_names.sql =====
+-- Clients may write only the object names the app writes, and may not create
+-- a score that is already archived (launch re-audit SF-3, Codex A2).
+--
+-- The scores and thumbnails insert/update policies (20260801160754_rls.sql,
+-- 20260902130000_thumbnails.sql) check only the first folder: the caller must
+-- own the score named there. Anything below it went -- any name, any depth,
+-- any number of objects -- so an owner could park arbitrary files under their
+-- own score's folder, outside every quota, and in thumbnails in particular
+-- under names nothing ever lists or cleans up.
+--
+-- What the app writes (grepped 2026-10-22):
+--   scores      {documentId}/original.pdf             storageUpload.ts (upload and
+--                                                       TUS), documentsService.ts
+--               {documentId}/pre-import-original.pdf  documentsService.replaceDocumentPdf
+--                                                       (the smart-import backup;
+--                                                       document_imports.backup_path
+--                                                       is pinned to it)
+--   thumbnails  {documentId}/{rev}.jpg                thumbnailRemote.ts
+-- documentId is a lower-case uuid (crypto.randomUUID(), and documents.id::text),
+-- rev a non-negative int. The Edge Functions write as the service role, which
+-- these policies do not reach.
+--
+-- RESTRICTIVE, beside the permissive owner policies, as
+-- 20261020180700_read_only_seats_storage.sql does: ANDed with whatever else
+-- allows the write, so this neither copies nor can undo those policies. Every
+-- other bucket answers true. UPDATE has USING and WITH CHECK, so an upsert's
+-- update arm (upload with upsert: true, every TUS upload) and a move are held
+-- to the same names. Reads and deletes are untouched: removing an odd name
+-- left from before this migration still works.
+--
+-- documents: billing_correctness's score cap (20261007120300, the
+-- documents_enforce_score_cap trigger) skips a row inserted with archived_at
+-- already set, since an archived score claims no slot. A client could insert
+-- any number of them -- readable, exportable, and each one a stored PDF -- so a
+-- client insert must arrive active. Archiving stays the server's (lapse,
+-- read-only seats, takedown); the app never inserts one archived.
+--
+-- Rerunnable: each policy is dropped before it is created.
+
+drop policy if exists scores_object_name_insert on storage.objects;
+
+create policy scores_object_name_insert on storage.objects as restrictive for insert to authenticated
+with check (
+    bucket_id is distinct from 'scores'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(original|pre-import-original)\.pdf$'
+);
+
+drop policy if exists scores_object_name_update on storage.objects;
+
+create policy scores_object_name_update on storage.objects as restrictive for update to authenticated
+using (
+    bucket_id is distinct from 'scores'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(original|pre-import-original)\.pdf$'
+)
+with check (
+    bucket_id is distinct from 'scores'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(original|pre-import-original)\.pdf$'
+);
+
+drop policy if exists thumbnails_object_name_insert on storage.objects;
+
+create policy thumbnails_object_name_insert on storage.objects as restrictive for insert to authenticated
+with check (
+    bucket_id is distinct from 'thumbnails'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(0|[1-9][0-9]{0,9})\.jpg$'
+);
+
+drop policy if exists thumbnails_object_name_update on storage.objects;
+
+create policy thumbnails_object_name_update on storage.objects as restrictive for update to authenticated
+using (
+    bucket_id is distinct from 'thumbnails'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(0|[1-9][0-9]{0,9})\.jpg$'
+)
+with check (
+    bucket_id is distinct from 'thumbnails'
+    or name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(0|[1-9][0-9]{0,9})\.jpg$'
+);
+
+drop policy if exists documents_insert_active_only on public.documents;
+
+create policy documents_insert_active_only on public.documents as restrictive for insert to authenticated
+with check (archived_at is null);
+
+-- ===== supabase/migrations/20261022100500_storage_bucket_limits.sql =====
+-- Size and type limits on the two buckets, from a migration (launch re-audit
+-- SF-3, Codex A2).
+--
+-- The limits lived only where the bucket was made: supabase/config.toml and
+-- seed.sql for the local stack, the thumbnails migration's own insert
+-- (20260902130000), and a dashboard step for hosted scores (rls.sql notes that
+-- hosted storage.buckets writes from migrations can hit ownership errors). A
+-- fresh replay onto a wiped project therefore had no migration that sets the
+-- scores bucket's 50 MiB / application/pdf limit at all.
+--
+-- Same values as config.toml and seed.sql: scores 50 MiB of application/pdf,
+-- thumbnails 2 MiB of image/jpeg. A missing bucket is created private; an
+-- existing one keeps its `public` flag and gets the limits.
+--
+-- Hosted projects may refuse the write (42501, or a platform trigger's raise),
+-- so each bucket is its own block that reports and moves on rather than
+-- failing the replay; the notice says which happened, and
+-- tests/sql/storage_name_limits.sql checks the result. If it was refused, set
+-- the limits in the dashboard (Storage -> bucket -> settings). Rerunnable.
+
+do $$
+begin
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values ('scores', 'scores', false, 52428800, array['application/pdf'])
+    on conflict (id) do update
+    set file_size_limit = excluded.file_size_limit,
+        allowed_mime_types = excluded.allowed_mime_types;
+    raise notice 'scores bucket limits applied: 50 MiB, application/pdf';
+exception
+    when insufficient_privilege or raise_exception then
+        raise notice 'scores bucket limits NOT applied here (% %): set them in the dashboard', sqlstate, sqlerrm;
+end;
+$$;
+
+do $$
+begin
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values ('thumbnails', 'thumbnails', false, 2097152, array['image/jpeg'])
+    on conflict (id) do update
+    set file_size_limit = excluded.file_size_limit,
+        allowed_mime_types = excluded.allowed_mime_types;
+    raise notice 'thumbnails bucket limits applied: 2 MiB, image/jpeg';
+exception
+    when insufficient_privilege or raise_exception then
+        raise notice 'thumbnails bucket limits NOT applied here (% %): set them in the dashboard', sqlstate, sqlerrm;
+end;
+$$;
+
+-- ===== supabase/migrations/20261022100600_superseded_studio_followups.sql =====
+-- What superseding a studio leaves behind (Codex round 1 on #69, MAJOR 1 and 2).
+--
+-- 20261022100300 retires an owner's extra studios: resolve_entitlements() reads
+-- no seat from a superseded studio, so a member seated only there now resolves
+-- as if never seated. Two things did not follow:
+--
+--  1. Their scores. The score cap only refuses a NEW active score
+--     (documents_enforce_score_cap); a member who had 100 active scores through
+--     the retired studio kept all 100. Every member of a superseded studio is
+--     now brought in line with their FINAL entitlement, once, here, and again
+--     whenever a studio is superseded later: anyone still entitled (their own
+--     plan, or a seat in another live studio) is skipped, and anyone left on a
+--     capped plan gets apply_free_tier_archival() -- the lapse path, which
+--     archives past the cap as 'plan_lapse' and deletes nothing; every restore
+--     path already undoes it. Members are visited in user id order, the order
+--     reconcile_studio_seats() uses, so the two cannot deadlock on a member's
+--     locks. A studio brought back (superseded_at cleared) is handed to
+--     reconcile_studio_seats(), as any seat change is.
+--
+--  2. Live ink. seat_grace_deadline() (20261020181100) still read every studio
+--     a member belonged to, so a retired membership could still refuse its
+--     member broadcast in the last hour of the owner's grace -- on the member's
+--     own score, or with a plan of their own. It now reads live studios only,
+--     the boundary resolve_entitlements() draws, and so does the restrictive
+--     doc_topic_seat_grace_broadcast policy that asks it (through
+--     caller_seat_grace_ends_before_token(), unchanged).
+--
+-- Deliberately NOT changed: subscriptions_follow_district (20261020180500) and
+-- the retention functions (20261021120700, 20261021120800) still visit
+-- superseded studios. Superseding retires a studio's seats, not its billing
+-- history or the district's retention duties to students attributed to it, so
+-- retention must keep processing it.
+--
+-- Rerunnable: functions CREATE OR REPLACE, the trigger dropped before it is
+-- created, and the one-off pass archives only what is still past a cap.
+
+-- ---------------------------------------------------------------------------
+-- 2. seat_grace_deadline(): live studios only
+-- ---------------------------------------------------------------------------
+-- The 20261020181100 definition, except that both membership reads skip a
+-- superseded studio.
+create or replace function public.seat_grace_deadline (p_user uuid) returns timestamptz language plpgsql stable
+security definer
+set search_path = public as $$
+begin
+    if p_user is null or not exists (
+        select 1
+        from public.studio_members sm
+        join public.studios st on st.id = sm.studio_id
+        where sm.user_id = p_user
+          and st.superseded_at is null
+    ) then
+        return null;
+    end if;
+    return (
+        select min(public.district_grace_ends_at (s.stripe_subscription_id, s.past_due_since))
+        from public.subscriptions s
+        where s.status = 'past_due'
+          and (
+              s.user_id = p_user
+              or s.user_id in (
+                  select st.owner_id
+                  from public.studio_members sm
+                  join public.studios st on st.id = sm.studio_id
+                  where sm.user_id = p_user
+                    and st.superseded_at is null
+              )
+          )
+          and public.subscription_is_live (s)
+    );
+end;
+$$;
+
+-- Unchanged from 20261020181100.
+revoke all on function public.seat_grace_deadline (uuid) from public;
+revoke all on function public.seat_grace_deadline (uuid) from anon;
+revoke all on function public.seat_grace_deadline (uuid) from authenticated;
+grant execute on function public.seat_grace_deadline (uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- 1. A superseded studio's members, on their final entitlement
+-- ---------------------------------------------------------------------------
+-- One member: skipped while still entitled (unlimited cloud scores), else
+-- archived past the plan's cap. apply_free_tier_archival() takes the member's
+-- row locks and the cap's advisory lock and re-reads the entitlement under
+-- them, so this read is a filter, never the cap. Also records whether the
+-- member is a read-only seat now, as reconcile_studio_seats() does, so the
+-- live-ink hint follows a seat the retired studio no longer makes read-only.
+-- Returns the scores it archived.
+create or replace function public.superseded_studio_member_follow (p_user uuid) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_ent jsonb;
+    v_archived int := 0;
+begin
+    if p_user is null then
+        raise exception 'superseded_studio_member_follow requires p_user' using errcode = '22023';
+    end if;
+
+    v_ent := public.resolve_entitlements (p_user);
+    if (v_ent -> 'limits' ->> 'cloud_scores')::int >= 0 then
+        v_archived := public.apply_free_tier_archival (p_user);
+    end if;
+    perform public.seat_live_ink_follow (p_user, coalesce((v_ent ->> 'seat_read_only')::boolean, false));
+    return v_archived;
+end;
+$$;
+
+revoke all on function public.superseded_studio_member_follow (uuid) from public;
+revoke all on function public.superseded_studio_member_follow (uuid) from anon;
+revoke all on function public.superseded_studio_member_follow (uuid) from authenticated;
+grant execute on function public.superseded_studio_member_follow (uuid) to service_role;
+
+-- A studio superseded, or brought back, after this migration.
+create or replace function public.studios_follow_superseded () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_member uuid;
+begin
+    if old.superseded_at is null and new.superseded_at is not null then
+        for v_member in
+            select sm.user_id
+            from public.studio_members sm
+            join auth.users u on u.id = sm.user_id
+            where sm.studio_id = new.id
+            order by sm.user_id
+        loop
+            perform public.superseded_studio_member_follow (v_member);
+        end loop;
+    elsif old.superseded_at is not null and new.superseded_at is null then
+        perform public.reconcile_studio_seats (new.id);
+    end if;
+    return null;
+end;
+$$;
+
+revoke all on function public.studios_follow_superseded () from public;
+revoke all on function public.studios_follow_superseded () from anon;
+revoke all on function public.studios_follow_superseded () from authenticated;
+
+drop trigger if exists studios_follow_superseded on public.studios;
+
+create trigger studios_follow_superseded after update of superseded_at on public.studios
+for each row
+when (old.superseded_at is distinct from new.superseded_at)
+execute function public.studios_follow_superseded ();
+
+-- The studios 20261022100300 already superseded: every member of any of them,
+-- once each, in user id order.
+do $$
+declare
+    v_member uuid;
+    v_members int := 0;
+    v_archived int := 0;
+begin
+    for v_member in
+        select distinct sm.user_id
+        from public.studio_members sm
+        join public.studios st on st.id = sm.studio_id
+        join auth.users u on u.id = sm.user_id
+        where st.superseded_at is not null
+        order by sm.user_id
+    loop
+        v_archived := v_archived + public.superseded_studio_member_follow (v_member);
+        v_members := v_members + 1;
+    end loop;
+
+    if v_members > 0 then
+        raise notice 'superseded studios: % member(s) brought in line with their entitlement, % score(s) archived as plan_lapse',
+            v_members, v_archived;
+    end if;
+end;
+$$;
+
+-- ===== supabase/migrations/20261022100700_client_table_privileges.sql =====
+-- The client roles keep only the table privileges the app uses (Codex round 1
+-- on #69, MAJOR 4).
+--
+-- The default ACL for `postgres` in `public` gives anon and authenticated
+-- every table privilege (arwdDxtm locally), and 20260827140000_core_table_grants
+-- and the service-only tables' migrations added grants without first removing
+-- it. RLS still decides every row, but not every privilege: TRUNCATE ignores
+-- RLS, and REFERENCES, TRIGGER and MAINTAIN have no business with a client.
+--
+--  1. TRUNCATE, REFERENCES, TRIGGER and (PostgreSQL 17+) MAINTAIN are revoked
+--     from anon and authenticated on every public table.
+--  2. SELECT/INSERT/UPDATE/DELETE stay only where an RLS policy lets that role
+--     use them. No public table has a policy for anon, so anon keeps nothing.
+--     authenticated keeps, per table, the commands its policies allow; the
+--     column grants on studios, practice_notes and managed_students and the
+--     narrower grants elsewhere are untouched. The client's upserts into
+--     annotation_snapshots, document_favorites and document_tags are ON
+--     CONFLICT DO NOTHING (ignoreDuplicates), which needs no UPDATE.
+--  3. omr_jobs, score_cache, imslp_category_sync and imslp_file_licenses lose
+--     every client privilege: nothing in src/ reads or writes them (the OMR
+--     service, imslp-sync, imslp-download and imslp-work use the service role).
+--     score_analyses keeps SELECT, INSERT and UPDATE for authenticated -- the
+--     app polls it (scoreAnalysisService.ts) and score-analyze upserts it with
+--     the caller's own token -- and loses DELETE.
+--  4. The default ACL for `postgres` in `public` no longer gives anon or
+--     authenticated anything on a new table: a migration that wants a client
+--     to reach a table grants it, next to the policy that allows it. The
+--     service role's default is left as it is (every table also grants it
+--     explicitly: tests/security/explicitServiceRoleGrants.test.ts).
+--
+-- tests/sql/explicit_grants.sql pins the result. Rerunnable: revokes only.
+
+-- ---------------------------------------------------------------------------
+-- 1. Never a client's, on any public table
+-- ---------------------------------------------------------------------------
+do $$
+declare
+    v_table text;
+    v_maintain boolean := current_setting('server_version_num')::int >= 170000;
+begin
+    for v_table in
+        select c.relname
+        from pg_class c
+        where c.relnamespace = 'public'::regnamespace
+          and c.relkind in ('r', 'p')
+        order by c.relname
+    loop
+        execute format('revoke truncate, references, trigger on table public.%I from public, anon, authenticated', v_table);
+        if v_maintain then
+            execute format('revoke maintain on table public.%I from public, anon, authenticated', v_table);
+        end if;
+    end loop;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 2. Only what a policy lets the client use
+-- ---------------------------------------------------------------------------
+-- No policy anywhere in public is for anon (or for PUBLIC).
+revoke select, insert, update, delete on table public.annotation_snapshots from anon;
+revoke select, insert, update, delete on table public.annotations from anon;
+revoke select, insert, update, delete on table public.document_favorites from anon;
+revoke select, insert, update, delete on table public.document_imports from anon;
+revoke select, insert, update, delete on table public.document_members from anon;
+revoke select, insert, update, delete on table public.document_tags from anon;
+revoke select, insert, update, delete on table public.documents from anon;
+revoke select, insert, update, delete on table public.library_tags from anon;
+revoke select, insert, update, delete on table public.share_links from anon;
+revoke select, insert, update, delete on table public.score_analyses from anon;
+
+-- authenticated: the commands without a policy. Marks history is insert and
+-- read (snapshots are never edited or removed by a client); marks are
+-- tombstoned by UPDATE, never deleted; favourites and tags are added and
+-- removed, never edited; an import record is never removed by a client;
+-- sharing is changed only through the definer RPCs.
+revoke update, delete on table public.annotation_snapshots from authenticated;
+revoke delete on table public.annotations from authenticated;
+revoke update on table public.document_favorites from authenticated;
+revoke delete on table public.document_imports from authenticated;
+revoke insert, update, delete on table public.document_members from authenticated;
+revoke update on table public.document_tags from authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 3. Service-only tables
+-- ---------------------------------------------------------------------------
+revoke all on table public.omr_jobs from public, anon, authenticated;
+revoke all on table public.score_cache from public, anon, authenticated;
+revoke all on table public.imslp_category_sync from public, anon, authenticated;
+revoke all on table public.imslp_file_licenses from public, anon, authenticated;
+
+revoke delete on table public.score_analyses from authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 4. New tables start with nothing for a client
+-- ---------------------------------------------------------------------------
+alter default privileges for role postgres in schema public revoke all on tables from anon, authenticated;
+
+-- ===== supabase/migrations/20261022100800_storage_quota_and_thumbnail_lifecycle.sql =====
+-- Storage abuse: a byte quota per owner, and one thumbnail per score
+-- (launch re-audit A2; Codex round 1 on #69, MAJOR 3).
+--
+-- 20261022100400 pinned object NAMES, but nothing bounded how much an owner
+-- stores: every numeric thumbnails/{id}/{rev}.jpg was a new object no one
+-- removed (thumbnailRemote.ts uploads a revision and never deletes the one
+-- before), and archiving a score (an owner's UPDATE) frees its cap slot while
+-- its PDF stays, so create-archive-repeat kept a PDF per archived score.
+--
+--  1. A per-owner byte quota, enforced as an object row is written. The
+--     owner is the owner of the score whose folder ({document_id}/) the
+--     object is in -- or, for a deleted score whose bytes still wait on
+--     cleanup, its document_storage_cleanup owner. Everything in both buckets
+--     counts: archived scores' PDFs, the pre-import backup, every thumbnail
+--     revision still stored, and deleted scores' leftovers. The limit is
+--     read from public.deployment_config.storage_quota_bytes, keyed by plan
+--     tier, defaulting to 500 MiB for free (and a roster student or a
+--     read-only seat) and 5 GiB for the paid tiers.
+--
+--     It is a BEFORE INSERT OR UPDATE trigger on storage.objects, not a
+--     policy: the Storage API checks policies on a test insert it rolls back
+--     (no size known yet) and then writes the real row on its service path,
+--     where no client policy runs. The trigger sees that write, size and all.
+--     An advisory lock per owner, held to commit, serializes concurrent
+--     uploads, and each one re-reads the usage after taking it, so two at
+--     once cannot both fit into the same remaining space. A write that does
+--     not grow an object is never refused, so nothing already stored becomes
+--     unwritable.
+--
+--  2. Thumbnails keep only the latest revision. A thumbnail written into a
+--     folder records every OTHER object there in
+--     public.thumbnail_storage_cleanup, the tombstone ledger the client
+--     purges from (the document_storage_cleanup pattern of 20261007120401:
+--     SQL cannot delete Storage bytes, storage.protect_delete blocks it). The
+--     ledger clears itself: removing an object deletes its row. A client may
+--     write a thumbnail only while its folder holds at most one other object
+--     (the latest, not yet replaced) and only for a revision between 0 and
+--     the score's content_rev, capped at 1,000,000.
+--
+-- Rerunnable: the column, table and constraints are guarded, functions
+-- replaced, triggers and policies dropped before they are created.
+
+-- ---------------------------------------------------------------------------
+-- 1a. The limits, in deployment_config
+-- ---------------------------------------------------------------------------
+alter table public.deployment_config add column if not exists storage_quota_bytes jsonb;
+
+-- Null means the defaults. Otherwise an object of plan tier -> positive byte
+-- count; a tier it leaves out keeps its default.
+create or replace function public.storage_quota_config_valid (p_config jsonb) returns boolean language sql immutable
+set search_path = '' as $$
+    select p_config is null
+        or (
+            jsonb_typeof(p_config) = 'object'
+            and not exists (
+                select 1
+                from jsonb_each(p_config) e
+                where e.key not in ('free', 'personal', 'teacher', 'academy', 'student')
+                   or jsonb_typeof(e.value) <> 'number'
+                   or (e.value #>> '{}') !~ '^[1-9][0-9]{0,15}$'
+            )
+        );
+$$;
+
+revoke all on function public.storage_quota_config_valid (jsonb) from public, anon, authenticated;
+
+alter table public.deployment_config drop constraint if exists deployment_config_storage_quota_bytes_check;
+
+alter table public.deployment_config
+add constraint deployment_config_storage_quota_bytes_check check (public.storage_quota_config_valid (storage_quota_bytes));
+
+-- The quota for a plan tier.
+create or replace function public.storage_quota_bytes (p_tier text) returns bigint language sql stable security definer
+set search_path = public as $$
+    select coalesce(
+        (select (c.storage_quota_bytes ->> p_tier)::bigint from public.deployment_config c where c.id),
+        case when p_tier in ('personal', 'teacher', 'academy') then 5368709120 -- 5 GiB
+             else 524288000 -- 500 MiB: free, a roster student, anything unknown
+        end
+    );
+$$;
+
+revoke all on function public.storage_quota_bytes (text) from public, anon, authenticated;
+grant execute on function public.storage_quota_bytes (text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- 1b. Whose bytes, and how many
+-- ---------------------------------------------------------------------------
+-- The owner of the score whose folder an object in 'scores' or 'thumbnails'
+-- is in: the live score's owner, else the owner a deleted score's cleanup
+-- tombstone names; null for anything else.
+create or replace function public.storage_object_owner (p_bucket text, p_name text) returns uuid language plpgsql stable
+security definer
+set search_path = public as $$
+declare
+    v_folder text := split_part(p_name, '/', 1);
+    v_doc uuid;
+    v_owner uuid;
+begin
+    if p_bucket is null or p_bucket not in ('scores', 'thumbnails')
+       or v_folder !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+        return null;
+    end if;
+    v_doc := v_folder::uuid;
+    select d.owner_id into v_owner from public.documents d where d.id = v_doc;
+    if v_owner is null then
+        select c.owner_id into v_owner from public.document_storage_cleanup c where c.document_id = v_doc;
+    end if;
+    return v_owner;
+end;
+$$;
+
+revoke all on function public.storage_object_owner (text, text) from public, anon, authenticated;
+
+-- An object's stored size; 0 when Storage has not recorded one.
+create or replace function public.storage_object_size (p_metadata jsonb) returns bigint language sql immutable
+set search_path = '' as $$
+    select case when (p_metadata ->> 'size') ~ '^[0-9]{1,18}$' then (p_metadata ->> 'size')::bigint else 0 end;
+$$;
+
+revoke all on function public.storage_object_size (jsonb) from public, anon, authenticated;
+
+-- Every byte an owner has in both buckets: under each score they own,
+-- archived or not, and under each deleted score of theirs still awaiting
+-- cleanup. Each folder is one range probe on Storage's (bucket_id, name
+-- COLLATE "C") index: '/' sorts right before '0', so [id/, id0) is the folder.
+create or replace function public.storage_owner_bytes (p_owner uuid) returns bigint language sql stable security definer
+set search_path = public as $$
+    select coalesce(sum(public.storage_object_size (o.metadata)), 0)::bigint
+    from (
+        select d.id from public.documents d where d.owner_id = p_owner
+        union
+        select c.document_id from public.document_storage_cleanup c
+        where c.owner_id = p_owner
+          and not exists (select 1 from public.documents d where d.id = c.document_id)
+    ) f
+    cross join (values ('scores'), ('thumbnails')) b(bucket)
+    join storage.objects o
+      on o.bucket_id = b.bucket
+     and o.name collate "C" >= (f.id::text || '/') collate "C"
+     and o.name collate "C" < (f.id::text || '0') collate "C";
+$$;
+
+revoke all on function public.storage_owner_bytes (uuid) from public, anon, authenticated;
+grant execute on function public.storage_owner_bytes (uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- 1c. The quota, as the row is written
+-- ---------------------------------------------------------------------------
+create or replace function public.storage_objects_enforce_quota () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_size bigint := public.storage_object_size (new.metadata);
+    v_owner uuid;
+    v_limit bigint;
+    v_used bigint;
+begin
+    if new.bucket_id is null or new.bucket_id not in ('scores', 'thumbnails') then
+        return new;
+    end if;
+    -- Rewriting an object in place without growing it is always allowed.
+    if tg_op = 'UPDATE'
+       and new.bucket_id = old.bucket_id
+       and new.name = old.name
+       and v_size <= public.storage_object_size (old.metadata) then
+        return new;
+    end if;
+
+    v_owner := public.storage_object_owner (new.bucket_id, new.name);
+    if v_owner is null then
+        return new;
+    end if;
+
+    perform pg_advisory_xact_lock (hashtext('cleffy.storage_quota'), hashtext(v_owner::text));
+
+    v_limit := public.storage_quota_bytes (public.resolve_entitlements (v_owner) ->> 'tier');
+
+    -- Everything stored, less the object this write replaces (an upsert's
+    -- existing row, or this row's own old version).
+    v_used := public.storage_owner_bytes (v_owner) - coalesce((
+        select sum(public.storage_object_size (o.metadata))
+        from storage.objects o
+        where o.bucket_id = new.bucket_id
+          and o.name collate "C" = new.name collate "C"
+    ), 0);
+
+    -- A write with no size yet (the Storage API's policy test) is refused
+    -- once nothing is left, so a full account fails before it uploads.
+    if v_used + v_size > v_limit or (v_size = 0 and v_used >= v_limit) then
+        raise exception 'storage_quota_exceeded'
+            using errcode = '42501',
+                  detail = json_build_object(
+                      'code', 'storage_quota_exceeded',
+                      'limit_bytes', v_limit,
+                      'used_bytes', v_used,
+                      'object_bytes', v_size
+                  )::text,
+                  hint = 'Delete scores (archived ones count too) or upgrade for more storage.';
+    end if;
+
+    return new;
+end;
+$$;
+
+revoke all on function public.storage_objects_enforce_quota () from public, anon, authenticated;
+
+drop trigger if exists storage_objects_enforce_quota on storage.objects;
+
+create trigger storage_objects_enforce_quota before insert or update on storage.objects
+for each row execute function public.storage_objects_enforce_quota ();
+
+-- ---------------------------------------------------------------------------
+-- 2a. Superseded thumbnails: the cleanup ledger
+-- ---------------------------------------------------------------------------
+create table if not exists public.thumbnail_storage_cleanup (
+    -- The object's name in the 'thumbnails' bucket: {document_id}/{rev}.jpg.
+    object_name text primary key,
+    -- No foreign keys, as document_storage_cleanup: the row must outlive a
+    -- score deleted before its old covers were purged.
+    document_id uuid not null,
+    owner_id uuid not null,
+    superseded_at timestamptz not null default now()
+);
+
+create index if not exists thumbnail_storage_cleanup_owner_idx on public.thumbnail_storage_cleanup (owner_id);
+
+create index if not exists thumbnail_storage_cleanup_document_idx on public.thumbnail_storage_cleanup (document_id);
+
+comment on table public.thumbnail_storage_cleanup is
+    'Thumbnail objects a newer revision of the same score has replaced. The owner''s client removes them from the '
+    'thumbnails bucket (thumbnailRemote.ts); removing an object deletes its row here.';
+
+alter table public.thumbnail_storage_cleanup enable row level security;
+
+-- The owner reads their own rows. Rows are written and removed only by the
+-- triggers below, so no client can mark someone else's cover for removal.
+drop policy if exists thumbnail_storage_cleanup_select on public.thumbnail_storage_cleanup;
+
+create policy thumbnail_storage_cleanup_select on public.thumbnail_storage_cleanup for select to authenticated
+using (owner_id = (select auth.uid ()));
+
+revoke all on table public.thumbnail_storage_cleanup from public, anon, authenticated;
+grant select on table public.thumbnail_storage_cleanup to authenticated;
+grant all on table public.thumbnail_storage_cleanup to service_role;
+
+create or replace function public.thumbnails_record_superseded () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_folder text;
+    v_owner uuid;
+begin
+    if tg_op = 'DELETE' then
+        if old.bucket_id = 'thumbnails' then
+            delete from public.thumbnail_storage_cleanup c where c.object_name = old.name;
+        end if;
+        return null;
+    end if;
+
+    if new.bucket_id is distinct from 'thumbnails' then
+        return null;
+    end if;
+    v_owner := public.storage_object_owner (new.bucket_id, new.name);
+    if v_owner is null then
+        return null;
+    end if;
+    v_folder := split_part(new.name, '/', 1);
+
+    insert into public.thumbnail_storage_cleanup (object_name, document_id, owner_id)
+    select o.name, v_folder::uuid, v_owner
+    from storage.objects o
+    where o.bucket_id = 'thumbnails'
+      and o.name collate "C" >= (v_folder || '/') collate "C"
+      and o.name collate "C" < (v_folder || '0') collate "C"
+      and o.name <> new.name
+    on conflict (object_name) do nothing;
+
+    -- The revision just written is the latest, not a leftover.
+    delete from public.thumbnail_storage_cleanup c where c.object_name = new.name;
+    return null;
+end;
+$$;
+
+revoke all on function public.thumbnails_record_superseded () from public, anon, authenticated;
+
+drop trigger if exists thumbnails_record_superseded on storage.objects;
+
+create trigger thumbnails_record_superseded after insert or delete on storage.objects
+for each row execute function public.thumbnails_record_superseded ();
+
+-- ---------------------------------------------------------------------------
+-- 2b. What a client may write into a thumbnail folder
+-- ---------------------------------------------------------------------------
+-- True when `p_name` (already held to {uuid}/{rev}.jpg by 20261022100400) names
+-- a revision between 0 and the score's content_rev (at most 1,000,000), and
+-- its folder holds at most one OTHER object: the latest, which this write
+-- replaces and the ledger above then marks for removal.
+create or replace function public.thumbnail_write_allowed (p_name text) returns boolean language plpgsql stable
+security definer
+set search_path = public as $$
+declare
+    v_folder text := split_part(p_name, '/', 1);
+    v_rev_text text := substring(split_part(p_name, '/', 2) from '^([0-9]{1,10})\.jpg$');
+    v_rev bigint;
+    v_content_rev int;
+begin
+    if v_rev_text is null
+       or v_folder !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+        return false;
+    end if;
+    v_rev := v_rev_text::bigint;
+
+    select d.content_rev into v_content_rev from public.documents d where d.id = v_folder::uuid;
+    if v_content_rev is null or v_rev > v_content_rev or v_rev > 1000000 then
+        return false;
+    end if;
+
+    return (
+        select count(*) <= 1
+        from storage.objects o
+        where o.bucket_id = 'thumbnails'
+          and o.name collate "C" >= (v_folder || '/') collate "C"
+          and o.name collate "C" < (v_folder || '0') collate "C"
+          and o.name <> p_name
+    );
+end;
+$$;
+
+revoke all on function public.thumbnail_write_allowed (text) from public, anon;
+grant execute on function public.thumbnail_write_allowed (text) to authenticated;
+
+-- Restrictive, beside 20261022100400's name policies: ANDed with the
+-- permissive owner policies, so it can only narrow them.
+drop policy if exists thumbnails_revision_insert on storage.objects;
+
+create policy thumbnails_revision_insert on storage.objects as restrictive for insert to authenticated
+with check (bucket_id is distinct from 'thumbnails' or public.thumbnail_write_allowed (name));
+
+drop policy if exists thumbnails_revision_update on storage.objects;
+
+create policy thumbnails_revision_update on storage.objects as restrictive for update to authenticated
+using (bucket_id is distinct from 'thumbnails' or public.thumbnail_write_allowed (name))
+with check (bucket_id is distinct from 'thumbnails' or public.thumbnail_write_allowed (name));
+
+-- ---------------------------------------------------------------------------
+-- 2c. Covers already superseded before this migration
+-- ---------------------------------------------------------------------------
+-- In each live score's thumbnail folder, every object but the one to keep
+-- goes on the ledger, so the owner's next library visit removes it. The one
+-- kept is the published revision (documents.thumb_rev) when it is stored --
+-- other devices download that one -- else the newest object.
+insert into public.thumbnail_storage_cleanup (object_name, document_id, owner_id)
+select o.name, d.id, d.owner_id
+from storage.objects o
+join public.documents d
+  on o.name ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/'
+ and d.id = split_part(o.name, '/', 1)::uuid
+where o.bucket_id = 'thumbnails'
+  and o.name is distinct from coalesce(
+      (select k.name from storage.objects k
+       where k.bucket_id = 'thumbnails'
+         and k.name collate "C" = (d.id::text || '/' || d.thumb_rev::text || '.jpg') collate "C"),
+      (select k.name from storage.objects k
+       where k.bucket_id = 'thumbnails'
+         and k.name collate "C" >= (d.id::text || '/') collate "C"
+         and k.name collate "C" < (d.id::text || '0') collate "C"
+       order by k.created_at desc, k.name desc
+       limit 1)
+  )
+on conflict (object_name) do nothing;
+
+-- ===== supabase/migrations/20261022100900_storage_cleanup_markers_and_thumbnail_cap.sql =====
+-- Storage accounting and thumbnail lifecycle, round 2 (Codex round 2 on #69:
+-- MAJOR 1, MAJOR 3's remainder, MINORs 2 and 3; decision 52).
+--
+--  1. A deleted score's cleanup marker can no longer be cleared by a client.
+--     20261022100800 counts a deleted score's leftovers against its owner
+--     through public.document_storage_cleanup, but the owner could DELETE that
+--     marker through PostgREST (20261007120401) and so take the bytes off the
+--     books while the objects stayed. The DELETE grant and the owner delete
+--     policy go. A marker is cleared only by
+--     public.finish_document_storage_cleanup, which confirms, under the
+--     owner's quota lock, that both of the score's folders are empty (or that
+--     the owner re-created the score under the same id), or by the service
+--     role (delete-account, after it has emptied both folders). Until then
+--     the bytes keep counting. A write that waited on the quota lock while the
+--     marker was cleared is refused rather than landing unattributed.
+--
+--  2. At most two thumbnails per score, in committed state. 20261022100800's
+--     two-object check is a policy, and the Storage API only runs policies on
+--     a test insert it rolls back; its real write is on the service path. So
+--     an AFTER INSERT/move trigger on storage.objects takes a per-score
+--     advisory lock and counts the folder, committed rows included: of
+--     concurrent uploads into one folder, every one past the second is
+--     refused (`thumbnail_limit`, 42501). It holds every writer, the service
+--     role too, because every real write is the service role's. The policy
+--     keeps only its revision cap: the trigger also runs on the policy test,
+--     so a full folder is refused there by name.
+--
+--  3. Thumbnail cleanup is claimed under the same per-score lock, and a
+--     claimed cover can never be published.
+--     public.claim_superseded_thumbnails marks the objects a client may
+--     remove: in a library sweep, the listed (superseded) ones; before a
+--     publish, every object but the one being written. Never the published
+--     revision (documents.thumb_rev), read under the lock. Publishing a
+--     revision (a thumb_rev change) takes the lock too and is refused
+--     (`thumbnail_claimed`) while its object is claimed, so a removal already
+--     claimed cannot delete a cover that has since become the published one.
+--     A publish whose thumb_rev update failed no longer blocks the next: its
+--     unpublished upload is not current, so the next publish claims and
+--     removes it before writing (thumbnailRemote.ts).
+--
+--  4. An over-quota account can still replace a file with one no larger.
+--     The Storage API's size-less policy test for a replacement used to be
+--     refused once the account's other files filled its quota, so a shrink
+--     never reached the real write. A write that replaces an object (an
+--     update, or an upsert's insert over an existing row) with one no larger
+--     is allowed, the size-less test included; the real write, size known,
+--     is held to that same rule, so growth past the quota is still refused.
+--
+-- Rerunnable: functions replaced, the column guarded, triggers and policies
+-- dropped before they are created.
+
+-- ---------------------------------------------------------------------------
+-- 1. Cleanup markers: cleared by the server, never by a client
+-- ---------------------------------------------------------------------------
+drop policy if exists document_storage_cleanup_delete on public.document_storage_cleanup;
+
+revoke delete on table public.document_storage_cleanup from public, anon, authenticated;
+
+-- Clear the caller's marker for a deleted score once nothing of it is stored.
+-- True when no marker of the caller's is left for this id; false while either
+-- folder still holds an object, so the caller removes them and asks again.
+-- Under the owner's quota lock, which every write into these folders takes:
+-- an upload already waiting there is either seen here, or refused when it
+-- finds the marker gone.
+create or replace function public.finish_document_storage_cleanup (p_document_id uuid) returns boolean
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_owner uuid := (select auth.uid ());
+begin
+    if v_owner is null or p_document_id is null then
+        return false;
+    end if;
+    if not exists (
+        select 1 from public.document_storage_cleanup c
+        where c.document_id = p_document_id and c.owner_id = v_owner
+    ) then
+        return true;
+    end if;
+
+    perform pg_advisory_xact_lock (hashtext('cleffy.storage_quota'), hashtext(v_owner::text));
+
+    perform 1 from public.document_storage_cleanup c
+    where c.document_id = p_document_id and c.owner_id = v_owner
+    for update;
+    if not found then
+        return true;
+    end if;
+
+    -- A live score under this id is the owner's again (20261007120401 lets
+    -- only the former owner re-create it), and its files count through it.
+    if not exists (select 1 from public.documents d where d.id = p_document_id)
+       and exists (
+           select 1
+           from storage.objects o
+           where o.bucket_id in ('scores', 'thumbnails')
+             and o.name collate "C" >= (p_document_id::text || '/') collate "C"
+             and o.name collate "C" < (p_document_id::text || '0') collate "C"
+       ) then
+        return false;
+    end if;
+
+    delete from public.document_storage_cleanup c
+    where c.document_id = p_document_id and c.owner_id = v_owner;
+    return true;
+end;
+$$;
+
+revoke all on function public.finish_document_storage_cleanup (uuid) from public, anon;
+grant execute on function public.finish_document_storage_cleanup (uuid) to authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- 4 (and 1). The quota trigger: replacements no larger pass; a folder whose
+-- marker went while the write waited is refused
+-- ---------------------------------------------------------------------------
+create or replace function public.storage_objects_enforce_quota () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_size bigint := public.storage_object_size (new.metadata);
+    v_replaced bigint;
+    v_owner uuid;
+    v_limit bigint;
+    v_used bigint;
+begin
+    if new.bucket_id is null or new.bucket_id not in ('scores', 'thumbnails') then
+        return new;
+    end if;
+
+    -- The object this write replaces: this row's own old version, or the row
+    -- an upsert's insert is about to meet; null for a new object.
+    if tg_op = 'UPDATE' and new.bucket_id = old.bucket_id and new.name = old.name then
+        v_replaced := public.storage_object_size (old.metadata);
+    else
+        select sum(public.storage_object_size (o.metadata)) into v_replaced
+        from storage.objects o
+        where o.bucket_id = new.bucket_id
+          and o.name collate "C" = new.name collate "C";
+    end if;
+
+    -- Replacing an object with one no larger never adds bytes, so it is
+    -- allowed even over quota: the Storage API's size-less policy test for a
+    -- replacement passes here, and its real write, size known, meets this
+    -- same rule or the quota below.
+    if v_replaced is not null and v_size <= v_replaced then
+        return new;
+    end if;
+
+    v_owner := public.storage_object_owner (new.bucket_id, new.name);
+    if v_owner is null then
+        return new;
+    end if;
+
+    perform pg_advisory_xact_lock (hashtext('cleffy.storage_quota'), hashtext(v_owner::text));
+
+    -- The score was deleted and its cleanup finished while this write
+    -- waited: its folder is no one's now, and nothing may land in it.
+    if public.storage_object_owner (new.bucket_id, new.name) is distinct from v_owner then
+        raise exception 'storage_folder_gone'
+            using errcode = '42501',
+                  detail = json_build_object('code', 'storage_folder_gone')::text,
+                  hint = 'The score this file belongs to was deleted.';
+    end if;
+
+    v_limit := public.storage_quota_bytes (public.resolve_entitlements (v_owner) ->> 'tier');
+
+    -- Everything stored, less the object this write replaces.
+    v_used := public.storage_owner_bytes (v_owner) - coalesce(v_replaced, 0);
+
+    -- A write with no size yet (the Storage API's policy test) for a new
+    -- object is refused once nothing is left, so a full account fails before
+    -- it uploads.
+    if v_used + v_size > v_limit or (v_size = 0 and v_used >= v_limit) then
+        raise exception 'storage_quota_exceeded'
+            using errcode = '42501',
+                  detail = json_build_object(
+                      'code', 'storage_quota_exceeded',
+                      'limit_bytes', v_limit,
+                      'used_bytes', v_used,
+                      'object_bytes', v_size
+                  )::text,
+                  hint = 'Delete scores (archived ones count too) or upgrade for more storage.';
+    end if;
+
+    return new;
+end;
+$$;
+
+revoke all on function public.storage_objects_enforce_quota () from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 2. At most two thumbnails per score, counted under a per-score lock
+-- ---------------------------------------------------------------------------
+-- The lock every change to a score's thumbnail folder, its claims and its
+-- published revision takes, held to commit.
+create or replace function public.thumbnail_folder_lock (p_document_id uuid) returns void language plpgsql
+set search_path = '' as $$
+begin
+    perform pg_advisory_xact_lock (hashtext('cleffy.thumbnail_folder'), hashtext(p_document_id::text));
+end;
+$$;
+
+revoke all on function public.thumbnail_folder_lock (uuid) from public, anon, authenticated;
+
+-- AFTER the row is in: under the lock, the count sees every upload committed
+-- before this one, and its own row. The folder may hold the published cover
+-- and one more (the one replacing it); anything past that is refused.
+create or replace function public.thumbnails_enforce_folder_cap () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_folder text;
+    v_count bigint;
+begin
+    if new.bucket_id is distinct from 'thumbnails' then
+        return null;
+    end if;
+    if tg_op = 'UPDATE' and old.bucket_id = new.bucket_id and old.name = new.name then
+        return null;
+    end if;
+    v_folder := split_part(new.name, '/', 1);
+    if v_folder !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+        return null;
+    end if;
+
+    perform public.thumbnail_folder_lock (v_folder::uuid);
+
+    select count(*) into v_count
+    from storage.objects o
+    where o.bucket_id = 'thumbnails'
+      and o.name collate "C" >= (v_folder || '/') collate "C"
+      and o.name collate "C" < (v_folder || '0') collate "C";
+
+    if v_count > 2 then
+        raise exception 'thumbnail_limit'
+            using errcode = '42501',
+                  detail = json_build_object('code', 'thumbnail_limit', 'objects', v_count, 'limit', 2)::text,
+                  hint = 'Remove the superseded cover (claim_superseded_thumbnails) before writing a new one.';
+    end if;
+    return null;
+end;
+$$;
+
+revoke all on function public.thumbnails_enforce_folder_cap () from public, anon, authenticated;
+
+drop trigger if exists thumbnails_enforce_folder_cap on storage.objects;
+
+-- Named to fire before thumbnails_record_superseded (AFTER triggers run in
+-- name order), so a refused write ledgers nothing.
+create trigger thumbnails_enforce_folder_cap
+after insert or update of name, bucket_id on storage.objects
+for each row execute function public.thumbnails_enforce_folder_cap ();
+
+-- The policy behind thumbnails_revision_insert/_update (20261022100800) keeps
+-- only its revision cap. Its folder count ran on the Storage API's rolled-back
+-- test alone and so bounded nothing; the trigger above counts on that test
+-- too, and on the real write. Refused there, a full folder says so
+-- (`thumbnail_limit`) rather than as a bare policy violation, which is how
+-- the owner's client knows to clear the folder first (thumbnailRemote.ts).
+create or replace function public.thumbnail_write_allowed (p_name text) returns boolean language plpgsql stable
+security definer
+set search_path = public as $$
+declare
+    v_folder text := split_part(p_name, '/', 1);
+    v_rev_text text := substring(split_part(p_name, '/', 2) from '^([0-9]{1,10})\.jpg$');
+    v_rev bigint;
+    v_content_rev int;
+begin
+    if v_rev_text is null
+       or v_folder !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+        return false;
+    end if;
+    v_rev := v_rev_text::bigint;
+
+    select d.content_rev into v_content_rev from public.documents d where d.id = v_folder::uuid;
+    return v_content_rev is not null and v_rev <= v_content_rev and v_rev <= 1000000;
+end;
+$$;
+
+revoke all on function public.thumbnail_write_allowed (text) from public, anon;
+grant execute on function public.thumbnail_write_allowed (text) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 3. Claims: what a client may remove, and what may no longer be published
+-- ---------------------------------------------------------------------------
+alter table public.thumbnail_storage_cleanup add column if not exists claimed_at timestamptz;
+
+comment on column public.thumbnail_storage_cleanup.claimed_at is
+    'Set by claim_superseded_thumbnails when a client was told to remove the object. A claimed object is never '
+    'published (documents_thumbnail_published); the row goes when the object does.';
+
+-- 20261022100800's ledger trigger, except that writing an object again no
+-- longer clears a claim on it: the removal already claimed would delete the
+-- new bytes, so the claim must keep it from being published.
+create or replace function public.thumbnails_record_superseded () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_folder text;
+    v_owner uuid;
+begin
+    if tg_op = 'DELETE' then
+        if old.bucket_id = 'thumbnails' then
+            delete from public.thumbnail_storage_cleanup c where c.object_name = old.name;
+        end if;
+        return null;
+    end if;
+
+    if new.bucket_id is distinct from 'thumbnails' then
+        return null;
+    end if;
+    v_owner := public.storage_object_owner (new.bucket_id, new.name);
+    if v_owner is null then
+        return null;
+    end if;
+    v_folder := split_part(new.name, '/', 1);
+
+    insert into public.thumbnail_storage_cleanup (object_name, document_id, owner_id)
+    select o.name, v_folder::uuid, v_owner
+    from storage.objects o
+    where o.bucket_id = 'thumbnails'
+      and o.name collate "C" >= (v_folder || '/') collate "C"
+      and o.name collate "C" < (v_folder || '0') collate "C"
+      and o.name <> new.name
+    on conflict (object_name) do nothing;
+
+    -- The revision just written is the latest, not a leftover -- unless a
+    -- removal has already claimed it.
+    delete from public.thumbnail_storage_cleanup c where c.object_name = new.name and c.claimed_at is null;
+    return null;
+end;
+$$;
+
+revoke all on function public.thumbnails_record_superseded () from public, anon, authenticated;
+
+-- The objects in these scores' thumbnail folders that the caller (their
+-- owner) may now remove, each claimed. With p_writing_rev null (a library
+-- sweep), the ones on the ledger; with it set (one score, about to write that
+-- revision), every object but that one, so an earlier upload whose publish
+-- failed does not hold the folder full. Never the published revision, read
+-- under the folder lock that publishing takes too. Scores that are not the
+-- caller's, or gone, are skipped.
+create or replace function public.claim_superseded_thumbnails (p_document_ids uuid[], p_writing_rev integer default null)
+returns setof text language plpgsql security definer
+set search_path = public as $$
+declare
+    v_caller uuid := (select auth.uid ());
+    v_doc uuid;
+    v_thumb_rev integer;
+    v_current text;
+    v_writing text;
+begin
+    if v_caller is null or p_document_ids is null or cardinality(p_document_ids) = 0 then
+        return;
+    end if;
+    if cardinality(p_document_ids) > 100 then
+        raise exception 'at most 100 scores per claim' using errcode = '22023';
+    end if;
+    if p_writing_rev is not null and cardinality(p_document_ids) <> 1 then
+        raise exception 'a revision being written names exactly one score' using errcode = '22023';
+    end if;
+
+    -- In id order, so two claims over overlapping scores take the locks alike.
+    for v_doc in select distinct x from unnest(p_document_ids) x where x is not null order by 1 loop
+        perform public.thumbnail_folder_lock (v_doc);
+
+        select d.thumb_rev into v_thumb_rev
+        from public.documents d
+        where d.id = v_doc and d.owner_id = v_caller;
+        if not found then
+            continue;
+        end if;
+        v_current := case when v_thumb_rev is not null then v_doc::text || '/' || v_thumb_rev::text || '.jpg' end;
+        v_writing := case when p_writing_rev is not null then v_doc::text || '/' || p_writing_rev::text || '.jpg' end;
+
+        -- The published cover is not superseded.
+        delete from public.thumbnail_storage_cleanup c where c.object_name = v_current;
+
+        return query
+        with candidates as (
+            select o.name
+            from storage.objects o
+            where o.bucket_id = 'thumbnails'
+              and o.name collate "C" >= (v_doc::text || '/') collate "C"
+              and o.name collate "C" < (v_doc::text || '0') collate "C"
+              and o.name is distinct from v_current
+              and o.name is distinct from v_writing
+              and (p_writing_rev is not null
+                   or exists (select 1 from public.thumbnail_storage_cleanup c where c.object_name = o.name))
+        )
+        insert into public.thumbnail_storage_cleanup as t (object_name, document_id, owner_id, claimed_at)
+        select k.name, v_doc, v_caller, now() from candidates k
+        on conflict (object_name) do update set claimed_at = coalesce(t.claimed_at, excluded.claimed_at)
+        returning t.object_name;
+    end loop;
+end;
+$$;
+
+revoke all on function public.claim_superseded_thumbnails (uuid[], integer) from public, anon;
+grant execute on function public.claim_superseded_thumbnails (uuid[], integer) to authenticated;
+
+-- Publishing a revision: under the folder lock, refused while a removal has
+-- claimed its object; otherwise it is current, and everything else in the
+-- folder is superseded (the ledger the sweep claims from).
+create or replace function public.documents_thumbnail_published () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_name text;
+begin
+    if new.thumb_rev is null or new.thumb_rev is not distinct from old.thumb_rev then
+        return new;
+    end if;
+    perform public.thumbnail_folder_lock (new.id);
+    v_name := new.id::text || '/' || new.thumb_rev::text || '.jpg';
+
+    if exists (
+        select 1 from public.thumbnail_storage_cleanup c
+        where c.object_name = v_name and c.claimed_at is not null
+    ) then
+        raise exception 'thumbnail_claimed'
+            using errcode = '55000',
+                  detail = json_build_object('code', 'thumbnail_claimed', 'object', v_name)::text,
+                  hint = 'That cover is being removed; upload it again before publishing it.';
+    end if;
+
+    delete from public.thumbnail_storage_cleanup c where c.object_name = v_name;
+    insert into public.thumbnail_storage_cleanup (object_name, document_id, owner_id)
+    select o.name, new.id, new.owner_id
+    from storage.objects o
+    where o.bucket_id = 'thumbnails'
+      and o.name collate "C" >= (new.id::text || '/') collate "C"
+      and o.name collate "C" < (new.id::text || '0') collate "C"
+      and o.name <> v_name
+    on conflict (object_name) do nothing;
+    return new;
+end;
+$$;
+
+revoke all on function public.documents_thumbnail_published () from public, anon, authenticated;
+
+drop trigger if exists documents_thumbnail_published on public.documents;
+
+create trigger documents_thumbnail_published before update of thumb_rev on public.documents
+for each row execute function public.documents_thumbnail_published ();
+
+-- ===== supabase/migrations/20261022101000_storage_quota_lock_and_cover_reuse.sql =====
+-- Storage accounting and thumbnail lifecycle, round 3 (Codex round 3 on #69:
+-- the MAJOR, MINOR 2's remainder and the new MINOR; decision 57).
+--
+--  1. A replacement can no longer slip past the quota while its predecessor
+--     is being deleted. 20261022100900 let a write that replaces an object
+--     with one no larger skip the quota, judging "replaces" from an unlocked
+--     read before the owner's quota lock. A BEFORE INSERT trigger runs before
+--     unique-conflict resolution: if a concurrent delete of the predecessor
+--     commits meanwhile, the upsert goes on as a plain INSERT, which nothing
+--     charged. Now the existing row is locked (FOR UPDATE) and the owner's
+--     quota lock taken before the exemption is weighed, and the row is read
+--     again, FOR UPDATE, under that lock: a predecessor still there cannot be
+--     deleted before this write commits, and one already gone is charged as
+--     a new object. Every write into a score's folders takes the owner lock
+--     now, a non-growing one too. And an AFTER INSERT trigger charges every
+--     row that was actually inserted -- after conflict resolution -- in full,
+--     under the same lock, whatever the BEFORE trigger concluded.
+--
+--  2. A delayed cleanup can no longer delete a cover that has since become
+--     the published one under the same name. Claims protected a name only
+--     until the first removal deleted its ledger row; a second, late removal
+--     of the same name could then take a re-uploaded, re-published cover.
+--     A BEFORE DELETE trigger on storage.objects now re-checks, under the
+--     score's folder lock, that the object is not the score's published cover
+--     (documents.thumb_rev) before a client's removal may take it, claim row
+--     or no claim row: the Storage API's policy test for the removal skips
+--     it, so its real delete never includes it. The service role's removals
+--     (delete-account empties a live score's folders before deleting the
+--     row) are not held to it. Publishing a revision takes its object's row
+--     lock (FOR KEY SHARE) first, so a removal already under way finishes
+--     before the publish, which is then refused (`thumbnail_gone`) rather
+--     than naming a removed cover, and a removal that starts after it sees
+--     the cover as published.
+--
+--  3. One lock order for the per-score folder locks: document id ascending.
+--     claim_superseded_thumbnails already took them in id order; a bulk
+--     UPDATE of thumb_rev took them in whatever order it visited rows, and
+--     could deadlock against a batched claim. thumbnail_folder_lock now
+--     remembers, for the transaction, the highest score id it has locked;
+--     a request for a lower one never waits: it takes the lock if it is
+--     free, and otherwise is refused at once (`thumbnail_folder_busy`,
+--     55P03, safe to retry). No transaction ever waits for a folder lock
+--     below one it holds, so no two can wait on each other for them.
+--
+--  4. Folders already over the two-object cap (written before
+--     20261022100900 counted them) are trimmed by the next library sweep, not
+--     only by the next publish: a sweep's claim, in a folder of more than
+--     two, also takes every object but the published one and the newest
+--     other (an upload whose publish may still be on its way).
+--
+-- Lock order, everywhere: a score's documents row, then a Storage object
+-- row, then the owner's quota lock, then the score's folder lock (ascending),
+-- then the cleanup ledger.
+--
+-- Rerunnable: functions replaced, triggers dropped before they are created.
+
+-- ---------------------------------------------------------------------------
+-- 3. The folder lock, in one order
+-- ---------------------------------------------------------------------------
+-- The highest score id this transaction holds the folder lock of rides in
+-- cleffy.thumbnail_folder_max (transaction-local; a rolled-back savepoint
+-- takes it back with the locks it took).
+create or replace function public.thumbnail_folder_lock (p_document_id uuid) returns void language plpgsql
+set search_path = '' as $$
+declare
+    v_max text := nullif(current_setting('cleffy.thumbnail_folder_max', true), '');
+begin
+    if v_max is not null and p_document_id < v_max::uuid then
+        -- Out of order: take it only if no one holds it (or this transaction
+        -- already does). Waiting here could close a cycle.
+        if not pg_try_advisory_xact_lock (hashtext('cleffy.thumbnail_folder'), hashtext(p_document_id::text)) then
+            raise exception 'thumbnail_folder_busy'
+                using errcode = '55P03',
+                      detail = json_build_object('code', 'thumbnail_folder_busy', 'document_id', p_document_id)::text,
+                      hint = 'Another change to this score''s cover is under way; try again.';
+        end if;
+        return;
+    end if;
+    perform pg_advisory_xact_lock (hashtext('cleffy.thumbnail_folder'), hashtext(p_document_id::text));
+    perform set_config('cleffy.thumbnail_folder_max', p_document_id::text, true);
+end;
+$$;
+
+revoke all on function public.thumbnail_folder_lock (uuid) from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 1. The quota: the predecessor locked, the owner lock taken, then the rule
+-- ---------------------------------------------------------------------------
+create or replace function public.storage_objects_enforce_quota () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_size bigint := public.storage_object_size (new.metadata);
+    v_replaced bigint;
+    v_owner uuid;
+    v_limit bigint;
+    v_used bigint;
+begin
+    if new.bucket_id is null or new.bucket_id not in ('scores', 'thumbnails') then
+        return new;
+    end if;
+
+    v_owner := public.storage_object_owner (new.bucket_id, new.name);
+    if v_owner is null then
+        return new;
+    end if;
+
+    -- An insert's predecessor (the row an upsert is about to meet), locked
+    -- before the owner lock: an UPDATE holds its row before this trigger
+    -- runs, so every writer takes the row first, then the owner lock. A
+    -- delete of it under way finishes first, and then there is none.
+    if tg_op = 'INSERT' then
+        perform 1 from storage.objects o
+        where o.bucket_id = new.bucket_id
+          and o.name collate "C" = new.name collate "C"
+        for update;
+    end if;
+
+    perform pg_advisory_xact_lock (hashtext('cleffy.storage_quota'), hashtext(v_owner::text));
+
+    -- The score was deleted and its cleanup finished while this write
+    -- waited: its folder is no one's now, and nothing may land in it.
+    if public.storage_object_owner (new.bucket_id, new.name) is distinct from v_owner then
+        raise exception 'storage_folder_gone'
+            using errcode = '42501',
+                  detail = json_build_object('code', 'storage_folder_gone')::text,
+                  hint = 'The score this file belongs to was deleted.';
+    end if;
+
+    -- The object this write replaces, read under the owner lock: this row's
+    -- own old version, or the predecessor, locked (one that appeared while
+    -- this write waited is locked now). A move replaces nothing (it cannot
+    -- land on an existing name).
+    if tg_op = 'UPDATE' then
+        if new.bucket_id = old.bucket_id and new.name = old.name then
+            v_replaced := public.storage_object_size (old.metadata);
+        end if;
+    else
+        select sum(public.storage_object_size (p.metadata)) into v_replaced
+        from (
+            select o.metadata from storage.objects o
+            where o.bucket_id = new.bucket_id
+              and o.name collate "C" = new.name collate "C"
+            for update
+        ) p;
+    end if;
+
+    -- Replacing an object with one no larger never adds bytes, so it is
+    -- allowed even over quota (the Storage API's size-less policy test for a
+    -- replacement included). The predecessor is locked to this transaction,
+    -- so the write does replace it; and should the row go in as a new one
+    -- after all, storage_objects_charge_insert charges it in full.
+    if v_replaced is not null and v_size <= v_replaced then
+        return new;
+    end if;
+
+    v_limit := public.storage_quota_bytes (public.resolve_entitlements (v_owner) ->> 'tier');
+
+    -- Everything stored, less the object this write replaces.
+    v_used := public.storage_owner_bytes (v_owner) - coalesce(v_replaced, 0);
+
+    -- A write with no size yet (the Storage API's policy test) for a new
+    -- object is refused once nothing is left, so a full account fails before
+    -- it uploads.
+    if v_used + v_size > v_limit or (v_size = 0 and v_used >= v_limit) then
+        raise exception 'storage_quota_exceeded'
+            using errcode = '42501',
+                  detail = json_build_object(
+                      'code', 'storage_quota_exceeded',
+                      'limit_bytes', v_limit,
+                      'used_bytes', v_used,
+                      'object_bytes', v_size
+                  )::text,
+                  hint = 'Delete scores (archived ones count too) or upgrade for more storage.';
+    end if;
+
+    return new;
+end;
+$$;
+
+revoke all on function public.storage_objects_enforce_quota () from public, anon, authenticated;
+
+-- After conflict resolution: a row that was actually inserted (an upsert
+-- that met an existing row fires AFTER UPDATE instead) is a new object, and
+-- is charged in full under the owner lock, with this row now in the usage.
+create or replace function public.storage_objects_charge_insert () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_size bigint := public.storage_object_size (new.metadata);
+    v_owner uuid;
+    v_limit bigint;
+    v_used bigint;
+begin
+    if new.bucket_id is null or new.bucket_id not in ('scores', 'thumbnails') then
+        return null;
+    end if;
+    v_owner := public.storage_object_owner (new.bucket_id, new.name);
+    if v_owner is null then
+        return null;
+    end if;
+
+    perform pg_advisory_xact_lock (hashtext('cleffy.storage_quota'), hashtext(v_owner::text));
+
+    v_limit := public.storage_quota_bytes (public.resolve_entitlements (v_owner) ->> 'tier');
+    -- Everything else stored: this row is in the usage now.
+    v_used := public.storage_owner_bytes (v_owner) - v_size;
+
+    if v_used + v_size > v_limit or (v_size = 0 and v_used >= v_limit) then
+        raise exception 'storage_quota_exceeded'
+            using errcode = '42501',
+                  detail = json_build_object(
+                      'code', 'storage_quota_exceeded',
+                      'limit_bytes', v_limit,
+                      'used_bytes', v_used,
+                      'object_bytes', v_size
+                  )::text,
+                  hint = 'Delete scores (archived ones count too) or upgrade for more storage.';
+    end if;
+    return null;
+end;
+$$;
+
+revoke all on function public.storage_objects_charge_insert () from public, anon, authenticated;
+
+drop trigger if exists storage_objects_charge_insert on storage.objects;
+
+create trigger storage_objects_charge_insert
+after insert on storage.objects
+for each row execute function public.storage_objects_charge_insert ();
+
+-- ---------------------------------------------------------------------------
+-- 2. A client's removal never takes the published cover
+-- ---------------------------------------------------------------------------
+-- BEFORE DELETE, for a signed-in user's delete -- the Storage API's policy
+-- test, whose answer is the list its real (service) delete then removes.
+-- Under the score's folder lock, which publishing takes too: the score's
+-- published cover is skipped (the row stays, and the removal reports it
+-- not removed). Other objects, a deleted score's, and the service role's
+-- removals go ahead.
+create or replace function public.thumbnails_keep_published_cover () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_folder text;
+begin
+    if old.bucket_id is distinct from 'thumbnails' or (select auth.uid ()) is null then
+        return old;
+    end if;
+    v_folder := split_part(old.name, '/', 1);
+    if v_folder !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+        return old;
+    end if;
+
+    perform public.thumbnail_folder_lock (v_folder::uuid);
+
+    if exists (
+        select 1 from public.documents d
+        where d.id = v_folder::uuid
+          and d.thumb_rev is not null
+          and old.name = d.id::text || '/' || d.thumb_rev::text || '.jpg'
+    ) then
+        return null;
+    end if;
+    return old;
+end;
+$$;
+
+revoke all on function public.thumbnails_keep_published_cover () from public, anon, authenticated;
+
+drop trigger if exists thumbnails_keep_published_cover on storage.objects;
+
+create trigger thumbnails_keep_published_cover before delete on storage.objects
+for each row execute function public.thumbnails_keep_published_cover ();
+
+-- Publishing a revision: its object's row first (FOR KEY SHARE: a removal of
+-- it under way finishes first, and the publish is refused; one that starts
+-- later waits for this commit and then finds it published), then the folder
+-- lock. Refused while a
+-- removal has claimed the object; otherwise it is current, and everything
+-- else in the folder is superseded. Holding another score's folder lock
+-- already (a bulk update), it never waits on the row: a removal under way
+-- refuses it (`thumbnail_folder_busy`).
+create or replace function public.documents_thumbnail_published () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_name text;
+begin
+    if new.thumb_rev is null or new.thumb_rev is not distinct from old.thumb_rev then
+        return new;
+    end if;
+    v_name := new.id::text || '/' || new.thumb_rev::text || '.jpg';
+
+    -- A revision whose object is not stored at all may still be named (the
+    -- client's republish repairs a missing cover); one that a removal takes
+    -- while this publish waits for it is refused (`thumbnail_gone`).
+    if exists (
+        select 1 from storage.objects o
+        where o.bucket_id = 'thumbnails' and o.name collate "C" = v_name collate "C"
+    ) then
+        if nullif(current_setting('cleffy.thumbnail_folder_max', true), '') is null then
+            perform 1 from storage.objects o
+            where o.bucket_id = 'thumbnails' and o.name collate "C" = v_name collate "C"
+            for key share;
+        else
+            perform 1 from storage.objects o
+            where o.bucket_id = 'thumbnails' and o.name collate "C" = v_name collate "C"
+            for key share skip locked;
+            if not found and exists (
+                select 1 from storage.objects o
+                where o.bucket_id = 'thumbnails' and o.name collate "C" = v_name collate "C"
+            ) then
+                raise exception 'thumbnail_folder_busy'
+                    using errcode = '55P03',
+                          detail = json_build_object('code', 'thumbnail_folder_busy', 'document_id', new.id)::text,
+                          hint = 'Another change to this score''s cover is under way; try again.';
+            end if;
+        end if;
+        if not found then
+            raise exception 'thumbnail_gone'
+                using errcode = '55000',
+                      detail = json_build_object('code', 'thumbnail_gone', 'object', v_name)::text,
+                      hint = 'That cover was removed while it was being published; upload it again.';
+        end if;
+    end if;
+
+    perform public.thumbnail_folder_lock (new.id);
+
+    if exists (
+        select 1 from public.thumbnail_storage_cleanup c
+        where c.object_name = v_name and c.claimed_at is not null
+    ) then
+        raise exception 'thumbnail_claimed'
+            using errcode = '55000',
+                  detail = json_build_object('code', 'thumbnail_claimed', 'object', v_name)::text,
+                  hint = 'That cover is being removed; upload it again before publishing it.';
+    end if;
+
+    delete from public.thumbnail_storage_cleanup c where c.object_name = v_name;
+    insert into public.thumbnail_storage_cleanup (object_name, document_id, owner_id)
+    select o.name, new.id, new.owner_id
+    from storage.objects o
+    where o.bucket_id = 'thumbnails'
+      and o.name collate "C" >= (new.id::text || '/') collate "C"
+      and o.name collate "C" < (new.id::text || '0') collate "C"
+      and o.name <> v_name
+    on conflict (object_name) do nothing;
+    return new;
+end;
+$$;
+
+revoke all on function public.documents_thumbnail_published () from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 4. A sweep trims a folder over the cap
+-- ---------------------------------------------------------------------------
+-- 20261022100900's claim, except that a library sweep (p_writing_rev null)
+-- in a folder of more than two objects also takes every object but the
+-- published one and the newest other. Folder locks in id order, as before.
+create or replace function public.claim_superseded_thumbnails (p_document_ids uuid[], p_writing_rev integer default null)
+returns setof text language plpgsql security definer
+set search_path = public as $$
+declare
+    v_caller uuid := (select auth.uid ());
+    v_doc uuid;
+    v_thumb_rev integer;
+    v_current text;
+    v_writing text;
+begin
+    if v_caller is null or p_document_ids is null or cardinality(p_document_ids) = 0 then
+        return;
+    end if;
+    if cardinality(p_document_ids) > 100 then
+        raise exception 'at most 100 scores per claim' using errcode = '22023';
+    end if;
+    if p_writing_rev is not null and cardinality(p_document_ids) <> 1 then
+        raise exception 'a revision being written names exactly one score' using errcode = '22023';
+    end if;
+
+    -- In id order: the one order every folder lock is taken in.
+    for v_doc in select distinct x from unnest(p_document_ids) x where x is not null order by 1 loop
+        perform public.thumbnail_folder_lock (v_doc);
+
+        select d.thumb_rev into v_thumb_rev
+        from public.documents d
+        where d.id = v_doc and d.owner_id = v_caller;
+        if not found then
+            continue;
+        end if;
+        v_current := case when v_thumb_rev is not null then v_doc::text || '/' || v_thumb_rev::text || '.jpg' end;
+        v_writing := case when p_writing_rev is not null then v_doc::text || '/' || p_writing_rev::text || '.jpg' end;
+
+        -- The published cover is not superseded.
+        delete from public.thumbnail_storage_cleanup c where c.object_name = v_current;
+
+        return query
+        with folder as (
+            select o.name, o.created_at
+            from storage.objects o
+            where o.bucket_id = 'thumbnails'
+              and o.name collate "C" >= (v_doc::text || '/') collate "C"
+              and o.name collate "C" < (v_doc::text || '0') collate "C"
+        ),
+        -- Over the cap, the newest object besides the published one may be
+        -- an upload on its way to being published: it stays.
+        newest as (
+            select f.name from folder f
+            where f.name is distinct from v_current
+            order by f.created_at desc, f.name desc
+            limit 1
+        ),
+        candidates as (
+            select f.name
+            from folder f
+            where f.name is distinct from v_current
+              and f.name is distinct from v_writing
+              and (p_writing_rev is not null
+                   or exists (select 1 from public.thumbnail_storage_cleanup c where c.object_name = f.name)
+                   or ((select count(*) from folder) > 2 and f.name not in (select n.name from newest n)))
+        )
+        insert into public.thumbnail_storage_cleanup as t (object_name, document_id, owner_id, claimed_at)
+        select k.name, v_doc, v_caller, now() from candidates k
+        on conflict (object_name) do update set claimed_at = coalesce(t.claimed_at, excluded.claimed_at)
+        returning t.object_name;
+    end loop;
+end;
+$$;
+
+revoke all on function public.claim_superseded_thumbnails (uuid[], integer) from public, anon;
+grant execute on function public.claim_superseded_thumbnails (uuid[], integer) to authenticated;

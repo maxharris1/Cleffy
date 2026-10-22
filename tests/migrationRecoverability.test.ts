@@ -22,8 +22,13 @@ import { describe, expect, it } from 'vitest';
  * migrations run — Stripe's published test card buying a real plan — and
  * because production's history row for that migration has `statements = NULL`,
  * no drift check against the recorded history can see it. The function being
- * defined in exactly one place is what currently makes the 1.0 push safe, and
- * this is what makes a change to that loud.
+ * defined in exactly one place is what made the 1.0 push safe, and this is
+ * what makes a change to that loud.
+ *
+ * Since 20261022100200_deployment_config.sql (launch re-audit BL-2) the
+ * narrowing is a row in `public.deployment_config` instead, which a replay of
+ * the function body cannot undo: that migration is the one deliberate second
+ * definition, and the tests below pin what it has to keep.
  *
  * Resolved from the project root: the jsdom test environment gives import.meta a
  * non-file URL, so fileURLToPath cannot be used here.
@@ -90,10 +95,38 @@ describe('entitling_billing_modes() — the live-flip landmine', () => {
      * whoever adds a second has to come here, read the comment at the top of
      * this file, and decide deliberately.
      */
-    it('is redefined by exactly one migration', () => {
+    /**
+     * Two, deliberately (launch re-audit BL-2). 20261022100200 replaces the
+     * hard-coded body with a read of `public.deployment_config`, so production's
+     * narrowing lives in a row no replay of a function body can undo, and it
+     * carries a hand-narrowed body into that row before replacing it, so applying
+     * it over today's production keeps test mode out. A third definition still
+     * has to come through here: it would have to keep both properties, which the
+     * two tests below hold.
+     */
+    it('is redefined by exactly two migrations: the original and the config read', () => {
         expect(definedIn(/create\s+or\s+replace\s+function\s+public\.entitling_billing_modes\s*\(/i)).toEqual([
             '20260828180000_billing_stripe_mode.sql',
+            '20261022100200_deployment_config.sql',
         ]);
+    });
+
+    it('is last defined as a STABLE read of deployment_config, falling back to both modes', () => {
+        const sql = migrations().find(({ name }) => name === '20261022100200_deployment_config.sql')?.sql ?? '';
+        const start = sql.search(/create\s+or\s+replace\s+function\s+public\.entitling_billing_modes\s*\(/i);
+        const definition = sql.slice(start, sql.indexOf('$$;', start));
+        expect(definition).toMatch(/\bstable\b/i);
+        expect(definition).not.toMatch(/\bimmutable\b/i);
+        expect(definition).toMatch(/from\s+public\.deployment_config\b/i);
+        expect(definition).toMatch(/coalesce\s*\([\s\S]*array\s*\[\s*'live'\s*,\s*'test'\s*\]/i);
+    });
+
+    it('carries a hand-narrowed body into deployment_config before replacing it', () => {
+        const sql = migrations().find(({ name }) => name === '20261022100200_deployment_config.sql')?.sql ?? '';
+        const carry = sql.search(/insert\s+into\s+public\.deployment_config/i);
+        const replace = sql.search(/create\s+or\s+replace\s+function\s+public\.entitling_billing_modes\s*\(/i);
+        expect(carry).toBeGreaterThan(-1);
+        expect(carry).toBeLessThan(replace);
     });
 
     /**

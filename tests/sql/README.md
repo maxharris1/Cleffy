@@ -38,7 +38,9 @@ guards, the change fanned out on `doc-db:{id}`, the membership event on
 `doc:{id}`, and the deleted owner's scores left as tombstones for
 delete-account to drain). It sets `storage.allow_delete_query` before removing
 `storage.objects` rows, as the Storage API does, so hosted Storage's
-`protect_delete` lets the RLS policies decide.
+`protect_delete` lets the RLS policies decide. Since `20261022100900` the former
+owner cannot delete the tombstone; `finish_document_storage_cleanup` clears it
+once both folders are empty. 39 checks.
 
 `share_link_errors.sql` proves
 `supabase/migrations/20261009120200_share_link_errors_and_peek.sql`: a dead
@@ -312,6 +314,12 @@ SECURITY INVOKER and would otherwise answer 42501 before it reached the lease
 check. Proven against PostgreSQL 17.11 on 2026-10-12 (53 checks) and again, with
 the review's additions, on 2026-10-13: all 98 checks passed.
 
+Decision 20 (launchfix P1, `20261022100100_billing_lock_tables_client_revoke.sql`)
+revoked the client roles' default-ACL grants on `checkout_attempts`,
+`subscription_writes` and `duplicate_refunds`, which checks 89, 92 and 98
+caught on the local stack: all 98 checks pass there since 2026-10-22, and CI
+runs it.
+
 `cancel_link_lifetime.sql` proves
 `supabase/migrations/20261020160300_cancel_link_token_lifetime.sql` (Codex round
 4 on #62): a cancel link's expiry is fixed on its `billing_mail_outbox` row when
@@ -548,3 +556,146 @@ service role's SELECT, and nothing for any client role). Proven against the
 local stack on 2026-10-21 with this branch's migrations: all 12 checks passed,
 and `district_retention.sql` (26), `district_student_scope.sql` (22) and
 `launch_consent.sql` (43) still pass under the narrowed grant.
+
+## Launchfix P1: DB release safety
+
+`explicit_grants.sql` proves `20261022100000_explicit_service_role_grants.sql`
+(BL-3), `20261022100100` (decision 20) and
+`20261022100700_client_table_privileges.sql` (Codex round 1 on #69, MAJOR 4):
+the service role reads every public table and holds full DML on all but five
+deliberately narrowed ones; anon and authenticated hold exactly a pinned,
+reduced list, column grants included -- no TRUNCATE, REFERENCES, TRIGGER or
+MAINTAIN anywhere, nothing for anon, nothing for either on `omr_jobs`,
+`score_cache`, `imslp_category_sync` and `imslp_file_licenses`, and no client
+privilege that an RLS policy does not let that role use; a table created now
+gives the client roles nothing; and with the default ACL revoked in the
+transaction, the fifteen BL-3 tables, stripped of what the default gave the
+service role, get it back from the migration alone, the client roles
+unchanged. 22 checks (`document_storage_cleanup` is SELECT only for
+authenticated since `20261022100900`). Run it against the local stack. `column_integrity.sql`
+checks 58, 76 and 80 now expect the client's update of a snapshot, a document
+tag or a favourite to be refused (42501) rather than to match no row.
+`tests/security/explicitServiceRoleGrants.test.ts` holds every table a
+migration creates to an explicit service_role grant.
+
+`deployment_config.sql` proves `20261022100200_deployment_config.sql` (BL-2):
+unset, test- and live-mode subscriptions both entitle; with the config at
+`{live}` a test-mode one (or a seat under a test-mode Academy) resolves free
+while a live one entitles, in the same session; clearing it restores both;
+the table is one service-role-only row of a non-empty subset of
+`{live,test}`; `entitling_billing_modes()` is STABLE and nothing indexes on it;
+and applied over production's hand-narrowed body the migration carries `{live}`
+into the table first. 34 checks.
+
+`one_studio_per_owner.sql` proves `20261022100300_one_studio_per_owner.sql`
+(BL-4): the backfill keeps a district's studio (billing record or seat
+override) over an older one, else the oldest, supersedes and logs the rest
+with their member counts and deletes nothing; a second live studio is refused
+with `studio_exists` (and by the unique index with triggers off); a superseded
+studio grants no seat, active or read-only, and takes no invite. 30 checks.
+
+`storage_name_limits.sql` proves `20261022100400_storage_object_names.sql` and
+`20261022100500_storage_bucket_limits.sql` (SF-3): an owner writes only
+`scores/{id}/original.pdf`, `scores/{id}/pre-import-original.pdf` and
+`thumbnails/{id}/{rev}.jpg` (insert, upsert, move), a client cannot create an
+archived score, and both buckets carry their size and type limits. 32 checks.
+Check 06 now expects the largest int revision to be refused: it is a valid
+name, but past `20261022100800`'s revision cap.
+
+`storage_quota.sql` proves
+`20261022100800_storage_quota_and_thumbnail_lifecycle.sql` (A2; Codex round 1
+on #69, MAJOR 3): the per-owner byte quota comes from
+`deployment_config.storage_quota_bytes` by plan tier (defaults 500 MiB free,
+5 GiB paid; the column takes only known tiers and positive integers); a write
+past it is refused with `storage_quota_exceeded` (42501), the Storage API's
+real write and a client's size-less test insert alike, counting archived
+scores' files and a deleted score's leftovers until purged, never counting an
+upserted object twice and never refusing a write that does not grow an
+object; a new thumbnail puts the folder's other objects on
+`thumbnail_storage_cleanup`, which clears itself as they are removed; a client
+may write a thumbnail only while its folder holds at most one other object and
+only for a revision from 0 to the score's `content_rev` (at most 1,000,000);
+and the migration ledgers covers superseded before it. 63 checks: check 69 now
+holds the service role to the folder count (69b), which `20261022100900`
+enforces in committed state on every writer.
+
+`superseded_studio_members.sql` proves
+`20261022100600_superseded_studio_followups.sql` (Codex round 1 on #69, MAJOR 1
+and 2): after the backfill a member who drops to free is archived past the
+free cap as `plan_lapse`, deleting nothing, while members still entitled
+(their own plan, a seat in another owner's live studio, a seat in the kept
+studio) are skipped; a rerun changes nothing; a studio superseded later is
+followed by the trigger and one brought back restores; and in the last minutes
+of the owner's grace a member of the retired studio only is no longer refused
+live ink, while a member of the live studio still is. 20 checks.
+
+`storage_cleanup_and_thumbnail_cap.sql` proves
+`20261022100900_storage_cleanup_markers_and_thumbnail_cap.sql` (Codex round 2
+on #69; decision 52): a deleted score's cleanup marker cannot be deleted by its
+owner (no DELETE grant or policy) and its bytes keep counting until
+`finish_document_storage_cleanup` finds both folders empty; an over-quota owner
+replaces a file with one no larger, the Storage API's size-less policy test
+included, while growth is refused; a third object in a thumbnail folder is
+refused (`thumbnail_limit`) on the real service-role write and on the policy
+test; `claim_superseded_thumbnails` claims an upload whose publish failed but
+never the published revision, and a claimed cover cannot be published
+(`thumbnail_claimed`). 58 checks.
+
+`storage_thumbnail_concurrency.sql` proves the same migration under real
+concurrency, through `dblink` backends that commit (it is not one transaction:
+it removes its fixtures at the start and the end, and drops `dblink` again if
+it created it; it connects back with the local stack's default password, so it
+is local and CI only). Three uploads into one folder at once: the later two
+wait on the first's lock and exactly one of them commits. A claim and a
+publish of the same cover, in both orders; clearing a deleted score's marker
+and an upload into its folder, in both orders (`storage_folder_gone`). 18
+checks. `tests/storage/storageLifecycle.test.ts` covers the same through the
+Storage API itself.
+
+`storage_quota_lock_and_cover_reuse.sql` proves
+`20261022101000_storage_quota_lock_and_cover_reuse.sql` (Codex round 3 on
+#69; decision 57): the quota trigger locks a write's predecessor FOR UPDATE,
+then takes the owner lock, and reads it FOR UPDATE again before the no-growth
+exemption; every write takes the owner lock, a non-growing one too; a row
+actually inserted is charged in full after conflict resolution
+(`storage_objects_charge_insert`), even with the BEFORE check dropped; a name
+this transaction deleted is charged as new when written again. A signed-in
+owner's removal never takes a live score's published cover (a reused,
+re-published name included, after its claim row is gone), while other covers,
+a deleted score's covers and the service role's removals go. The folder lock
+takes a lower score id after a higher one only if it is free
+(`thumbnail_folder_busy`, 55P03, otherwise). A folder already over the
+two-object cap is trimmed by a sweep (all but the published cover and the
+newest other) and by the next publish. 45 checks.
+
+`storage_quota_lock_concurrency.sql` proves the same migration under real
+concurrency, through `dblink` backends that commit (the same harness, rules
+and caveats as `storage_thumbnail_concurrency.sql`). A delete of X, an upsert
+of X and another upload: the upsert waits on X's row, finds it gone, and is
+charged as a new object, so the owner never ends over the cap (three sessions,
+as in the review; and two, with the delete and the other upload in one
+transaction); with the delete rolled back, the upsert is still a non-growing
+replacement, allowed at the cap. A cover name reused after two devices' claims
+survives the second, late removal. A removal and a publish of the same
+object, both orders (`thumbnail_gone`; the removal leaves a cover published
+while it waited). Opposite lock orders across two scores: the out-of-order
+publish is refused at once (`thumbnail_folder_busy`), not by a deadlock, and
+the claim completes; in order, the claim only waits. 26 checks. With
+`20261022100900`'s functions instead, the owner ends 100 bytes over the cap,
+the late removal deletes the re-published cover, and the opposite-order case
+ends in `deadlock detected`.
+
+Each `\ir`s its migrations to rerun them, so it is psql only.
+
+## In CI
+
+The `supabase-local` job runs every `tests/sql/*.sql` and
+`supabase/sql-tests/sharing_access_control.sql` through
+`scripts/ci/sql-proof.sh`, which reads both result shapes above and holds the
+summary to the rows: a `failures | total` proof must print exactly `total`
+check rows, `failures` of them failing, and the harness exactly its `k`
+failing rows. A new proof runs there by being added. Any failing check fails the job: there is no list of
+tolerated failures, and the only exception `.github/workflows/ci.yml` can hold is
+a whole proof skipped with its reason (none). The job also fails, by name, unless
+Realtime is running and has created today's `realtime.messages` partition, which
+the broadcast checks write.

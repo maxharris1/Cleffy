@@ -65,6 +65,13 @@ export const noteThumbnailObjectMissing = (docId: string, rev: number): void => 
     attempted.delete(attemptKey(docId, rev));
 };
 
+/**
+ * The database's refusal of a third object in a score's thumbnail folder
+ * (20261022100900): the published cover and one more is the most it holds.
+ */
+const isFolderFull = (error: StorageErrorLike | null | undefined): boolean =>
+    /thumbnail_limit/.test(error?.message ?? '');
+
 /** Upload the render and stamp the row. Resolves to whether both landed. */
 export const publishThumbnail = async (docId: string, rev: number, blob: Blob): Promise<boolean> => {
     const key = attemptKey(docId, rev);
@@ -74,16 +81,91 @@ export const publishThumbnail = async (docId: string, rev: number, blob: Blob): 
     attempted.add(key);
     try {
         const supabase = getSupabase();
-        const { error } = await supabase.storage
-            .from(BUCKET)
-            .upload(thumbnailObjectPath(docId, rev), blob, { contentType: 'image/jpeg', upsert: true });
+        const upload = () =>
+            supabase.storage
+                .from(BUCKET)
+                .upload(thumbnailObjectPath(docId, rev), blob, { contentType: 'image/jpeg', upsert: true });
+        let { error } = await upload();
+        if (isFolderFull(error)) {
+            // Besides the published cover, the folder holds an upload whose
+            // publish never landed, or a cover a newer one replaced that no
+            // purge has reached. Neither is current, so they are this
+            // revision's to replace: remove them and try once more.
+            await removeClaimedThumbnails([docId], rev);
+            ({ error } = await upload());
+        }
         if (error) {
             return false;
         }
         const { error: rowError } = await supabase.from('documents').update({ thumb_rev: rev }).eq('id', docId);
-        return !rowError;
+        if (rowError) {
+            return false;
+        }
+        void purgeSupersededThumbnails({ docId });
+        return true;
     } catch {
         return false;
+    }
+};
+
+/** Scores whose superseded covers one library sweep purges. */
+const PURGE_BATCH = 100;
+
+/**
+ * Remove the covers the database lets this owner remove now. It claims them
+ * under the score's lock (claim_superseded_thumbnails, 20261022100900): with
+ * `writingRev`, everything in the folder but the published revision and the
+ * one about to be written; without, the covers a newer revision replaced. A
+ * claimed cover can no longer be published, and the database skips the
+ * score's published cover in any removal of ours (20261022101000), so a
+ * removal never takes the current cover, even one re-published under a name
+ * claimed earlier. Never throws: what is left is claimed again on the next
+ * library visit.
+ */
+const removeClaimedThumbnails = async (docIds: string[], writingRev?: number): Promise<void> => {
+    try {
+        const supabase = getSupabase();
+        const { data: names, error } = await supabase.rpc(
+            'claim_superseded_thumbnails',
+            writingRev === undefined
+                ? { p_document_ids: docIds }
+                : { p_document_ids: docIds, p_writing_rev: writingRev },
+        );
+        if (error || !names || names.length === 0) {
+            return;
+        }
+        await supabase.storage.from(BUCKET).remove(names);
+    } catch {
+        // The next library visit tries again.
+    }
+};
+
+/**
+ * Remove covers a newer revision has replaced, for one score or across an
+ * owner's library. The database lists them in thumbnail_storage_cleanup
+ * (20261022100800) and drops each row as its object goes; until they are
+ * gone, the folder takes no newer cover than the one replacing the latest.
+ * Never throws: what is left is retried on the next library visit
+ * (sweepPendingStorageCleanup).
+ */
+export const purgeSupersededThumbnails = async (target: { docId: string } | { ownerId: string }): Promise<void> => {
+    try {
+        if ('docId' in target) {
+            await removeClaimedThumbnails([target.docId]);
+            return;
+        }
+        const { data: rows, error } = await getSupabase()
+            .from('thumbnail_storage_cleanup')
+            .select('document_id')
+            .eq('owner_id', target.ownerId)
+            .order('superseded_at', { ascending: true })
+            .limit(PURGE_BATCH);
+        if (error || !rows || rows.length === 0) {
+            return;
+        }
+        await removeClaimedThumbnails([...new Set(rows.map((row) => row.document_id))]);
+    } catch {
+        // The next library visit tries again.
     }
 };
 
