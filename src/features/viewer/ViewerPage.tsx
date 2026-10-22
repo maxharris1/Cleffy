@@ -14,6 +14,7 @@ import {
     ensureDocumentPageCount,
     fetchDocument,
     fetchMyRole,
+    fetchSeatReadOnly,
     isCloudDocId,
     loadDocumentBytes,
     loadDocumentOffline,
@@ -200,7 +201,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [rejected, setRejected] = useState<{ docId: string; ids: ReadonlySet<string> } | null>(null);
     const rejectedCount = rejected?.docId === docId ? rejected.ids.size : 0;
     /** Changes kept on this device because the score is archived (see SyncHold). */
-    const [held, setHeld] = useState<{ docId: string; pendingMarks: number } | null>(null);
+    const [held, setHeld] = useState<{
+        docId: string;
+        pendingMarks: number;
+        reason: 'archived' | 'seat-read-only';
+    } | null>(null);
     const heldCount = held?.docId === docId ? held.pendingMarks : 0;
     const [shareOpen, setShareOpen] = useState(false);
     const [notesOpen, setNotesOpen] = useState(false);
@@ -214,6 +219,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [accessLoss, setAccessLoss] = useState<AccessLoss | null>(null);
     /** "Your access changed" banner after a live role change. */
     const [accessNotice, setAccessNotice] = useState<string | null>(null);
+    /**
+     * This account's Academy seat is read-only (its academy is over its seat
+     * limit): the server refuses its every write and its live ink, on any
+     * score, so the viewer is view only. Tagged with the account it was read
+     * for. Asked on open, again whenever access is re-checked (the server
+     * sends the membership hint when a seat changes either way), and set when
+     * the sync engine holds a refused change for this reason.
+     */
+    const [seat, setSeat] = useState<{ userId: string; readOnly: boolean } | null>(null);
     const accessCheckInFlight = useRef(false);
     /** A change arrived while a check was running; that check may have read the role before it. */
     const accessRecheckPending = useRef(false);
@@ -255,10 +269,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
         /** One read of the server's answer. Resolves true once access is gone (nothing left to re-check). */
         const checkOnce = async (): Promise<boolean> => {
-            const [docResult, roleResult] = await Promise.allSettled([
+            const [docResult, roleResult, seatResult] = await Promise.allSettled([
                 fetchDocument(docId),
                 fetchMyRole(docId, userId),
+                fetchSeatReadOnly(),
             ]);
+            // Unanswered: keep what is shown; the next hint or reconnect asks again.
+            if (seatResult.status === 'fulfilled') {
+                setSeat({ userId, readOnly: seatResult.value });
+            }
             if (docResult.status !== 'fulfilled') {
                 return false;
             }
@@ -353,6 +372,24 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         // Once per loss: the session object changing identity must not re-run it.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [accessLoss, docId, userId]);
+
+    // The seat, once per account on open; recheckAccess keeps it current.
+    useEffect(() => {
+        if (!userId) {
+            return;
+        }
+        let cancelled = false;
+        fetchSeatReadOnly()
+            .then((readOnly) => {
+                if (!cancelled) {
+                    setSeat({ userId, readOnly });
+                }
+            })
+            .catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+    }, [userId]);
 
     const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
 
@@ -759,9 +796,12 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 setAccessLoss('ended');
                 return;
             }
-            setHeld({ docId, pendingMarks: hold.pendingMarks });
+            setHeld({ docId, pendingMarks: hold.pendingMarks, reason: hold.reason });
+            if (hold.reason === 'seat-read-only' && userId) {
+                setSeat({ userId, readOnly: true });
+            }
         },
-        [docId],
+        [docId, userId],
     );
     const onPeers = useCallback((next: PresencePeer[]) => setPeers(next), []);
     // Referentially stable — the review panel's scan effect depends on it.
@@ -818,8 +858,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // CachedPdf.archivedAt current for exactly this, so the offline open (which
     // synthesizes its row from the cache) reads it too.
     const archived = state.doc.archived_at !== null;
+    // A read-only Academy seat writes nothing anywhere (RLS, Storage, live ink).
+    // Dropping to view only restarts sync without the live-ink publisher, and
+    // rejoins the channel -- which is when Realtime asks again what it may send.
+    const seatReadOnly = seat?.userId === resolvedUserId && seat.readOnly;
     const readOnly =
         archived ||
+        seatReadOnly ||
         (state.role !== 'owner' && state.role !== 'editor') ||
         !resolvedUserId ||
         state.provisional === true;
@@ -844,6 +889,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 {archived ? (
                     <span title="Read-only — over your plan’s score limit">
                         <Badge tone="warn">Archived</Badge>
+                    </span>
+                ) : seatReadOnly ? (
+                    <span title="View only — your Academy seat is read-only">
+                        <Badge>view only</Badge>
                     </span>
                 ) : readOnly ? (
                     <Badge>view only</Badge>
@@ -957,7 +1006,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     </div>
                 ) : null}
                 <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
-                <SyncHeldNotice count={heldCount} />
+                <SyncHeldNotice count={heldCount} reason={held?.reason} />
                 {staleBytes ? (
                     <div
                         className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"

@@ -52,4 +52,15 @@ describe('SyncHeldNotice', () => {
         // Standing state, not a one-off event: nothing to dismiss.
         expect(screen.queryByRole('button')).not.toBeInTheDocument();
     });
+
+    it('says when it is the Academy seat, not the score, that is read-only', () => {
+        render(<SyncHeldNotice count={1} reason="seat-read-only" />);
+        const notice = screen.getByRole('status');
+        expect(notice).toHaveTextContent(
+            'Your Academy seat is read-only, so 1 change you made to this score is saved only on this device.',
+        );
+        expect(notice).toHaveTextContent('It uploads automatically once your seat is active again');
+        expect(notice).not.toHaveTextContent('archived');
+        expect(notice).not.toHaveTextContent('undone');
+    });
 });

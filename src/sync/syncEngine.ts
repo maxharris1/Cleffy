@@ -58,6 +58,13 @@ export interface AnnotationsApi {
      * whose sign-in cannot be ended that way.
      */
     fetchSignInEnded?(): Promise<{ ended: boolean; error: ApiError | null }>;
+    /**
+     * Whether this account is on a read-only Academy seat right now (a seat
+     * past its academy's limit: caller_seat_read_only). RLS then refuses its
+     * every write, on any score, until the seat is active again. Absent, or
+     * false, for anyone who is not.
+     */
+    fetchSeatReadOnly?(): Promise<{ readOnly: boolean; error: ApiError | null }>;
     fetchSince(
         docId: string,
         afterSeq: number,
@@ -113,9 +120,13 @@ export interface SyncRejection {
  *   archived them or reset their access) while the device still holds its
  *   token. The changes are this account's (stamped with it) and upload when
  *   it signs in again; no other account sends or draws them meanwhile.
+ * - 'seat-read-only': this account's Academy seat is read-only (its academy
+ *   is over its seat limit), so no score takes its changes. Nothing is lost:
+ *   they upload once the owner makes the seat active again or the academy
+ *   pays.
  */
 export interface SyncHold {
-    reason: 'archived' | 'signed-out';
+    reason: 'archived' | 'signed-out' | 'seat-read-only';
     /** Distinct marks with changes waiting on this document. */
     pendingMarks: number;
 }
@@ -1284,6 +1295,9 @@ export class SyncEngine {
      * for good, a whole lesson's work lost to a failed card. Those ops are kept
      * and the drain stops (false) until the score is writable again.
      *
+     * Likewise on a read-only Academy seat (fetchSeatReadOnly): the refusal
+     * is of the seat, on every score, and lifts when the seat does.
+     *
      * Likewise when the server has ended this sign-in (fetchSignInEnded): a
      * student whose teacher reset their access is still a member, and the
      * refusal is of the token, not of the change. The ops are kept for the
@@ -1294,13 +1308,16 @@ export class SyncEngine {
      */
     private async reject(op: PendingOp, reason: string): Promise<boolean> {
         const { api, db, store, docId } = this.deps;
-        const [archive, signIn] = await Promise.all([
+        const [archive, signIn, seat] = await Promise.all([
             this.withAuth(() => api.fetchDocumentArchived(docId)),
             api.fetchSignInEnded
                 ? this.withAuth(() => api.fetchSignInEnded!())
                 : Promise.resolve({ ended: false, error: null }),
+            api.fetchSeatReadOnly
+                ? this.withAuth(() => api.fetchSeatReadOnly!())
+                : Promise.resolve({ readOnly: false, error: null }),
         ]);
-        const unknown = archive.error ?? signIn.error;
+        const unknown = archive.error ?? signIn.error ?? seat.error;
         if (unknown) {
             // Either question unanswered: keep the op and ask again later.
             this.deferRetry(unknown.kind === 'reject' ? { ...unknown, kind: 'retry' } : unknown);
@@ -1312,6 +1329,10 @@ export class SyncEngine {
         }
         if (archive.archived) {
             await this.hold('archived');
+            return false;
+        }
+        if (seat.readOnly) {
+            await this.hold('seat-read-only');
             return false;
         }
         if (this.deps.onRefusalHeld) {
@@ -1684,6 +1705,10 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
             }
             const { data: revoked, error, status } = await supabase.rpc('student_access_revoked');
             return { ended: !error && revoked === true, error: fail(error, status) };
+        },
+        async fetchSeatReadOnly() {
+            const { data, error, status } = await supabase.rpc('caller_seat_read_only');
+            return { readOnly: !error && data === true, error: fail(error, status) };
         },
         async fetchSince(docId, afterSeq, limit) {
             const { data, error, status } = await supabase

@@ -280,6 +280,8 @@ Deno.serve(async (req) => {
                 p_current_period_end: row.current_period_end,
                 p_cancel_at_period_end: row.cancel_at_period_end,
                 p_last_event_created_at: row.last_event_created_at,
+                p_collection_method: row.collection_method,
+                p_ended_at: row.ended_at,
             });
             if (error) {
                 // 23503 on the only FK here (user_id → auth.users) is answered by

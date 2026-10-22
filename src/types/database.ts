@@ -348,6 +348,13 @@ export type Entitlements = {
      * before 20261009120101, and entitlements cached from them, do not carry it.
      */
     cancel_at_period_end?: boolean;
+    /**
+     * An Academy seat past its studio's limit -- a district override lowered,
+     * cleared or lapsed: tier 'free', source 'studio_member', and limits that
+     * allow viewing and exporting only. Optional because servers before
+     * 20261020180500, and entitlements cached from them, do not carry it.
+     */
+    seat_read_only?: boolean;
     limits: EntitlementLimits;
 };
 
@@ -381,6 +388,23 @@ export type SubscriptionRow = {
      * whichever of them happened to write second.
      */
     last_event_created_at: string | null;
+    /**
+     * How Stripe collects it. `send_invoice` is Stripe Invoicing -- a district
+     * contract -- and is what a studio's seat override is tied to. Null on rows
+     * written before the webhook recorded it.
+     */
+    collection_method: 'charge_automatically' | 'send_invoice' | null;
+    /**
+     * When the status went past_due/unpaid (server-stamped). A send_invoice
+     * subscription keeps full access for a grace period counted from it.
+     */
+    past_due_since: string | null;
+    /**
+     * When Stripe says it actually ended (ended_at, or the cancel_at a terminal
+     * status confirms). Null while it has not. A district's contract end is
+     * derived from this, never from a scheduled or period date.
+     */
+    ended_at: string | null;
     created_at: string;
     updated_at: string;
 };
@@ -406,6 +430,10 @@ export type StudioRow = {
     id: string;
     owner_id: string;
     name: string;
+    /**
+     * The Academy cap (5). A district's larger count is an admin override that
+     * clients never read directly: studio_seat_limit() answers the effective one.
+     */
     seat_limit: number;
     created_at: string;
 };
@@ -420,6 +448,8 @@ export type StudioMemberRow = {
     studio_id: string;
     user_id: string;
     created_at: string;
+    /** The owner chose this seat to stay active if the studio is ever over its limit. */
+    kept_active: boolean;
 };
 
 /**
@@ -912,6 +942,13 @@ export type Database = {
                 Args: Record<string, never>;
                 Returns: boolean;
             };
+            // True when the caller holds a read-only Academy seat (past its
+            // academy's limit): RLS refuses every write it makes, on any score.
+            // The sync engine keeps such a change rather than undoing it.
+            caller_seat_read_only: {
+                Args: Record<string, never>;
+                Returns: boolean;
+            };
             // Service role only: student-provision ends a student's sessions on
             // archive and reset, and returns how many it ended.
             end_student_sessions: {
@@ -946,6 +983,18 @@ export type Database = {
             studio_roster: {
                 Args: { p_studio: string };
                 Returns: Array<{ user_id: string; email: string }>;
+            };
+            studio_seat_limit: {
+                Args: { p_studio: string };
+                Returns: number;
+            };
+            studio_seat_status: {
+                Args: { p_studio: string };
+                Returns: Array<{ user_id: string; kept_active: boolean; active: boolean }>;
+            };
+            studio_set_active_seats: {
+                Args: { p_studio: string; p_members: string[] };
+                Returns: number;
             };
             set_document_page_count: {
                 Args: { doc: string; pages: number };

@@ -36,6 +36,18 @@ export const shouldArchiveOnStatus = (status: string): boolean => ARCHIVING_STAT
 export const isTerminalStatus = (status: string): boolean => TERMINAL_STATUSES.includes(status);
 
 /**
+ * Past due, inside its grace period, still pays (launch-compliance decisions 21
+ * and 25): an Academy subscription, card-paid or Stripe Invoicing, and any
+ * Stripe Invoicing subscription, keeps full access for 30 days after it first
+ * went past due, or until an admin's later extension -- subscription_is_live()
+ * in migration 20261020180900_district_paying_status.sql decides how long -- so
+ * its row has to keep naming the plan it pays for. `unpaid` is not paying and
+ * records free, and so does a card Personal or Teacher plan past due, as before.
+ */
+const keepsTierWhilePastDue = (sub: StripeSubscriptionLike, priceTiers: Record<string, BillingTier>): boolean =>
+    sub.status === 'past_due' && (collectionMethodOf(sub) === 'send_invoice' || tierOf(sub, priceTiers) === 'academy');
+
+/**
  * Whether the buyer already holds a subscription that Checkout would put a
  * SECOND one beside. Checkout always creates a new subscription, so a Personal
  * subscriber who picked Teacher there was billed for both; plan changes and
@@ -65,6 +77,15 @@ export const holdsRunningSubscription = (
         return Number.isFinite(endMs) ? endMs > nowMs : true;
     });
 
+/**
+ * How Stripe collects a subscription's invoices. Checkout only ever creates
+ * `charge_automatically`; `send_invoice` is Stripe Invoicing, which only an
+ * admin holding the secret key can set up -- that is what a district contract
+ * is, and what a studio's seat override is tied to (migration
+ * 20261020180400_district_seat_overrides.sql).
+ */
+export type CollectionMethod = 'charge_automatically' | 'send_invoice';
+
 export interface SubscriptionUpsert {
     stripe_subscription_id: string;
     user_id: string;
@@ -81,6 +102,17 @@ export interface SubscriptionUpsert {
      * read the older state writing second (QA round 4, D3).
      */
     last_event_created_at: string | null;
+    /**
+     * Null only for an object that did not say. The write keeps whatever the
+     * row already had in that case, so an incomplete object cannot unset it.
+     */
+    collection_method: CollectionMethod | null;
+    /**
+     * When the subscription actually ended, by Stripe's own account of it:
+     * null until the status is terminal (endedAtOf). The write keeps a stored
+     * one over a null, like collection_method.
+     */
+    ended_at: string | null;
 }
 
 /** Only the fields this handler reads — not a full mirror of Stripe's type. */
@@ -90,8 +122,11 @@ export interface StripeSubscriptionLike {
     cancel_at_period_end?: boolean | null;
     /** A scheduled cancellation (seconds), set from the dashboard or the API. */
     cancel_at?: number | null;
+    /** Set by Stripe once the subscription has ended. */
+    ended_at?: number | null;
     current_period_end?: number | null;
     customer?: string | { id?: string } | null;
+    collection_method?: string | null;
     metadata?: Record<string, string> | null;
     items?: {
         data?: Array<{ price?: { id?: string | null } | null; current_period_end?: number | null } | undefined>;
@@ -455,6 +490,44 @@ export const tierForPrice = (priceId: string | null, priceTiers: Record<string, 
     return priceTiers[priceId] ?? 'free';
 };
 
+/**
+ * The subscription metadata that marks a district contract. A district is
+ * priced on a custom quote, so its price is in no catalogue and tierForPrice
+ * alone would record it as free.
+ */
+export const DISTRICT_PLAN_METADATA = { key: 'cleffy_plan', value: 'district' } as const;
+
+const collectionMethodOf = (sub: StripeSubscriptionLike): CollectionMethod | null =>
+    sub.collection_method === 'send_invoice' || sub.collection_method === 'charge_automatically'
+        ? sub.collection_method
+        : null;
+
+/**
+ * A district contract: Stripe Invoicing AND marked as one in metadata. Both,
+ * because neither is something a customer can set -- Checkout only creates
+ * `charge_automatically` subscriptions and writes only server-chosen metadata --
+ * but the metadata alone would be one dashboard slip from turning any
+ * card-paid subscription into Academy, and send_invoice alone would do the
+ * same for any invoice-billed one-off.
+ */
+export const isDistrictSubscription = (sub: StripeSubscriptionLike): boolean =>
+    collectionMethodOf(sub) === 'send_invoice' &&
+    sub.metadata?.[DISTRICT_PLAN_METADATA.key] === DISTRICT_PLAN_METADATA.value;
+
+/**
+ * A catalogue price names its plan. A district's custom-quote price is in no
+ * catalogue, so a district contract is Academy by its marking instead; the
+ * seat count above Academy's 5 is set separately, by an admin, against this
+ * subscription -- in its own table, which nothing here writes.
+ */
+const tierOf = (sub: StripeSubscriptionLike, priceTiers: Record<string, BillingTier>): BillingTier => {
+    const byPrice = tierForPrice(priceIdOf(sub), priceTiers);
+    if (byPrice !== 'free') {
+        return byPrice;
+    }
+    return isDistrictSubscription(sub) ? 'academy' : 'free';
+};
+
 const priceIdOf = (sub: StripeSubscriptionLike): string | null => {
     const first = sub.items?.data?.[0];
     return first?.price?.id ?? null;
@@ -487,6 +560,24 @@ const endingOf = (sub: StripeSubscriptionLike): { periodEnd: string | null; canc
         periodEnd: end === null ? null : new Date(end * 1000).toISOString(),
         cancelling: sub.cancel_at_period_end === true || scheduled,
     };
+};
+
+const secondsToIso = (seconds: number | null | undefined): string | null =>
+    typeof seconds === 'number' && Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : null;
+
+/**
+ * When the subscription actually stopped, and only once it has: Stripe's
+ * ended_at, or -- for an object that lacks it -- the cancel_at it was cancelled
+ * on, which a terminal status confirms happened. Never a scheduled cancellation
+ * (cancel_at on a live subscription) and never a period end: a district's
+ * contract end is derived from this (migration 20261020180500), and the
+ * retention purge counts from that.
+ */
+export const endedAtOf = (sub: StripeSubscriptionLike): string | null => {
+    if (!isTerminalStatus(sub.status)) {
+        return null;
+    }
+    return secondsToIso(sub.ended_at) ?? secondsToIso(sub.cancel_at);
 };
 
 /**
@@ -641,12 +732,15 @@ export const subscriptionRowFrom = (
     return {
         stripe_subscription_id: sub.id,
         user_id: userId,
-        tier: isEntitlingStatus(sub.status) ? tierForPrice(priceId, priceTiers) : 'free',
+        tier:
+            isEntitlingStatus(sub.status) || keepsTierWhilePastDue(sub, priceTiers) ? tierOf(sub, priceTiers) : 'free',
         status: sub.status,
         price_id: priceId,
         current_period_end: ending.periodEnd,
         cancel_at_period_end: ending.cancelling,
         last_event_created_at: lastEventCreatedAt,
+        collection_method: collectionMethodOf(sub),
+        ended_at: endedAtOf(sub),
     };
 };
 
@@ -779,6 +873,42 @@ const finishPendingDuplicateUndo = async (
 };
 
 /**
+ * A district is billed through Stripe Invoicing, so no Checkout ever links its
+ * customer to the owner. Without the link, stripe-portal answers no_customer
+ * for the owner's own billing (Codex review of #61, minor 1). The subscription
+ * write vouches for the owner: a district subscription is attributed by the
+ * metadata an admin set, and the marking is not something a customer can set.
+ *
+ * An unmapped customer is linked to the owner, which replaces any older
+ * customer the owner had in this Stripe account. That is the right account for
+ * their portal now, and the runbook has them cancel any card plan first. A
+ * customer already mapped to SOMEONE ELSE is left alone and logged, because a
+ * mapping is never moved off another user on a subscription's say-so.
+ */
+const linkDistrictCustomer = async (
+    store: WebhookStore,
+    sub: StripeSubscriptionLike,
+    userId: string,
+): Promise<void> => {
+    const customerId = idOf(sub.customer);
+    if (!customerId || !isDistrictSubscription(sub)) {
+        return;
+    }
+    const mapped = await store.userIdForCustomer(customerId);
+    if (mapped === userId) {
+        return;
+    }
+    if (mapped !== null) {
+        store.log(
+            `district subscription ${sub.id}: customer ${customerId} is already linked to another user; ` +
+                `not relinking it to ${userId}`,
+        );
+        return;
+    }
+    await store.linkCustomer(customerId, userId);
+};
+
+/**
  * Writes the row, then brings the score archive in line with it. Both halves
  * read the user's entitlements AFTER the upsert, so they act on every
  * subscription the user holds, not just this one: a lapse while another plan is
@@ -812,6 +942,7 @@ const applySubscription = async (
     if (written.outcome === 'lost_lock') {
         return await leaseLost(store, event, sub.id);
     }
+    await linkDistrictCustomer(store, sub, userId);
     if (shouldArchiveOnStatus(sub.status)) {
         await store.applyFreeTierArchival(userId);
     } else if (isEntitlingStatus(sub.status)) {

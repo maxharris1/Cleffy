@@ -35,29 +35,45 @@ export const SyncRejectedNotice = ({ count, onDismiss }: SyncRejectedNoticeProps
 };
 
 interface SyncHeldNoticeProps {
-    /** Marks with changes kept on this device that the archived score refuses. */
+    /** Marks with changes kept on this device that the server refuses for now. */
     count: number;
+    /**
+     * Why: the score is archived (the default), or this account's Academy
+     * seat is read-only, which refuses its changes on every score.
+     */
+    reason?: 'archived' | 'seat-read-only';
 }
 
 /**
- * The score was archived (over the plan's score cap) while changes to it were
- * still waiting to upload. The sync engine keeps them rather than undoing
- * them — resubscribing restores the score and they upload then — but until
- * that happens they exist only on this device, which the musician needs to
- * know before clearing site data or signing out. Not dismissible: it is the
- * standing state of the score, like the Archived badge.
+ * The score was archived (over the plan's score cap), or this account's
+ * Academy seat went read-only, while changes were still waiting to upload. The
+ * sync engine keeps them rather than undoing them — resubscribing restores the
+ * score, and an active seat takes them again — but until that happens they
+ * exist only on this device, which the musician needs to know before clearing
+ * site data or signing out. Not dismissible: it is the standing state of the
+ * score, like the Archived badge.
  */
-export const SyncHeldNotice = ({ count }: SyncHeldNoticeProps) => {
+export const SyncHeldNotice = ({ count, reason = 'archived' }: SyncHeldNoticeProps) => {
     if (count <= 0) {
         return null;
     }
+    const changes = count === 1 ? '1 change' : `${count} changes`;
+    const are = count === 1 ? 'is' : 'are';
+    const upload = count === 1 ? 'It uploads' : 'They upload';
     return (
         <div className="border-b border-amber-200 bg-amber-50 px-3 py-2" role="status">
-            <p className="text-sm text-amber-900">
-                This score is archived and read-only, so {count === 1 ? '1 change' : `${count} changes`} you made to it{' '}
-                {count === 1 ? 'is' : 'are'} saved only on this device. {count === 1 ? 'It uploads' : 'They upload'}{' '}
-                automatically once the score is restored, for example when its owner renews their plan.
-            </p>
+            {reason === 'seat-read-only' ? (
+                <p className="text-sm text-amber-900">
+                    Your Academy seat is read-only, so {changes} you made to this score {are} saved only on this device.{' '}
+                    {upload} automatically once your seat is active again, for example when the academy&rsquo;s owner
+                    renews or picks your seat.
+                </p>
+            ) : (
+                <p className="text-sm text-amber-900">
+                    This score is archived and read-only, so {changes} you made to it {are} saved only on this device.{' '}
+                    {upload} automatically once the score is restored, for example when its owner renews their plan.
+                </p>
+            )}
         </div>
     );
 };

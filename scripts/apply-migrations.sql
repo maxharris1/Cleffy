@@ -13565,3 +13565,2731 @@ $$;
 
 revoke all on function public.consume_cancel_link_token (text) from public, anon, authenticated;
 grant execute on function public.consume_cancel_link_token (text) to service_role;
+
+-- ===== supabase/migrations/20261020180400_district_seat_overrides.sql =====
+-- District seats: an admin-set teacher-seat count above the Academy cap of 5,
+-- tied to the district's Stripe Invoicing subscription.
+--
+-- A district buys on a custom quote. Max creates the subscription in Stripe with
+-- collection_method = send_invoice (the district is invoiced and pays by bank
+-- transfer or card on its own terms), the webhook records it like any other
+-- subscription, and the seat count from the contract is set here by hand. Five
+-- things make that safe:
+--
+--  * The override lives in its OWN table, keyed by studio, that nothing in the
+--    webhook writes. A renewal, a period move, a past_due blip, a cancellation:
+--    every one of them rewrites the subscriptions row and none of them can reset
+--    the seat count, because the seat count is not on that row. studios.seat_limit
+--    stays 5 and stays out of every client grant (20260826193902_billing.sql).
+--
+--  * The override only counts while the subscription it names is live: the
+--    studio owner's own, recorded with collection_method = send_invoice, tier
+--    academy, in an entitling Stripe account and status, inside its period. A
+--    contract that ends (cancelled, unpaid, past due) puts the studio back on 5
+--    without anyone remembering to clear anything, and a renewal brings it back
+--    without anyone re-setting it. The foreign key to subscriptions is what
+--    makes a typo in the subscription id an error rather than a silent no-op.
+--
+--  * collection_method is new on subscriptions, written by the webhook from the
+--    Stripe object. Checkout only ever creates charge_automatically
+--    subscriptions, so "send_invoice" is a fact only an admin with the Stripe
+--    secret key can create. Rows that predate this column read null, which is
+--    never send_invoice, so no existing subscription gains an override.
+--
+--  * Every write is logged by a trigger into studio_seat_override_log, whoever
+--    makes it -- the admin functions below, or a hand-run statement in the SQL
+--    editor -- with the actor and reason the admin functions pass through.
+--
+--  * Admin-only: there is no admin role in the app, so "admin" is the service
+--    role (and postgres, in the dashboard's SQL editor). Neither table and none
+--    of the admin functions is reachable from a user JWT, and the functions
+--    refuse one even if a grant ever slips.
+--
+-- studios_enforce_seat_limit now reads the effective limit, and takes a
+-- per-studio advisory lock before counting, so two invites in flight together
+-- cannot both take the last seat -- which mattered little at 5 and matters more
+-- at 200.
+
+-- ---------------------------------------------------------------------------
+-- subscriptions.collection_method
+-- ---------------------------------------------------------------------------
+alter table public.subscriptions
+    add column if not exists collection_method text check (collection_method in ('charge_automatically', 'send_invoice'));
+
+-- When Stripe says the subscription actually ended: its ended_at, or the
+-- cancel_at it ended on (stripeEvents.ts endedAtOf). Set only once the status
+-- is terminal. A district's contract end is derived from this and nothing else
+-- Stripe sends -- never a scheduled cancellation or a billing-period date
+-- (20261020180500, district_billing_follow).
+alter table public.subscriptions add column if not exists ended_at timestamptz;
+
+-- Re-declared from 20261013120101_subscription_write_under_lock.sql with two more
+-- parameters. Dropped first because adding a parameter makes a NEW overload, and
+-- the old ten-argument one would then be ambiguous for a call naming ten. The
+-- defaults keep a webhook deployed before this migration working against it, and
+-- the coalesces in the update keep such a write from nulling a method or an end
+-- a newer delivery already recorded.
+--
+-- The grant service_role needs even though it bypasses RLS: the function is
+-- SECURITY INVOKER (see 20261013120101 for why).
+grant all on table public.subscriptions to service_role;
+
+drop function if exists public.write_subscription_under_lock (
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz
+);
+
+create or replace function public.write_subscription_under_lock (
+    p_holder uuid,
+    p_subscription_id text,
+    p_user uuid,
+    p_mode text,
+    p_tier text,
+    p_status text,
+    p_price_id text,
+    p_current_period_end timestamptz,
+    p_cancel_at_period_end boolean,
+    p_last_event_created_at timestamptz,
+    p_collection_method text default null,
+    p_ended_at timestamptz default null
+) returns text language plpgsql set search_path = public as $$
+declare
+    v_constraint text;
+begin
+    -- Ours, and held for the rest of the transaction. Outside the exception
+    -- block below on purpose: a subtransaction rollback would give the row lock
+    -- back, and the point of it is that it outlives the write.
+    perform 1
+    from public.subscription_writes
+    where stripe_subscription_id = p_subscription_id and holder = p_holder
+    for update;
+
+    if not found then
+        return 'lost_lock';
+    end if;
+
+    begin
+        insert into public.subscriptions (
+            stripe_subscription_id,
+            user_id,
+            mode,
+            tier,
+            status,
+            price_id,
+            current_period_end,
+            cancel_at_period_end,
+            last_event_created_at,
+            collection_method,
+            ended_at,
+            updated_at
+        ) values (
+            p_subscription_id,
+            p_user,
+            p_mode,
+            p_tier,
+            p_status,
+            p_price_id,
+            p_current_period_end,
+            p_cancel_at_period_end,
+            p_last_event_created_at,
+            p_collection_method,
+            p_ended_at,
+            now()
+        )
+        -- The primary key, as before: a redelivery updates the subscription's
+        -- own row. The partial unique index is NOT a conflict target -- a second
+        -- entitling subscription is not the same subscription, so there is no
+        -- row for it to merge into.
+        on conflict (stripe_subscription_id) do update
+        set user_id = excluded.user_id,
+            mode = excluded.mode,
+            tier = excluded.tier,
+            status = excluded.status,
+            price_id = excluded.price_id,
+            current_period_end = excluded.current_period_end,
+            cancel_at_period_end = excluded.cancel_at_period_end,
+            last_event_created_at = excluded.last_event_created_at,
+            collection_method = coalesce(excluded.collection_method, subscriptions.collection_method),
+            ended_at = coalesce(excluded.ended_at, subscriptions.ended_at),
+            updated_at = now();
+    exception
+        when unique_violation then
+            get stacked diagnostics v_constraint = constraint_name;
+            if v_constraint = 'subscriptions_one_entitling_per_user_mode' then
+                return 'duplicate';
+            end if;
+            raise;
+        when foreign_key_violation then
+            return 'missing_user';
+    end;
+
+    return 'written';
+end;
+$$;
+
+revoke all on function public.write_subscription_under_lock (
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text, timestamptz
+) from public, anon, authenticated;
+
+grant execute on function public.write_subscription_under_lock (
+    uuid, text, uuid, text, text, text, text, timestamptz, boolean, timestamptz, text, timestamptz
+) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Tables
+-- ---------------------------------------------------------------------------
+-- One override per studio. The ceiling is a sanity bound on a hand-typed number,
+-- not a product limit: a district bigger than this is a conversation first.
+create table if not exists public.studio_seat_overrides (
+    studio_id uuid primary key references public.studios (id) on delete cascade,
+    seat_limit int not null check (seat_limit > 5 and seat_limit <= 10000),
+    stripe_subscription_id text not null references public.subscriptions (stripe_subscription_id) on delete cascade,
+    reason text,
+    updated_by text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists studio_seat_overrides_subscription on public.studio_seat_overrides (stripe_subscription_id);
+
+-- Append-only. By-default identity rather than always: nothing writes an id by
+-- hand, and tests/migrationRecoverability.test.ts pins omr_jobs as the one
+-- always-generated id a logical restore has to work around.
+--
+-- No foreign key on purpose: the history of a contract is worth
+-- keeping after the studio it described is gone, and it names no person -- only
+-- the admin who made the change.
+create table if not exists public.studio_seat_override_log (
+    id bigint generated by default as identity primary key,
+    studio_id uuid not null,
+    action text not null check (action in ('set', 'changed', 'cleared')),
+    old_seat_limit int,
+    new_seat_limit int,
+    old_stripe_subscription_id text,
+    new_stripe_subscription_id text,
+    reason text,
+    actor text not null,
+    changed_at timestamptz not null default now()
+);
+
+create index if not exists studio_seat_override_log_studio on public.studio_seat_override_log (studio_id, changed_at desc);
+
+-- ---------------------------------------------------------------------------
+-- Change log, written by trigger so no write path can skip it
+-- ---------------------------------------------------------------------------
+-- The admin functions pass actor and reason through transaction-local settings;
+-- a hand-run statement falls back to the row's own updated_by/reason, and a
+-- cascade (the studio or its owner deleted) to the database role that ran it.
+create or replace function public.studio_seat_overrides_log_change () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_actor text := nullif(current_setting('cleffy.seat_override_actor', true), '');
+    v_reason text := nullif(current_setting('cleffy.seat_override_reason', true), '');
+begin
+    if tg_op = 'INSERT' then
+        insert into public.studio_seat_override_log (
+            studio_id, action, new_seat_limit, new_stripe_subscription_id, reason, actor
+        ) values (
+            new.studio_id, 'set', new.seat_limit, new.stripe_subscription_id,
+            coalesce(v_reason, new.reason), coalesce(v_actor, new.updated_by)
+        );
+        return new;
+    end if;
+
+    if tg_op = 'UPDATE' then
+        if new.seat_limit is not distinct from old.seat_limit
+            and new.stripe_subscription_id is not distinct from old.stripe_subscription_id
+            and new.reason is not distinct from old.reason then
+            return new;
+        end if;
+        insert into public.studio_seat_override_log (
+            studio_id, action, old_seat_limit, new_seat_limit,
+            old_stripe_subscription_id, new_stripe_subscription_id, reason, actor
+        ) values (
+            new.studio_id, 'changed', old.seat_limit, new.seat_limit,
+            old.stripe_subscription_id, new.stripe_subscription_id,
+            coalesce(v_reason, new.reason), coalesce(v_actor, new.updated_by)
+        );
+        return new;
+    end if;
+
+    insert into public.studio_seat_override_log (
+        studio_id, action, old_seat_limit, old_stripe_subscription_id, reason, actor
+    ) values (
+        old.studio_id, 'cleared', old.seat_limit, old.stripe_subscription_id,
+        v_reason, coalesce(v_actor, session_user::text)
+    );
+    return old;
+end;
+$$;
+
+drop trigger if exists studio_seat_overrides_log on public.studio_seat_overrides;
+
+create trigger studio_seat_overrides_log after insert or update or delete on public.studio_seat_overrides
+for each row execute function public.studio_seat_overrides_log_change ();
+
+-- ---------------------------------------------------------------------------
+-- The effective seat limit
+-- ---------------------------------------------------------------------------
+-- The studio's own limit (5), raised by an override only while the subscription
+-- it is tied to is the owner's live district subscription. The subscription
+-- predicates are resolve_entitlements()'s own, so a district whose owner has
+-- lapsed to free cannot hold more seats than it is paying for.
+create or replace function public.studio_effective_seat_limit (p_studio uuid) returns int language sql stable security definer
+set search_path = public as $$
+    select greatest(
+        st.seat_limit,
+        coalesce((
+            select o.seat_limit
+            from public.studio_seat_overrides o
+            join public.subscriptions s on s.stripe_subscription_id = o.stripe_subscription_id
+            where o.studio_id = st.id
+              and s.user_id = st.owner_id
+              and s.collection_method = 'send_invoice'
+              and s.tier = 'academy'
+              and s.mode = any (public.entitling_billing_modes ())
+              and s.status in ('active', 'trialing')
+              and (s.current_period_end is null or s.current_period_end > now())
+        ), 0)
+    )
+    from public.studios st
+    where st.id = p_studio;
+$$;
+
+-- Redefined from 20260826193902_billing.sql: the effective limit instead of the
+-- column, and the per-studio lock before the count.
+create or replace function public.studios_enforce_seat_limit () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_limit int;
+    v_used int;
+begin
+    v_limit := public.studio_effective_seat_limit (new.studio_id);
+    if v_limit is null then
+        raise exception 'studio not found' using errcode = 'P0002';
+    end if;
+
+    -- Two invites in flight at once would otherwise both count the same members
+    -- and both take the last seat. The second blocks here until the first
+    -- commits, then counts again with a fresh snapshot (read committed takes one
+    -- per statement) that includes the first one's row. Released at commit.
+    perform pg_advisory_xact_lock (hashtext('cleffy.studio_seats'), hashtext(new.studio_id::text));
+
+    -- The owner occupies a seat, so members may fill at most seat_limit - 1.
+    select count(*)::int into v_used
+    from public.studio_members sm
+    where sm.studio_id = new.studio_id and sm.user_id <> new.user_id;
+
+    if v_used + 1 > v_limit - 1 then
+        raise exception 'seat_limit_reached'
+            using errcode = 'P0001',
+                  detail = json_build_object('code', 'seat_limit_reached', 'limit', v_limit)::text;
+    end if;
+
+    return new;
+end;
+$$;
+
+-- What the Academy seats screen shows as "n of N seats". The owner and the
+-- studio's members may ask; nobody else learns a district's size.
+create or replace function public.studio_seat_limit (p_studio uuid) returns int language plpgsql stable security definer
+set search_path = public as $$
+begin
+    if auth.uid() is null or public.studio_role (p_studio) is null then
+        raise exception 'only the studio owner or its members can read its seat limit' using errcode = '42501';
+    end if;
+    return public.studio_effective_seat_limit (p_studio);
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Admin functions (service role / SQL editor only)
+-- ---------------------------------------------------------------------------
+-- Sets or changes a studio's override. Everything that would make the override
+-- silently do nothing is refused here instead, with a message that says which:
+-- the subscription must already be recorded (the webhook has seen it), belong to
+-- the studio's owner, be a send_invoice subscription, and resolve to Academy.
+create or replace function public.admin_set_studio_seat_override (
+    p_studio uuid,
+    p_seat_limit int,
+    p_stripe_subscription_id text,
+    p_actor text,
+    p_reason text default null
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_owner uuid;
+    v_sub record;
+begin
+    -- Belt and braces behind the grants: no signed-in user is an admin.
+    if auth.uid() is not null then
+        raise exception 'seat overrides are admin-only' using errcode = '42501';
+    end if;
+    if nullif(trim(coalesce(p_actor, '')), '') is null then
+        raise exception 'say who is making this change (p_actor)' using errcode = '22023';
+    end if;
+    if p_seat_limit is null or p_seat_limit <= 5 or p_seat_limit > 10000 then
+        raise exception 'a seat override must be above the Academy cap of 5 (and at most 10000); got %', p_seat_limit
+            using errcode = '22023';
+    end if;
+
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+    if v_owner is null then
+        raise exception 'no studio %', p_studio using errcode = 'P0002';
+    end if;
+
+    select s.user_id, s.collection_method, s.tier, s.status, s.mode
+    into v_sub
+    from public.subscriptions s
+    where s.stripe_subscription_id = p_stripe_subscription_id;
+
+    if not found then
+        raise exception 'subscription % is not recorded yet; wait for the webhook, then retry', p_stripe_subscription_id
+            using errcode = 'P0002';
+    end if;
+    if v_sub.user_id <> v_owner then
+        raise exception 'subscription % belongs to another user, not this studio''s owner', p_stripe_subscription_id
+            using errcode = '22023';
+    end if;
+    if v_sub.collection_method is distinct from 'send_invoice' then
+        raise exception 'subscription % is not a send_invoice (Stripe Invoicing) subscription', p_stripe_subscription_id
+            using errcode = '22023';
+    end if;
+    if v_sub.tier <> 'academy' or not (v_sub.mode = any (public.entitling_billing_modes ())) then
+        raise exception 'subscription % does not entitle Academy (tier %, status %, mode %)',
+            p_stripe_subscription_id, v_sub.tier, v_sub.status, v_sub.mode
+            using errcode = '22023';
+    end if;
+
+    perform set_config('cleffy.seat_override_actor', trim(p_actor), true);
+    perform set_config('cleffy.seat_override_reason', coalesce(p_reason, ''), true);
+
+    insert into public.studio_seat_overrides (studio_id, seat_limit, stripe_subscription_id, reason, updated_by)
+    values (p_studio, p_seat_limit, p_stripe_subscription_id, p_reason, trim(p_actor))
+    on conflict (studio_id) do update
+    set seat_limit = excluded.seat_limit,
+        stripe_subscription_id = excluded.stripe_subscription_id,
+        reason = excluded.reason,
+        updated_by = excluded.updated_by,
+        updated_at = now();
+
+    -- Transaction-local is not statement-local: cleared, so a later hand-run
+    -- write in the same transaction is not logged under this call's name.
+    perform set_config('cleffy.seat_override_actor', '', true);
+    perform set_config('cleffy.seat_override_reason', '', true);
+
+    return jsonb_build_object(
+        'studio_id', p_studio,
+        'seat_limit', p_seat_limit,
+        'stripe_subscription_id', p_stripe_subscription_id,
+        'effective_seat_limit', public.studio_effective_seat_limit (p_studio)
+    );
+end;
+$$;
+
+-- Removes a studio's override; it goes back to 5. Members already seated keep
+-- their seats (nothing here evicts anyone), but no new one can be added until
+-- the count is under 5 again.
+create or replace function public.admin_clear_studio_seat_override (
+    p_studio uuid,
+    p_actor text,
+    p_reason text default null
+) returns boolean language plpgsql security definer
+set search_path = public as $$
+declare
+    v_found boolean;
+begin
+    if auth.uid() is not null then
+        raise exception 'seat overrides are admin-only' using errcode = '42501';
+    end if;
+    if nullif(trim(coalesce(p_actor, '')), '') is null then
+        raise exception 'say who is making this change (p_actor)' using errcode = '22023';
+    end if;
+
+    perform set_config('cleffy.seat_override_actor', trim(p_actor), true);
+    perform set_config('cleffy.seat_override_reason', coalesce(p_reason, ''), true);
+
+    delete from public.studio_seat_overrides where studio_id = p_studio;
+    v_found := found;
+
+    perform set_config('cleffy.seat_override_actor', '', true);
+    perform set_config('cleffy.seat_override_reason', '', true);
+    return v_found;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- RLS and privileges
+-- ---------------------------------------------------------------------------
+-- RLS on with no policies: no client role reads or writes either table.
+alter table public.studio_seat_overrides enable row level security;
+alter table public.studio_seat_override_log enable row level security;
+
+revoke all on table public.studio_seat_overrides from public;
+revoke all on table public.studio_seat_overrides from anon;
+revoke all on table public.studio_seat_overrides from authenticated;
+grant select on table public.studio_seat_overrides to service_role;
+
+revoke all on table public.studio_seat_override_log from public;
+revoke all on table public.studio_seat_override_log from anon;
+revoke all on table public.studio_seat_override_log from authenticated;
+grant select on table public.studio_seat_override_log to service_role;
+
+-- Trigger-only.
+revoke all on function public.studio_seat_overrides_log_change () from public;
+revoke all on function public.studio_seat_overrides_log_change () from anon;
+revoke all on function public.studio_seat_overrides_log_change () from authenticated;
+
+-- Internal: unchecked, so not a client RPC. studio_seat_limit is the checked one.
+revoke all on function public.studio_effective_seat_limit (uuid) from public;
+revoke all on function public.studio_effective_seat_limit (uuid) from anon;
+revoke all on function public.studio_effective_seat_limit (uuid) from authenticated;
+grant execute on function public.studio_effective_seat_limit (uuid) to service_role;
+
+revoke all on function public.studio_seat_limit (uuid) from public;
+revoke all on function public.studio_seat_limit (uuid) from anon;
+grant execute on function public.studio_seat_limit (uuid) to authenticated;
+
+revoke all on function public.admin_set_studio_seat_override (uuid, int, text, text, text) from public;
+revoke all on function public.admin_set_studio_seat_override (uuid, int, text, text, text) from anon;
+revoke all on function public.admin_set_studio_seat_override (uuid, int, text, text, text) from authenticated;
+grant execute on function public.admin_set_studio_seat_override (uuid, int, text, text, text) to service_role;
+
+revoke all on function public.admin_clear_studio_seat_override (uuid, text, text) from public;
+revoke all on function public.admin_clear_studio_seat_override (uuid, text, text) from anon;
+revoke all on function public.admin_clear_studio_seat_override (uuid, text, text) from authenticated;
+grant execute on function public.admin_clear_studio_seat_override (uuid, text, text) to service_role;
+
+-- Re-stated because create or replace keeps grants but this file is the one a
+-- reader lands on: still trigger-only.
+revoke all on function public.studios_enforce_seat_limit () from public;
+revoke all on function public.studios_enforce_seat_limit () from anon;
+revoke all on function public.studios_enforce_seat_limit () from authenticated;
+
+-- ===== supabase/migrations/20261020180500_district_seat_cap_and_grace.sql =====
+-- District seats, second pass (Codex review of PR #61 and the launch-compliance
+-- decisions of 2026-10-21, items 1-3):
+--
+--  * The seat cap is enforced where access is decided, in resolve_entitlements(),
+--    not only where seats are added. 20261020180400 capped INSERTs, so a district
+--    that seated 100 teachers and then lapsed, had its override lowered or
+--    cleared, or moved to ordinary $49 Academy, went on entitling all 100. Now a
+--    seat counts only if it ranks inside the studio's effective limit. The seats
+--    past it are READ-ONLY: view and export, nothing new -- no uploads, no
+--    imports or analyses, no students, and (through the existing plan_lapse
+--    archive, which annotation RLS already refuses writes on) no new marks.
+--    Nothing is deleted. The owner picks which seats stay active
+--    (studio_set_active_seats); the default is the oldest members. Paying again,
+--    or the override coming back, makes every seat active again at once.
+--
+--  * public.district_billing is the district's billing record: the Stripe
+--    Invoicing subscription it runs on, contract_ends_at (decisions item 1 --
+--    the retention purge in PR #64 counts 30 days from it; null means never),
+--    and an admin's grace extension. contract_ends_at is set by an admin from
+--    the contract, or else follows the subscription's cancel/ended date.
+--
+--  * A send_invoice (Stripe Invoicing / PO terms) subscription past its due date
+--    keeps full access -- override included -- for 30 days after it went past
+--    due, or until an admin's extension if later (decisions item 3). After that
+--    the lapse rules above apply. Stripe's own Invoicing reminders (due, +7,
+--    +21 days) are an account setting; docs/DISTRICT_SEATS.md has the steps.
+--
+-- Why the read-only state needs two halves. The entitlement half is derived on
+-- every read, so it is right the moment the clock or a row changes: a read-only
+-- seat resolves to zero on every created thing and unlimited on export
+-- (tier_limits('student') -- exactly "view and export"), which the score cap,
+-- the quota RPCs, the export claim and student-provision already enforce. The
+-- annotation half rides on archived_at, which RLS checks per write; that is a
+-- stored fact, so reconcile_studio_seats() brings it in line on every event
+-- that can move a seat (an override write, a subscription write, a pick, a
+-- removal) and an hourly cron catches the ones only the clock moves (a grace
+-- period running out, a period end with no webhook).
+
+-- ---------------------------------------------------------------------------
+-- When a subscription went past due
+-- ---------------------------------------------------------------------------
+-- Stripe marks a send_invoice subscription past_due once its invoice passes the
+-- due date, so the first write in past_due/unpaid stands in for the due date.
+-- A late webhook can only start the clock later, never earlier: the error runs
+-- in the district's favour. Stamped by trigger so a hand-run update cannot
+-- forget it, and kept through past_due -> unpaid.
+alter table public.subscriptions add column if not exists past_due_since timestamptz;
+
+create or replace function public.subscriptions_track_past_due () returns trigger language plpgsql
+set search_path = public as $$
+begin
+    if new.status in ('past_due', 'unpaid') then
+        if tg_op = 'UPDATE' and old.status in ('past_due', 'unpaid') then
+            new.past_due_since := coalesce(new.past_due_since, old.past_due_since, now());
+        else
+            new.past_due_since := coalesce(new.past_due_since, now());
+        end if;
+    else
+        new.past_due_since := null;
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.subscriptions_track_past_due () from public;
+revoke all on function public.subscriptions_track_past_due () from anon;
+revoke all on function public.subscriptions_track_past_due () from authenticated;
+
+drop trigger if exists subscriptions_track_past_due on public.subscriptions;
+
+create trigger subscriptions_track_past_due before insert or update on public.subscriptions
+for each row execute function public.subscriptions_track_past_due ();
+
+-- ---------------------------------------------------------------------------
+-- The district billing record
+-- ---------------------------------------------------------------------------
+-- One row per district studio. Separate from studio_seat_overrides on purpose:
+-- clearing an override at contract end must not take the contract end with it,
+-- or the retention purge would never see the district.
+--
+-- >>> canonical public.district_billing >>>
+-- One definition, byte-identical in 20261020180500_district_seat_cap_and_grace.sql
+-- (mh/district-seats, PR #61) and 20261021120700_district_retention.sql
+-- (mh/launch-consent, PR #64), from this marker line to the closing one. It is
+-- rerunnable on its own: the table only if it is missing, each constraint only
+-- if it is missing by name, and the privileges reset to the same end state
+-- every time. Clients get nothing; the service role may read it; every write is
+-- made by SECURITY DEFINER functions, which need no grant.
+--
+-- contract_ends_at: null means the district's data is never auto-purged.
+-- contract_ends_source: 'admin' (pinned from the contract, null allowed: never)
+-- or 'stripe' (Stripe's actual end); null only with a null contract_ends_at.
+-- grace_extended_until: full access while past due lasts until the later of
+-- 30 days and this.
+create table if not exists public.district_billing (
+    studio_id uuid primary key references public.studios (id) on delete cascade,
+    stripe_subscription_id text references public.subscriptions (stripe_subscription_id) on delete set null,
+    contract_ends_at timestamptz,
+    contract_ends_source text,
+    grace_extended_until timestamptz,
+    updated_by text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+do $district_billing$
+begin
+    if not exists (
+        select 1 from pg_constraint
+        where conrelid = 'public.district_billing'::regclass
+          and conname = 'district_billing_contract_ends_source_check'
+    ) then
+        alter table public.district_billing
+        add constraint district_billing_contract_ends_source_check
+        check (contract_ends_source in ('admin', 'stripe'));
+    end if;
+
+    if not exists (
+        select 1 from pg_constraint
+        where conrelid = 'public.district_billing'::regclass
+          and conname = 'district_billing_contract_ends_source_matches'
+    ) then
+        alter table public.district_billing
+        add constraint district_billing_contract_ends_source_matches
+        check ((contract_ends_source is null) = (contract_ends_at is null) or contract_ends_source is not distinct from 'admin');
+    end if;
+end;
+$district_billing$;
+
+create index if not exists district_billing_subscription on public.district_billing (stripe_subscription_id);
+
+create index if not exists district_billing_contract_ends on public.district_billing (contract_ends_at)
+where contract_ends_at is not null;
+
+alter table public.district_billing enable row level security;
+
+revoke all on table public.district_billing from public, anon, authenticated, service_role;
+
+grant select on table public.district_billing to service_role;
+-- <<< canonical public.district_billing <<<
+
+-- Append-only, and like studio_seat_override_log it outlives the studio.
+create table if not exists public.district_billing_log (
+    id bigint generated by default as identity primary key,
+    studio_id uuid not null,
+    old_stripe_subscription_id text,
+    new_stripe_subscription_id text,
+    old_contract_ends_at timestamptz,
+    new_contract_ends_at timestamptz,
+    new_contract_ends_source text,
+    old_grace_extended_until timestamptz,
+    new_grace_extended_until timestamptz,
+    reason text,
+    actor text not null,
+    changed_at timestamptz not null default now()
+);
+
+create index if not exists district_billing_log_studio on public.district_billing_log (studio_id, changed_at desc);
+
+create or replace function public.district_billing_log_change () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_actor text := nullif(current_setting('cleffy.district_billing_actor', true), '');
+    v_reason text := nullif(current_setting('cleffy.district_billing_reason', true), '');
+begin
+    if tg_op = 'UPDATE'
+        and new.stripe_subscription_id is not distinct from old.stripe_subscription_id
+        and new.contract_ends_at is not distinct from old.contract_ends_at
+        and new.contract_ends_source is not distinct from old.contract_ends_source
+        and new.grace_extended_until is not distinct from old.grace_extended_until then
+        return new;
+    end if;
+
+    if tg_op = 'DELETE' then
+        insert into public.district_billing_log (
+            studio_id, old_stripe_subscription_id, old_contract_ends_at, old_grace_extended_until, reason, actor
+        ) values (
+            old.studio_id, old.stripe_subscription_id, old.contract_ends_at, old.grace_extended_until,
+            v_reason, coalesce(v_actor, session_user::text)
+        );
+        return old;
+    end if;
+
+    insert into public.district_billing_log (
+        studio_id, old_stripe_subscription_id, new_stripe_subscription_id, old_contract_ends_at,
+        new_contract_ends_at, new_contract_ends_source, old_grace_extended_until, new_grace_extended_until,
+        reason, actor
+    ) values (
+        new.studio_id,
+        case when tg_op = 'UPDATE' then old.stripe_subscription_id end,
+        new.stripe_subscription_id,
+        case when tg_op = 'UPDATE' then old.contract_ends_at end,
+        new.contract_ends_at,
+        new.contract_ends_source,
+        case when tg_op = 'UPDATE' then old.grace_extended_until end,
+        new.grace_extended_until,
+        v_reason,
+        coalesce(v_actor, new.updated_by)
+    );
+    return new;
+end;
+$$;
+
+drop trigger if exists district_billing_log on public.district_billing;
+
+create trigger district_billing_log after insert or update or delete on public.district_billing
+for each row execute function public.district_billing_log_change ();
+
+-- ---------------------------------------------------------------------------
+-- Is a subscription live right now?
+-- ---------------------------------------------------------------------------
+-- The one definition every entitlement read now shares: active or trialing
+-- inside its period, as before -- or a send_invoice subscription past due but
+-- still inside its grace period. Card subscriptions get no grace: Stripe
+-- retries the card and the existing past_due behaviour is unchanged.
+create or replace function public.district_grace_ends_at (p_subscription_id text, p_past_due_since timestamptz)
+returns timestamptz language sql stable
+set search_path = public as $$
+    -- greatest() skips nulls: no extension is just the 30 days.
+    select greatest(
+        p_past_due_since + interval '30 days',
+        (
+            select max(b.grace_extended_until)
+            from public.district_billing b
+            where b.stripe_subscription_id = p_subscription_id
+        )
+    );
+$$;
+
+create or replace function public.subscription_is_live (s public.subscriptions) returns boolean language sql stable
+set search_path = public as $$
+    select s.mode = any (public.entitling_billing_modes ())
+        and (
+            (s.status in ('active', 'trialing') and (s.current_period_end is null or s.current_period_end > now()))
+            or (
+                s.collection_method = 'send_invoice'
+                and s.status in ('past_due', 'unpaid')
+                and coalesce(now() < public.district_grace_ends_at (s.stripe_subscription_id, s.past_due_since), false)
+            )
+        );
+$$;
+
+revoke all on function public.district_grace_ends_at (text, timestamptz) from public;
+revoke all on function public.district_grace_ends_at (text, timestamptz) from anon;
+revoke all on function public.district_grace_ends_at (text, timestamptz) from authenticated;
+grant execute on function public.district_grace_ends_at (text, timestamptz) to service_role;
+
+revoke all on function public.subscription_is_live (public.subscriptions) from public;
+revoke all on function public.subscription_is_live (public.subscriptions) from anon;
+revoke all on function public.subscription_is_live (public.subscriptions) from authenticated;
+grant execute on function public.subscription_is_live (public.subscriptions) to service_role;
+
+-- Redefined from 20261020180400: liveness (grace included) from the shared
+-- predicate. Otherwise unchanged.
+create or replace function public.studio_effective_seat_limit (p_studio uuid) returns int language sql stable security definer
+set search_path = public as $$
+    select greatest(
+        st.seat_limit,
+        coalesce((
+            select o.seat_limit
+            from public.studio_seat_overrides o
+            join public.subscriptions s on s.stripe_subscription_id = o.stripe_subscription_id
+            where o.studio_id = st.id
+              and s.user_id = st.owner_id
+              and s.collection_method = 'send_invoice'
+              and s.tier = 'academy'
+              and public.subscription_is_live (s)
+        ), 0)
+    )
+    from public.studios st
+    where st.id = p_studio;
+$$;
+
+-- Unchanged, re-stated where the definition now lives: internal, unchecked.
+revoke all on function public.studio_effective_seat_limit (uuid) from public;
+revoke all on function public.studio_effective_seat_limit (uuid) from anon;
+revoke all on function public.studio_effective_seat_limit (uuid) from authenticated;
+grant execute on function public.studio_effective_seat_limit (uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Which seats are active
+-- ---------------------------------------------------------------------------
+-- The owner's pick. Members the owner marked kept rank first, then everyone by
+-- when they were seated (oldest first), then by id so ties are stable. The
+-- owner holds one seat, so the first seat_limit - 1 members are active.
+alter table public.studio_members add column if not exists kept_active boolean not null default false;
+
+create index if not exists studio_members_seat_order on public.studio_members (studio_id, kept_active desc, created_at, user_id);
+
+-- One member's seat: true active, false read-only, null not a member. Counts
+-- only as far as it needs to, so a 10000-seat district costs no more than a
+-- 5-seat one on every entitlement read.
+create or replace function public.studio_seat_is_active (p_studio uuid, p_user uuid) returns boolean language plpgsql stable
+security definer
+set search_path = public as $$
+declare
+    v_kept boolean;
+    v_joined timestamptz;
+    v_slots int;
+    v_ahead int;
+begin
+    select sm.kept_active, sm.created_at into v_kept, v_joined
+    from public.studio_members sm
+    where sm.studio_id = p_studio and sm.user_id = p_user;
+
+    if not found then
+        return null;
+    end if;
+
+    v_slots := greatest(coalesce(public.studio_effective_seat_limit (p_studio), 0) - 1, 0);
+
+    select count(*)::int into v_ahead
+    from (
+        select 1
+        from public.studio_members o
+        where o.studio_id = p_studio
+          and o.user_id <> p_user
+          and (
+              (o.kept_active and not v_kept)
+              or (o.kept_active = v_kept and (o.created_at, o.user_id) < (v_joined, p_user))
+          )
+        limit v_slots
+    ) ahead;
+
+    return v_ahead < v_slots;
+end;
+$$;
+
+-- The whole studio at once, in the same order, for the owner's screen and the
+-- reconcile below. Must agree with studio_seat_is_active; the SQL proof checks.
+create or replace function public.studio_seat_states (p_studio uuid)
+returns table (user_id uuid, kept_active boolean, active boolean, seated_at timestamptz) language sql stable
+security definer
+set search_path = public as $$
+    select ranked.user_id, ranked.kept_active, ranked.position <= greatest(coalesce(public.studio_effective_seat_limit (p_studio), 0) - 1, 0), ranked.created_at
+    from (
+        select sm.user_id, sm.kept_active, sm.created_at,
+               row_number() over (order by sm.kept_active desc, sm.created_at, sm.user_id) as position
+        from public.studio_members sm
+        where sm.studio_id = p_studio
+    ) ranked;
+$$;
+
+revoke all on function public.studio_seat_is_active (uuid, uuid) from public;
+revoke all on function public.studio_seat_is_active (uuid, uuid) from anon;
+revoke all on function public.studio_seat_is_active (uuid, uuid) from authenticated;
+grant execute on function public.studio_seat_is_active (uuid, uuid) to service_role;
+
+revoke all on function public.studio_seat_states (uuid) from public;
+revoke all on function public.studio_seat_states (uuid) from anon;
+revoke all on function public.studio_seat_states (uuid) from authenticated;
+grant execute on function public.studio_seat_states (uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- resolve_entitlements(): the cap, enforced
+-- ---------------------------------------------------------------------------
+-- The 20261009120101 definition with three changes:
+--  * liveness is subscription_is_live(), so a district inside its invoice grace
+--    period is still entitled -- its owner by their own subscription, its seats
+--    through it;
+--  * an Academy seat entitles only if it is an ACTIVE seat (inside the studio's
+--    effective limit);
+--  * a teacher whose only seats are past the limit resolves read-only: tier
+--    'free' (they are not entitled to Academy, and buying their own plan is a
+--    real way back), source 'studio_member', seat_read_only true, and the
+--    view-and-export limits. Every answer now carries seat_read_only.
+-- An active seat anywhere beats a read-only one, and the teacher's own
+-- subscription still beats both.
+create or replace function public.resolve_entitlements (p_user uuid) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_user uuid := p_user;
+    v_tier text := 'free';
+    v_status text;
+    v_source text := 'none';
+    v_period_end timestamptz;
+    v_cancelling boolean := false;
+    v_read_only boolean := false;
+    v_sub record;
+begin
+    if v_user is null then
+        raise exception 'resolve_entitlements requires p_user' using errcode = '22023';
+    end if;
+
+    perform 1
+    from auth.users u
+    where u.id = v_user
+      and u.raw_app_meta_data ->> 'user_type' = 'student';
+
+    if found then
+        return jsonb_build_object(
+            'user_id', v_user,
+            'tier', 'student',
+            'status', null::text,
+            'source', 'managed',
+            'current_period_end', null::timestamptz,
+            'cancel_at_period_end', false,
+            'seat_read_only', false,
+            'limits', public.tier_limits ('student')
+        );
+    end if;
+
+    -- Own subscription first. Highest tier wins if somehow more than one is live.
+    select s.tier, s.status, s.current_period_end, s.cancel_at_period_end
+    into v_sub
+    from public.subscriptions s
+    where s.user_id = v_user
+      and public.subscription_is_live (s)
+    order by case s.tier when 'academy' then 3 when 'teacher' then 2 when 'personal' then 1 else 0 end desc,
+             s.current_period_end desc nulls last
+    limit 1;
+
+    if found then
+        v_tier := v_sub.tier;
+        v_status := v_sub.status;
+        v_period_end := v_sub.current_period_end;
+        v_cancelling := v_sub.cancel_at_period_end;
+        v_source := 'subscription';
+    else
+        -- An active seat in an academy whose owner is paying.
+        select s.status, s.current_period_end, s.cancel_at_period_end
+        into v_sub
+        from public.studio_members sm
+        join public.studios st on st.id = sm.studio_id
+        join public.subscriptions s on s.user_id = st.owner_id
+        where sm.user_id = v_user
+          and s.tier = 'academy'
+          and public.subscription_is_live (s)
+          and public.studio_seat_is_active (sm.studio_id, v_user)
+        order by s.current_period_end desc nulls last
+        limit 1;
+
+        if found then
+            v_tier := 'academy';
+            v_status := v_sub.status;
+            v_period_end := v_sub.current_period_end;
+            v_cancelling := v_sub.cancel_at_period_end;
+            v_source := 'studio_member';
+        else
+            -- A seat past the limit: kept, readable, exportable -- and nothing new.
+            -- Only a studio over its limit can rank anyone past it, and only an
+            -- override that lapsed, shrank or went can leave one over.
+            perform 1
+            from public.studio_members sm
+            where sm.user_id = v_user
+              and not public.studio_seat_is_active (sm.studio_id, v_user);
+
+            if found then
+                v_read_only := true;
+                v_source := 'studio_member';
+            end if;
+        end if;
+    end if;
+
+    return jsonb_build_object(
+        'user_id', v_user,
+        'tier', v_tier,
+        'status', v_status,
+        'source', v_source,
+        'current_period_end', v_period_end,
+        'cancel_at_period_end', coalesce(v_cancelling, false),
+        'seat_read_only', v_read_only,
+        -- tier_limits('student') is zero on everything one creates and unlimited
+        -- on export: exactly "view and export only".
+        'limits', case when v_read_only then public.tier_limits ('student') else public.tier_limits (v_tier) end
+    );
+end;
+$$;
+
+revoke all on function public.resolve_entitlements (uuid) from public;
+revoke all on function public.resolve_entitlements (uuid) from anon;
+revoke all on function public.resolve_entitlements (uuid) from authenticated;
+grant execute on function public.resolve_entitlements (uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Bringing the stored half in line
+-- ---------------------------------------------------------------------------
+-- Every member, in id order (the order restore_plan_archived_scores visits
+-- them, so the two cannot deadlock on a teacher's locks): a read-only seat has
+-- its active scores archived as plan_lapse -- the archive annotation RLS
+-- already refuses writes on, and the one every restore path already undoes --
+-- and anyone else gets back what a lapse archived, up to the plan they now
+-- resolve to (unlimited for an active paid seat, the free 3 for a teacher the
+-- owner released). Both calls re-read the member's entitlements under their own
+-- locks, so this is a filter, never the cap. Returns the scores it moved.
+create or replace function public.reconcile_studio_seats (p_studio uuid) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_member uuid;
+    v_moved int := 0;
+begin
+    for v_member in
+        select sm.user_id
+        from public.studio_members sm
+        join auth.users u on u.id = sm.user_id
+        where sm.studio_id = p_studio
+        order by sm.user_id
+    loop
+        if coalesce((public.resolve_entitlements (v_member) ->> 'seat_read_only')::boolean, false) then
+            v_moved := v_moved + public.apply_free_tier_archival (v_member);
+        else
+            v_moved := v_moved + public.restore_user_plan_archived_scores (v_member);
+        end if;
+    end loop;
+    return v_moved;
+end;
+$$;
+
+-- The hourly sweep, for what only the clock moves. Only studios with more
+-- members than the Academy cap leaves room for can hold a read-only seat.
+create or replace function public.reconcile_district_seats () returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_studio uuid;
+    v_moved int := 0;
+begin
+    for v_studio in
+        select sm.studio_id
+        from public.studio_members sm
+        group by sm.studio_id
+        having count(*) > 4
+        order by sm.studio_id
+    loop
+        v_moved := v_moved + public.reconcile_studio_seats (v_studio);
+    end loop;
+
+    -- An admin's pin the clock has just carried into the past, while the owner
+    -- pays, is cleared here (district_billing_rederive): no event marks it.
+    for v_studio in
+        select b.studio_id
+        from public.district_billing b
+        where b.contract_ends_source = 'admin'
+          and b.contract_ends_at <= now()
+        order by b.studio_id
+    loop
+        perform public.district_billing_rederive (v_studio);
+    end loop;
+    return v_moved;
+end;
+$$;
+
+revoke all on function public.reconcile_studio_seats (uuid) from public;
+revoke all on function public.reconcile_studio_seats (uuid) from anon;
+revoke all on function public.reconcile_studio_seats (uuid) from authenticated;
+grant execute on function public.reconcile_studio_seats (uuid) to service_role;
+
+revoke all on function public.reconcile_district_seats () from public;
+revoke all on function public.reconcile_district_seats () from anon;
+revoke all on function public.reconcile_district_seats () from authenticated;
+grant execute on function public.reconcile_district_seats () to service_role;
+
+select cron.schedule ('district-seat-reconcile', '41 * * * *', $$select public.reconcile_district_seats ()$$);
+
+-- An override set, changed or cleared moves seats at once.
+create or replace function public.studio_seat_overrides_reconcile () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if tg_op <> 'DELETE' then
+        -- The override names the district's subscription; the billing record
+        -- follows it, so grace and the contract end are read from the same one.
+        -- Pointing it at a replacement subscription derives the contract end
+        -- again at once (Codex round-2 review of #61, major 2): the old
+        -- subscription's end must not outlive the renewal.
+        perform set_config('cleffy.district_billing_actor', new.updated_by, true);
+        insert into public.district_billing (studio_id, stripe_subscription_id, updated_by)
+        values (new.studio_id, new.stripe_subscription_id, new.updated_by)
+        on conflict (studio_id) do update
+        set stripe_subscription_id = excluded.stripe_subscription_id,
+            updated_by = excluded.updated_by,
+            updated_at = now()
+        where district_billing.stripe_subscription_id is distinct from excluded.stripe_subscription_id;
+        perform public.district_billing_rederive (new.studio_id);
+        perform set_config('cleffy.district_billing_actor', '', true);
+    end if;
+    perform public.reconcile_studio_seats (case when tg_op = 'DELETE' then old.studio_id else new.studio_id end);
+    return null;
+end;
+$$;
+
+revoke all on function public.studio_seat_overrides_reconcile () from public;
+revoke all on function public.studio_seat_overrides_reconcile () from anon;
+revoke all on function public.studio_seat_overrides_reconcile () from authenticated;
+
+drop trigger if exists studio_seat_overrides_reconcile on public.studio_seat_overrides;
+
+create trigger studio_seat_overrides_reconcile after insert or update or delete on public.studio_seat_overrides
+for each row execute function public.studio_seat_overrides_reconcile ();
+
+-- A member removed frees a seat (someone read-only may now be active) and
+-- releases the member, who gets back what a read-only seat archived, up to the
+-- plan they now resolve to. Skipped for a deleted account -- its scores are
+-- delete-account's to drain, not to un-archive -- and for a deleted studio.
+create or replace function public.studio_members_release_seat () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if exists (select 1 from auth.users u where u.id = old.user_id) then
+        perform public.restore_user_plan_archived_scores (old.user_id);
+    end if;
+    if exists (select 1 from public.studios st where st.id = old.studio_id) then
+        perform public.reconcile_studio_seats (old.studio_id);
+    end if;
+    return null;
+end;
+$$;
+
+revoke all on function public.studio_members_release_seat () from public;
+revoke all on function public.studio_members_release_seat () from anon;
+revoke all on function public.studio_members_release_seat () from authenticated;
+
+drop trigger if exists studio_members_release_seat on public.studio_members;
+
+create trigger studio_members_release_seat after delete on public.studio_members
+for each row execute function public.studio_members_release_seat ();
+
+-- ---------------------------------------------------------------------------
+-- Subscription writes: the billing record and the seats follow
+-- ---------------------------------------------------------------------------
+-- Runs inside the webhook's write_subscription_under_lock (and any hand-run
+-- write), only when something an entitlement reads has changed.
+--
+-- contract_ends_at follows Stripe unless an admin pinned it -- and only Stripe's
+-- ACTUAL end (Codex round-2 review of #61, major 3): the subscription's ended_at
+-- (stripeEvents.ts endedAtOf: Stripe's ended_at, or the cancel_at a terminal
+-- status confirms it ended on) once its status is terminal, and null while it
+-- has not ended. Never a scheduled cancellation, which can still be moved or
+-- withdrawn (a cancellation a year out, then an immediate one, must count from
+-- the immediate one). A subscription recorded as ended without an ended_at (a
+-- webhook deployed before 20261020180400) takes its current_period_end, the
+-- one other date Stripe gave us (Codex round-3 review of #61: never the stored
+-- end, the event's time or now()); with neither, the record keeps what it has
+-- and a warning is logged. A redelivery changes nothing, because ended_at does
+-- not change once Stripe has set it.
+--
+-- And never while the district pays (major 2): a district renewing on a NEW
+-- subscription -- the old one ended and recorded its end, then the owner signed
+-- again -- has a live Academy subscription, and that alone makes the
+-- Stripe-derived end null, whichever subscription the record or the override
+-- still names. Card-paid counts as much as Stripe Invoicing (Max, 2026-10-21):
+-- an owner who moved the district to ordinary Academy is paying, so #64 never
+-- purges them, while the seats past 5 go read-only as decisions item 2 says. Derived from scratch on every call, so whatever moved
+-- (a subscription write, the override naming another subscription, an admin
+-- handing the date back to Stripe) leaves the same answer. An admin's pin is
+-- the contract's own date and is left alone, unless it has already passed while
+-- the owner pays (Max, 2026-10-21): then it is cleared and logged. Clearing the date is also what
+-- stops a purge cycle already under way: the retention workflow (#64) cancels
+-- any cycle whose contract end is cleared or moved.
+create or replace function public.district_billing_rederive (p_studio uuid) returns void
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.district_billing;
+    v_owner uuid;
+    v_linked public.subscriptions;
+    v_end timestamptz;
+    v_paying boolean;
+begin
+    select * into v_row from public.district_billing b where b.studio_id = p_studio for update;
+    if not found then
+        return;
+    end if;
+
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+
+    -- Any live paid Academy subscription of the owner, card-paid or Stripe
+    -- Invoicing, is a district that pays (Max, 2026-10-21): #64 never purges
+    -- it. Its seats past the cap of 5 are still read-only (decisions item 2);
+    -- that is the seat limit's business, not this record's.
+    v_paying := exists (
+        select 1 from public.subscriptions s
+        where s.user_id = v_owner
+          and s.tier = 'academy'
+          and public.subscription_is_live (s)
+    );
+
+    if v_row.contract_ends_source = 'admin' then
+        -- An admin's pin is the contract's own date and is left alone -- unless
+        -- it has already passed while the owner pays on a live subscription
+        -- (Max, 2026-10-21): a renewal the pin predates, which would otherwise
+        -- have #64 purge a paying district. Cleared and logged, it hands the
+        -- record back to Stripe, which, the owner paying, says no end. A pin
+        -- still in the future, and a pinned "never" (null), stay.
+        if v_paying and v_row.contract_ends_at is not null and v_row.contract_ends_at <= now() then
+            perform set_config('cleffy.district_billing_reason',
+                'admin pin ' || v_row.contract_ends_at::text || ' had passed while the owner pays on a live subscription: cleared',
+                true);
+            update public.district_billing b
+            set contract_ends_at = null,
+                contract_ends_source = null,
+                updated_by = coalesce(nullif(current_setting('cleffy.district_billing_actor', true), ''), 'system'),
+                updated_at = now()
+            where b.studio_id = p_studio;
+            perform set_config('cleffy.district_billing_reason', '', true);
+        end if;
+        return;
+    end if;
+
+    if not v_paying then
+        select * into v_linked from public.subscriptions s where s.stripe_subscription_id = v_row.stripe_subscription_id;
+        if found and v_linked.status in ('canceled', 'incomplete_expired') then
+            -- Stripe's own dates only (Codex round-3 review of #61): ended_at
+            -- (which the webhook fills from Stripe's ended_at, or the cancel_at
+            -- it ended on), else the subscription's current_period_end. Never
+            -- the event's time or now(): with neither date -- a subscription
+            -- recorded as ended by a webhook from before this migration, with
+            -- no period end -- the record keeps what it has and says so.
+            v_end := coalesce(v_linked.ended_at, v_linked.current_period_end);
+            if v_end is null then
+                raise warning 'district_billing: studio % subscription % ended with no Stripe end date; contract_ends_at left at %',
+                    p_studio, v_linked.stripe_subscription_id, coalesce(v_row.contract_ends_at::text, 'null');
+                return;
+            end if;
+        end if;
+    end if;
+
+    update public.district_billing b
+    set contract_ends_at = v_end,
+        contract_ends_source = case when v_end is null then null else 'stripe' end,
+        updated_by = coalesce(nullif(current_setting('cleffy.district_billing_actor', true), ''), 'stripe'),
+        updated_at = now()
+    where b.studio_id = p_studio
+      and (b.contract_ends_at is distinct from v_end
+           or b.contract_ends_source is distinct from case when v_end is null then null else 'stripe' end);
+end;
+$$;
+
+revoke all on function public.district_billing_rederive (uuid) from public;
+revoke all on function public.district_billing_rederive (uuid) from anon;
+revoke all on function public.district_billing_rederive (uuid) from authenticated;
+
+-- A Stripe Invoicing subscription written for the owner: the record links to it
+-- if it links to nothing yet, or if it is live and the linked one is not (a
+-- renewal on a new subscription). An override, when there is one, decides the
+-- link instead (studio_seat_overrides_reconcile). Then the contract end is
+-- derived again -- after any of the owner's subscription writes, a card one
+-- included, since a card-paid Academy is a district that pays.
+create or replace function public.district_billing_follow (p_studio uuid, s public.subscriptions) returns void
+language plpgsql security definer
+set search_path = public as $$
+begin
+    perform set_config('cleffy.district_billing_actor', 'stripe', true);
+
+    -- A card subscription never becomes the record's link, but whether the
+    -- owner pays is derived again: a card-paid Academy starting or ending
+    -- moves the contract end (district_billing_rederive).
+    if s.collection_method is distinct from 'send_invoice' then
+        perform public.district_billing_rederive (p_studio);
+        perform set_config('cleffy.district_billing_actor', '', true);
+        return;
+    end if;
+
+    insert into public.district_billing (studio_id, stripe_subscription_id, updated_by)
+    values (p_studio, s.stripe_subscription_id, 'stripe')
+    on conflict (studio_id) do update
+    set stripe_subscription_id = excluded.stripe_subscription_id,
+        updated_at = now()
+    where district_billing.stripe_subscription_id is distinct from excluded.stripe_subscription_id
+      and not exists (select 1 from public.studio_seat_overrides o where o.studio_id = p_studio)
+      and (
+          district_billing.stripe_subscription_id is null
+          or (
+              public.subscription_is_live (s)
+              and not exists (
+                  select 1 from public.subscriptions l
+                  where l.stripe_subscription_id = district_billing.stripe_subscription_id
+                    and public.subscription_is_live (l)
+              )
+          )
+      );
+
+    perform public.district_billing_rederive (p_studio);
+
+    perform set_config('cleffy.district_billing_actor', '', true);
+end;
+$$;
+
+revoke all on function public.district_billing_follow (uuid, public.subscriptions) from public;
+revoke all on function public.district_billing_follow (uuid, public.subscriptions) from anon;
+revoke all on function public.district_billing_follow (uuid, public.subscriptions) from authenticated;
+
+create or replace function public.subscriptions_follow_district () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_studio uuid;
+begin
+    if tg_op = 'UPDATE'
+        and new.status is not distinct from old.status
+        and new.tier is not distinct from old.tier
+        and new.mode is not distinct from old.mode
+        and new.user_id is not distinct from old.user_id
+        and new.current_period_end is not distinct from old.current_period_end
+        and new.cancel_at_period_end is not distinct from old.cancel_at_period_end
+        and new.collection_method is not distinct from old.collection_method
+        and new.past_due_since is not distinct from old.past_due_since
+        and new.ended_at is not distinct from old.ended_at then
+        return null;
+    end if;
+
+    for v_studio in
+        select st.id from public.studios st where st.owner_id = new.user_id order by st.id
+    loop
+        perform public.district_billing_follow (v_studio, new);
+
+        if (select count(*) from public.studio_members sm where sm.studio_id = v_studio) > 4 then
+            perform public.reconcile_studio_seats (v_studio);
+        end if;
+    end loop;
+
+    return null;
+end;
+$$;
+
+revoke all on function public.subscriptions_follow_district () from public;
+revoke all on function public.subscriptions_follow_district () from anon;
+revoke all on function public.subscriptions_follow_district () from authenticated;
+
+drop trigger if exists subscriptions_follow_district on public.subscriptions;
+
+create trigger subscriptions_follow_district after insert or update on public.subscriptions
+for each row execute function public.subscriptions_follow_district ();
+
+-- Districts whose subscription the webhook has already recorded get their
+-- billing record now rather than at their next event.
+insert into public.district_billing (studio_id, stripe_subscription_id, updated_by)
+select o.studio_id, o.stripe_subscription_id, 'migration 20261020180500'
+from public.studio_seat_overrides o
+on conflict (studio_id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- The owner picks which seats stay active
+-- ---------------------------------------------------------------------------
+-- p_members is the owner's list of seats to keep; everyone else is ordered by
+-- when they were seated. A list longer than the seats the studio can fill now
+-- is refused rather than half-honoured. Allowed whatever the owner pays: the
+-- pick matters most when the district has lapsed.
+create or replace function public.studio_set_active_seats (p_studio uuid, p_members uuid[]) returns int language plpgsql
+security definer
+set search_path = public as $$
+declare
+    v_owner uuid;
+    v_slots int;
+    v_wanted uuid[] := coalesce(array(select distinct m from unnest(p_members) as m where m is not null), '{}');
+begin
+    if auth.uid() is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+    if v_owner is null or v_owner <> auth.uid() then
+        raise exception 'only the studio owner can choose its active seats' using errcode = '42501';
+    end if;
+
+    -- The same lock the seat trigger counts under, so a pick and an invite
+    -- cannot interleave.
+    perform pg_advisory_xact_lock (hashtext('cleffy.studio_seats'), hashtext(p_studio::text));
+
+    if exists (
+        select 1 from unnest(v_wanted) as m
+        where not exists (
+            select 1 from public.studio_members sm where sm.studio_id = p_studio and sm.user_id = m
+        )
+    ) then
+        raise exception 'every kept seat must be a member of this academy' using errcode = '22023';
+    end if;
+
+    v_slots := greatest(public.studio_effective_seat_limit (p_studio) - 1, 0);
+    if cardinality(v_wanted) > v_slots then
+        raise exception 'only % seats can be active besides yours; % chosen', v_slots, cardinality(v_wanted)
+            using errcode = '22023',
+                  detail = json_build_object('code', 'too_many_active_seats', 'limit', v_slots)::text;
+    end if;
+
+    update public.studio_members sm
+    set kept_active = (sm.user_id = any (v_wanted))
+    where sm.studio_id = p_studio
+      and sm.kept_active is distinct from (sm.user_id = any (v_wanted));
+
+    return public.reconcile_studio_seats (p_studio);
+end;
+$$;
+
+-- What the owner's seat list shows: who is active and who is read-only.
+create or replace function public.studio_seat_status (p_studio uuid)
+returns table (user_id uuid, kept_active boolean, active boolean) language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_owner uuid;
+begin
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+    if v_owner is null or v_owner <> auth.uid() then
+        raise exception 'only the studio owner can list seats' using errcode = '42501';
+    end if;
+
+    return query
+    select s.user_id, s.kept_active, s.active from public.studio_seat_states (p_studio) s;
+end;
+$$;
+
+revoke all on function public.studio_set_active_seats (uuid, uuid[]) from public;
+revoke all on function public.studio_set_active_seats (uuid, uuid[]) from anon;
+grant execute on function public.studio_set_active_seats (uuid, uuid[]) to authenticated;
+
+revoke all on function public.studio_seat_status (uuid) from public;
+revoke all on function public.studio_seat_status (uuid) from anon;
+grant execute on function public.studio_seat_status (uuid) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Admin: contract end and grace (service role / SQL editor only)
+-- ---------------------------------------------------------------------------
+-- The billing record for a studio, created from the owner's send_invoice
+-- subscription if the webhook has not made one yet.
+create or replace function public.district_billing_row (p_studio uuid) returns public.district_billing language plpgsql
+security definer
+set search_path = public as $$
+declare
+    v_row public.district_billing;
+    v_owner uuid;
+    v_sub text;
+begin
+    select * into v_row from public.district_billing b where b.studio_id = p_studio;
+    if found then
+        return v_row;
+    end if;
+
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+    if v_owner is null then
+        raise exception 'no studio %', p_studio using errcode = 'P0002';
+    end if;
+
+    select coalesce(
+        (select o.stripe_subscription_id from public.studio_seat_overrides o where o.studio_id = p_studio),
+        (select s.stripe_subscription_id from public.subscriptions s
+         where s.user_id = v_owner and s.collection_method = 'send_invoice'
+         order by s.updated_at desc limit 1)
+    ) into v_sub;
+
+    insert into public.district_billing (studio_id, stripe_subscription_id, updated_by)
+    values (p_studio, v_sub, 'admin')
+    returning * into v_row;
+    return v_row;
+end;
+$$;
+
+-- Pins the contract end from the contract (p_contract_ends_at; null pins
+-- "never purge"), or with p_automatic hands it back to Stripe's dates.
+create or replace function public.admin_set_district_contract_end (
+    p_studio uuid,
+    p_contract_ends_at timestamptz,
+    p_actor text,
+    p_reason text default null,
+    p_automatic boolean default false
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.district_billing;
+begin
+    if auth.uid() is not null then
+        raise exception 'district billing is admin-only' using errcode = '42501';
+    end if;
+    if nullif(trim(coalesce(p_actor, '')), '') is null then
+        raise exception 'say who is making this change (p_actor)' using errcode = '22023';
+    end if;
+    if p_automatic and p_contract_ends_at is not null then
+        raise exception 'p_automatic follows Stripe; pass p_contract_ends_at => null with it' using errcode = '22023';
+    end if;
+
+    v_row := public.district_billing_row (p_studio);
+
+    perform set_config('cleffy.district_billing_actor', trim(p_actor), true);
+    perform set_config('cleffy.district_billing_reason', coalesce(p_reason, ''), true);
+
+    if p_automatic then
+        update public.district_billing b
+        set contract_ends_at = null, contract_ends_source = null, updated_by = trim(p_actor), updated_at = now()
+        where b.studio_id = p_studio;
+
+        -- Re-derive from the subscriptions as they stand, the way their
+        -- webhook writes do.
+        perform public.district_billing_rederive (p_studio);
+    else
+        update public.district_billing b
+        set contract_ends_at = p_contract_ends_at,
+            contract_ends_source = 'admin',
+            updated_by = trim(p_actor),
+            updated_at = now()
+        where b.studio_id = p_studio;
+
+        -- A pin already past while the owner pays is cleared (and logged) at
+        -- once, as on any later event; the answer below says so.
+        perform public.district_billing_rederive (p_studio);
+    end if;
+
+    perform set_config('cleffy.district_billing_actor', '', true);
+    perform set_config('cleffy.district_billing_reason', '', true);
+
+    select * into v_row from public.district_billing b where b.studio_id = p_studio;
+    return jsonb_build_object(
+        'studio_id', p_studio,
+        'stripe_subscription_id', v_row.stripe_subscription_id,
+        'contract_ends_at', v_row.contract_ends_at,
+        'contract_ends_source', v_row.contract_ends_source
+    );
+end;
+$$;
+
+-- Moves full access while past due out to p_grace_until (null: back to the
+-- standard 30 days). Seats move at once.
+create or replace function public.admin_extend_district_grace (
+    p_studio uuid,
+    p_grace_until timestamptz,
+    p_actor text,
+    p_reason text default null
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.district_billing;
+    v_ends timestamptz;
+begin
+    if auth.uid() is not null then
+        raise exception 'district billing is admin-only' using errcode = '42501';
+    end if;
+    if nullif(trim(coalesce(p_actor, '')), '') is null then
+        raise exception 'say who is making this change (p_actor)' using errcode = '22023';
+    end if;
+
+    v_row := public.district_billing_row (p_studio);
+    if v_row.stripe_subscription_id is null then
+        raise exception 'studio % has no Stripe Invoicing subscription recorded to extend', p_studio
+            using errcode = 'P0002';
+    end if;
+
+    perform set_config('cleffy.district_billing_actor', trim(p_actor), true);
+    perform set_config('cleffy.district_billing_reason', coalesce(p_reason, ''), true);
+
+    update public.district_billing b
+    set grace_extended_until = p_grace_until, updated_by = trim(p_actor), updated_at = now()
+    where b.studio_id = p_studio;
+
+    perform set_config('cleffy.district_billing_actor', '', true);
+    perform set_config('cleffy.district_billing_reason', '', true);
+
+    perform public.reconcile_studio_seats (p_studio);
+
+    select public.district_grace_ends_at (s.stripe_subscription_id, s.past_due_since) into v_ends
+    from public.subscriptions s
+    where s.stripe_subscription_id = v_row.stripe_subscription_id;
+
+    return jsonb_build_object(
+        'studio_id', p_studio,
+        'stripe_subscription_id', v_row.stripe_subscription_id,
+        'grace_extended_until', p_grace_until,
+        'grace_ends_at', v_ends
+    );
+end;
+$$;
+
+revoke all on function public.district_billing_row (uuid) from public;
+revoke all on function public.district_billing_row (uuid) from anon;
+revoke all on function public.district_billing_row (uuid) from authenticated;
+grant execute on function public.district_billing_row (uuid) to service_role;
+
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from public;
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from anon;
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from authenticated;
+grant execute on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) to service_role;
+
+revoke all on function public.admin_extend_district_grace (uuid, timestamptz, text, text) from public;
+revoke all on function public.admin_extend_district_grace (uuid, timestamptz, text, text) from anon;
+revoke all on function public.admin_extend_district_grace (uuid, timestamptz, text, text) from authenticated;
+grant execute on function public.admin_extend_district_grace (uuid, timestamptz, text, text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- RLS and privileges
+-- ---------------------------------------------------------------------------
+-- district_billing's own are in its canonical definition above.
+alter table public.district_billing_log enable row level security;
+
+revoke all on table public.district_billing_log from public;
+revoke all on table public.district_billing_log from anon;
+revoke all on table public.district_billing_log from authenticated;
+grant select on table public.district_billing_log to service_role;
+
+revoke all on function public.district_billing_log_change () from public;
+revoke all on function public.district_billing_log_change () from anon;
+revoke all on function public.district_billing_log_change () from authenticated;
+
+-- ===== supabase/migrations/20261020180600_read_only_seats_enforced.sql =====
+-- Read-only seats are read-only everywhere, from the moment they are read-only
+-- (Codex round-2 review of PR #61, major 1; launch-compliance decision 2).
+--
+-- 20261020180500 made a seat past its studio's limit read-only in its
+-- entitlements, and made its OWN scores read-only by archiving them -- which
+-- annotation RLS refuses writes on, but only on the archived score, and only once
+-- reconcile_studio_seats() has run. Two gaps:
+--
+--  * a read-only teacher who is an editor on SOMEONE ELSE's score went on
+--    drawing on it indefinitely: that score is not archived, and nothing asked
+--    who was writing;
+--  * a seat the clock made read-only (an invoice grace period running out, a
+--    period ending with no webhook) kept editing its own scores until the hourly
+--    sweep archived them.
+--
+-- So the writer is now asked, at request time, on every write path a read-only
+-- seat could otherwise use: marks (insert, update -- which includes a tombstone
+-- -- and both batch RPCs, which are SECURITY INVOKER so these policies apply),
+-- lesson-history snapshots, live ink on doc:{id}, a score's title and contents,
+-- share links and assignments (invites), and seats (studio_invite_member already
+-- requires Academy, which a read-only seat does not resolve to). seat_read_only()
+-- reads resolve_entitlements(), so the answer is right the instant the clock or
+-- a row moves it; the archive stays as it was, for everyone else's writes to a
+-- read-only seat's own scores.
+--
+-- What stays allowed: reading and exporting everything (no read path changes),
+-- removing one's own things, and anyone who is not a read-only seat -- a roster
+-- student included: a student resolves to tier 'student' with seat_read_only
+-- false, so a managed student's Edit access is exactly what it was. The check is
+-- on the CALLER's seat, never on the score's owner.
+--
+-- Restrictive policies, added beside the existing permissive ones rather than
+-- re-creating them: a restrictive policy is ANDed with whatever permissive
+-- policies a table has, so this file neither copies nor can undo another
+-- migration's definition of annotations_insert, doc_topic_send_broadcast and the
+-- rest -- the realtime ones especially, which the content-moderation work also
+-- tightens.
+
+-- ---------------------------------------------------------------------------
+-- Is this user on a read-only seat right now?
+-- ---------------------------------------------------------------------------
+-- Only a studio member can be: everyone else answers false without resolving
+-- entitlements, so the policies below cost a non-member one index probe.
+create or replace function public.seat_read_only (p_user uuid) returns boolean language plpgsql stable security definer
+set search_path = public as $$
+begin
+    if p_user is null then
+        return false;
+    end if;
+    if not exists (select 1 from public.studio_members sm where sm.user_id = p_user) then
+        return false;
+    end if;
+    return coalesce((public.resolve_entitlements (p_user) ->> 'seat_read_only')::boolean, false);
+end;
+$$;
+
+-- The caller's own answer, for policies (written `(select ...)` so it is planned
+-- once per statement, not once per row) and for the client, which holds marks it
+-- could not upload rather than undoing them (src/sync/syncEngine.ts).
+create or replace function public.caller_seat_read_only () returns boolean language sql stable security definer
+set search_path = public as $$
+    select public.seat_read_only (auth.uid());
+$$;
+
+revoke all on function public.seat_read_only (uuid) from public;
+revoke all on function public.seat_read_only (uuid) from anon;
+revoke all on function public.seat_read_only (uuid) from authenticated;
+grant execute on function public.seat_read_only (uuid) to service_role;
+
+revoke all on function public.caller_seat_read_only () from public;
+revoke all on function public.caller_seat_read_only () from anon;
+grant execute on function public.caller_seat_read_only () to authenticated;
+grant execute on function public.caller_seat_read_only () to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Marks, lesson history, live ink
+-- ---------------------------------------------------------------------------
+drop policy if exists annotations_seat_read_only_insert on public.annotations;
+
+create policy annotations_seat_read_only_insert on public.annotations as restrictive for insert to authenticated
+with check (not (select public.caller_seat_read_only ()));
+
+-- USING true: a read-only seat still sees every mark it could see. WITH CHECK
+-- refuses the write itself, with an error, as an archived score does -- the
+-- sync engine keeps a refused change instead of undoing it (see the client).
+drop policy if exists annotations_seat_read_only_update on public.annotations;
+
+create policy annotations_seat_read_only_update on public.annotations as restrictive for update to authenticated
+using (true)
+with check (not (select public.caller_seat_read_only ()));
+
+drop policy if exists annotation_snapshots_seat_read_only_insert on public.annotation_snapshots;
+
+create policy annotation_snapshots_seat_read_only_insert on public.annotation_snapshots as restrictive for insert to authenticated
+with check (not (select public.caller_seat_read_only ()));
+
+-- Live ink is broadcast on doc:{id}. Presence stays (a viewer still appears in
+-- the presence bar), and so does any other topic.
+drop policy if exists doc_topic_seat_read_only_broadcast on realtime.messages;
+
+create policy doc_topic_seat_read_only_broadcast on realtime.messages as restrictive for insert to authenticated
+with check (
+    realtime.messages.extension is distinct from 'broadcast'
+    or realtime.topic () not like 'doc:%'
+    or not (select public.caller_seat_read_only ())
+);
+
+-- ---------------------------------------------------------------------------
+-- Invites
+-- ---------------------------------------------------------------------------
+drop policy if exists share_links_seat_read_only_insert on public.share_links;
+
+create policy share_links_seat_read_only_insert on public.share_links as restrictive for insert to authenticated
+with check (not (select public.caller_seat_read_only ()));
+
+-- assign_score is SECURITY DEFINER (it writes document_members), so no policy
+-- reaches it; a trigger does. BEFORE INSERT fires for its upsert's update arm
+-- too. auth.uid() is still the caller inside a definer function, and null for
+-- the service role, which is never refused.
+create or replace function public.refuse_read_only_seat_write () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.seat_read_only (auth.uid()) then
+        raise exception 'this Academy seat is read-only'
+            using errcode = '42501',
+                  detail = json_build_object('code', 'seat_read_only')::text,
+                  hint = 'The academy''s owner can make this seat active again.';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.refuse_read_only_seat_write () from public;
+revoke all on function public.refuse_read_only_seat_write () from anon;
+revoke all on function public.refuse_read_only_seat_write () from authenticated;
+
+drop trigger if exists assignments_refuse_read_only_seat on public.assignments;
+
+create trigger assignments_refuse_read_only_seat before insert on public.assignments
+for each row execute function public.refuse_read_only_seat_write ();
+
+-- ---------------------------------------------------------------------------
+-- A score's own edits
+-- ---------------------------------------------------------------------------
+-- Renaming a score or replacing its file is an edit. page_count and thumb_rev
+-- are not: the viewer backfills them just from opening a score, and refusing
+-- them would break viewing. archived_at already answers to the score cap.
+create or replace function public.documents_refuse_read_only_seat () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if (new.title is distinct from old.title or new.content_rev is distinct from old.content_rev)
+        and public.seat_read_only (auth.uid()) then
+        raise exception 'this Academy seat is read-only'
+            using errcode = '42501',
+                  detail = json_build_object('code', 'seat_read_only')::text,
+                  hint = 'The academy''s owner can make this seat active again.';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.documents_refuse_read_only_seat () from public;
+revoke all on function public.documents_refuse_read_only_seat () from anon;
+revoke all on function public.documents_refuse_read_only_seat () from authenticated;
+
+drop trigger if exists documents_refuse_read_only_seat on public.documents;
+
+create trigger documents_refuse_read_only_seat before update on public.documents
+for each row execute function public.documents_refuse_read_only_seat ();
+
+-- ===== supabase/migrations/20261020180700_read_only_seats_storage.sql =====
+-- Read-only seats cannot write score files through Storage either
+-- (Codex round-3 review of PR #61, round-2 major 1 still partial).
+--
+-- 20261020180600 refuses a read-only seat's writes on every table it could use,
+-- and documents_refuse_read_only_seat refuses bumping a score's content_rev.
+-- But the PDF itself lives in the private 'scores' bucket, and its
+-- scores_insert / scores_update / scores_delete policies (20260801160754) ask
+-- only that the caller own the score. So a read-only seat could still replace
+-- {documentId}/original.pdf, or delete it, straight through the Storage API,
+-- without touching content_rev at all.
+--
+-- Restrictive policies beside those permissive ones, as 20261020180600 does for
+-- the tables, asking the same question with the same helper:
+-- caller_seat_read_only(), planned once per statement. Only the 'scores'
+-- bucket: every other bucket answers true.
+--
+-- What stays allowed: reading and downloading (no SELECT policy changes, so
+-- signed URLs and downloads work as before); every write by anyone who is not a
+-- read-only seat; and removing the files of a score the seat has already
+-- deleted -- deleting one's own score stays allowed, and its files are then
+-- removed under document_storage_cleanup_pending (20261007120401), whose folder
+-- no live score holds any more. The 'thumbnails' bucket is left alone: a cover
+-- is the viewer's own backfill from opening a score, like thumb_rev, which
+-- 20261020180600 lets through for the same reason.
+--
+-- UPDATE has both USING and WITH CHECK: an upsert's update arm (the Storage
+-- API's upload with upsert: true, and every resumable upload) is refused with
+-- an error by a failing USING, where a plain UPDATE just matches nothing.
+
+drop policy if exists scores_seat_read_only_insert on storage.objects;
+
+create policy scores_seat_read_only_insert on storage.objects as restrictive for insert to authenticated
+with check (bucket_id is distinct from 'scores' or not (select public.caller_seat_read_only ()));
+
+drop policy if exists scores_seat_read_only_update on storage.objects;
+
+create policy scores_seat_read_only_update on storage.objects as restrictive for update to authenticated
+using (bucket_id is distinct from 'scores' or not (select public.caller_seat_read_only ()))
+with check (bucket_id is distinct from 'scores' or not (select public.caller_seat_read_only ()));
+
+drop policy if exists scores_seat_read_only_delete on storage.objects;
+
+create policy scores_seat_read_only_delete on storage.objects as restrictive for delete to authenticated
+using (
+    bucket_id is distinct from 'scores'
+    or not (select public.caller_seat_read_only ())
+    or public.document_storage_cleanup_pending ((storage.foldername (name))[1])
+);
+
+-- ===== supabase/migrations/20261020180800_read_only_seats_live_ink.sql =====
+-- Live ink stops when a seat goes read-only, including on a channel that was
+-- already open (Codex round-3 review of PR #61, round-2 major 1 still partial).
+--
+-- 20261020180600's doc_topic_seat_read_only_broadcast refuses a read-only
+-- seat's broadcasts on doc:{id} -- but Realtime asks that policy only when a
+-- channel JOINS and again when the client hands it a new access token. In
+-- between it keeps the answer it got: proven against the local Realtime
+-- server (v2.143.4), a teacher who joined while active went on broadcasting
+-- after their seat turned read-only, until their next token refresh, from
+-- which every send was refused. Realtime offers no way to re-ask on each send
+-- or to evict one subscriber.
+--
+-- So the server now acts at the moment a seat changes, rather than waiting for
+-- the client to rejoin:
+--
+--  * public.seat_read_only_since records which accounts are read-only seats,
+--    so that the change itself -- not every sweep -- is what acts. It is kept
+--    by reconcile_studio_seats(), which every event that can move a seat
+--    already runs (an override, a subscription write, a pick, a removal) and
+--    the hourly sweep runs for what only the clock moves (an invoice grace
+--    period running out).
+--  * When an account becomes a read-only seat, every score it can write on
+--    (its own, and those it edits) gets the membership hint on its live topic.
+--    The app re-reads its access on that hint -- now its seat too
+--    (caller_seat_read_only) -- drops to view only and restarts its channel,
+--    which Realtime authorizes afresh: no more live ink. The same hint goes
+--    out when the seat is active again, so the app leaves view only at once.
+--  * A client that ignores the hint is cut off by topic rotation where the
+--    database has it: PR #63 (content moderation, merged before this one in
+--    the binding order) adds public.rotate_document_realtime(uuid), which moves
+--    a score's realtime to a new topic that the policies admit only fresh
+--    joins to, so a channel authorized before the change is left on a topic
+--    nobody else is on. Called when present, so this migration stands on its
+--    own and gains the eviction the moment #63's is applied before it. Without
+--    it, such a client keeps its cached permission only until its access
+--    token is refreshed or expires (jwt_expiry, an hour): Realtime refuses
+--    every send after a refresh and closes the channel at expiry.
+--
+-- Nothing here changes who may read: a read-only seat still joins, receives
+-- and appears in presence.
+
+-- ---------------------------------------------------------------------------
+-- Who is a read-only seat
+-- ---------------------------------------------------------------------------
+create table if not exists public.seat_read_only_since (
+    user_id uuid primary key references auth.users (id) on delete cascade,
+    since timestamptz not null default now()
+);
+
+alter table public.seat_read_only_since enable row level security;
+
+revoke all on table public.seat_read_only_since from public;
+revoke all on table public.seat_read_only_since from anon;
+revoke all on table public.seat_read_only_since from authenticated;
+grant select on table public.seat_read_only_since to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Telling the account's open scores, and cutting off a stale channel
+-- ---------------------------------------------------------------------------
+-- Every score p_user can write on: their own and those they are an editor of.
+-- On each score's live topic -- #63's current one when it has rotated it -- the
+-- membership hint the app already follows (document_members_broadcast's
+-- payload: it re-reads its access and never trusts the payload). With
+-- p_rotate, and #63's rotation present, the score moves to a new topic too.
+create or replace function public.seat_live_ink_notify (p_user uuid, p_rotate boolean) returns int
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_doc uuid;
+    v_role text;
+    v_topic text;
+    v_live_topic boolean := to_regprocedure('public.document_live_topic(uuid)') is not null;
+    v_rotate boolean := p_rotate and to_regprocedure('public.rotate_document_realtime(uuid)') is not null;
+    v_count int := 0;
+begin
+    for v_doc, v_role in
+        select d.id, 'owner' from public.documents d where d.owner_id = p_user
+        union
+        select dm.document_id, dm.role from public.document_members dm
+        where dm.user_id = p_user and dm.role in ('owner', 'editor')
+        order by 1
+    loop
+        if v_live_topic then
+            execute 'select public.document_live_topic ($1)' into v_topic using v_doc;
+        else
+            v_topic := 'doc:' || v_doc::text;
+        end if;
+
+        perform realtime.send (
+            jsonb_build_object('table', 'document_members', 'document_id', v_doc, 'user_id', p_user, 'role', v_role),
+            'membership', -- event
+            v_topic, -- topic
+            true -- private
+        );
+
+        if v_rotate then
+            execute 'select public.rotate_document_realtime ($1)' using v_doc;
+        end if;
+        v_count := v_count + 1;
+    end loop;
+    return v_count;
+end;
+$$;
+
+-- Records the seat's state and acts only on a change: read-only now and not
+-- before -- hint and rotate; active again -- hint.
+create or replace function public.seat_live_ink_follow (p_user uuid, p_read_only boolean) returns void
+language plpgsql security definer
+set search_path = public as $$
+begin
+    if p_read_only then
+        insert into public.seat_read_only_since (user_id) values (p_user) on conflict (user_id) do nothing;
+        if found then
+            perform public.seat_live_ink_notify (p_user, true);
+        end if;
+    else
+        delete from public.seat_read_only_since s where s.user_id = p_user;
+        if found then
+            perform public.seat_live_ink_notify (p_user, false);
+        end if;
+    end if;
+end;
+$$;
+
+revoke all on function public.seat_live_ink_notify (uuid, boolean) from public;
+revoke all on function public.seat_live_ink_notify (uuid, boolean) from anon;
+revoke all on function public.seat_live_ink_notify (uuid, boolean) from authenticated;
+
+revoke all on function public.seat_live_ink_follow (uuid, boolean) from public;
+revoke all on function public.seat_live_ink_follow (uuid, boolean) from anon;
+revoke all on function public.seat_live_ink_follow (uuid, boolean) from authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Where seats move
+-- ---------------------------------------------------------------------------
+-- Redefined from 20261020180500: the same walk over every member, which now
+-- also records each member's seat and acts on a change.
+create or replace function public.reconcile_studio_seats (p_studio uuid) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_member uuid;
+    v_read_only boolean;
+    v_moved int := 0;
+begin
+    for v_member in
+        select sm.user_id
+        from public.studio_members sm
+        join auth.users u on u.id = sm.user_id
+        where sm.studio_id = p_studio
+        order by sm.user_id
+    loop
+        v_read_only := coalesce((public.resolve_entitlements (v_member) ->> 'seat_read_only')::boolean, false);
+        if v_read_only then
+            v_moved := v_moved + public.apply_free_tier_archival (v_member);
+        else
+            v_moved := v_moved + public.restore_user_plan_archived_scores (v_member);
+        end if;
+        perform public.seat_live_ink_follow (v_member, v_read_only);
+    end loop;
+    return v_moved;
+end;
+$$;
+
+revoke all on function public.reconcile_studio_seats (uuid) from public;
+revoke all on function public.reconcile_studio_seats (uuid) from anon;
+revoke all on function public.reconcile_studio_seats (uuid) from authenticated;
+grant execute on function public.reconcile_studio_seats (uuid) to service_role;
+
+-- Redefined from 20261020180500: a removed member is no longer walked by the
+-- studio's reconcile, so their own seat is followed here.
+create or replace function public.studio_members_release_seat () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if exists (select 1 from auth.users u where u.id = old.user_id) then
+        perform public.restore_user_plan_archived_scores (old.user_id);
+        perform public.seat_live_ink_follow (old.user_id, public.seat_read_only (old.user_id));
+    end if;
+    if exists (select 1 from public.studios st where st.id = old.studio_id) then
+        perform public.reconcile_studio_seats (old.studio_id);
+    end if;
+    return null;
+end;
+$$;
+
+revoke all on function public.studio_members_release_seat () from public;
+revoke all on function public.studio_members_release_seat () from anon;
+revoke all on function public.studio_members_release_seat () from authenticated;
+
+-- ===== supabase/migrations/20261020180900_district_paying_status.sql =====
+-- Who is paying: one status set for card and Stripe Invoicing Academy billing
+-- (launch-compliance decisions 21 and 25; Codex round-4 review of PR #61, new
+-- major 1 and the Decision 21 partial).
+--
+-- 20261020180500 counted a subscription as live when it was active or
+-- trialing inside its period, or -- for send_invoice only -- past_due OR unpaid
+-- inside its 30-day grace. Two things were wrong with that:
+--
+--  * `unpaid` counted. Stripe moves a subscription to unpaid once it has given
+--    up collecting; that is not a district that pays (decision 25).
+--  * A card-paid Academy past due got no grace at all, and the webhook
+--    (stripeEvents.ts) recorded it as tier free. A district that moved to
+--    ordinary card Academy and whose card then failed stopped counting as
+--    paying the moment Stripe first retried: an old linked cancellation came
+--    back as its contract end (purgeable), and a past admin pin was no longer
+--    cleared (decision 8).
+--
+-- Now, for card and Stripe Invoicing alike (decisions 21 and 25), a subscription
+-- is paying when it is
+--
+--     active or trialing (inside its period, as before), or
+--     past_due, inside 30 days of when past_due was first recorded
+--     (subscriptions.past_due_since), or until an admin's later per-district
+--     extension (district_billing.grace_extended_until).
+--
+-- unpaid, canceled, incomplete and incomplete_expired are not. The past-due
+-- grace is for Academy (any collection method) and, as before, for any Stripe
+-- Invoicing subscription; a card Personal or Teacher plan past due is still
+-- free limits at once (the webhook records it as tier free, and it is not live
+-- here either, so it cannot mask a seat).
+--
+-- After the grace period the ordinary lapse rules apply, from the clock alone:
+-- resolve_entitlements() reads this on every call, so the seats past 5 are
+-- read-only the moment grace ends (nothing is deleted), and the hourly sweep
+-- now re-derives every district's contract end, so a district that stopped
+-- paying only by the clock gets its Stripe end back without waiting for an
+-- event.
+--
+-- Rerunnable: every function is CREATE OR REPLACE; nothing else is created.
+
+-- ---------------------------------------------------------------------------
+-- The grace deadline
+-- ---------------------------------------------------------------------------
+-- Redefined from 20261020180500: an admin's extension is per district, so it
+-- now reaches the owner's card-paid Academy too, not only the Stripe Invoicing
+-- subscription the billing record links to.
+create or replace function public.district_grace_ends_at (p_subscription_id text, p_past_due_since timestamptz)
+returns timestamptz language sql stable
+set search_path = public as $$
+    -- greatest() skips nulls: no extension is just the 30 days.
+    select greatest(
+        p_past_due_since + interval '30 days',
+        (
+            select max(b.grace_extended_until)
+            from public.district_billing b
+            where b.stripe_subscription_id = p_subscription_id
+               or b.studio_id in (
+                   select st.id
+                   from public.subscriptions s
+                   join public.studios st on st.owner_id = s.user_id
+                   where s.stripe_subscription_id = p_subscription_id
+                     and s.tier = 'academy'
+               )
+        )
+    );
+$$;
+
+revoke all on function public.district_grace_ends_at (text, timestamptz) from public;
+revoke all on function public.district_grace_ends_at (text, timestamptz) from anon;
+revoke all on function public.district_grace_ends_at (text, timestamptz) from authenticated;
+grant execute on function public.district_grace_ends_at (text, timestamptz) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The paying status set
+-- ---------------------------------------------------------------------------
+-- Redefined from 20261020180500. The one predicate every entitlement read, the
+-- seat limit, the paying check behind the contract end (district_billing_rederive)
+-- and the billing record's link already share, so changing it here changes all
+-- of them together.
+create or replace function public.subscription_is_live (s public.subscriptions) returns boolean language sql stable
+set search_path = public as $$
+    select s.mode = any (public.entitling_billing_modes ())
+        and (
+            (s.status in ('active', 'trialing') and (s.current_period_end is null or s.current_period_end > now()))
+            or (
+                s.status = 'past_due'
+                and (s.tier = 'academy' or s.collection_method = 'send_invoice')
+                and coalesce(now() < public.district_grace_ends_at (s.stripe_subscription_id, s.past_due_since), false)
+            )
+        );
+$$;
+
+revoke all on function public.subscription_is_live (public.subscriptions) from public;
+revoke all on function public.subscription_is_live (public.subscriptions) from anon;
+revoke all on function public.subscription_is_live (public.subscriptions) from authenticated;
+grant execute on function public.subscription_is_live (public.subscriptions) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- The hourly sweep
+-- ---------------------------------------------------------------------------
+-- Redefined from 20261020180500: the same seat walk, then EVERY district's
+-- contract end derived again rather than only the admin pins already past. A
+-- grace period that runs out is only the clock: no webhook marks it, so this is
+-- where a district that has stopped paying gets its Stripe end back (and where
+-- a pin the clock carried into the past is cleared while it pays, as before).
+-- district_billing_rederive writes only when the answer changes.
+create or replace function public.reconcile_district_seats () returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_studio uuid;
+    v_moved int := 0;
+begin
+    for v_studio in
+        select sm.studio_id
+        from public.studio_members sm
+        group by sm.studio_id
+        having count(*) > 4
+        order by sm.studio_id
+    loop
+        v_moved := v_moved + public.reconcile_studio_seats (v_studio);
+    end loop;
+
+    for v_studio in
+        select b.studio_id from public.district_billing b order by b.studio_id
+    loop
+        perform public.district_billing_rederive (v_studio);
+    end loop;
+    return v_moved;
+end;
+$$;
+
+revoke all on function public.reconcile_district_seats () from public;
+revoke all on function public.reconcile_district_seats () from anon;
+revoke all on function public.reconcile_district_seats () from authenticated;
+grant execute on function public.reconcile_district_seats () to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Admin grace extension
+-- ---------------------------------------------------------------------------
+-- Redefined from 20261020180500: a district paying by card can be given more
+-- time too (the extension is per district). Refused only when the owner has no
+-- Academy subscription of any kind and the record links none. The answer's
+-- grace_ends_at is for the linked subscription, or else the owner's past-due
+-- Academy, whichever ends latest.
+create or replace function public.admin_extend_district_grace (
+    p_studio uuid,
+    p_grace_until timestamptz,
+    p_actor text,
+    p_reason text default null
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.district_billing;
+    v_owner uuid;
+    v_ends timestamptz;
+begin
+    if auth.uid() is not null then
+        raise exception 'district billing is admin-only' using errcode = '42501';
+    end if;
+    if nullif(trim(coalesce(p_actor, '')), '') is null then
+        raise exception 'say who is making this change (p_actor)' using errcode = '22023';
+    end if;
+
+    v_row := public.district_billing_row (p_studio);
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+
+    if v_row.stripe_subscription_id is null
+        and not exists (select 1 from public.subscriptions s where s.user_id = v_owner and s.tier = 'academy') then
+        raise exception 'studio % has no Academy subscription recorded to extend', p_studio
+            using errcode = 'P0002';
+    end if;
+
+    perform set_config('cleffy.district_billing_actor', trim(p_actor), true);
+    perform set_config('cleffy.district_billing_reason', coalesce(p_reason, ''), true);
+
+    update public.district_billing b
+    set grace_extended_until = p_grace_until, updated_by = trim(p_actor), updated_at = now()
+    where b.studio_id = p_studio;
+
+    perform set_config('cleffy.district_billing_reason', '', true);
+
+    perform public.reconcile_studio_seats (p_studio);
+    -- Paying again (or no longer) moves the contract end too, by this actor.
+    perform public.district_billing_rederive (p_studio);
+
+    perform set_config('cleffy.district_billing_actor', '', true);
+
+    select max(public.district_grace_ends_at (s.stripe_subscription_id, s.past_due_since)) into v_ends
+    from public.subscriptions s
+    where s.stripe_subscription_id = v_row.stripe_subscription_id
+       or (s.user_id = v_owner and s.tier = 'academy' and s.status = 'past_due');
+
+    return jsonb_build_object(
+        'studio_id', p_studio,
+        'stripe_subscription_id', v_row.stripe_subscription_id,
+        'grace_extended_until', p_grace_until,
+        'grace_ends_at', v_ends
+    );
+end;
+$$;
+
+revoke all on function public.admin_extend_district_grace (uuid, timestamptz, text, text) from public;
+revoke all on function public.admin_extend_district_grace (uuid, timestamptz, text, text) from anon;
+revoke all on function public.admin_extend_district_grace (uuid, timestamptz, text, text) from authenticated;
+grant execute on function public.admin_extend_district_grace (uuid, timestamptz, text, text) to service_role;
+
+-- ===== supabase/migrations/20261020181000_district_contract_end_clamp.sql =====
+-- A contract end is never earlier than when Cleffy learned of it
+-- (launch-compliance decision 22; Codex round-4 review of PR #61, new major 2).
+--
+-- The retention purge (PR #64) sends the owner an export notice 16 days after
+-- district_billing.contract_ends_at and purges 30 days after it. Every path
+-- that set the end wrote its source date as given: Stripe's ended_at or
+-- current_period_end (district_billing_rederive) and an admin's date
+-- (admin_set_district_contract_end). So a cancellation Stripe delivered late,
+-- or recorded with an old period end, or an admin date already in the past,
+-- started the retention clock in the past -- possibly already beyond its notice
+-- and its window, so a district could be purged with no notice at all.
+--
+-- Now every end-setting path stores
+--
+--     contract_ends_at = greatest(the source's date, contract_end_learned_at)
+--
+-- where contract_end_learned_at is when Cleffy learned of that end: now() at the
+-- write or at the event's processing. The source's own date is kept beside it
+-- (contract_end_reported_at), and the lower bound is preserved: a retry, a
+-- replayed or redelivered event, an hourly re-derivation -- anything that
+-- reports the SAME date from the same source -- keeps the learned-at time it
+-- has, so it can neither move the learned-at time later nor the end earlier. A
+-- different date (Stripe's ended_at arriving after a webhook that only gave a
+-- period end, an admin entering a new date) is a new end, learned now. A
+-- missing date still leaves the stored value unchanged (20261020180500's
+-- warning path), and an end that goes away (the district pays again, an admin
+-- hands it back) clears both columns with it. The district always gets its
+-- full 14-day notice and 30-day window, counted from no earlier than the day
+-- Cleffy knew.
+--
+-- The columns are added here, outside the canonical district_billing block
+-- that 20261020180500 shares byte for byte with #64's
+-- 20261021120700_district_retention.sql, so that block is unchanged; #64 only
+-- reads contract_ends_at, which is already clamped when it reads it.
+--
+-- Rerunnable: columns IF NOT EXISTS, functions CREATE OR REPLACE, and the
+-- backfill touches only rows it has not touched before.
+
+alter table public.district_billing add column if not exists contract_end_reported_at timestamptz;
+
+alter table public.district_billing add column if not exists contract_end_learned_at timestamptz;
+
+-- ---------------------------------------------------------------------------
+-- Rows written before this migration
+-- ---------------------------------------------------------------------------
+-- Their source date is the stored end. When it was learned is not recorded;
+-- the row's last write is the closest bound there is (never later than now),
+-- and it errs the district's way: the clamp can only move the end later.
+do $backfill$
+begin
+    perform set_config('cleffy.district_billing_actor', 'migration 20261020181000', true);
+    perform set_config('cleffy.district_billing_reason', 'contract end clamped to when it was last written (decision 22)', true);
+
+    update public.district_billing b
+    set contract_end_reported_at = b.contract_ends_at,
+        contract_end_learned_at = least(b.updated_at, now()),
+        contract_ends_at = greatest(b.contract_ends_at, least(b.updated_at, now()))
+    where b.contract_ends_at is not null
+      and b.contract_end_learned_at is null;
+
+    perform set_config('cleffy.district_billing_actor', '', true);
+    perform set_config('cleffy.district_billing_reason', '', true);
+end;
+$backfill$;
+
+-- ---------------------------------------------------------------------------
+-- Deriving the end from Stripe
+-- ---------------------------------------------------------------------------
+-- Redefined from 20261020180500. Which date, and whether the district pays, are
+-- decided exactly as before; what is stored is clamped to when it was learned.
+create or replace function public.district_billing_rederive (p_studio uuid) returns void
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.district_billing;
+    v_owner uuid;
+    v_linked public.subscriptions;
+    v_end timestamptz;
+    v_learned timestamptz;
+    v_stored timestamptz;
+    v_paying boolean;
+    v_reason text := nullif(current_setting('cleffy.district_billing_reason', true), '');
+begin
+    select * into v_row from public.district_billing b where b.studio_id = p_studio for update;
+    if not found then
+        return;
+    end if;
+
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+
+    -- Any paying Academy subscription of the owner, card-paid or Stripe
+    -- Invoicing (subscription_is_live: decisions 21 and 25), is a district
+    -- that pays: #64 never purges it. Its seats past the cap of 5 are still
+    -- read-only (decisions item 2); that is the seat limit's business.
+    v_paying := exists (
+        select 1 from public.subscriptions s
+        where s.user_id = v_owner
+          and s.tier = 'academy'
+          and public.subscription_is_live (s)
+    );
+
+    if v_row.contract_ends_source = 'admin' then
+        -- An admin's pin is the contract's own date and is left alone -- unless
+        -- it has already passed while the owner pays (decision 8): cleared and
+        -- logged, it hands the record back to Stripe, which, the owner paying,
+        -- says no end. A pin still in the future, and a pinned "never" (null),
+        -- stay.
+        if v_paying and v_row.contract_ends_at is not null and v_row.contract_ends_at <= now() then
+            perform set_config('cleffy.district_billing_reason',
+                'admin pin ' || v_row.contract_ends_at::text || ' had passed while the owner pays on a live subscription: cleared',
+                true);
+            update public.district_billing b
+            set contract_ends_at = null,
+                contract_ends_source = null,
+                contract_end_reported_at = null,
+                contract_end_learned_at = null,
+                updated_by = coalesce(nullif(current_setting('cleffy.district_billing_actor', true), ''), 'system'),
+                updated_at = now()
+            where b.studio_id = p_studio;
+            perform set_config('cleffy.district_billing_reason', coalesce(v_reason, ''), true);
+        end if;
+        return;
+    end if;
+
+    if not v_paying then
+        select * into v_linked from public.subscriptions s where s.stripe_subscription_id = v_row.stripe_subscription_id;
+        if found and v_linked.status in ('canceled', 'incomplete_expired') then
+            -- Stripe's own dates only (Codex round-3 review of #61): ended_at,
+            -- else the subscription's current_period_end. Never the event's
+            -- time or now() as the date itself: with neither, the record keeps
+            -- what it has and says so.
+            v_end := coalesce(v_linked.ended_at, v_linked.current_period_end);
+            if v_end is null then
+                raise warning 'district_billing: studio % subscription % ended with no Stripe end date; contract_ends_at left at %',
+                    p_studio, v_linked.stripe_subscription_id, coalesce(v_row.contract_ends_at::text, 'null');
+                return;
+            end if;
+        end if;
+    end if;
+
+    -- Decision 22: never earlier than when Cleffy learned of it. The same
+    -- Stripe date as stored (a redelivery, a replay, the hourly sweep) keeps
+    -- the learned-at time it has; a new date is learned now.
+    if v_end is not null then
+        if v_row.contract_ends_source = 'stripe'
+            and v_row.contract_end_reported_at is not distinct from v_end
+            and v_row.contract_end_learned_at is not null then
+            v_learned := v_row.contract_end_learned_at;
+        else
+            v_learned := now();
+        end if;
+        v_stored := greatest(v_end, v_learned);
+    end if;
+
+    if v_stored is distinct from v_end and v_reason is null then
+        perform set_config('cleffy.district_billing_reason',
+            'stripe end ' || v_end::text || ' predates when Cleffy learned of it (' || v_learned::text || '): clamped',
+            true);
+    end if;
+
+    update public.district_billing b
+    set contract_ends_at = v_stored,
+        contract_ends_source = case when v_end is null then null else 'stripe' end,
+        contract_end_reported_at = v_end,
+        contract_end_learned_at = v_learned,
+        updated_by = coalesce(nullif(current_setting('cleffy.district_billing_actor', true), ''), 'stripe'),
+        updated_at = now()
+    where b.studio_id = p_studio
+      and (b.contract_ends_at is distinct from v_stored
+           or b.contract_ends_source is distinct from case when v_end is null then null else 'stripe' end
+           or b.contract_end_reported_at is distinct from v_end
+           or b.contract_end_learned_at is distinct from v_learned);
+
+    perform set_config('cleffy.district_billing_reason', coalesce(v_reason, ''), true);
+end;
+$$;
+
+revoke all on function public.district_billing_rederive (uuid) from public;
+revoke all on function public.district_billing_rederive (uuid) from anon;
+revoke all on function public.district_billing_rederive (uuid) from authenticated;
+
+-- ---------------------------------------------------------------------------
+-- An admin's date
+-- ---------------------------------------------------------------------------
+-- Redefined from 20261020180500. The admin's date is stored clamped to when it
+-- was entered; entering the same date again (a retry) keeps the first time.
+-- A pinned "never" (null) and handing the date back to Stripe (p_automatic)
+-- are unchanged.
+create or replace function public.admin_set_district_contract_end (
+    p_studio uuid,
+    p_contract_ends_at timestamptz,
+    p_actor text,
+    p_reason text default null,
+    p_automatic boolean default false
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.district_billing;
+    v_learned timestamptz;
+begin
+    if auth.uid() is not null then
+        raise exception 'district billing is admin-only' using errcode = '42501';
+    end if;
+    if nullif(trim(coalesce(p_actor, '')), '') is null then
+        raise exception 'say who is making this change (p_actor)' using errcode = '22023';
+    end if;
+    if p_automatic and p_contract_ends_at is not null then
+        raise exception 'p_automatic follows Stripe; pass p_contract_ends_at => null with it' using errcode = '22023';
+    end if;
+
+    v_row := public.district_billing_row (p_studio);
+
+    perform set_config('cleffy.district_billing_actor', trim(p_actor), true);
+    perform set_config('cleffy.district_billing_reason', coalesce(p_reason, ''), true);
+
+    if p_automatic then
+        update public.district_billing b
+        set contract_ends_at = null, contract_ends_source = null,
+            contract_end_reported_at = null, contract_end_learned_at = null,
+            updated_by = trim(p_actor), updated_at = now()
+        where b.studio_id = p_studio;
+
+        -- Re-derive from the subscriptions as they stand, the way their
+        -- webhook writes do.
+        perform public.district_billing_rederive (p_studio);
+    else
+        if p_contract_ends_at is not null then
+            if v_row.contract_ends_source = 'admin'
+                and v_row.contract_end_reported_at is not distinct from p_contract_ends_at
+                and v_row.contract_end_learned_at is not null then
+                v_learned := v_row.contract_end_learned_at;
+            else
+                v_learned := now();
+            end if;
+        end if;
+
+        update public.district_billing b
+        set contract_ends_at = greatest(p_contract_ends_at, v_learned),
+            contract_ends_source = 'admin',
+            contract_end_reported_at = p_contract_ends_at,
+            contract_end_learned_at = v_learned,
+            updated_by = trim(p_actor),
+            updated_at = now()
+        where b.studio_id = p_studio;
+
+        -- A pin already past while the owner pays is cleared (and logged) at
+        -- once, as on any later event; the answer below says so.
+        perform public.district_billing_rederive (p_studio);
+    end if;
+
+    perform set_config('cleffy.district_billing_actor', '', true);
+    perform set_config('cleffy.district_billing_reason', '', true);
+
+    select * into v_row from public.district_billing b where b.studio_id = p_studio;
+    return jsonb_build_object(
+        'studio_id', p_studio,
+        'stripe_subscription_id', v_row.stripe_subscription_id,
+        'contract_ends_at', v_row.contract_ends_at,
+        'contract_ends_source', v_row.contract_ends_source,
+        'contract_end_reported_at', v_row.contract_end_reported_at,
+        'contract_end_learned_at', v_row.contract_end_learned_at
+    );
+end;
+$$;
+
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from public;
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from anon;
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from authenticated;
+grant execute on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) to service_role;
+
+-- ===== supabase/migrations/20261020181100_read_only_seats_grace_deadline.sql =====
+-- Live ink stops at the grace deadline itself, not at the next sweep
+-- (launch-compliance decision 26; Codex round-4 review of PR #61, D2 partial).
+--
+-- Every check a read-only seat meets per request already compares now()
+-- against the stored grace deadline: caller_seat_read_only() reads
+-- resolve_entitlements(), whose subscription_is_live() asks
+-- now() < district_grace_ends_at(), so marks, lesson history, renames, share
+-- links, assignments and every write to the 'scores' bucket are refused from
+-- the deadline itself, with nothing recorded and nothing archived -- no sweep
+-- (tests/sql/district_read_only_seats.sql proves it with every trigger off).
+--
+-- Live ink is the exception, because Realtime does not ask per request. It
+-- asks the broadcast policy when a channel JOINS and again when the client
+-- hands it a new access token, and keeps the answer until then -- at the
+-- latest until that token expires, when it closes the channel (proven against
+-- the local Realtime server; 20261020180800). A join answered while the
+-- district's grace still ran therefore kept its live ink past the deadline,
+-- until the hourly sweep (20261020180500's district-seat-reconcile) noticed and
+-- rotated the score's topic: up to an hour of a modified client drawing live on
+-- a seat the clock had already made read-only.
+--
+-- So the join itself is now asked whether the answer would outlive the
+-- deadline. A district member whose seat rests on a subscription inside its
+-- past-due grace (decisions 21 and 25: card or Stripe Invoicing), and whose
+-- grace ends before the token Realtime is authorizing expires (its exp claim),
+-- is refused broadcast on doc:{id}. Whatever Realtime holds then expires no
+-- later than the deadline: a channel authorized earlier was authorized with a
+-- token that runs out before it, and every refresh after that is refused. A
+-- token with no exp is treated as never expiring. The cost is live ink for a
+-- seat in the last token lifetime (jwt_expiry, an hour) of a grace period of
+-- 30 days or more -- marks still save, through RLS, and reach everyone through
+-- doc-db:{id} -- and it is a member of a district in that last hour, not only
+-- the seats that will go read-only: which of them do depends on what the owner
+-- does in that hour. Paying ends the grace period and with it the refusal at
+-- the next join or refresh. Presence, receiving, and anyone who is not a
+-- member of such a district (a roster student included) are untouched.
+--
+-- The sweep keeps its job: it records the seat, sends the membership hint and
+-- rotates the topics (20261020180800) once the clock has moved it, as before.
+--
+-- Rerunnable: functions CREATE OR REPLACE, the policy dropped before it is
+-- created.
+
+-- ---------------------------------------------------------------------------
+-- When the clock alone could make this account a read-only seat
+-- ---------------------------------------------------------------------------
+-- The earliest grace deadline among the past-due subscriptions, inside their
+-- grace, that this account's seat or own plan rests on: its own, and those of
+-- the owners of the studios it is a member of. Null for an account that is no
+-- studio's member (the cheap common case: one index probe), and for a member
+-- whose district pays outright. subscription_is_live() of a past_due row is
+-- exactly "inside its grace", so the deadline is always still ahead.
+create or replace function public.seat_grace_deadline (p_user uuid) returns timestamptz language plpgsql stable
+security definer
+set search_path = public as $$
+begin
+    if p_user is null or not exists (select 1 from public.studio_members sm where sm.user_id = p_user) then
+        return null;
+    end if;
+    return (
+        select min(public.district_grace_ends_at (s.stripe_subscription_id, s.past_due_since))
+        from public.subscriptions s
+        where s.status = 'past_due'
+          and (
+              s.user_id = p_user
+              or s.user_id in (
+                  select st.owner_id
+                  from public.studio_members sm
+                  join public.studios st on st.id = sm.studio_id
+                  where sm.user_id = p_user
+              )
+          )
+          and public.subscription_is_live (s)
+    );
+end;
+$$;
+
+-- For the policy below: does the caller's grace end before the token Realtime
+-- is authorizing does? Written `(select ...)` in the policy, so it is planned
+-- once per statement.
+create or replace function public.caller_seat_grace_ends_before_token () returns boolean language sql stable
+security definer
+set search_path = public as $$
+    select coalesce(
+        public.seat_grace_deadline (auth.uid())
+            <= coalesce(to_timestamp(nullif(auth.jwt () ->> 'exp', '')::double precision), 'infinity'::timestamptz),
+        false
+    );
+$$;
+
+revoke all on function public.seat_grace_deadline (uuid) from public;
+revoke all on function public.seat_grace_deadline (uuid) from anon;
+revoke all on function public.seat_grace_deadline (uuid) from authenticated;
+grant execute on function public.seat_grace_deadline (uuid) to service_role;
+
+revoke all on function public.caller_seat_grace_ends_before_token () from public;
+revoke all on function public.caller_seat_grace_ends_before_token () from anon;
+grant execute on function public.caller_seat_grace_ends_before_token () to authenticated;
+grant execute on function public.caller_seat_grace_ends_before_token () to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Live ink
+-- ---------------------------------------------------------------------------
+-- Restrictive, beside 20261020180600's doc_topic_seat_read_only_broadcast and
+-- whatever permissive policies the topic has (#63's included): ANDed with them,
+-- so it neither copies nor can undo another migration's definition.
+drop policy if exists doc_topic_seat_grace_broadcast on realtime.messages;
+
+create policy doc_topic_seat_grace_broadcast on realtime.messages as restrictive for insert to authenticated
+with check (
+    realtime.messages.extension is distinct from 'broadcast'
+    or realtime.topic () not like 'doc:%'
+    or not (select public.caller_seat_grace_ends_before_token ())
+);
+
+-- ===== supabase/migrations/20261020181200_district_contract_end_automatic_retry.sql =====
+-- Handing the contract end back to Stripe twice does not restart retention
+-- (launch-compliance decision 22; Codex round-5 review of PR #61, new minor 1).
+--
+-- 20261020181000's admin_set_district_contract_end (p_automatic => true)
+-- cleared contract_end_learned_at on every call and re-derived, so the
+-- re-derivation found no learned-at time to keep and assigned now(). Repeating
+-- the hand-back after the district already followed Stripe -- a retry, a
+-- runbook step run twice -- moved the clamped contract_ends_at, and with it
+-- #64's notice and purge, later each time, though Stripe's data had not
+-- changed. Decision 22's learned-at time is persisted once.
+--
+-- Now:
+--
+--   * Already following Stripe (contract_ends_source 'stripe', or null with no
+--     end): nothing is cleared. The request only runs the re-derivation every
+--     webhook write already runs, which writes nothing while Stripe's data is
+--     unchanged and keeps the learned-at time of the same Stripe date
+--     (20261020181000). The end, its learned-at time and Stripe's date stay.
+--   * A real hand-back (contract_ends_source 'admin'): the pin goes and the end
+--     is derived from Stripe again. The pin's date and learned-at time are kept
+--     on the row as it is handed over, so a Stripe end on that same date keeps
+--     the earlier learned-at time (never a later one); a different date is a
+--     new end, learned now; no end clears both. An end Stripe gives no date
+--     for is not inherited from the pin: it is null, as it was before.
+--
+-- Pinning a date (p_automatic false) is unchanged from 20261020181000.
+--
+-- Rerunnable: the function is CREATE OR REPLACE, nothing else is created or
+-- altered, and the privileges are reset to the same end state every time.
+
+create or replace function public.admin_set_district_contract_end (
+    p_studio uuid,
+    p_contract_ends_at timestamptz,
+    p_actor text,
+    p_reason text default null,
+    p_automatic boolean default false
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.district_billing;
+    v_learned timestamptz;
+begin
+    if auth.uid() is not null then
+        raise exception 'district billing is admin-only' using errcode = '42501';
+    end if;
+    if nullif(trim(coalesce(p_actor, '')), '') is null then
+        raise exception 'say who is making this change (p_actor)' using errcode = '22023';
+    end if;
+    if p_automatic and p_contract_ends_at is not null then
+        raise exception 'p_automatic follows Stripe; pass p_contract_ends_at => null with it' using errcode = '22023';
+    end if;
+
+    v_row := public.district_billing_row (p_studio);
+
+    perform set_config('cleffy.district_billing_actor', trim(p_actor), true);
+    perform set_config('cleffy.district_billing_reason', coalesce(p_reason, ''), true);
+
+    if p_automatic then
+        if v_row.contract_ends_source is not distinct from 'admin' then
+            -- A real hand-back. The row follows Stripe from here, carrying the
+            -- pin's date and learned-at time (a pinned "never" carries none), so
+            -- that the re-derivation below keeps that learned-at time if Stripe
+            -- reports the same date and learns any other date now.
+            update public.district_billing b
+            set contract_ends_source = case when b.contract_ends_at is null then null else 'stripe' end,
+                contract_end_reported_at = case when b.contract_ends_at is null then null else b.contract_end_reported_at end,
+                contract_end_learned_at = case when b.contract_ends_at is null then null else b.contract_end_learned_at end,
+                updated_by = trim(p_actor), updated_at = now()
+            where b.studio_id = p_studio;
+        end if;
+
+        -- Re-derive from the subscriptions as they stand, the way their
+        -- webhook writes do. Already following Stripe, with Stripe's data
+        -- unchanged, this writes nothing.
+        perform public.district_billing_rederive (p_studio);
+
+        if v_row.contract_ends_source is not distinct from 'admin' then
+            -- Stripe ended the subscription without a date (the re-derivation
+            -- warns and keeps what the row has): the pin's date is not
+            -- Stripe's, so it is not kept as Stripe's end.
+            update public.district_billing b
+            set contract_ends_at = null, contract_ends_source = null,
+                contract_end_reported_at = null, contract_end_learned_at = null,
+                updated_by = trim(p_actor), updated_at = now()
+            where b.studio_id = p_studio
+              and b.contract_ends_source = 'stripe'
+              and not exists (
+                  select 1 from public.subscriptions s
+                  where s.stripe_subscription_id = b.stripe_subscription_id
+                    and s.status in ('canceled', 'incomplete_expired')
+                    and coalesce(s.ended_at, s.current_period_end) is not distinct from b.contract_end_reported_at
+              );
+        end if;
+    else
+        if p_contract_ends_at is not null then
+            if v_row.contract_ends_source = 'admin'
+                and v_row.contract_end_reported_at is not distinct from p_contract_ends_at
+                and v_row.contract_end_learned_at is not null then
+                v_learned := v_row.contract_end_learned_at;
+            else
+                v_learned := now();
+            end if;
+        end if;
+
+        update public.district_billing b
+        set contract_ends_at = greatest(p_contract_ends_at, v_learned),
+            contract_ends_source = 'admin',
+            contract_end_reported_at = p_contract_ends_at,
+            contract_end_learned_at = v_learned,
+            updated_by = trim(p_actor),
+            updated_at = now()
+        where b.studio_id = p_studio;
+
+        -- A pin already past while the owner pays is cleared (and logged) at
+        -- once, as on any later event; the answer below says so.
+        perform public.district_billing_rederive (p_studio);
+    end if;
+
+    perform set_config('cleffy.district_billing_actor', '', true);
+    perform set_config('cleffy.district_billing_reason', '', true);
+
+    select * into v_row from public.district_billing b where b.studio_id = p_studio;
+    return jsonb_build_object(
+        'studio_id', p_studio,
+        'stripe_subscription_id', v_row.stripe_subscription_id,
+        'contract_ends_at', v_row.contract_ends_at,
+        'contract_ends_source', v_row.contract_ends_source,
+        'contract_end_reported_at', v_row.contract_end_reported_at,
+        'contract_end_learned_at', v_row.contract_end_learned_at
+    );
+end;
+$$;
+
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from public;
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from anon;
+revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from authenticated;
+grant execute on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) to service_role;

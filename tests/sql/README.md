@@ -114,6 +114,131 @@ updates when the role exists.
 an archived, claimed roster row whose account is a provisioned student (false
 for a wrong one, a live or unclaimed row, a non-student account, a non-bcrypt
 hash and an unknown username), and refuses every caller but the service role.
+`district_seats.sql` proves
+`supabase/migrations/20261020180400_district_seat_overrides.sql`: a studio is
+capped at Academy's 5 until an admin sets an override, which then raises the
+seat trigger's limit only while the subscription it is tied to is the studio
+owner's live `send_invoice` Academy subscription (a lapsed period, `past_due`,
+`canceled` or a switch to `charge_automatically` puts the studio back on 5, and
+a renewal or payment restores the override without anyone re-setting it); the
+webhook's own subscription writes (`write_subscription_under_lock`, a write
+that omits `collection_method` included) never touch the override or its log;
+`admin_set_studio_seat_override` refuses an override at or below 5, no actor, an
+unrecorded or another user's subscription and a card-paid one, leaving nothing
+behind; owners and members read the effective limit through `studio_seat_limit`
+and nobody else does; no client role reads or writes either table, calls the
+admin functions (a user identity is refused even where EXECUTE is held) or
+raises `studios.seat_limit`; and every set, change and clear -- a hand-run
+insert and the cascade from a deleted studio included -- lands in
+`studio_seat_override_log`, which outlives the studio. It reports
+`failures | total` on its last line.
+
+`district_seat_cap.sql` proves
+`supabase/migrations/20261020180500_district_seat_cap_and_grace.sql`: with
+nine teachers seated under a 10-seat district override, lowering it to 6,
+clearing it, a send_invoice invoice past due beyond 30 days, and the district
+moving to ordinary card-paid Academy each leave only the seats inside the new
+limit entitled -- the owner's pick first, then the oldest -- and make the rest
+read-only (`resolve_entitlements` answers tier free, `seat_read_only`, zero on
+everything created and unlimited export; their scores are archived as
+`plan_lapse`, so annotation RLS refuses marks while view and export still
+work, and uploads, un-archiving and new invites are refused), with no score or
+seat deleted; re-setting the override, an admin's grace extension and the
+district paying each restore every seat and every score at once; inside 30
+days past due (clock from `past_due_since`, which a later delivery does not
+restart) the district keeps full access, its owner included, while a card
+Teacher plan past due gets none; the hourly
+`reconcile_district_seats` catches a grace period that only the clock ended;
+`studio_seat_states` agrees with `studio_seat_is_active`; only the owner picks
+seats (never more than the limit leaves room for, never a non-member) or reads
+their status; removing a read-only teacher releases them to free with their
+scores back up to the free cap; `district_billing.contract_ends_at` follows
+Stripe's actual end only (null while a cancellation is merely scheduled or
+the subscription is resumed or past due; on cancellation Stripe's `ended_at`
+-- not the scheduled date of an earlier schedule -- or, from a webhook that
+omits it (the migration deployed before the new webhook), Stripe's
+`current_period_end`; with neither, nothing is invented: the record keeps what
+it had, null included, and a warning is logged -- never the event's time or
+now(); never moved by a redelivery; untouched by a card subscription that is
+not Academy), and is null while the owner has a card-paid Academy (a paying
+district, whose seats past 5 stay read-only), and is null -- so the
+retention purge selects nothing -- as soon as the district pays on a
+replacement subscription, with or without the override moved to it, while a
+replacement not yet paid leaves the old end, and the replacement's own end
+counts once it ends, until an admin pins it (a date, or null for never) --
+a pinned date already past while the owner pays is cleared and logged, when
+pinned and by the hourly sweep, while a future one and one for a district
+that does not pay stand --
+and an admin can hand it back to Stripe; one paying status set for card and
+Stripe Invoicing Academy billing (`20261020180900_district_paying_status.sql`,
+decisions 21 and 25): active, trialing and past_due inside 30 days of first
+going past due (or an admin's per-district extension, which reaches a card
+Academy too) pay -- no contract end, no purge, a past admin pin cleared and
+logged -- while unpaid (even inside the 30 days and recorded with its tier) and
+past_due past grace do not, and the hourly sweep gives a district that stopped
+paying only by the clock its Stripe end back; every stored contract end is no
+earlier than when Cleffy learned of it (`20261020181000_district_contract_end_clamp.sql`,
+decision 22): a cancellation delivered late with a Stripe date months old and
+an admin date already past are both stored as the time they were learned,
+Stripe's or the admin's own date kept beside it, so the 14-day notice and the
+30-day window are whole, and a replay, a redelivery, the hourly sweep or an
+admin retry of the same date keeps the learned-at time (neither later nor the
+end earlier) while a different date is a new end; every billing-record change is
+logged with its actor; and no client role reads the billing record or its log, calls
+the admin or reconcile functions, or writes `kept_active`. It reports
+`failures | total` on its last line.
+`district_read_only_seats.sql` proves
+`supabase/migrations/20261020180600_read_only_seats_enforced.sql`: a seat that
+the clock alone made read-only (an invoice grace period running out, with no
+webhook and no hourly sweep yet, so nothing is archived) can write nothing at
+once -- no mark on its own score or on a score shared with it as an editor,
+through PostgREST or either batch RPC, no tombstone, no lesson-history
+snapshot, no live ink on `doc:{id}`, no rename or new file, no share link, no
+assignment, no seat invite, and (`20261020180700_read_only_seats_storage.sql`)
+no write to its score's PDF in the `scores` bucket: an upsert over it, a new
+file in its folder and removing it are refused or match nothing -- while it
+still sees, downloads and exports everything, appears in presence, backfills a
+page count and a cover, and can delete its own score and clean up its files;
+the hourly sweep (`20261020180800_read_only_seats_live_ink.sql`) records the
+seat as read-only, sends the membership hint on the live topic of every score
+it can write on and rotates those scores' topics through PR #63's
+`rotate_document_realtime` (a stand-in records the calls when #63 is absent),
+once -- a second sweep changes nothing, and paying clears the record and hints
+again without rotating; a grace period that runs out on the clock alone
+(`20261020181100_read_only_seats_grace_deadline.sql`, decision 26) shuts live
+ink at the deadline itself: before it the seat still marks and writes its PDF,
+but a broadcast authorized with a token that outlives the deadline (or has no
+exp) is refused, since Realtime would keep that answer past it, while one whose
+token expires first is not and a roster student is untouched; past it, with no
+sweep (nothing recorded, nothing archived), live ink and the Storage write are
+refused; no client reads the record or sends the hint; an active seat and a roster
+student with Edit keep writing; paying again lifts it immediately; and nobody
+can ask about another user's seat. It reports `failures | total` on its last
+line.
+
+`district_migrations_rerunnable.sql` proves the district migrations
+(`20261020180400` through `20261020181100`) are rerunnable whole,
+not only the canonical block: it applies all three, in order, twice on top of a
+database that already has them (psql `\ir`, so psql only, never the MCP), then
+checks every trigger, policy, constraint and cron job exists once, every added
+column and index is there, RLS and grants are unchanged, the latest function
+definitions win, and an override, its log, a billing record and a kept seat
+written before the rerun are untouched -- with the log trigger firing once per
+change. A migration that is not rerunnable stops it with its error.
+`tests/billing/districtMigrationsRerunnable.test.ts` holds the guards in CI.
+
+`district_billing_canonical.sql` proves the canonical `public.district_billing`
+definition (the marked block in
+`supabase/migrations/20261020180500_district_seat_cap_and_grace.sql`, copied
+byte for byte into PR #64's `20261021120700_district_retention.sql`;
+`tests/billing/districtBillingCanonical.test.ts` holds the copies equal) is
+rerunnable on its own: with the table removed inside the transaction, the block
+alone builds it, and running it again leaves the same columns, constraints
+(each once, by name), indexes, RLS and grants (the service role's SELECT, and
+nothing for any client role); the source/date constraints refuse an unknown
+source, a Stripe source with no date and a date with no source, while an
+admin may pin null. It reports `failures | total` on its last line.
+
 `edge_rate_limit_refund.sql` proves
 `supabase/migrations/20261011120101_refund_edge_rate_limit.sql`: a refund hands
 back one use of a bucket inside its window (never below zero, never into the

@@ -192,6 +192,20 @@ class FakeApi implements AnnotationsApi {
         return { ended: this.signInEnded, error: null };
     }
 
+    /** caller_seat_read_only(): this account's Academy seat is past its academy's limit. */
+    seatReadOnly = false;
+    seatCheckError: ApiError | null = null;
+
+    async fetchSeatReadOnly() {
+        if (this.offline) {
+            return { readOnly: false, error: this.err() };
+        }
+        if (this.seatCheckError) {
+            return { readOnly: false, error: this.seatCheckError };
+        }
+        return { readOnly: this.seatReadOnly, error: null };
+    }
+
     async fetchOne(id: string) {
         this.fetchOnes += 1;
         if (this.offline) {
@@ -704,6 +718,64 @@ describe('SyncEngine archived score', () => {
         expect(store.get('a1')).toBeUndefined();
         expect(rejections.map((r) => r.annotationId)).toEqual(['a1']);
         expect(holds).toEqual([]);
+    });
+});
+
+describe('SyncEngine read-only Academy seat', () => {
+    // A district over its seat limit makes this account's seat read-only: RLS
+    // refuses its writes on every score, including one that is not archived
+    // (a score someone else owns and shared with it). Marks drawn before that
+    // are the teacher's work, and come back with the seat.
+    const refuseWrites = () => {
+        const forbidden: ApiError = { message: 'new row violates row-level security policy', kind: 'reject' };
+        api.insertIgnoreDuplicates = async () => ({ error: forbidden });
+        api.insertMany = async () => ({ error: forbidden });
+        api.update = async () => ({ error: forbidden });
+        api.updateMany = async () => ({ error: forbidden });
+    };
+
+    it('keeps marks on an unarchived shared score instead of undoing them, and says why', async () => {
+        await store.create(makeStroke('a1'));
+        api.rows.set('a2', serverRow('a2', { seq: 3 }));
+        await store.applyRemoteBatch([fromServerRow(serverRow('a2', { seq: 3 }))], new Set());
+        await store.update('a2', { color: '#222222' });
+        api.seatReadOnly = true;
+        const realInsertMany = api.insertMany.bind(api);
+        refuseWrites();
+
+        await engine.flush();
+
+        expect(api.archived).toBe(false);
+        expect(await db.ops.count()).toBe(2);
+        expect(store.get('a1')).toBeDefined();
+        expect(store.get('a2')?.color).toBe('#222222');
+        expect(rejections).toEqual([]);
+        expect(holds).toEqual([{ reason: 'seat-read-only', pendingMarks: 2 }]);
+        expect(engine.pendingRetryDelayMs).toBeGreaterThanOrEqual(60_000);
+
+        // The academy pays (or the owner keeps this seat): the marks upload.
+        api.seatReadOnly = false;
+        api.insertMany = realInsertMany;
+        api.insertIgnoreDuplicates = FakeApi.prototype.insertIgnoreDuplicates.bind(api);
+        api.update = FakeApi.prototype.update.bind(api);
+        api.updateMany = FakeApi.prototype.updateMany.bind(api);
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(api.rows.get('a1')).toBeDefined();
+        expect(api.rows.get('a2')?.color).toBe('#222222');
+    });
+
+    it('keeps the op when whether the seat is read-only cannot be read', async () => {
+        await store.create(makeStroke('a1'));
+        refuseWrites();
+        api.seatCheckError = { message: 'network down', kind: 'retry' };
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(rejections).toEqual([]);
+        expect(api.fetchOnes).toBe(0);
     });
 });
 
