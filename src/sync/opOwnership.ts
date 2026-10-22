@@ -1,3 +1,4 @@
+import { isCutOffWrite } from '@/sync/cutOffWrites';
 import type { PendingOp, ScribblerDb } from '@/sync/db';
 import { isCloudDocId } from '@/sync/docIds';
 import { readCachedPdfMeta } from '@/sync/pdfCache';
@@ -19,7 +20,9 @@ import { readCachedPdfMeta } from '@/sync/pdfCache';
  *
  * Device-only (`local-…`) scores are never uploaded and belong to no account:
  * every op on them is the device's. On a cloud score with nobody signed in,
- * none is anyone's.
+ * none is anyone's. An op whose write a sign-out cut off (cutOffWrites) is
+ * nobody's anywhere: not drawn, uploaded, exported or kept for a sign-in,
+ * until the next load sweeps it.
  */
 export type OpOwner = (op: PendingOp) => boolean;
 
@@ -34,7 +37,7 @@ export const opOwnerFor = async (
     cache?: LegacyOwnerCache,
 ): Promise<OpOwner> => {
     if (!isCloudDocId(docId)) {
-        return () => true;
+        return (op) => !isCutOffWrite(op);
     }
     if (!userId) {
         return () => false;
@@ -51,7 +54,7 @@ export const opOwnerFor = async (
             legacyOurs = known;
         }
     }
-    return (op) => (op.userId === undefined ? legacyOurs : op.userId === userId);
+    return (op) => !isCutOffWrite(op) && (op.userId === undefined ? legacyOurs : op.userId === userId);
 };
 
 /**

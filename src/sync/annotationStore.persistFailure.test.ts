@@ -4,7 +4,9 @@ import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { AnnotationStore, settleEdit } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import {
-    clearAccountInk,
+    accountSignedIn,
+    heldInkForExport,
+    retireAccountInk,
     forgetDocInk,
     hasUnsavedInk,
     heldMarksFor,
@@ -326,20 +328,28 @@ describe('held ink and accounts (finding 1)', () => {
         expect((await db.ops.toArray()).map((op) => op.userId)).toEqual([A]);
     });
 
-    it('a sign-out that cannot tell whose session it ended (clearAccountInk()) forgets every account’s held ink, and keeps device-only scores’', async () => {
+    it('a sign-out that cannot tell whose session it ended (retireAccountInk()) cuts off every account’s held ink, keeps it for Export, and keeps device-only scores’ as they were', async () => {
         await failedStrokeAs(A, 'a1');
         await failedStrokeAs(null, 'local-1');
         expect(unsavedMarkCount(A)).toBe(1);
         expect(hasUnsavedInk()).toBe(true);
 
-        clearAccountInk();
+        retireAccountInk();
 
+        // Out of every viewer, sign-out count and Retry; still the tab's to export.
         expect(unsavedMarkCount()).toBe(0);
         expect(heldMarksFor(A, DOC)).toEqual([]);
+        expect(heldInkForExport(A, DOC).held.map((a) => a.id)).toEqual(['a1']);
+        expect(hasUnsavedInk()).toBe(true);
         const asB = new AnnotationStore(db, DOC);
         asB.setAuthor(B);
         await asB.load();
         expect(asB.get('a1')).toBeUndefined();
+        expect(heldMarksFor(null, DOC).map((a) => a.id)).toEqual(['local-1']);
+
+        // Another account signing in here lets it go.
+        accountSignedIn(B);
+        expect(heldInkForExport(A, DOC).held).toEqual([]);
         expect(heldMarksFor(null, DOC).map((a) => a.id)).toEqual(['local-1']);
     });
 });

@@ -1,6 +1,8 @@
 import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
 import { localDateString } from '@/features/viewer/history/snapshotTypes';
+import { anyCutOffWrites, cutOffWrites, isCutOffWrite, resetCutOffWritesForTests } from '@/sync/cutOffWrites';
 import type { LocalAnnotation, PendingOp, ScribblerDb } from '@/sync/db';
+import { onAccountSignedIn, setSignedOutInk } from '@/sync/inkRecoverySignal';
 import type { Annotation } from '@/types/models';
 
 /**
@@ -27,7 +29,17 @@ import type { Annotation } from '@/types/models';
  * Every write is bound to its account's epoch (see epochOf): sign-out moves
  * it on, and any write of that account's still on its way — a Retry spanning
  * the sign-out, a chunk of a long write, one stalled behind a blocked
- * database — then writes nothing, checked inside its own transaction.
+ * database — then writes nothing, checked inside its own transaction and
+ * again once it is seen done (see writeOps). One whose transaction commits
+ * all the same is cut off (cutOffWrites): its rows are swept, and its ink is
+ * still held here.
+ *
+ * Sign-out never destroys held ink (retireAccountInk): it cuts off the
+ * account's writes, and the ink stays in this tab, out of every viewer and
+ * of Retry, for Export or an explicit Discard (SignedOutInkNotice). It goes
+ * only on that Discard, when the tab closes (the unload guard asks first),
+ * or when another account signs in here (accountSignedIn); the same
+ * account signing in again gets it back.
  */
 
 export type CommitOp =
@@ -49,8 +61,8 @@ export interface OpenStore {
     readonly docId: string;
     readonly authorId: string | null;
     liveAnnotations(): Annotation[];
-    /** Its account's held ink was cleared (sign-out, here or in another tab): forget what it drew of it. */
-    accountInkCleared(): void;
+    /** Its account signed out (here or in another tab): forget what it drew for it. */
+    accountSignedOut(): void;
 }
 
 interface RecoveryEntry {
@@ -81,11 +93,10 @@ interface RecoveryEntry {
      */
     refused: number;
     /**
-     * Edits not made because holding them would pass MAX_HELD_SCORES or
-     * MAX_HELD_OPS (see admits): undone on screen, and said so, never held
-     * by dropping something older.
+     * The user hid the conflict notice (its Dismiss): the conflicts stay for
+     * Export all the same. A newly overtaken mark shows it again.
      */
-    overflow: number;
+    conflictNoticeHidden: boolean;
     /** Writes of this entry's ops run one at a time, so a held op is never in two writes at once. */
     chain: Promise<void>;
 }
@@ -111,6 +122,26 @@ export const MAX_HELD_OPS = 100_000;
 export const SERVER_CHECK_TIMEOUT_MS = 3000;
 
 const entries = new Map<string, RecoveryEntry>();
+/**
+ * Edits not made because holding them would pass MAX_HELD_SCORES or
+ * MAX_HELD_OPS (see admits), by entry key: undone on screen, and said so,
+ * never held by dropping something older. Counters only, apart from the
+ * entries, so a refusal neither makes an entry nor counts toward the bounds.
+ */
+const overflowNotes = new Map<string, number>();
+/**
+ * Accounts signed out in this tab or another (retireAccountInk), and how
+ * this tab heard of it. Their entries stay — the only copy of their ink —
+ * but no viewer draws them and nothing writes them: Export or Discard only.
+ */
+export type SignedOutReason = 'here' | 'other-tab';
+const retired = new Map<string, SignedOutReason>();
+/** The account last seen signed in in this tab (accountSignedIn), null once it signs out. */
+let signedIn: string | null = null;
+/** Each score's PDF and title from its open viewer, kept while its ink is held: what Export draws on after sign-out. */
+const sources = new Map<string, { title: string; bytes?: ArrayBuffer; viewers: number }>();
+/** Ink writes on their way, by write id (see writeOps): what a sign-out cuts off. */
+const inFlightWrites = new Map<string, string | null>();
 const listeners = new Set<() => void>();
 const openStores = new Set<OpenStore>();
 /** Per account, moved on whenever its held ink is cleared (see epochOf). */
@@ -120,7 +151,11 @@ let inFlight = 0;
 
 const keyOf = (userId: string | null, docId: string): string => JSON.stringify([userId, docId]);
 
-const entryFor = (userId: string | null, docId: string): RecoveryEntry | undefined => entries.get(keyOf(userId, docId));
+const isRetired = (userId: string | null): boolean => userId !== null && retired.has(userId);
+
+/** The entry a viewer, Retry or a write uses: none for a signed-out account (see retired). */
+const entryFor = (userId: string | null, docId: string): RecoveryEntry | undefined =>
+    isRetired(userId) ? undefined : entries.get(keyOf(userId, docId));
 
 /**
  * The account's write epoch. A write captures it when it starts, and writes
@@ -139,6 +174,10 @@ const epochOf = (userId: string | null): number => {
  * when this was called. A store takes it when an edit is made (persistOps).
  */
 export const boundTo = (userId: string | null): (() => boolean) => {
+    if (isRetired(userId)) {
+        // Signed out: nothing more of its is written until it signs in again.
+        return () => false;
+    }
     const epoch = epochOf(userId);
     return () => epochOf(userId) === epoch;
 };
@@ -179,7 +218,7 @@ const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string): Rec
             conflicts: new Map(),
             startingPoint: null,
             refused: 0,
-            overflow: 0,
+            conflictNoticeHidden: false,
             chain: Promise.resolve(),
         };
         entries.set(key, entry);
@@ -190,21 +229,42 @@ const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string): Rec
 
 /** Drop an entry with nothing left to hold or say. */
 const pruneEntry = (entry: RecoveryEntry): void => {
-    if (
-        entry.ops.length === 0 &&
-        entry.conflicts.size === 0 &&
-        !entry.startingPoint &&
-        entry.refused === 0 &&
-        entry.overflow === 0
-    ) {
+    if (entry.ops.length === 0 && entry.conflicts.size === 0 && !entry.startingPoint && entry.refused === 0) {
         if (entries.get(keyOf(entry.userId, entry.docId)) === entry) {
             entries.delete(keyOf(entry.userId, entry.docId));
+            pruneSource(entry.docId);
         }
     }
 };
 
+/** Let a score's PDF go once no viewer has it open and no ink of it is held. */
+const pruneSource = (docId: string): void => {
+    const source = sources.get(docId);
+    if (source && source.viewers === 0 && ![...entries.values()].some((entry) => entry.docId === docId)) {
+        sources.delete(docId);
+    }
+};
+
+/** Drop entries (and their overflow notes) for good: Discard, another account signing in, a purge. */
+const dropEntries = (drop: (entry: RecoveryEntry) => boolean): boolean => {
+    let any = false;
+    for (const [key, entry] of entries) {
+        if (drop(entry)) {
+            entries.delete(key);
+            pruneSource(entry.docId);
+            any = true;
+        }
+    }
+    return any;
+};
+
+/** Whether a signed-out account's ink is held here (the shell's SignedOutInkNotice). */
+const holdsSignedOutInk = (): boolean =>
+    [...entries.values()].some((entry) => isRetired(entry.userId) && entry.ops.length + entry.conflicts.size > 0);
+
 const changed = (): void => {
     syncUnloadGuard();
+    setSignedOutInk(holdsSignedOutInk());
     for (const listener of listeners) {
         listener();
     }
@@ -231,8 +291,14 @@ export const heldMarkCount = (userId: string | null, docId: string): number => e
 /** Edits refused for want of a day snapshot (see RecoveryEntry.refused). */
 export const refusedEditCount = (userId: string | null, docId: string): number => entryFor(userId, docId)?.refused ?? 0;
 
-/** Edits undone because the registry was full (see RecoveryEntry.overflow). */
-export const overflowCount = (userId: string | null, docId: string): number => entryFor(userId, docId)?.overflow ?? 0;
+/** Edits undone because the registry was full (see overflowNotes). */
+export const overflowCount = (userId: string | null, docId: string): number =>
+    isRetired(userId) ? 0 : (overflowNotes.get(keyOf(userId, docId)) ?? 0);
+
+const noteOverflow = (userId: string | null, docId: string, edits: number): void => {
+    const key = keyOf(userId, docId);
+    overflowNotes.set(key, (overflowNotes.get(key) ?? 0) + edits);
+};
 
 /** Held marks a newer version overtook: Export only (see RecoveryEntry.conflicts). */
 export const conflictCount = (userId: string | null, docId: string): number =>
@@ -243,13 +309,31 @@ export const conflictMarksFor = (userId: string | null, docId: string): Annotati
     ...(entryFor(userId, docId)?.conflicts.values() ?? []),
 ];
 
-/** The user has seen the conflicts, and exported them or not: they go (the banner's Dismiss). */
-export const dismissConflicts = (userId: string | null, docId: string): void => {
+/** Whether the user hid the conflict notice (see RecoveryEntry.conflictNoticeHidden). */
+export const conflictNoticeHidden = (userId: string | null, docId: string): boolean =>
+    entryFor(userId, docId)?.conflictNoticeHidden ?? false;
+
+/** The banner's Dismiss: the notice goes, the conflicts stay for Export until the tab closes or Discard. */
+export const hideConflictNotice = (userId: string | null, docId: string): void => {
+    const entry = entryFor(userId, docId);
+    if (!entry || entry.conflictNoticeHidden) {
+        return;
+    }
+    entry.conflictNoticeHidden = true;
+    changed();
+};
+
+/**
+ * The banner's Discard, once the user has confirmed it (with Export offered
+ * first): the held versions of overtaken marks go for good.
+ */
+export const discardConflicts = (userId: string | null, docId: string): void => {
     const entry = entryFor(userId, docId);
     if (!entry || entry.conflicts.size === 0) {
         return;
     }
     entry.conflicts.clear();
+    entry.conflictNoticeHidden = false;
     pruneEntry(entry);
     changed();
 };
@@ -301,7 +385,7 @@ const chainsOf = (ops: readonly AuthoredOp[]): Map<string, { base: Annotation | 
 export const unsavedMarkCount = (userId?: string | null): number => {
     let count = 0;
     for (const entry of entries.values()) {
-        if (entry.userId !== null && (userId === undefined || entry.userId === userId)) {
+        if (entry.userId !== null && !isRetired(entry.userId) && (userId === undefined || entry.userId === userId)) {
             count += entry.marks.size + entry.conflicts.size;
         }
     }
@@ -311,7 +395,7 @@ export const unsavedMarkCount = (userId?: string | null): number => {
 /** Scores of this account's with held ink (or held conflicts), for the ended-sign-in prompt. */
 export const heldDocIds = (userId: string): string[] =>
     [...entries.values()]
-        .filter((entry) => entry.userId === userId && entry.marks.size + entry.conflicts.size > 0)
+        .filter((entry) => entry.userId === userId && !isRetired(userId) && entry.marks.size + entry.conflicts.size > 0)
         .map((entry) => entry.docId);
 
 /**
@@ -421,6 +505,8 @@ const moveToConflicts = (entry: RecoveryEntry, ids: Iterable<string>): void => {
     }
     entry.ops = kept;
     gone.forEach((id) => entry.marks.delete(id));
+    // Newly overtaken: say so again, though the user hid the notice before.
+    entry.conflictNoticeHidden = false;
     pruneEntry(entry);
     changed();
 };
@@ -509,7 +595,7 @@ export const holdOps = (
     for (const [author, authored] of byAuthor) {
         const owes = startingPoint && !entryFor(author, docId)?.startingPoint ? startingPoint : null;
         if (!admits(author, docId, authored.length + (owes?.length ?? 0))) {
-            ensureEntry(db, author, docId).overflow += new Set(authored.map((held) => held.op.annotation.id)).size;
+            noteOverflow(author, docId, new Set(authored.map((held) => held.op.annotation.id)).size);
             refused.push(...authored);
             continue;
         }
@@ -575,14 +661,33 @@ const releaseHeld = (entry: RecoveryEntry, written: readonly AuthoredOp[]): void
     entry.ops = kept;
     if (kept.length === 0) {
         // Room again: new failed edits can be held.
-        entry.overflow = 0;
+        overflowNotes.delete(keyOf(entry.userId, entry.docId));
     }
 };
 
 /**
+ * Edits a sign-out cut off on their way to storage (see writeQueue): not
+ * written, but the user's all the same, so held with the account's other
+ * ink — signed out, so for Export or Discard. Not bounded by admits: they
+ * are at most the writes that were under way. Let go only when another
+ * account has signed in here meanwhile, which lets that ink go too.
+ */
+export const keepCutOff = (db: ScribblerDb, author: string | null, docId: string, ops: readonly AuthoredOp[]): void => {
+    if (ops.length === 0 || (author !== null && !retired.has(author) && signedIn !== author)) {
+        return;
+    }
+    const entry = ensureEntry(db, author, docId);
+    for (const held of ops) {
+        appendHeld(entry, held);
+    }
+    changed();
+};
+
+/**
  * A day snapshot that failed for an edit of an existing mark, which was
- * refused (see RecoveryEntry.refused). Its starting point is kept only when
- * it fits (see admits); the edit was refused either way.
+ * refused (see RecoveryEntry.refused). Counted, with its starting point,
+ * only when that fits (see admits); else said as overflow. The edit was
+ * refused either way.
  */
 export const noteRefusedEdit = (
     db: ScribblerDb,
@@ -590,12 +695,16 @@ export const noteRefusedEdit = (
     docId: string,
     startingPoint: Annotation[],
 ): void => {
-    const fits = admits(userId, docId, entryFor(userId, docId)?.startingPoint ? 0 : startingPoint.length);
+    if (!admits(userId, docId, entryFor(userId, docId)?.startingPoint ? 0 : startingPoint.length)) {
+        // No room to keep its starting point: said as an edit not made
+        // (overflow), with no entry made and nothing counted toward the bounds.
+        noteOverflow(userId, docId, 1);
+        changed();
+        return;
+    }
     const entry = ensureEntry(db, userId, docId);
     entry.refused += 1;
-    if (fits) {
-        entry.startingPoint ??= { live: startingPoint, day: localDateString() };
-    }
+    entry.startingPoint ??= { live: startingPoint, day: localDateString() };
     changed();
 };
 
@@ -606,11 +715,39 @@ export const noteRefusedEdit = (
  * transaction rolls back. `check`, given the chunk's current mirror rows,
  * names marks a newer version has overtaken (see overtakes): their ops are
  * left out. Returns what it wrote and what it left out.
+ *
+ * Done only if `live` still holds once the transaction is seen to have
+ * committed: a sign-out between its last check and then cut it off
+ * (retireAccountInk records its id, PendingOp.inkWrite), so it throws
+ * RecoveryCancelled, its ops stay held, and its rows are swept as stale
+ * (sweepCutOffWrites) — the store and storage never disagree about it.
  */
 const writeOps = async (
     db: ScribblerDb,
     docId: string,
+    author: string | null,
     slice: readonly AuthoredOp[],
+    live: () => boolean,
+    check?: (rows: ReadonlyMap<string, LocalAnnotation | undefined>) => Set<string>,
+): Promise<{ written: AuthoredOp[]; overtaken: Set<string> }> => {
+    const writeId = crypto.randomUUID();
+    inFlightWrites.set(writeId, author);
+    try {
+        const result = await writeOpsWithin(db, docId, slice, writeId, live, check);
+        if (!live()) {
+            throw new RecoveryCancelled();
+        }
+        return result;
+    } finally {
+        inFlightWrites.delete(writeId);
+    }
+};
+
+const writeOpsWithin = (
+    db: ScribblerDb,
+    docId: string,
+    slice: readonly AuthoredOp[],
+    writeId: string,
     live: () => boolean,
     check?: (rows: ReadonlyMap<string, LocalAnnotation | undefined>) => Set<string>,
 ): Promise<{ written: AuthoredOp[]; overtaken: Set<string> }> =>
@@ -633,6 +770,7 @@ const writeOps = async (
             annotationId: op.annotation.id,
             annotation: op.annotation,
             queuedAt,
+            inkWrite: writeId,
             ...(op.type === 'restore' ? { baseDeletedAt: op.baseDeletedAt } : {}),
             ...(author ? { userId: author } : {}),
         }));
@@ -641,6 +779,11 @@ const writeOps = async (
             throw new RecoveryCancelled();
         }
         await db.ops.bulkAdd(opRows);
+        // The last word before it commits: a sign-out while the outbox
+        // write was under way rolls it all back here.
+        if (!live()) {
+            throw new RecoveryCancelled();
+        }
         return { written, overtaken };
     });
 
@@ -652,9 +795,9 @@ const writeOps = async (
  * override it. What could not be written is held, and the error rethrown —
  * or, past the registry's bounds, HeldInkFull names what was not held.
  * Bound to the author's epoch as it was when the edit was made (`live`,
- * from boundTo; else from the call): a sign-out before it runs, or between
- * its chunks, ends it with RecoveryCancelled, writing and holding nothing
- * more.
+ * from boundTo; else from the call): a sign-out before it runs, between its
+ * chunks or during one ends it with RecoveryCancelled, writing nothing more;
+ * what it had not written is held as the signed-out account's (keepCutOff).
  */
 export const persistOps = (
     db: ScribblerDb,
@@ -694,7 +837,7 @@ const writeQueue = async (
         }
         for (; written < queue.length; written += PERSIST_CHUNK) {
             const chunk = queue.slice(written, written + PERSIST_CHUNK);
-            await writeOps(db, docId, chunk, live);
+            await writeOps(db, docId, author, chunk, live);
             const entry = entryFor(author, docId);
             if (entry && carried.length > 0) {
                 releaseHeld(entry, chunk);
@@ -703,14 +846,21 @@ const writeQueue = async (
             }
         }
     } catch (err) {
+        const carriedSet = new Set(carried);
         if (!live()) {
-            // Signed out meanwhile: what it was writing went with the account.
+            // Signed out meanwhile: cut off, and not written — still the
+            // user's, so held for Export or Discard. The carried ops already are.
+            keepCutOff(
+                db,
+                author,
+                docId,
+                queue.slice(written).filter((held) => !carriedSet.has(held)),
+            );
             throw err instanceof RecoveryCancelled ? err : new RecoveryCancelled();
         }
         // Chunks before this one committed; this one rolled back whole. The
         // carried ops it had are still held; the fresh ones join them, if
         // they fit.
-        const carriedSet = new Set(carried);
         const refused = holdOps(
             db,
             docId,
@@ -756,6 +906,10 @@ export interface RetryOptions {
 export const retryHeld = (userId: string | null, docId: string, options: RetryOptions = {}): Promise<RetryResult> => {
     const entry = entryFor(userId, docId);
     if (!entry) {
+        // Nothing held: an overflow notice alone goes, there being room again.
+        if (!isRetired(userId) && overflowNotes.delete(keyOf(userId, docId))) {
+            changed();
+        }
         return Promise.resolve({ ok: true, wrote: [], overtaken: [] });
     }
     const live = boundTo(userId);
@@ -822,7 +976,7 @@ const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: Ret
                 break;
             }
             const chains = chainsOf(entry.ops);
-            const result = await writeOps(entry.db, entry.docId, chunk, live, (rows) => {
+            const result = await writeOps(entry.db, entry.docId, entry.userId, chunk, live, (rows) => {
                 const out = new Set<string>();
                 for (const [id, row] of rows) {
                     const chain = chains.get(id);
@@ -839,14 +993,15 @@ const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: Ret
         }
     } catch (err) {
         if (err instanceof RecoveryCancelled || !live()) {
-            // Signed out meanwhile: the entry went with the account.
+            // Signed out meanwhile: what is not written stays held, signed out.
+            changed();
             return { ok: false, wrote: [...new Set(wrote)], overtaken };
         }
         console.warn('Retrying the unsaved marks failed', err);
         ok = false;
     }
     if (ok) {
-        entry.overflow = 0;
+        overflowNotes.delete(keyOf(entry.userId, entry.docId));
     }
     pruneEntry(entry);
     changed();
@@ -858,7 +1013,8 @@ const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: Ret
  * a sign-out that keeps the account's queued changes for its next sign-in
  * (signOutKeepingChanges): written, they are kept with the rest. Never
  * throws. The caller bounds the wait: a stalled database never settles it,
- * and the sign-out's clearAccountInk then cancels what is still on its way.
+ * and the sign-out's retireAccountInk then cuts off what is still on its
+ * way — what it had not written stays held, signed out.
  */
 export const retryAccountInk = async (userId: string): Promise<void> => {
     const docs = [...entries.values()].filter((entry) => entry.userId === userId).map((entry) => entry.docId);
@@ -868,61 +1024,223 @@ export const retryAccountInk = async (userId: string): Promise<void> => {
 };
 
 /**
- * Sign-out: forget the signed-out account's held ink, conflicts and refused
- * edits (after its warning), end every write of its still on its way (its
- * epoch moves on), and have each open viewer drawing for it forget what it
- * drew. Another account's held ink in this tab stays for that account. Told
- * to the other tabs of this browser too, which share the sign-out (see
- * listenToOtherTabs). `userId` undefined: the sign-out could not tell whose
- * session it ended, so every account's goes. Device-only scores' entries
- * stay, as their marks do.
+ * Sign-out, here (`here`) or in another tab of this browser (`other-tab`):
+ * cut off every write of the account's at once — its epoch moves on, so
+ * nothing more of it is written, and writes still on their way are cut off
+ * (cutOffWrites) — and have each open viewer drawing for it forget what it
+ * drew. Its held ink, conflicts included, is NOT dropped: memory is its only
+ * copy. It stays in this tab, out of every viewer and of Retry, for Export
+ * or an explicit Discard (signedOutInk, SignedOutInkNotice), until the tab
+ * closes or another account signs in here (accountSignedIn). A sign-out here
+ * tells the other tabs too. `userId` undefined: the sign-out could not tell
+ * whose session it ended, so every account's is. Device-only scores belong
+ * to no account and are untouched.
  */
-export const clearAccountInk = (userId?: string | null): void => {
+export const retireAccountInk = (userId?: string | null, reason: SignedOutReason = 'here'): void => {
     if (userId === null) {
         return;
     }
-    dropAccountInk(userId);
-    tellOtherTabs(userId);
+    retire(userId, reason);
+    if (reason === 'here') {
+        tellOtherTabs(userId);
+    }
 };
 
-const dropAccountInk = (userId: string | undefined): void => {
-    const matches = (who: string | null) => who !== null && (userId === undefined || who === userId);
-    let any = false;
-    for (const [key, entry] of entries) {
-        if (matches(entry.userId)) {
-            entries.delete(key);
-            any = true;
-        }
-    }
+const retire = (userId: string | undefined, reason: SignedOutReason): void => {
+    const accounts = new Set<string>();
     if (userId !== undefined) {
-        epochs.set(userId, epochOf(userId) + 1);
-    }
-    for (const who of [...epochs.keys()]) {
-        if (userId === undefined && matches(who)) {
-            epochs.set(who, epochOf(who) + 1);
+        accounts.add(userId);
+    } else {
+        for (const who of [
+            ...epochs.keys(),
+            ...inFlightWrites.values(),
+            ...[...entries.values()].map((e) => e.userId),
+        ]) {
+            if (who !== null) {
+                accounts.add(who);
+            }
         }
     }
+    const cut: string[] = [];
+    for (const who of accounts) {
+        epochs.set(who, epochOf(who) + 1);
+        if (!retired.has(who)) {
+            retired.set(who, reason);
+        }
+        if (signedIn === who) {
+            signedIn = null;
+        }
+        for (const [writeId, author] of inFlightWrites) {
+            if (author === who) {
+                cut.push(writeId);
+            }
+        }
+        for (const key of [...overflowNotes.keys()]) {
+            if ((JSON.parse(key) as [string | null, string])[0] === who) {
+                overflowNotes.delete(key);
+            }
+        }
+    }
+    cutOffWrites(cut);
     for (const store of [...openStores]) {
-        if (matches(store.authorId)) {
-            store.accountInkCleared();
+        if (store.authorId !== null && accounts.has(store.authorId)) {
+            store.accountSignedOut();
         }
     }
+    changed();
+};
+
+/**
+ * An account is signed in in this tab (session.ts, by inkRecoverySignal).
+ * Its own signed-out ink is its again: drawn, and retried, as before. Any
+ * other signed-out account's goes for good: the tab is someone else's now.
+ */
+export const accountSignedIn = (userId: string): void => {
+    signedIn = userId;
+    if (retired.size === 0) {
+        return;
+    }
+    for (const who of [...retired.keys()]) {
+        if (who !== userId) {
+            dropEntries((entry) => entry.userId === who);
+        }
+        retired.delete(who);
+    }
+    changed();
+};
+
+onAccountSignedIn(accountSignedIn);
+
+/** A score of a signed-out account's with ink held here (SignedOutInkNotice). */
+export interface SignedOutScore {
+    docId: string;
+    /** Held marks and conflicts on it. */
+    marks: number;
+    /** From its viewer, while it was open (rememberScoreSource). */
+    title?: string;
+    bytes?: ArrayBuffer;
+}
+
+/** Ink of signed-out accounts this tab still holds, by account, for Export or Discard. */
+export const signedOutInk = (): Array<{ userId: string; reason: SignedOutReason; scores: SignedOutScore[] }> => {
+    const out: Array<{ userId: string; reason: SignedOutReason; scores: SignedOutScore[] }> = [];
+    for (const [userId, reason] of retired) {
+        const scores = [...entries.values()]
+            .filter((entry) => entry.userId === userId && entry.marks.size + entry.conflicts.size > 0)
+            .map((entry): SignedOutScore => {
+                const source = sources.get(entry.docId);
+                return {
+                    docId: entry.docId,
+                    marks: entry.marks.size + entry.conflicts.size,
+                    ...(source ? { title: source.title, ...(source.bytes ? { bytes: source.bytes } : {}) } : {}),
+                };
+            });
+        if (scores.length > 0) {
+            out.push({ userId, reason, scores });
+        }
+    }
+    return out;
+};
+
+/**
+ * The notice's Discard, once the user has confirmed it with Export offered
+ * first: a signed-out account's held ink here goes for good (every signed-out
+ * account's when `userId` is undefined).
+ */
+export const discardSignedOutInk = (userId?: string): void => {
+    const any = dropEntries((entry) => isRetired(entry.userId) && (userId === undefined || entry.userId === userId));
     if (any) {
         changed();
     }
 };
 
-/** The score is closed for good on this device (deleted, left, access taken back): its held ink goes. */
+/**
+ * What an export bakes in of `userId`'s held ink on this score, signed out
+ * or not: the newest held version of each mark (tombstones included), the
+ * held versions of overtaken marks, and each held mark's chain (for
+ * overtakes). `signedOut`: the account has signed out, so only this ink is
+ * its own to export here, not the device's saved marks.
+ */
+export const heldInkForExport = (
+    userId: string | null,
+    docId: string,
+): {
+    held: Annotation[];
+    conflicts: Annotation[];
+    chains: Map<string, { base: Annotation | null; latest: Annotation }>;
+    signedOut: boolean;
+} => {
+    const entry = entries.get(keyOf(userId, docId));
+    const latest = new Map<string, Annotation>();
+    for (const { op } of entry?.ops ?? []) {
+        latest.set(op.annotation.id, op.annotation);
+    }
+    return {
+        held: [...latest.values()],
+        conflicts: [...(entry?.conflicts.values() ?? [])],
+        chains: entry ? chainsOf(entry.ops) : new Map(),
+        signedOut: isRetired(userId),
+    };
+};
+
+/**
+ * The score is closed for good on this device (deleted, left, access taken
+ * back): its held ink goes (requester answer (a): "document close" is the
+ * purge, not every viewer unmount).
+ */
 export const forgetDocInk = (docId: string): void => {
-    let any = false;
-    for (const [key, entry] of entries) {
-        if (entry.docId === docId) {
-            entries.delete(key);
-            any = true;
+    for (const key of [...overflowNotes.keys()]) {
+        if ((JSON.parse(key) as [string | null, string])[1] === docId) {
+            overflowNotes.delete(key);
         }
     }
-    if (any) {
+    if (dropEntries((entry) => entry.docId === docId)) {
         changed();
+    }
+};
+
+/**
+ * Sweep this score's stale ink rows: outbox rows of writes a sign-out cut
+ * off (cutOffWrites) whose transaction committed all the same. Every reader
+ * already ignores them (opOwnerFor counts them nobody's); this deletes them,
+ * with the mirror row each wrote when nothing newer has replaced it, and
+ * then the score's pull watermark, so the next pull brings back the server's
+ * version of those marks. Called on every load and attach of a store.
+ * Returns the marks they were on (empty when none), whether or not the
+ * delete itself worked. Never throws.
+ */
+export const sweepCutOffWrites = async (db: ScribblerDb, docId: string): Promise<Set<string>> => {
+    if (!anyCutOffWrites()) {
+        return new Set();
+    }
+    try {
+        const stale = (await db.ops.where('docId').equals(docId).toArray()).filter(isCutOffWrite);
+        if (stale.length === 0) {
+            return new Set();
+        }
+        const marks = new Set(stale.map((op) => op.annotationId));
+        await db
+            .transaction('rw', db.annotations, db.ops, db.syncState, async () => {
+                const queued = await db.ops.where('docId').equals(docId).toArray();
+                const gone = queued.filter(isCutOffWrite);
+                const kept = new Set(queued.filter((op) => !isCutOffWrite(op)).map((op) => op.annotationId));
+                const written = new Set(gone.map((op) => `${op.annotationId}\u0000${op.annotation.updatedAt}`));
+                await db.ops.bulkDelete(gone.flatMap((op) => (op.opId === undefined ? [] : [op.opId])));
+                const ids = [...new Set(gone.map((op) => op.annotationId))].filter((id) => !kept.has(id));
+                const rows = await db.annotations.bulkGet(ids);
+                const drop = rows.flatMap((row) =>
+                    row && written.has(`${row.id}\u0000${row.updatedAt}`) ? [row.id] : [],
+                );
+                if (drop.length > 0) {
+                    await db.annotations.bulkDelete(drop);
+                    await db.syncState.delete(docId);
+                }
+            })
+            .catch((err: unknown) => console.warn('Could not sweep ink writes cut off by a sign-out', err));
+        return marks;
+    } catch (err) {
+        console.warn('Could not look for ink writes cut off by a sign-out', err);
+        return new Set();
     }
 };
 
@@ -931,7 +1249,7 @@ const CHANNEL_NAME = 'cleffy:ink-recovery';
 export const SIGNED_OUT_STORAGE_KEY = 'cleffy:ink-recovery:signed-out';
 
 interface SignedOutMessage {
-    type: 'account-ink-cleared';
+    type: 'account-signed-out';
     /** Absent: whose session ended was not known — every account's. */
     userId?: string;
 }
@@ -939,15 +1257,15 @@ interface SignedOutMessage {
 const isSignedOutMessage = (value: unknown): value is SignedOutMessage =>
     !!value &&
     typeof value === 'object' &&
-    (value as SignedOutMessage).type === 'account-ink-cleared' &&
+    (value as SignedOutMessage).type === 'account-signed-out' &&
     ((value as SignedOutMessage).userId === undefined || typeof (value as SignedOutMessage).userId === 'string');
 
 let channel: BroadcastChannel | null = null;
 
-/** Another tab signed this account out: its held ink here goes too, and its writes here stop. */
+/** Another tab signed this account out: its writes here stop too, and its held ink here stays, signed out. */
 const onOtherTabSignedOut = (value: unknown): void => {
     if (isSignedOutMessage(value)) {
-        dropAccountInk(value.userId);
+        retire(value.userId, 'other-tab');
     }
 };
 
@@ -957,7 +1275,7 @@ const onOtherTabSignedOut = (value: unknown): void => {
  * none. Never throws.
  */
 const tellOtherTabs = (userId: string | undefined): void => {
-    const message: SignedOutMessage = { type: 'account-ink-cleared', ...(userId ? { userId } : {}) };
+    const message: SignedOutMessage = { type: 'account-signed-out', ...(userId ? { userId } : {}) };
     try {
         if (channel) {
             channel.postMessage(message);
@@ -1004,14 +1322,41 @@ listenToOtherTabs();
 
 /**
  * An open viewer's store: export reads its memory when the database cannot
- * be read (see openMarksFor), and a sign-out clearing its account's ink
- * has it forget what it drew (OpenStore.accountInkCleared). Returns the
- * unregister, for the viewer's unmount.
+ * be read (see openMarksFor), and its account's sign-out has it forget
+ * what it drew (OpenStore.accountSignedOut). Returns the unregister, for
+ * the viewer's unmount.
  */
 export const registerOpenStore = (store: OpenStore): (() => void) => {
     openStores.add(store);
     return () => {
         openStores.delete(store);
+    };
+};
+
+/**
+ * An open viewer's PDF and title for its score: kept while the score has
+ * held ink, even after the viewer closes, so a signed-out account's Export
+ * (SignedOutInkNotice) has the score to draw on once sign-out has cleared
+ * the device's copy. Returns the unregister, for the viewer's unmount.
+ */
+export const rememberScoreSource = (docId: string, title: string, bytes?: ArrayBuffer): (() => void) => {
+    const source = sources.get(docId);
+    if (source) {
+        source.title = title;
+        source.bytes = bytes ?? source.bytes;
+        source.viewers += 1;
+    } else {
+        sources.set(docId, { title, ...(bytes ? { bytes } : {}), viewers: 1 });
+    }
+    let done = false;
+    return () => {
+        const current = sources.get(docId);
+        if (done || !current) {
+            return;
+        }
+        done = true;
+        current.viewers = Math.max(0, current.viewers - 1);
+        pruneSource(docId);
     };
 };
 
@@ -1072,6 +1417,12 @@ export const resetInkRecoveryForTests = (): void => {
     entries.clear();
     openStores.clear();
     epochs.clear();
+    overflowNotes.clear();
+    retired.clear();
+    sources.clear();
+    inFlightWrites.clear();
+    signedIn = null;
+    resetCutOffWritesForTests();
     inFlight = 0;
     changed();
 };

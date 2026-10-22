@@ -1,6 +1,6 @@
 import { getDb, type LocalAnnotation } from '@/sync/db';
 import { isCloudDocId } from '@/sync/docIds';
-import { conflictMarksFor, heldChainsFor, heldMarksFor, openMarksFor, overtakes } from '@/sync/inkRecovery';
+import { heldInkForExport, openMarksFor, overtakes } from '@/sync/inkRecovery';
 import { foreignMarkIds } from '@/sync/opOwnership';
 import type { Annotation } from '@/types/models';
 
@@ -18,6 +18,15 @@ export interface ExportMarks {
      * (inkRecovery.overtakes): baked in beside the newer one, so both show.
      */
     conflicts: number;
+    /** Of this account's unsaved erases, those a newer version overtook: nothing to draw, but said. */
+    erasedConflicts?: number;
+    /**
+     * Set when `userId` has signed out and this tab still holds its unsaved
+     * marks (inkRecovery.retireAccountInk): the export has only those —
+     * `unsaved` of them — not the score's saved marks, which are no longer
+     * its own to read here.
+     */
+    signedOut?: { unsaved: number } | null;
 }
 
 /**
@@ -49,7 +58,22 @@ export const loadExportMarks = async (
 ): Promise<ExportMarks> => {
     const wanted = (a: Annotation) => !a.deletedAt && (pageIndex === undefined || a.page === pageIndex);
     const inkAuthor = isCloudDocId(docId) ? userId : null;
-    const kept = conflictMarksFor(inkAuthor, docId).map(asConflict).filter(wanted);
+    const ink = heldInkForExport(inkAuthor, docId);
+    const kept = ink.conflicts.map(asConflict).filter(wanted);
+    const erasedConflicts = ink.conflicts.filter(
+        (a) => a.deletedAt && (pageIndex === undefined || a.page === pageIndex),
+    ).length;
+    if (ink.signedOut) {
+        // Signed out: only its own unsaved marks are its to export here.
+        const held = ink.held.filter(wanted);
+        return {
+            annotations: [...held, ...kept],
+            incomplete: null,
+            conflicts: kept.length,
+            erasedConflicts,
+            signedOut: { unsaved: held.length + kept.length },
+        };
+    }
     let rows: LocalAnnotation[];
     let foreign: Set<string>;
     try {
@@ -66,17 +90,18 @@ export const loadExportMarks = async (
                 : 'Could not read this device’s marks; exporting only the unsaved ones',
             err,
         );
-        const held = (open ?? heldMarksFor(inkAuthor, docId)).filter(wanted);
+        const held = (open ?? ink.held).filter(wanted);
         return {
             annotations: [...held, ...kept],
             incomplete: open ? null : { unsaved: held.length + kept.length },
             conflicts: kept.length,
+            erasedConflicts,
         };
     }
     const mirror = new Map(rows.map((row) => [row.id, row]));
     const marks = new Map<string, Annotation>(rows.map(({ pending: _pending, ...a }) => [a.id, a]));
     const overtaken: Annotation[] = [];
-    for (const [id, { base, latest }] of heldChainsFor(inkAuthor, docId)) {
+    for (const [id, { base, latest }] of ink.chains) {
         if (overtakes(mirror.get(id), base, latest)) {
             overtaken.push(asConflict(latest));
         } else {
@@ -88,6 +113,7 @@ export const loadExportMarks = async (
         annotations: [...[...marks.values()].filter((a) => wanted(a) && !foreign.has(a.id)), ...conflicts],
         incomplete: null,
         conflicts: conflicts.length,
+        erasedConflicts,
     };
 };
 
@@ -111,8 +137,15 @@ const marksWord = (n: number): string => (n === 1 ? 'mark' : 'marks');
 export const exportNotice = ({
     incomplete,
     conflicts,
-}: Pick<ExportMarks, 'incomplete' | 'conflicts'>): string | null => {
+    erasedConflicts = 0,
+    signedOut = null,
+}: Pick<ExportMarks, 'incomplete' | 'conflicts' | 'erasedConflicts' | 'signedOut'>): string | null => {
     const parts: string[] = [];
+    if (signedOut) {
+        parts.push(
+            `You’re signed out, so this export has only the ${signedOut.unsaved} unsaved ${marksWord(signedOut.unsaved)} this tab still holds, not the score’s saved marks.`,
+        );
+    }
     if (incomplete) {
         parts.push(
             `This export is missing marks. This device’s storage couldn’t be read, so it has only the ${incomplete.unsaved} unsaved ${marksWord(incomplete.unsaved)} this tab still holds, not the score’s saved marks.`,
@@ -123,6 +156,13 @@ export const exportNotice = ({
             conflicts === 1
                 ? 'One of your unsaved marks changed elsewhere before it could be saved here: the export has both versions.'
                 : `${conflicts} of your unsaved marks changed elsewhere before they could be saved here: the export has both versions.`,
+        );
+    }
+    if (erasedConflicts > 0) {
+        parts.push(
+            erasedConflicts === 1
+                ? 'One of your unsaved erases was overtaken by a newer version made elsewhere: the export shows that version.'
+                : `${erasedConflicts} of your unsaved erases were overtaken by newer versions made elsewhere: the export shows those versions.`,
         );
     }
     return parts.length > 0 ? parts.join(' ') : null;
