@@ -1,4 +1,4 @@
-import { createClient } from 'npm:@supabase/supabase-js@2';
+import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
@@ -150,7 +150,9 @@ Deno.serve(async (req) => {
     return response;
 });
 
-type UserClient = ReturnType<typeof createClient>;
+// SupabaseClient, not ReturnType<typeof createClient>: under deno check the
+// latter's schema generics resolve to `never`, and every query on it fails to type.
+type UserClient = SupabaseClient;
 
 const rejectBadPageCount = async (
     userClient: UserClient,
