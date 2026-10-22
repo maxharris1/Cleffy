@@ -423,9 +423,9 @@ select pg_temp.chk ('85 the service role counts and purges; only definer code ke
        and to_regprocedure('public.content_strike_subject_key(text)') is null$q$);
 
 -- ---------------------------------------------------------------------------
--- Report: failing checks, then `failures | total`
+-- Report: every check, then `failures | total`
 -- ---------------------------------------------------------------------------
-select name, ok, detail from t_results where not ok order by name;
+select name, ok, detail from t_results order by name;
 
 select count(*) filter (where not ok) as failures, count(*) as total from t_results;
 

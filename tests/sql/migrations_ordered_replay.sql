@@ -63,10 +63,13 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Fixtures (as postgres)
 -- ---------------------------------------------------------------------------
--- O owns districts A and D (contracts ended 17 days ago) and has no plan of
--- their own, so a moved student's restore is carried over rather than done.
+-- O owns district A and Q owns district D (contracts ended 17 days ago; one
+-- live studio per owner since 20261022100300); neither has a plan of their
+-- own, so a moved student's restore is carried over rather than done.
 insert into auth.users (id, aud, role, email, raw_app_meta_data)
 select pg_temp.u ('a1'), 'authenticated', 'authenticated', 'replay-owner@example.invalid', '{}'::jsonb
+union all
+select pg_temp.u ('a2'), 'authenticated', 'authenticated', 'replay-owner-d@example.invalid', '{}'::jsonb
 union all
 select pg_temp.u (s), 'authenticated', 'authenticated', 'replay-' || s || '@students.cleffy.app',
        '{"user_type":"student"}'::jsonb
@@ -74,7 +77,7 @@ from unnest(array['b1', 'b2', 'b3']) as s;
 
 insert into public.studios (id, owner_id, name)
 values ('d5200000-0000-4000-8000-0000000005da', pg_temp.u ('a1'), 'Replay district A'),
-       ('d5200000-0000-4000-8000-0000000005dd', pg_temp.u ('a1'), 'Replay district D');
+       ('d5200000-0000-4000-8000-0000000005dd', pg_temp.u ('a2'), 'Replay district D');
 
 insert into public.district_billing (studio_id, contract_ends_at, contract_ends_source, updated_by)
 values ('d5200000-0000-4000-8000-0000000005da', now() - interval '17 days', 'admin', 'test'),
@@ -82,7 +85,7 @@ values ('d5200000-0000-4000-8000-0000000005da', now() - interval '17 days', 'adm
 
 insert into public.managed_students
     (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at, district_studio_id)
-select pg_temp.roster (s), pg_temp.u ('a1'), pg_temp.u (s), 'Student ' || s, null, 'code', 'replay_' || s, now(),
+select pg_temp.roster (s), pg_temp.u (case when s = 'b1' then 'a1' else 'a2' end), pg_temp.u (s), 'Student ' || s, null, 'code', 'replay_' || s, now(),
        case when s = 'b1' then 'd5200000-0000-4000-8000-0000000005da'::uuid
             else 'd5200000-0000-4000-8000-0000000005dd'::uuid end
 from unnest(array['b1', 'b2', 'b3']) as s;
@@ -236,9 +239,9 @@ select pg_temp.chk ('16 after the replay, the run cancels A and clears its carri
                      and (counts ->> 'reattributed_restored')::int = 0)$q$);
 
 -- ---------------------------------------------------------------------------
--- Report: failing checks, then `failures | total`
+-- Report: every check, then `failures | total`
 -- ---------------------------------------------------------------------------
-select name, ok, detail from t_results where not ok order by name;
+select name, ok, detail from t_results order by name;
 
 select count(*) filter (where not ok) as failures, count(*) as total from t_results;
 

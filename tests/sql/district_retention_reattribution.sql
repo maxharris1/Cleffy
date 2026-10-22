@@ -11,8 +11,9 @@
 -- lapsed is un-archived as part of the re-attribution if their teacher's plan
 -- has room, and otherwise when A's contract is renewed.
 --
--- Cast: O owns district A (contract ended 17 days ago) and district B (no
--- contract end), and has no plan of their own (free: no roster). T teaches in
+-- Cast: O owns district A (contract ended 17 days ago) and has no plan of
+-- their own (free: no roster); Q owns district B (no contract end; one live
+-- studio per owner since 20261022100300). T teaches in
 -- A on their own Teacher plan (unlimited roster). P owns district C (contract
 -- ended 17 days ago), also free until C is renewed. Every student has a mark on
 -- O's score. After the soft deletes:
@@ -147,11 +148,11 @@ select pg_temp.account (s), 'authenticated', 'authenticated', 'rr-' || s || '@st
 from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'c1', 'c2']) as s
 union all
 select pg_temp.account (s), 'authenticated', 'authenticated', 'rr-' || s || '@example.invalid', '{}'::jsonb
-from unnest(array['a2', 'a3']) as s;
+from unnest(array['a2', 'a3', 'a4']) as s;
 
 insert into public.studios (id, owner_id, name)
 values ('d5000000-0000-4000-8000-0000000005da', pg_temp.account ('a1'), 'District A'),
-       ('d5000000-0000-4000-8000-0000000005db', pg_temp.account ('a1'), 'District B'),
+       ('d5000000-0000-4000-8000-0000000005db', pg_temp.account ('a4'), 'District B'),
        ('d5000000-0000-4000-8000-0000000005dc', pg_temp.account ('a3'), 'District C');
 
 insert into public.district_billing (studio_id, contract_ends_at, contract_ends_source, updated_by)
@@ -451,9 +452,9 @@ select pg_temp.holds (
 );
 
 -- ---------------------------------------------------------------------------
--- Report: failing checks, then `failures | total`
+-- Report: every check, then `failures | total`
 -- ---------------------------------------------------------------------------
-select n, check_name, detail from integrity_results where not passed order by n;
+select n, check_name, passed, detail from integrity_results order by n;
 
 select count(*) filter (where not passed) as failures, count(*) as total from integrity_results;
 
