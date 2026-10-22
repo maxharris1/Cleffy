@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import {
@@ -164,6 +165,25 @@ describe('latest wins against a newer version (MAJOR 2)', () => {
         expect(store.conflictCount).toBe(0);
     });
 
+    it('a server still on the version this device’s unsent edit was made on is behind it, whatever its clock says', async () => {
+        await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });
+        const store = await storeAs(A);
+        // Written here but not uploaded yet, then a later edit is held.
+        await store.update('a1', { color: '#00ff00' });
+        await withFullDisk(() => store.update('a1', { color: '#ff0000' }));
+        // The server has seq 5 as first stored, stamped by a clock far ahead of this device's.
+        const ahead = new Date(Date.now() + 3_600_000).toISOString();
+        store.setRetryHooks({
+            serverRows: () => Promise.resolve([{ ...stroke('a1'), seq: 5, updatedAt: ahead }]),
+            overtaken: vi.fn(),
+        });
+
+        await expect(store.retryFailedPersist()).resolves.toBe(true);
+
+        expect((await db.annotations.get('a1'))?.color).toBe('#ff0000');
+        expect(store.conflictCount).toBe(0);
+    });
+
     it('goes on from the mirror alone when the server cannot answer', async () => {
         const store = await heldRedOverSynced(A);
         store.setRetryHooks({ serverRows: () => Promise.reject(new Error('offline')), overtaken: vi.fn() });
@@ -265,6 +285,22 @@ describe('cancelled by sign-out (MAJOR 1, new finding 1)', () => {
         expect(heldMarksFor(A, DOC)).toEqual([]);
     });
 
+    it('a day-snapshot failure that lands after the sign-out holds nothing for the account again', async () => {
+        const store = await storeAs(A);
+        let fail!: () => void;
+        const failing = new Promise<never>((_, reject) => (fail = () => reject(quotaError())));
+        vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockReturnValue(failing);
+
+        const edit = store.create(stroke('late'));
+        clearAccountInk(A);
+        fail();
+
+        await expect(edit).rejects.toThrow(/signed out/);
+        expect(heldMarksFor(A, DOC)).toEqual([]);
+        expect(unsavedMarkCount(A)).toBe(0);
+        expect(store.getPage(0).has('late')).toBe(false);
+    });
+
     it('store mounted after cleanup: a retained store forgets the cleared account’s held marks, then draws only B’s', async () => {
         const mounted = await heldRedOverSynced(A);
         await withFullDisk(() => mounted.create(stroke('a-secret')));
@@ -359,7 +395,10 @@ describe('sign-out reaches the other tabs (MAJOR 1)', () => {
 
 describe('memory bounds without losing held ink (MAJOR 2, decision c)', () => {
     const fakeOps = (count: number, docId: string): AuthoredOp[] =>
-        Array.from({ length: count }, (_, i) => ({ op: { type: 'create', annotation: stroke(`f${i}`, docId) }, author: null }));
+        Array.from({ length: count }, (_, i) => ({
+            op: { type: 'create', annotation: stroke(`f${i}`, docId) },
+            author: null,
+        }));
 
     it('memory cap without data loss: past MAX_HELD_SCORES a new score’s failed edit is undone and said so; nothing held goes', async () => {
         vi.spyOn(console, 'warn').mockImplementation(() => undefined);

@@ -37,12 +37,18 @@ const useRecoveryCount = (store: AnnotationStore | null, read: (store: Annotatio
 type NoticeState = 'overflow' | 'held' | 'refused' | 'conflicts';
 
 /** What the strip says: short on phones, so it stays about two lines with its buttons beside it. */
-const copy = (state: NoticeState, retryFailed: boolean): { short: string; long: string } => {
+const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { short: string; long: string } => {
     if (state === 'overflow') {
-        return {
-            short: 'Too many unsaved marks: new ones weren’t made. Export a copy.',
-            long: 'This device can’t keep any more unsaved marks, so your latest changes weren’t made. Export a copy to keep the rest, then Retry.',
-        };
+        // Export only when this score has unsaved marks of its own to keep.
+        return exportable
+            ? {
+                  short: 'Too many unsaved marks: new ones weren’t made. Export a copy.',
+                  long: 'This device can’t keep any more unsaved marks, so your latest changes weren’t made. Export a copy to keep the rest, then Retry.',
+              }
+            : {
+                  short: 'Too many unsaved marks: new ones weren’t made.',
+                  long: 'This device can’t keep any more unsaved marks, so your latest changes weren’t made. Free up storage, then Retry.',
+              };
     }
     if (state === 'conflicts') {
         return {
@@ -104,8 +110,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
     if (!store || (count <= 0 && refused <= 0 && overflow <= 0 && conflicts <= 0)) {
         return null;
     }
-    const state: NoticeState =
-        overflow > 0 ? 'overflow' : count > 0 ? 'held' : refused > 0 ? 'refused' : 'conflicts';
+    const state: NoticeState = overflow > 0 ? 'overflow' : count > 0 ? 'held' : refused > 0 ? 'refused' : 'conflicts';
     const exportable = count > 0 || conflicts > 0;
 
     const retry = async () => {
@@ -115,7 +120,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
         setRetryFailed(!saved);
     };
 
-    const { short, long } = copy(state, retryFailed);
+    const { short, long } = copy(state, retryFailed, exportable);
 
     return (
         <div

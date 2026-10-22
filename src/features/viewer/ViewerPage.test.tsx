@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
-import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
+import { holdOps, resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import type { DocumentRow } from '@/types/database';
 
 const fetchDocument = vi.fn();
@@ -145,8 +145,24 @@ vi.mock('@/features/viewer/ViewerHeader', () => ({
 vi.mock('@/features/viewer/presence/PresenceBar', () => ({ PresenceBar: () => null }));
 vi.mock('@/features/viewer/history/LessonHistoryButton', () => ({ LessonHistoryButton: () => null }));
 vi.mock('@/features/export/ShareExportMenu', () => ({
-    ShareExportMenu: ({ openSignal = 0 }: { openSignal?: number }) => (
-        <div data-testid="share-export-menu" data-open-signal={openSignal} />
+    ShareExportMenu: ({
+        openSignal = 0,
+        docId,
+        title,
+        userId,
+    }: {
+        openSignal?: number;
+        docId: string;
+        title: string;
+        userId?: string | null;
+    }) => (
+        <div
+            data-testid="share-export-menu"
+            data-open-signal={openSignal}
+            data-doc={docId}
+            data-title={title}
+            data-user={userId ?? ''}
+        />
     ),
 }));
 vi.mock('@/features/import/ImportScanButton', () => ({
@@ -1120,6 +1136,54 @@ describe('CloudViewer sign-in ended under the sync engine', () => {
         expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
         expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
         expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
+    it('offers Export of ink this device could not store before signing out, and signs out when asked (new finding 1)', async () => {
+        const user = userEvent.setup();
+        sessionKind.userType = 'student';
+        holdOps(new ScribblerDb(`viewer-held-${crypto.randomUUID()}`), DOC_ID, [
+            {
+                op: {
+                    type: 'create',
+                    annotation: {
+                        id: 'unsaved-1',
+                        docId: DOC_ID,
+                        page: 0,
+                        kind: 'stroke',
+                        color: '#111111',
+                        payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+                        createdBy: null,
+                        createdAt: '2026-10-22T00:00:00.000Z',
+                        updatedAt: '2026-10-22T00:00:00.000Z',
+                        deletedAt: null,
+                        seq: 0,
+                    },
+                },
+                author: SESSION.user.id,
+            },
+        ]);
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('editor');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        act(() => {
+            lastSync.current?.onHeld?.({ reason: 'signed-out', pendingMarks: 2 });
+        });
+
+        expect(await screen.findByText(/Some marks you made couldn’t be saved on this device/)).toBeInTheDocument();
+        const menu = screen.getByTestId('share-export-menu');
+        expect(menu).toHaveAttribute('data-doc', DOC_ID);
+        expect(menu).toHaveAttribute('data-user', SESSION.user.id);
+        expect(menu.getAttribute('data-title')).toBe(serverDoc().title);
+        // Nothing is signed out (or cleared) while the student can still export.
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
+
+        await user.click(screen.getByRole('button', { name: 'Sign out now' }));
+
+        expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
+        expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
     });
 
     it('discards, and says so, the outbox of a student whose account was deleted with their teacher', async () => {

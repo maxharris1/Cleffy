@@ -284,6 +284,38 @@ describe('ShareExportMenu export allowance', () => {
         expect(rpc).not.toHaveBeenCalled();
     });
 
+    it('shows what an incomplete export is missing, and stays open over it, not just a console warning (MAJOR 3)', async () => {
+        const missing = 'This export is missing marks. This device’s storage couldn’t be read.';
+        buildAnnotatedPdf.mockImplementation(
+            (_doc: string, _bytes: ArrayBuffer, _title: string, options: { onNotice?: (notice: string) => void }) => {
+                options.onNotice?.(missing);
+                return Promise.resolve(builtPdf);
+            },
+        );
+        rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
+        const user = await openMenu();
+
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledWith(builtPdf));
+        expect(await screen.findByText(missing)).toBeInTheDocument();
+        expect(screen.getByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
+    });
+
+    it('shows the same notice for a page sent as a photo', async () => {
+        const conflict =
+            'One of your unsaved marks changed elsewhere before it could be saved here: the export has both versions.';
+        exportAnnotatedPageImage.mockImplementation((...args: unknown[]) => {
+            (args[5] as (notice: string) => void)(conflict);
+            return Promise.resolve();
+        });
+        const user = await openMenu();
+
+        await user.click(screen.getByRole('menuitem', { name: /Send page 1 as photo/ }));
+
+        expect(await screen.findByText(conflict)).toBeInTheDocument();
+    });
+
     describe('as a share-link guest', () => {
         beforeEach(() => {
             useSession.mockReturnValue({ session: guest, loading: false, lastEvent: null });
