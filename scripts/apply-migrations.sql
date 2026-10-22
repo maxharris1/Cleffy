@@ -18207,7 +18207,8 @@ grant execute on function public.defer_district_retention_notice (bigint) to ser
 
 -- ===== supabase/migrations/20261022130000_district_retention_reattribution.sql =====
 -- District retention: a student re-attributed after the soft delete is not
--- hard deleted under the district they left.
+-- hard deleted under the district they left, and gets back what that
+-- district's purge took.
 --
 -- Launch re-audit, Codex A4: the soft delete (20261021120700) lists the
 -- district's students in district_retention_students, and the hard delete a
@@ -18220,7 +18221,8 @@ grant execute on function public.defer_district_retention_notice (bigint) to ser
 -- (retention_district_students(), district_studio_id = the district) no longer
 -- included.
 --
--- Two halves, both logged as 'skipped_reattributed' in district_retention_log:
+-- Two halves, both logged in district_retention_log as attribution_changed
+-- with counts.event = 'skipped_reattributed':
 --
 --  * admin_set_student_district() drops the student from every purge list but
 --    the one of the district it now names, under the roster row's lock.
@@ -18231,31 +18233,105 @@ grant execute on function public.defer_district_retention_notice (bigint) to ser
 --    not reach (a soft delete running concurrently with the correction, or a
 --    correction made before this migration).
 --
+-- No new step value. 20261021120800 drops and re-adds
+-- district_retention_log_step_check with its own fixed list, so a row with any
+-- step it does not know would stop an ordered replay of the migrations at
+-- 20261021120800 (Codex round 1 on #66, minor 1). The skip is an attribution
+-- change seen by the purge, and is logged as one. Add none here later either:
+-- put a new event in counts, as this does.
+--
+-- And the student gets their roster place back (Codex round 1 on #66, minor 2;
+-- Cleffy's decision): one the soft delete archived (was_archived false, so
+-- archived only because the district lapsed) is un-archived as part of the
+-- re-attribution, by district_reattributed_restore(), if their teacher's plan
+-- has room for them: the same check student-provision's restore makes
+-- (checkRosterStock: limits.students from the teacher's entitlements, 0 for
+-- no roster, -1 for unlimited, against their unarchived students), and only if
+-- no other district's purge lists them. One it cannot restore yet is carried
+-- over in district_retention_restores, and the left district's cancel (its
+-- contract renewed) tries again, under the same check, so the list entry's
+-- restore is not lost with the entry.
+--
 -- Everything else stands: soft then hard delete with logged counts (decision
 -- 1), attribution only on positive evidence (decisions 8-10: nothing here
--- attributes a student), the contract-end rules (21-22). A skipped student
--- stays archived as the soft delete left them; the teacher can restore them,
--- as after any archive (was_archived is logged for whoever decides).
+-- attributes a student), the contract-end rules (21-22).
 --
--- Rerunnable: the constraint is rebuilt inside a DO block, the functions are
--- replaced with the same signatures, and the privileges reset to the same end
--- state.
+-- Rerunnable: the table is created if missing, the functions are replaced
+-- with the same signatures, and the privileges reset to the same end state.
 
-do $district_retention_log_step$
+-- ---------------------------------------------------------------------------
+-- Restores carried over from a dropped purge entry
+-- ---------------------------------------------------------------------------
+-- A student the district's soft delete archived, whom a human then took out of
+-- the district, and whom district_reattributed_restore() could not restore at
+-- that moment. Cleared, with the district's list, by its cancel (which retries
+-- them) and its hard delete.
+create table if not exists public.district_retention_restores (
+    studio_id uuid not null,
+    managed_student_id uuid not null,
+    student_user_id uuid not null,
+    reattributed_at timestamptz not null default now(),
+    primary key (studio_id, managed_student_id)
+);
+
+alter table public.district_retention_restores enable row level security;
+
+revoke all on table public.district_retention_restores from public, anon, authenticated;
+
+grant all on table public.district_retention_restores to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Un-archive a re-attributed student, if their teacher's plan has room
+-- ---------------------------------------------------------------------------
+-- p_left_studio is the district whose purge archived them. Returns what
+-- happened: 'restored', or why not ('gone', 'not_archived', 'on_another_purge',
+-- 'no_roster_plan', 'roster_full'). Only the callers below decide that the
+-- archive was the purge's (was_archived false); this re-checks the rest under
+-- the roster row's lock, which those callers already hold. Check-then-write on
+-- the teacher's count, as student-provision's restore is.
+create or replace function public.district_reattributed_restore (p_managed_student uuid, p_left_studio uuid)
+returns text language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.managed_students;
+    v_limit int;
+    v_active int;
 begin
-    alter table public.district_retention_log drop constraint if exists district_retention_log_step_check;
-    alter table public.district_retention_log
-    add constraint district_retention_log_step_check check (
-        step in ('notice_queued', 'notice_sent', 'soft_deleted', 'hard_deleted', 'cancelled', 'attribution_changed',
-                 'attribution_backfilled', 'attribution_backfill_run', 'skipped_reattributed')
-    );
+    select * into v_row from public.managed_students ms where ms.id = p_managed_student for update;
+    if not found then
+        return 'gone';
+    end if;
+    if v_row.archived_at is null then
+        return 'not_archived';
+    end if;
+    -- Another district's purge archived or listed them too: its own cancel or
+    -- hard delete decides.
+    if exists (
+        select 1 from public.district_retention_students s
+        where s.managed_student_id = p_managed_student and s.studio_id is distinct from p_left_studio
+    ) then
+        return 'on_another_purge';
+    end if;
+    v_limit := (public.resolve_entitlements (v_row.teacher_id) -> 'limits' ->> 'students')::int;
+    if v_limit is null or v_limit = 0 then
+        return 'no_roster_plan';
+    end if;
+    if v_limit > 0 then
+        select count(*) into v_active from public.managed_students ms
+        where ms.teacher_id = v_row.teacher_id and ms.archived_at is null;
+        if v_active >= v_limit then
+            return 'roster_full';
+        end if;
+    end if;
+    update public.managed_students set archived_at = null where id = p_managed_student;
+    return 'restored';
 end;
-$district_retention_log_step$;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- The correction drops the student from any other district's purge
 -- ---------------------------------------------------------------------------
--- 20261021120800's definition, plus the list. A purge list entry for the
+-- 20261021120800's definition, plus the lists. A purge list entry for the
 -- district the student now names (an admin re-confirming the same district)
 -- stays: that district's purge still covers them.
 create or replace function public.admin_set_student_district (p_managed_student uuid, p_studio uuid, p_actor text)
@@ -18263,6 +18339,8 @@ returns void language plpgsql security definer
 set search_path = public as $$
 declare
     v_old uuid;
+    v_drop public.district_retention_students;
+    v_restore text;
 begin
     if coalesce(trim(p_actor), '') = '' then
         raise exception 'say who is making the change' using errcode = '22023';
@@ -18281,26 +18359,38 @@ begin
             jsonb_build_object('managed_student_id', p_managed_student, 'from', v_old, 'to', p_studio,
                                'actor', p_actor));
 
-    -- Logged under the district whose purge it left.
-    with dropped as (
+    -- Each district whose purge it left: the entry goes, the student gets back
+    -- what that purge took if their teacher's plan has room (or it is carried
+    -- over to the district's cancel), logged under that district.
+    for v_drop in
         delete from public.district_retention_students s
         where s.managed_student_id = p_managed_student
           and s.studio_id is distinct from p_studio
         returning s.*
-    )
-    insert into public.district_retention_log (studio_id, step, counts)
-    select d.studio_id, 'skipped_reattributed',
-           jsonb_build_object('students_skipped', 1, 'managed_student_id', d.managed_student_id,
-                              'student_user_id', d.student_user_id, 'was_archived', d.was_archived,
-                              'to', p_studio, 'actor', p_actor, 'by', 'admin_set_student_district')
-    from dropped d;
+    loop
+        v_restore := case when v_drop.was_archived then 'was_archived'
+                          else public.district_reattributed_restore (p_managed_student, v_drop.studio_id) end;
+        if v_restore in ('on_another_purge', 'no_roster_plan', 'roster_full') then
+            insert into public.district_retention_restores (studio_id, managed_student_id, student_user_id)
+            values (v_drop.studio_id, v_drop.managed_student_id, v_drop.student_user_id)
+            on conflict do nothing;
+        end if;
+        insert into public.district_retention_log (studio_id, step, counts)
+        values (v_drop.studio_id, 'attribution_changed',
+                jsonb_build_object('event', 'skipped_reattributed', 'students_skipped', 1,
+                                   'managed_student_id', v_drop.managed_student_id,
+                                   'student_user_id', v_drop.student_user_id, 'was_archived', v_drop.was_archived,
+                                   'restore', v_restore, 'to', p_studio, 'actor', p_actor,
+                                   'by', 'admin_set_student_district'));
+    end loop;
 end;
 $$;
 
 -- ---------------------------------------------------------------------------
 -- The run: the hard delete re-checks attribution under the row lock
 -- ---------------------------------------------------------------------------
--- 20261021120700's definition; only the hard-delete loop changes.
+-- 20261021120700's definition; only the cancel (it retries the restores
+-- carried over) and the hard-delete loop change.
 create or replace function public.retention_district_run (p_now timestamptz default now(), p_batch int default 20)
 returns jsonb language plpgsql security definer
 set search_path = public, extensions, vault as $$
@@ -18315,6 +18405,9 @@ declare
     v_student record;
     v_roster record;
     v_n int;
+    v_restored int;
+    v_restore text;
+    v_carried record;
     v_skipped jsonb;
     v_members int;
     v_url text;
@@ -18347,16 +18440,30 @@ begin
               and not s.was_archived
               and ms.archived_at is not null;
             get diagnostics v_n = row_count;
+            -- And the ones re-attributed away while the purge was pending, whom
+            -- the correction could not restore then: the same check again.
+            v_restored := 0;
+            for v_carried in
+                select r.managed_student_id from public.district_retention_restores r
+                where r.studio_id = candidate.studio_id
+                order by r.managed_student_id
+            loop
+                if public.district_reattributed_restore (v_carried.managed_student_id, candidate.studio_id) = 'restored' then
+                    v_restored := v_restored + 1;
+                end if;
+            end loop;
+            delete from public.district_retention_restores where studio_id = candidate.studio_id;
             delete from public.district_retention_students where studio_id = candidate.studio_id;
             delete from public.district_retention_notices
             where studio_id = candidate.studio_id and sent_at is null;
             delete from public.district_retention where studio_id = candidate.studio_id;
             insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
             values (candidate.studio_id, 'cancelled', v_state.contract_ends_at,
-                    jsonb_build_object('students_restored', v_n, 'new_contract_ends_at', v_billing.contract_ends_at));
+                    jsonb_build_object('students_restored', v_n + v_restored, 'reattributed_restored', v_restored,
+                                       'new_contract_ends_at', v_billing.contract_ends_at));
             v_done := v_done || jsonb_build_object(
                 'cancel', (v_done ->> 'cancel')::int + 1,
-                'students_restored', (v_done ->> 'students_restored')::int + v_n);
+                'students_restored', (v_done ->> 'students_restored')::int + v_n + v_restored);
 
         elsif v_step = 'notice' then
             select st.owner_id, st.name, u.email into v_owner, v_name, v_email
@@ -18447,16 +18554,24 @@ begin
                 -- Still in the purge's scope (retention_district_students():
                 -- the district this row names) and still the account that was
                 -- listed. Otherwise a human re-attributed the student after
-                -- the soft delete: skipped, and off the list.
+                -- the soft delete: skipped, and off the list. A student moved
+                -- to another district or roster gets back what this purge took,
+                -- as the correction would have done; a row whose account is not
+                -- the one listed is left as it is, for a human.
                 if v_roster.district_studio_id is distinct from candidate.studio_id
                    or v_roster.student_user_id is distinct from v_student.student_user_id then
                     delete from public.district_retention_students
                     where studio_id = candidate.studio_id and managed_student_id = v_student.managed_student_id;
+                    v_restore := case
+                        when v_roster.student_user_id is distinct from v_student.student_user_id then 'other_account'
+                        when v_student.was_archived then 'was_archived'
+                        else public.district_reattributed_restore (v_student.managed_student_id, candidate.studio_id) end;
                     v_skipped := v_skipped || jsonb_build_array(jsonb_build_object(
                         'managed_student_id', v_student.managed_student_id,
                         'student_user_id', v_student.student_user_id,
                         'was_archived', v_student.was_archived,
-                        'now_district_studio_id', v_roster.district_studio_id));
+                        'now_district_studio_id', v_roster.district_studio_id,
+                        'restore', v_restore));
                     continue;
                 end if;
 
@@ -18475,8 +18590,9 @@ begin
 
             if jsonb_array_length(v_skipped) > 0 then
                 insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
-                values (candidate.studio_id, 'skipped_reattributed', v_state.contract_ends_at,
-                        jsonb_build_object('students_skipped', jsonb_array_length(v_skipped),
+                values (candidate.studio_id, 'attribution_changed', v_state.contract_ends_at,
+                        jsonb_build_object('event', 'skipped_reattributed',
+                                           'students_skipped', jsonb_array_length(v_skipped),
                                            'students', v_skipped, 'by', 'retention_district_run'));
             end if;
 
@@ -18484,6 +18600,7 @@ begin
             -- Takes the seats, the override and the billing record with it.
             delete from public.studios where id = candidate.studio_id;
             delete from public.district_retention_students where studio_id = candidate.studio_id;
+            delete from public.district_retention_restores where studio_id = candidate.studio_id;
             update public.district_retention set hard_deleted_at = p_now where studio_id = candidate.studio_id;
             insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
             values (candidate.studio_id, 'hard_deleted', v_state.contract_ends_at,
@@ -18535,11 +18652,15 @@ begin
 end;
 $$;
 
+-- Internal: only the two above call it.
+revoke all on function public.district_reattributed_restore (uuid, uuid) from public, anon, authenticated;
+
 -- DEPLOY: unchanged. retention_district_run() stays unscheduled
 -- (20261021120700's DEPLOY note); schedule it only with this migration applied.
 
 -- ===== supabase/migrations/20261022130100_content_strikes_survive_deletion.sql =====
--- Copyright strikes survive the account they were given to.
+-- Copyright strikes survive the account they were given to, for as long as
+-- they can count.
 --
 -- Launch re-audit, SF-15: content_strikes.user_id was ON DELETE CASCADE
 -- (20261020150000), so deleting an account (delete-account, the 12-month
@@ -18551,31 +18672,58 @@ $$;
 --  (a) The foreign key nulls user_id instead: the strike row stays, as the
 --      takedown it came from already does (content_takedowns.uploader_id is
 --      ON DELETE SET NULL, unchanged here).
---  (b) Each strike carries subject_key: sha256(lower(email)) of the uploader's
---      sign-in address, hex, no HMAC. It is set from auth.users when the strike
---      is inserted (a trigger, so apply_content_takedown and any other insert
---      path get it), and backfilled below for existing strikes. A guest (no
---      address) has none.
---  (c) active_content_strikes() also counts strikes whose account is gone
---      (user_id null) and whose subject_key is the digest of the user's
---      current address: an address re-registered inherits them. A strike whose
---      account still exists counts for that account only, so an address freed
---      by an email change does not hand its owner's strikes to whoever takes
---      it next.
+--  (b) When the account is deleted, and not before, its strikes that still
+--      count (not withdrawn, inside the 12-month window) are keyed with the
+--      account's address AT THAT MOMENT, read from the auth.users row being
+--      deleted (a BEFORE DELETE trigger, under the delete's own row lock, so
+--      an email change cannot slip in between). A live strike carries no key:
+--      it counts by user_id. Keying at deletion is what keeps an address the
+--      account gave up earlier (an email change) from inheriting its strikes
+--      (Codex round 1 on #66, major 1).
+--  (c) The key is versioned and keyed: subject_key_version 1 is
+--      hex(hmac-sha256(pepper, lower(btrim(email)))), the pepper read
+--      server-side from the Vault secret `content_strike_pepper`. Without the
+--      pepper a database or backup reader cannot test candidate addresses
+--      against the keys (Codex round 1 on #66, major 2). Missing, it fails
+--      closed with a clear error and never a plain digest: deleting an account
+--      that has strikes to key is refused, and so is counting strikes while
+--      keyed ones exist. The pepper is never logged or returned. A later
+--      version would name its own secret and be added beside version 1, which
+--      can be retired once its keys have been purged (12 months at most, (e)).
+--  (d) active_content_strikes() also counts strikes whose account is gone
+--      (user_id null) and whose key is the user's current address under the
+--      key's version, inside the same window: an address re-registered
+--      inherits them.
+--  (e) Retention: retention_purge_content_strikes() deletes a deleted
+--      account's strikes 12 months after the newest strike under the same key
+--      (and an unkeyed one 12 months after it was given), daily, through the
+--      retention job pattern of 20261021120300 (scheduled and active, as those
+--      jobs are). The takedown records are not touched.
 --
 -- The 12-month window and the voiding on a successful counter-notice are
 -- unchanged (STRIKE_WINDOW_MONTHS, src/features/moderation/moderationRules.ts).
 -- No table grant is added here: launchfix P1 grants content_strikes explicitly.
 --
--- Rerunnable: the column is added once, the foreign key is replaced only while
--- it still cascades, the backfill fills only missing keys, the trigger is
--- dropped just before it is created, and the functions are replaced.
+-- Rerunnable: the columns are added once, the foreign key is replaced only
+-- while it still cascades, the triggers are dropped just before they are
+-- created, the functions are replaced, and the job is unscheduled before it is
+-- scheduled.
+--
+-- DEPLOY: set the Vault secret `content_strike_pepper` on production before
+-- go-live (a long random value, kept nowhere else; Max only):
+--     select vault.create_secret ('<random>', 'content_strike_pepper', 'Keys copyright strikes after account deletion');
+-- Until it is set, deleting an account with active strikes fails. Never change
+-- or delete it while version-1 keys exist: they would stop matching. Local
+-- stacks and CI get a non-secret dev value from supabase/seed.sql.
 
 alter table public.content_strikes
 alter column user_id drop not null;
 
 alter table public.content_strikes
 add column if not exists subject_key text;
+
+alter table public.content_strikes
+add column if not exists subject_key_version smallint;
 
 do $content_strikes_user_fk$
 begin
@@ -18596,22 +18744,50 @@ $content_strikes_user_fk$;
 create index if not exists content_strikes_subject_key_idx on public.content_strikes (subject_key, created_at desc)
 where user_id is null and subject_key is not null;
 
--- The digest of a sign-in address; null for none. Internal.
-create or replace function public.content_strike_subject_key (p_email text) returns text language sql immutable
-set search_path = public as $$
-    select case when nullif(btrim(coalesce(p_email, '')), '') is null then null
-                else encode(sha256(convert_to(lower(p_email), 'UTF8')), 'hex') end;
+-- This PR's first revision keyed with plain sha256 through this helper.
+drop function if exists public.content_strike_subject_key (text);
+
+-- The pepper for a key version, from Vault. Raises rather than answer without
+-- one; the message names the secret, never its value. Internal.
+create or replace function public.content_strike_pepper (p_version smallint) returns text language plpgsql stable
+security definer
+set search_path = public, vault as $$
+declare
+    v_pepper text;
+begin
+    if p_version is distinct from 1 then
+        raise exception 'unknown content strike key version %', p_version using errcode = '22023';
+    end if;
+    select s.decrypted_secret into v_pepper from vault.decrypted_secrets s where s.name = 'content_strike_pepper' limit 1;
+    if coalesce(v_pepper, '') = '' then
+        raise exception 'the Vault secret content_strike_pepper is not set: copyright strikes cannot be keyed or matched'
+            using errcode = '55000',
+                  hint = 'Set it with vault.create_secret before deleting accounts or counting strikes (DEPLOY note in 20261022130100).';
+    end if;
+    return v_pepper;
+end;
 $$;
 
--- Set on insert from the account's address, whatever the insert said. Not on
--- update: the foreign key's SET NULL is an update, and the key must outlive it.
+-- The key of a sign-in address under a version; null for no address (a
+-- guest), without reading the pepper. Internal.
+create or replace function public.content_strike_subject_key (p_email text, p_version smallint) returns text
+language sql stable
+security definer
+set search_path = public, extensions as $$
+    select case when nullif(btrim(coalesce(p_email, '')), '') is null then null
+                else encode(extensions.hmac(convert_to(lower(btrim(p_email)), 'UTF8'),
+                                            convert_to(public.content_strike_pepper (p_version), 'UTF8'), 'sha256'),
+                            'hex') end;
+$$;
+
+-- A strike is inserted unkeyed, whatever the insert said: keys are made only
+-- when the account is deleted.
 create or replace function public.content_strikes_set_subject_key () returns trigger language plpgsql
 security definer
 set search_path = public as $$
 begin
-    if new.user_id is not null then
-        new.subject_key := (select public.content_strike_subject_key (u.email) from auth.users u where u.id = new.user_id);
-    end if;
+    new.subject_key := null;
+    new.subject_key_version := null;
     return new;
 end;
 $$;
@@ -18621,36 +18797,135 @@ drop trigger if exists content_strikes_set_subject_key on public.content_strikes
 create trigger content_strikes_set_subject_key before insert on public.content_strikes
 for each row execute function public.content_strikes_set_subject_key ();
 
--- Strikes given before this migration, while their account still exists.
--- (Strikes whose account was already deleted went with it, under the cascade.)
-update public.content_strikes s
-set subject_key = public.content_strike_subject_key (u.email)
-from auth.users u
-where u.id = s.user_id
-  and s.subject_key is null
-  and public.content_strike_subject_key (u.email) is not null;
+-- The account is being deleted: key the strikes that still count with the
+-- address it has now, before the foreign key nulls their user_id. Strikes
+-- already withdrawn or outside the window stay unkeyed (and are purged).
+create or replace function public.content_strikes_key_on_account_delete () returns trigger language plpgsql
+security definer
+set search_path = public as $$
+declare
+    v_key text;
+begin
+    if exists (
+        select 1 from public.content_strikes s
+        where s.user_id = old.id and s.voided_at is null and s.created_at > now() - interval '12 months'
+    ) then
+        v_key := public.content_strike_subject_key (old.email, 1::smallint);
+        if v_key is not null then
+            update public.content_strikes s
+            set subject_key = v_key, subject_key_version = 1
+            where s.user_id = old.id and s.voided_at is null and s.created_at > now() - interval '12 months';
+        end if;
+    end if;
+    return old;
+end;
+$$;
+
+drop trigger if exists content_strikes_key_on_account_delete on auth.users;
+
+create trigger content_strikes_key_on_account_delete before delete on auth.users
+for each row execute function public.content_strikes_key_on_account_delete ();
 
 -- Strikes that count: not withdrawn, within the window the policy states
 -- (STRIKE_WINDOW_MONTHS in src/features/moderation/moderationRules.ts), and
--- either the user's own or left by a deleted account with the user's address.
-create or replace function public.active_content_strikes (p_user uuid) returns integer language sql stable security definer
+-- either the user's own or left by a deleted account under the user's
+-- address. The pepper is read only when such keyed strikes exist.
+create or replace function public.active_content_strikes (p_user uuid) returns integer language plpgsql stable
+security definer
 set search_path = public as $$
-    with subject as (
-        select public.content_strike_subject_key (u.email) as key from auth.users u where u.id = p_user
-    )
-    select count(*)::int
+declare
+    v_count int;
+    v_email text;
+    v_version smallint;
+    v_key text;
+    v_inherited int;
+begin
+    select count(*)::int into v_count
     from public.content_strikes s
-    where (s.user_id = p_user
-           or (s.user_id is null and s.subject_key is not null
-               and s.subject_key = (select key from subject)))
-      and s.voided_at is null
-      and s.created_at > now() - interval '12 months';
+    where s.user_id = p_user and s.voided_at is null and s.created_at > now() - interval '12 months';
+
+    select u.email into v_email from auth.users u where u.id = p_user;
+    if nullif(btrim(coalesce(v_email, '')), '') is null then
+        return v_count;
+    end if;
+
+    for v_version in
+        select distinct s.subject_key_version
+        from public.content_strikes s
+        where s.user_id is null and s.subject_key is not null
+          and s.voided_at is null and s.created_at > now() - interval '12 months'
+    loop
+        v_key := public.content_strike_subject_key (v_email, v_version);
+        select count(*)::int into v_inherited
+        from public.content_strikes s
+        where s.user_id is null and s.subject_key = v_key and s.subject_key_version = v_version
+          and s.voided_at is null and s.created_at > now() - interval '12 months';
+        v_count := v_count + v_inherited;
+    end loop;
+    return v_count;
+end;
 $$;
 
-revoke all on function public.content_strike_subject_key (text) from public, anon, authenticated;
+-- ---------------------------------------------------------------------------
+-- Retention: a deleted account's strikes, 12 months after the newest under
+-- the same key (when the last of them stops counting); an unkeyed one, 12
+-- months after it was given. Bounded per run, like the jobs of 20261021120300.
+-- ---------------------------------------------------------------------------
+create or replace function public.retention_purge_content_strikes (
+    p_older_than interval default interval '12 months',
+    p_batch int default 1000
+) returns int
+language plpgsql security definer
+set search_path = public as $$
+declare
+    purged int;
+begin
+    delete from public.content_strikes d
+    where d.id in (
+        select s.id
+        from public.content_strikes s
+        where s.user_id is null
+          and s.created_at < now() - p_older_than
+          and (s.subject_key is null
+               or not exists (
+                   select 1 from public.content_strikes n
+                   where n.user_id is null and n.subject_key = s.subject_key
+                     and n.subject_key_version is not distinct from s.subject_key_version
+                     and n.created_at >= now() - p_older_than
+               ))
+        order by s.created_at
+        limit greatest(p_batch, 0)
+    );
+    get diagnostics purged = row_count;
+    return purged;
+end;
+$$;
+
+revoke all on function public.content_strike_pepper (smallint) from public, anon, authenticated, service_role;
+
+revoke all on function public.content_strike_subject_key (text, smallint) from public, anon, authenticated, service_role;
 
 revoke all on function public.content_strikes_set_subject_key () from public, anon, authenticated;
+
+revoke all on function public.content_strikes_key_on_account_delete () from public, anon, authenticated;
 
 revoke all on function public.active_content_strikes (uuid) from public, anon, authenticated;
 
 grant execute on function public.active_content_strikes (uuid) to service_role;
+
+revoke all on function public.retention_purge_content_strikes (interval, int) from public, anon, authenticated;
+
+grant execute on function public.retention_purge_content_strikes (interval, int) to service_role;
+
+-- Off the hour and clear of 20261021120300's 03:17-04:23 jobs; unscheduled
+-- first so a re-applied migration replaces rather than duplicates.
+do $$
+begin
+    perform cron.unschedule (jobid) from cron.job where jobname = 'retention-content-strikes';
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('retention-content-strikes', '7 4 * * *', $$select public.retention_purge_content_strikes ()$$);

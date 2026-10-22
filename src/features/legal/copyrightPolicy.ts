@@ -126,6 +126,9 @@ export const COPYRIGHT_POLICY: LegalDocument = {
                 p(
                     `Each time we restrict or remove a score after a valid copyright notice, the uploader’s account gets a strike. An account with ${REPEAT_INFRINGER_STRIKES} strikes within ${STRIKE_WINDOW_MONTHS} months is closed in appropriate circumstances. A strike is withdrawn if a counter-notice or complaint succeeds.`,
                 ),
+                p(
+                    `Deleting an account does not clear its strikes. After deletion we keep the strike record and a keyed hash of the account’s email address for up to ${STRIKE_WINDOW_MONTHS} months after the most recent strike, to enforce these rules: an account later created with that address carries the strikes that still count.`,
+                ),
                 placeholder(
                     'Counsel to confirm the strike threshold and window, and what closing an account involves.',
                 ),

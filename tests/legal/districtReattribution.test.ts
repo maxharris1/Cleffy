@@ -1,17 +1,20 @@
 // @vitest-environment node
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 /**
  * Launch re-audit, Codex A4 (20261022130000): a student re-attributed after the
- * district soft delete is not hard deleted under the district they left.
- * tests/sql/district_retention_reattribution.sql proves it against a database;
- * what CI holds here, without one, is the shape: the hard delete re-checks the
- * roster row's district and account under its lock, the admin correction drops
- * the student from other districts' purge lists, both log 'skipped_reattributed',
- * and the migration reruns.
+ * district soft delete is not hard deleted under the district they left, and
+ * gets back what that purge took (Codex round 1 on #66, minor 2).
+ * tests/sql/district_retention_reattribution.sql proves it against a database,
+ * and tests/sql/migrations_ordered_replay.sql that the migrations replay in
+ * order over its log rows (minor 1); what CI holds here, without one, is the
+ * shape: the hard delete re-checks the roster row's district and account under
+ * its lock, the admin correction drops the student from other districts' purge
+ * lists, both restore through the same plan check and log the skip as
+ * attribution_changed (no new step), and the migration reruns.
  */
 const read = (path: string): string => readFileSync(resolve(process.cwd(), path), 'utf8');
 const migration = read('supabase/migrations/20261022130000_district_retention_reattribution.sql');
@@ -47,13 +50,27 @@ describe('the hard delete re-checks attribution (20261022130000)', () => {
         expect(hard).toContain("u.raw_app_meta_data ->> 'user_type' = 'student'");
     });
 
-    it('takes a skipped student off the list and logs the skip with its counts', () => {
+    it('takes a skipped student off the list, restores a moved one, and logs the skip with its counts', () => {
         expect(hard).toMatch(
             /delete from public\.district_retention_students\s+where studio_id = candidate\.studio_id and managed_student_id = v_student\.managed_student_id;/,
         );
-        expect(hard).toMatch(
-            /insert into public\.district_retention_log[^;]*'skipped_reattributed'[^;]*'students_skipped'/,
+        expect(hard).toContain(
+            'else public.district_reattributed_restore (v_student.managed_student_id, candidate.studio_id) end;',
         );
+        expect(hard).toMatch(
+            /insert into public\.district_retention_log[^;]*'attribution_changed'[^;]*'event', 'skipped_reattributed'[^;]*'students_skipped'/,
+        );
+    });
+
+    it('retries the carried-over restores on cancel, and clears them with the lists', () => {
+        const cancel = run.slice(run.indexOf("if v_step = 'cancel' then"), run.indexOf("elsif v_step = 'notice' then"));
+        expect(cancel).toContain(
+            "if public.district_reattributed_restore (v_carried.managed_student_id, candidate.studio_id) = 'restored' then",
+        );
+        expect(cancel).toContain(
+            'delete from public.district_retention_restores where studio_id = candidate.studio_id;',
+        );
+        expect(hard).toContain('delete from public.district_retention_restores where studio_id = candidate.studio_id;');
     });
 
     it('leaves the hard delete’s own log counts as they were', () => {
@@ -82,7 +99,18 @@ describe('the admin correction drops other districts’ purge entries (202610221
         expect(lock).toBeGreaterThan(-1);
         expect(drop).toBeGreaterThan(lock);
         expect(admin).toContain('and s.studio_id is distinct from p_studio');
-        expect(admin).toMatch(/insert into public\.district_retention_log[^;]*'skipped_reattributed'/);
+        expect(admin).toMatch(
+            /insert into public\.district_retention_log[^;]*'attribution_changed'[^;]*'event', 'skipped_reattributed'/,
+        );
+    });
+
+    it('un-archives a student the purge archived, or carries the restore over', () => {
+        expect(admin).toContain(
+            "v_restore := case when v_drop.was_archived then 'was_archived'\n                          else public.district_reattributed_restore (p_managed_student, v_drop.studio_id) end;",
+        );
+        expect(admin).toMatch(
+            /if v_restore in \('on_another_purge', 'no_roster_plan', 'roster_full'\) then\s+insert into public\.district_retention_restores/,
+        );
     });
 
     it('still logs the correction itself', () => {
@@ -91,36 +119,76 @@ describe('the admin correction drops other districts’ purge entries (202610221
     });
 });
 
+describe('the restore is student-provision’s roster check (20261022130000)', () => {
+    const restore = fn('district_reattributed_restore');
+
+    it('locks the row, skips another district’s purge, and checks the teacher’s plan and count', () => {
+        expect(restore).toContain('where ms.id = p_managed_student for update;');
+        expect(restore).toContain('s.studio_id is distinct from p_left_studio');
+        expect(restore).toContain("(public.resolve_entitlements (v_row.teacher_id) -> 'limits' ->> 'students')::int");
+        expect(restore).toMatch(/if v_limit is null or v_limit = 0 then\s+return 'no_roster_plan';/);
+        expect(restore).toMatch(/if v_active >= v_limit then\s+return 'roster_full';/);
+        // The update comes after every check.
+        expect(restore.indexOf('set archived_at = null')).toBeGreaterThan(restore.indexOf("return 'roster_full'"));
+    });
+
+    it('mirrors the edge function’s gate (limits.students: 0 refuses, -1 is unlimited)', () => {
+        const provision = read('supabase/functions/student-provision/index.ts');
+        expect(provision).toContain('const limit = entitlements.limits.students;');
+        expect(provision).toContain(".is('archived_at', null);");
+        expect(provision).toContain('return count >= limit ? refusal() : { ok: true };');
+    });
+});
+
+describe('no migration logs a step 20261021120800’s replay would refuse', () => {
+    it('only 20261021120800 rebuilds the step check, and 20261022130000 does not touch it', () => {
+        const dir = resolve(process.cwd(), 'supabase/migrations');
+        const rebuilders = readdirSync(dir)
+            .filter((name) => name.endsWith('.sql') && !/_imslp_works_catalog\.sql$/.test(name))
+            .filter((name) =>
+                /add constraint district_retention_log_step_check/.test(read(`supabase/migrations/${name}`)),
+            );
+        expect(rebuilders).toEqual(['20261021120800_district_student_attribution.sql']);
+        expect(migration).not.toMatch(/'skipped_reattributed'\s*\)|step in \(/);
+    });
+
+    it('the ordered replay proof replays, in order, every rerunnable migration through this one', () => {
+        const proof = read('tests/sql/migrations_ordered_replay.sql');
+        const included = [...proof.matchAll(/^\\ir \.\.\/\.\.\/supabase\/migrations\/(\S+)$/gm)].map((m) => m[1]);
+        expect(included[0]).toBe('20261020160300_cancel_link_token_lifetime.sql');
+        expect(included).toEqual([...included].sort());
+        expect(included).toContain('20261021120800_district_student_attribution.sql');
+        expect(included.slice(-2)).toEqual([
+            '20261022130000_district_retention_reattribution.sql',
+            '20261022130100_content_strikes_survive_deletion.sql',
+        ]);
+        for (const name of included) expect(() => read(`supabase/migrations/${name}`), name).not.toThrow();
+    });
+});
+
 describe('20261022130000 reruns and keeps the service role alone', () => {
     const stmts = statements(migration);
 
-    it('only replaces functions, and adds its constraint inside a DO block', () => {
+    it('only replaces functions, creates its table if missing, and adds no constraint', () => {
         for (const s of stmts.filter((x) => /^create (or replace )?function\b/i.test(x))) {
             expect(s, s).toMatch(/^create or replace function /i);
         }
-        for (const s of stmts) {
-            expect(s, s).not.toMatch(/\badd constraint\b|^create (table|index|trigger|policy)\b/i);
+        for (const s of stmts.filter((x) => /^create (unique )?(table|index)\b/i.test(x))) {
+            expect(s, s).toMatch(/^create (unique )?(table|index) if not exists /i);
         }
-        expect(migration).toMatch(
-            /drop constraint if exists district_retention_log_step_check;\s+alter table public\.district_retention_log\s+add constraint district_retention_log_step_check/,
-        );
+        for (const s of stmts) {
+            expect(s, s).not.toMatch(/\badd constraint\b|^create (trigger|policy)\b/i);
+        }
     });
 
-    it('keeps every step 20261021120800 allows, and adds skipped_reattributed', () => {
-        const check = migration.match(/add constraint district_retention_log_step_check check \(([\s\S]*?)\);/)?.[1];
-        for (const step of [
-            'notice_queued',
-            'notice_sent',
-            'soft_deleted',
-            'hard_deleted',
-            'cancelled',
-            'attribution_changed',
-            'attribution_backfilled',
-            'attribution_backfill_run',
-            'skipped_reattributed',
-        ]) {
-            expect(check).toContain(`'${step}'`);
-        }
+    it('keeps the carried-over restores the service role’s, with RLS on', () => {
+        expect(migration).toContain('alter table public.district_retention_restores enable row level security;');
+        expect(migration).toContain(
+            'revoke all on table public.district_retention_restores from public, anon, authenticated;',
+        );
+        expect(migration).toContain(
+            'revoke all on function public.district_reattributed_restore (uuid, uuid) from public, anon, authenticated;',
+        );
     });
 
     it('revokes from clients and grants the service role both functions', () => {
