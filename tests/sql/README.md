@@ -1080,6 +1080,18 @@ reset is over, and is the service role's alone. Ends with `failures | total`.
 Proven against the local stack on 2026-10-22: all 11 checks passed; the proof
 does not run without the function.
 
+`clear_stale_code_reset_markers_race.sql` proves the same function against an
+Auth account deletion (PR #72 fix 2), through `dblink` backends that commit
+(the harness, rules and caveats of `end_student_sessions_lock_order.sql`). The
+deletion holds the student's `auth.users` row and then waits, through
+`managed_students`' ON DELETE CASCADE, for the roster row: the cleanup takes
+that auth row NOWAIT, passes the student over and lets go of its roster row at
+once, so the delete runs straight on; an account an Auth update holds is passed
+over without a wait (a third backend takes its roster row NOWAIT while the
+cleanup's transaction is open) and cleared by the next call; a deletion after
+the cleanup only waits for it. 11 checks. With the first version of the
+function, the deletion case ends in `deadlock detected` and 7 of the 11 fail.
+
 `student_email_reset_fence.sql` proves
 `supabase/migrations/20261022140800_student_email_reset_fence.sql` (P3's
 "the email reset path is unfenced"): on an email-method roster row, the code

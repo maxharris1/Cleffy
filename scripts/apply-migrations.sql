@@ -26626,6 +26626,13 @@ grant execute on function public.my_storage_usage () to authenticated, service_r
 --     one already holding the student is never touched;
 --   * the roster row is taken SKIP LOCKED: a row someone is working on is
 --     passed over until the next call;
+--   * the account's own auth.users row is taken last, FOR UPDATE NOWAIT, and
+--     never waited for: an Auth account deletion holds that row and then
+--     waits, through managed_students' ON DELETE CASCADE, for the roster row
+--     this holds, the inverse order (PR #72 fix 2). Busy, the candidate is
+--     passed over until the next call, and the locks taken for it (roster
+--     row, reservation) are let go at once with its subtransaction, so the
+--     deletion goes straight on rather than deadlocking with this;
 --   * the marker is removed only if it still names the worker read under those
 --     locks, so a call never removes a marker newer than the one it judged;
 --   * an account with a marker and no roster row (the student was deleted, or
@@ -26658,36 +26665,47 @@ begin
         order by u.id
         limit greatest(coalesce(p_limit, 500), 0)
     loop
-        v_roster := null;
-        select ms.id into v_roster
-        from public.managed_students ms
-        where ms.student_user_id = v_user.id
-        for update skip locked;
-        if not found and exists (select 1 from public.managed_students ms where ms.student_user_id = v_user.id) then
-            continue; -- someone is working on this student: the next call
-        end if;
+        -- One subtransaction per candidate: leaving it by lock_not_available
+        -- lets go of every lock taken for this candidate.
+        begin
+            v_roster := null;
+            select ms.id into v_roster
+            from public.managed_students ms
+            where ms.student_user_id = v_user.id
+            for update skip locked;
+            if not found and exists (select 1 from public.managed_students ms where ms.student_user_id = v_user.id) then
+                continue; -- someone is working on this student: the next call
+            end if;
 
-        v_live := false;
-        if v_roster is not null then
-            select r.reserved_until > now() into v_live
-            from public.student_claim_reservations r
-            where r.student_id = v_roster
-            for update;
-            v_live := coalesce(v_live, false);
-        end if;
-        if v_live then
-            continue; -- a reset or claim holds the student: its marker may still be read
-        end if;
+            v_live := false;
+            if v_roster is not null then
+                select r.reserved_until > now() into v_live
+                from public.student_claim_reservations r
+                where r.student_id = v_roster
+                for update;
+                v_live := coalesce(v_live, false);
+            end if;
+            if v_live then
+                continue; -- a reset or claim holds the student: its marker may still be read
+            end if;
 
-        select u.raw_app_meta_data ->> 'code_reset_worker' into v_marker from auth.users u where u.id = v_user.id;
-        update auth.users u
-        set raw_app_meta_data = u.raw_app_meta_data - 'code_reset_worker'
-        where u.id = v_user.id
-          and u.raw_app_meta_data ->> 'code_reset_worker' is not distinct from v_marker
-          and v_marker is not null;
-        if found then
-            v_cleared := v_cleared + 1;
-        end if;
+            -- Never waited for (see above): busy raises lock_not_available.
+            v_marker := null;
+            select u.raw_app_meta_data ->> 'code_reset_worker' into v_marker
+            from auth.users u
+            where u.id = v_user.id
+            for update nowait;
+            update auth.users u
+            set raw_app_meta_data = u.raw_app_meta_data - 'code_reset_worker'
+            where u.id = v_user.id
+              and u.raw_app_meta_data ->> 'code_reset_worker' is not distinct from v_marker
+              and v_marker is not null;
+            if found then
+                v_cleared := v_cleared + 1;
+            end if;
+        exception when lock_not_available then
+            null; -- the account is busy (an Auth deletion or update): the next call
+        end;
     end loop;
     return v_cleared;
 end;

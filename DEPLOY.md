@@ -2216,7 +2216,8 @@ select public.clear_stale_code_reset_markers();
 
 It removes the key (nothing else of `app_metadata`) only from accounts that no
 live reservation holds, under the reset's own locks, skips a student someone is
-working on, and returns how many it cleared; a second run clears nothing
+working on (or whose account Auth is updating or deleting: never waited for, so
+it cannot deadlock with an account deletion), and returns how many it cleared; a second run clears nothing
 (`20261022140700`). Nothing schedules it. Never edit `app_metadata` by hand
 instead.
 
