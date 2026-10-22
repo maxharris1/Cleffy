@@ -798,6 +798,27 @@ it; a retry or a budget deferral whose next attempt would land past the window
 fails at once; and a forward never attempted has no window. Proven against the
 local stack on 2026-10-22: all 58 checks passed (43 before the fix round).
 
+`realtime_revocation_rotation.sql` proves
+`20261022120000_realtime_revocation_rotation.sql`: every way a member loses a
+score, or loses write on it, moves the score to its next realtime topic
+generation (the takedown's rotation, `20261020150100`), once per score per
+transaction and only at commit (a deferred trigger; the proof fires it with
+`SET CONSTRAINTS … IMMEDIATE`, as COMMIT would). Paths: editor -> viewer
+(`set_document_member_role`, and `assign_score` flipping to view-only),
+`remove_document_member` and `leave_document` in one transaction,
+`revoke_share_link` withdrawing two members, `unassign_score`,
+`end_student_sessions` (a reset) across two scores, an archive (the stamp,
+then the session end, which does not move it again) and the district soft
+delete (`retention_district_run`) of two students sharing a score. After each:
+both old topics are told `topic_rotated`, the member who lost access is refused
+both topics of the new generation (and the old), the members who stay join the
+new one, and a viewer joins it without being able to send live ink. Gaining
+access, a plain revoke and a restore move nothing, a score deleted in the same
+transaction is skipped, and no client role reaches the queue. Needs the local
+stack running (today's `realtime.messages` partition). Proven against the local
+stack on 2026-10-22: all 59 checks passed; with the migration's three queueing
+triggers dropped inside the transaction, 27 of them fail.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
