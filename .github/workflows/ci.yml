@@ -56,6 +56,25 @@ jobs:
             # storage checks write, as on every hosted project).
             - name: Start the local Supabase stack and apply every migration
               run: supabase start -x studio,imgproxy,mailpit,edge-runtime,logflare,vector,supavisor,postgres-meta
+            # The proofs need Realtime running, not only its schema: it creates
+            # the day's realtime.messages partition the broadcast checks write
+            # (sharing_access_control, district_read_only_seats, and launchfix
+            # P4's realtime_revocation_rotation and content_moderation). Fail
+            # here, by name, if it ever stops starting -- rather than as a
+            # proof that silently finds no partition.
+            - name: Realtime is running and has created today's messages partition
+              run: |
+                  DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
+                  docker ps --format '{{.Names}}' | grep -E '^supabase_realtime_' || { echo "::error::the Realtime container is not running"; exit 1; }
+                  for attempt in $(seq 1 30); do
+                      if [ "$(psql "$DB_URL" -tAc "select to_regclass('realtime.messages_' || to_char(now() at time zone 'utc', 'YYYY_MM_DD')) is not null")" = "t" ]; then
+                          echo "Realtime is up: today's realtime.messages partition exists"
+                          exit 0
+                      fi
+                      sleep 2
+                  done
+                  echo "::error::Realtime did not create today's realtime.messages partition"
+                  exit 1
             # A recovery replays migrations over a database that already has
             # them; these must apply again cleanly, in order.
             - name: Re-apply the cancel-link and launchfix P1 migrations
@@ -76,32 +95,14 @@ jobs:
             # sharing proof beside the migrations. A new proof runs by being
             # added -- this file changes only to skip one, which needs a reason.
             # Every proof runs even after one fails, and the step fails at the
-            # end, so one red run shows them all.
+            # end, so one red run shows them all. Any failing check fails the
+            # job: there is no list of tolerated failures.
             - name: SQL proofs (tests/sql/*.sql and supabase/sql-tests/sharing_access_control.sql)
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
 
                   # Whole proofs not run here: name -> reason. None today.
                   declare -A SKIP=()
-
-                  # Checks known to fail, by the number they print with. The proof
-                  # still runs; any OTHER failing check fails the job, and a listed
-                  # check that passes is reported so the entry can go. Each entry
-                  # was failing on dev 47e9b38f before launchfix P1 touched
-                  # anything, and is for the proof's owner to settle:
-                  declare -A KNOWN=(
-                      # 49, 59, 60, 62: written against a stand-in for #63's
-                      # rotate_document_realtime. With #63 merged the sweep really
-                      # rotates the score's topics, so check 49 sees a rotation it
-                      # expects not to, and the later joins on generation-0
-                      # doc:{id} (presence, live ink) are refused by the
-                      # current-generation realtime policy. Realtime: launchfix P4.
-                      [district_read_only_seats]="49,59,60,62"
-                      # 22, 24: expect a reset student's write to match no row;
-                      # 20261021120400's statement trigger now refuses it outright
-                      # (42501 "access has been withdrawn"), which is stricter.
-                      [student_access_revocation]="22,24"
-                  )
 
                   failed=""
                   for proof in tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql; do
@@ -111,7 +112,7 @@ jobs:
                           continue
                       fi
                       echo "::group::${proof}"
-                      if ! bash scripts/ci/sql-proof.sh "$DB_URL" "$proof" "${KNOWN[$name]:-}"; then
+                      if ! bash scripts/ci/sql-proof.sh "$DB_URL" "$proof"; then
                           failed="${failed} ${proof}"
                       fi
                       echo "::endgroup::"

@@ -610,15 +610,18 @@ begin
 end;
 $$;
 
--- The hints b6's account got on a score's (generation-0) live topic, when the
--- day's realtime.messages partition exists to hold them; null when it does not.
+-- The hints b6's account got on a score's live topic, on every generation of
+-- it (doc:{id}, then doc:{id}:{n} once #63's rotation has moved the score: the
+-- hint that rotates goes to the old topic, a later one to the current), when
+-- the day's realtime.messages partition exists to hold them; null when it does
+-- not.
 create function pg_temp.seat_hints (p_doc uuid) returns bigint language sql as $$
     select case when exists (
         select 1 from pg_class
         where relnamespace = 'realtime'::regnamespace and relname = 'messages_' || to_char(now(), 'YYYY_MM_DD')
     ) then (
         select count(*) from realtime.messages m
-        where m.topic = 'doc:' || p_doc::text
+        where (m.topic = 'doc:' || p_doc::text or m.topic like 'doc:' || p_doc::text || ':%')
           and m.event = 'membership'
           and m.payload ->> 'user_id' = 'd1700000-0000-4000-8000-0000000000b6'
     ) end;
@@ -785,6 +788,13 @@ select pg_temp.holds (
 -- The clock, moved: grace ends 20 minutes from now. Every trigger off.
 select pg_temp.act_as_server ();
 
+-- The sweep above rotated d1 (#63's rotate_document_realtime), and the
+-- realtime.messages policies admit only a score's current generation: a real
+-- client re-reads it (realtime_topic_epoch) and joins there, so these joins do
+-- too. On generation 0 every one of them would be refused for the wrong reason.
+insert into integrity_fixtures (k, v)
+values ('d1_live_topic', public.document_live_topic ('d1700000-0000-4000-8000-0000000000d1'));
+
 set local session_replication_role = replica;
 
 update public.subscriptions set past_due_since = now() - interval '30 days' + interval '20 minutes'
@@ -814,12 +824,12 @@ select pg_temp.allowed (
        on conflict (bucket_id, name collate "C") where archived_at is null do update set metadata = excluded.metadata$q$
 );
 
-select pg_temp.on_topic ('doc:d1700000-0000-4000-8000-0000000000d1');
+select pg_temp.on_topic ((select v from integrity_fixtures where k = 'd1_live_topic'));
 
 select pg_temp.refused (
     'but a live-ink join whose token outlives the deadline is refused broadcast: it could not be stopped at the deadline',
     $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
-       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+       values ((select v from integrity_fixtures where k = 'd1_live_topic'), 'broadcast', 'ink:progress', '{}', true,
                (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$,
     '42501'
 );
@@ -827,7 +837,7 @@ select pg_temp.refused (
 select pg_temp.allowed (
     'that join still appears in presence',
     $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
-       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'presence', 'presence', '{}', true,
+       values ((select v from integrity_fixtures where k = 'd1_live_topic'), 'presence', 'presence', '{}', true,
                (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$
 );
 
@@ -836,7 +846,7 @@ select pg_temp.act_as_user_until ('d1700000-0000-4000-8000-0000000000b6', now() 
 select pg_temp.allowed (
     'a join whose token expires before the deadline keeps live ink',
     $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
-       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+       values ((select v from integrity_fixtures where k = 'd1_live_topic'), 'broadcast', 'ink:progress', '{}', true,
                (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$
 );
 
@@ -845,7 +855,7 @@ select pg_temp.act_as_user ('d1700000-0000-4000-8000-0000000000b6');
 select pg_temp.refused (
     'a token without exp is treated as never expiring: refused',
     $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
-       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+       values ((select v from integrity_fixtures where k = 'd1_live_topic'), 'broadcast', 'ink:progress', '{}', true,
                (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$,
     '42501'
 );
@@ -855,7 +865,7 @@ select pg_temp.act_as_student_until ('d1700000-0000-4000-8000-0000000000e1', now
 select pg_temp.allowed (
     'b1''s roster student (no seat) keeps live ink on the shared score',
     $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
-       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+       values ((select v from integrity_fixtures where k = 'd1_live_topic'), 'broadcast', 'ink:progress', '{}', true,
                (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$
 );
 
@@ -883,12 +893,12 @@ select pg_temp.holds (
     $q$select public.caller_seat_read_only ()$q$
 );
 
-select pg_temp.on_topic ('doc:d1700000-0000-4000-8000-0000000000d1');
+select pg_temp.on_topic ((select v from integrity_fixtures where k = 'd1_live_topic'));
 
 select pg_temp.refused (
     'past the deadline, with no sweep, live ink is refused',
     $q$insert into realtime.messages (topic, extension, event, payload, private, inserted_at)
-       values ('doc:d1700000-0000-4000-8000-0000000000d1', 'broadcast', 'ink:progress', '{}', true,
+       values ((select v from integrity_fixtures where k = 'd1_live_topic'), 'broadcast', 'ink:progress', '{}', true,
                (select v::timestamp from integrity_fixtures where k = 'msg_at'))$q$,
     '42501'
 );

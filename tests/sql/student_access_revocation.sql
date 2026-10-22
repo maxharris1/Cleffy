@@ -480,11 +480,14 @@ select pg_temp.refused (
     '42501'
 );
 
-select pg_temp.allowed (
-    'reset: ... nor change one (no row matches)',
+-- 20261021120400's statement trigger refuses a revoked student's write
+-- outright, before RLS would have matched no row.
+select pg_temp.refused (
+    'reset: ... nor change one (refused: access withdrawn)',
     $q$update public.annotations set color = '#dc2626'
        where id = 'c1ef0000-0000-4000-8000-00000000a5c1'$q$,
-    0
+    '42501',
+    '%access has been withdrawn%'
 );
 
 select pg_temp.holds (
@@ -493,12 +496,14 @@ select pg_temp.holds (
        where student_user_id = 'c1ef0000-0000-4000-8000-00000000a7e2' and archived_at is null$q$
 );
 
-select pg_temp.allowed (
-    'reset: ... nor erase one through patch_annotations_batch (no row matches)',
+select pg_temp.refused (
+    'reset: ... nor erase one through patch_annotations_batch (refused: access withdrawn)',
     $q$select public.patch_annotations_batch (jsonb_build_array(jsonb_build_object(
            'id', 'c1ef0000-0000-4000-8000-00000000a5c1',
            'document_id', 'c1ef0000-0000-4000-8000-00000000ad01',
-           'deleted_at', now())))$q$
+           'deleted_at', now())))$q$,
+    '42501',
+    '%access has been withdrawn%'
 );
 
 -- Issued in the same second as the stamp: whole-second iat cannot say which
