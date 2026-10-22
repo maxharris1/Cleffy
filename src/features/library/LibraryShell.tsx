@@ -16,6 +16,7 @@ import {
     readCachedLibraryList,
     type LibraryListSnapshot,
 } from '@/features/library/libraryBootstrap';
+import { features } from '@/lib/features';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -329,19 +330,22 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             // so only the viewer's Generate button requests it.
             // Free, local prescan: does this score already carry colored-ink
             // markings? If so (and the user never declined), offer the import.
-            try {
-                // Loaded after an upload only: the page rasterizer and segmenter
-                // have no business in the bundle every library visit pays for.
-                const [bytes, { prescanDocument }] = await Promise.all([
-                    loadDocumentBytes(document, { userId }),
-                    import('@/features/import/prescan'),
-                ]);
-                if ((await prescanDocument(bytes)) && (await shouldOfferImport(document.id))) {
-                    setImportOffer(document);
-                    return; // the dialog decides where to navigate
+            // Not asked at all while smart import is off (features.smartImport).
+            if (features.smartImport) {
+                try {
+                    // Loaded after an upload only: the page rasterizer and segmenter
+                    // have no business in the bundle every library visit pays for.
+                    const [bytes, { prescanDocument }] = await Promise.all([
+                        loadDocumentBytes(document, { userId }),
+                        import('@/features/import/prescan'),
+                    ]);
+                    if ((await prescanDocument(bytes)) && (await shouldOfferImport(document.id))) {
+                        setImportOffer(document);
+                        return; // the dialog decides where to navigate
+                    }
+                } catch {
+                    // Best-effort — never block the upload flow.
                 }
-            } catch {
-                // Best-effort — never block the upload flow.
             }
             navigate(`/doc/${document.id}`);
         } catch (err) {

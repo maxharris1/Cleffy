@@ -1,7 +1,9 @@
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
 
+import type { AgeGate } from '@/features/auth/ageCheck';
 import { perfMark } from '@/lib/perf';
+import { safePresenceName } from '@/lib/presenceName';
 import { getSupabase } from '@/lib/supabase';
 
 export interface SessionState {
@@ -118,12 +120,16 @@ export const userTypeOf = (session: Session | null): 'student' | null => {
 export const signUpWithPassword = async (
     email: string,
     password: string,
-    captchaToken?: string | null,
+    captchaToken: string | null | undefined,
+    ageGate: AgeGate,
 ): Promise<{ needsEmailConfirmation: boolean }> => {
     const { data, error } = await getSupabase().auth.signUp({
         email,
         password,
-        options: { emailRedirectTo: authCallbackUrl(), ...captchaOptions(captchaToken) },
+        // age_gate is what the before_user_created hook checks
+        // (20261021120000_consent_age.sql): country and the age it requires,
+        // never the birthday the age screen compared it with.
+        options: { emailRedirectTo: authCallbackUrl(), data: { age_gate: ageGate }, ...captchaOptions(captchaToken) },
     });
     if (error) {
         throw error;
@@ -202,10 +208,16 @@ export const updatePassword = async (password: string): Promise<void> => {
  * share-link join page need one too — the one flow where an unsolved challenge
  * would stop a child getting into the score their teacher just shared.
  */
-export const signInAnonymouslyWithName = async (displayName: string, captchaToken?: string | null): Promise<void> => {
+export const signInAnonymouslyWithName = async (
+    displayName: string,
+    captchaToken: string | null | undefined,
+    ageGate: AgeGate,
+): Promise<void> => {
     const supabase = getSupabase();
+    // A guest is a new auth user like any other, so the hook checks its
+    // age_gate too.
     const { error } = await supabase.auth.signInAnonymously({
-        options: { data: { display_name: displayName }, ...captchaOptions(captchaToken) },
+        options: { data: { display_name: displayName, age_gate: ageGate }, ...captchaOptions(captchaToken) },
     });
     if (error) {
         throw error;
@@ -464,7 +476,18 @@ export const clearAccountCachesFromDevice = async ({ keepCloudAnnotations = fals
     ]);
 };
 
-/** Display name for presence/attribution: metadata name, else email, else Guest. */
+/**
+ * The name this account announces in a score's presence bar: its display name,
+ * else "Guest" / "Collaborator" — never its email (src/lib/presenceName.ts).
+ */
+export const presenceNameOf = (session: Session | null): string =>
+    safePresenceName(storedDisplayNameOf(session), Boolean(session?.user.is_anonymous));
+
+/**
+ * This account's own label (top bar, account page): metadata name, else email,
+ * else Guest. Only ever shown to the account itself — presence uses
+ * presenceNameOf instead.
+ */
 export const displayNameOf = (session: Session | null): string => {
     const meta = session?.user.user_metadata as Record<string, unknown> | undefined;
     const name = typeof meta?.['display_name'] === 'string' ? (meta['display_name'] as string) : null;
@@ -474,8 +497,8 @@ export const displayNameOf = (session: Session | null): string => {
 /**
  * The stored display name with no fallback — '' when the account never set one.
  *
- * displayNameOf() substitutes the email, which is right for presence and wrong
- * for a form field: seeding the input with an address the user never typed
+ * displayNameOf() substitutes the email, which is right for the account's own
+ * label and wrong for a form field: seeding the input with an address the user never typed
  * would turn "leave it blank" into "save my email as my name".
  */
 export const storedDisplayNameOf = (session: Session | null): string => {

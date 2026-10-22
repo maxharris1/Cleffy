@@ -3,11 +3,16 @@ import { Link, useOutletContext } from 'react-router';
 
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { LimitReachedError, isLimitReachedError } from '@/features/billing/limitErrors';
+import { countryName } from '@/features/legal/countries';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { AgeAttestationFields } from '@/features/roster/AgeAttestationFields';
 import { StudentCodeCard } from '@/features/roster/StudentCodeCard';
 import {
     archiveStudent,
     assignScore,
+    attestationFor,
+    attestationProblem,
+    deleteStudent,
     fetchStudentTimeline,
     listAssignmentsForStudents,
     listRoster,
@@ -17,6 +22,7 @@ import {
     unassignScore,
     type ProvisionOptions,
     type RosterAssignment,
+    type TeacherAttestation,
     type TimelineEntry,
 } from '@/features/roster/rosterService';
 import { getDb } from '@/sync/db';
@@ -165,6 +171,8 @@ export const RosterPage = () => {
     const [invitedEmail, setInvitedEmail] = useState<string | null>(null);
     const [resetTarget, setResetTarget] = useState<ManagedStudentRow | null>(null);
     const [archiveTarget, setArchiveTarget] = useState<ManagedStudentRow | null>(null);
+    const [restoreTarget, setRestoreTarget] = useState<ManagedStudentRow | null>(null);
+    const [deleteTarget, setDeleteTarget] = useState<ManagedStudentRow | null>(null);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const rosterGen = useRef(0);
@@ -343,11 +351,30 @@ export const RosterPage = () => {
         setArchiveTarget(null);
     };
 
-    const restore = (student: ManagedStudentRow) =>
-        run(async () => {
-            await restoreStudent(student.id);
+    const confirmRestore = async (attestation: TeacherAttestation) => {
+        const target = restoreTarget;
+        if (!target) {
+            return;
+        }
+        await run(async () => {
+            await restoreStudent(target.id, attestation);
             await reloadRoster();
         });
+        setRestoreTarget(null);
+    };
+
+    const confirmDelete = async () => {
+        const target = deleteTarget;
+        if (!target) {
+            return;
+        }
+        await run(async () => {
+            await deleteStudent(target.id);
+            setExpandedId((id) => (id === target.id ? null : id));
+            await reloadRoster();
+        });
+        setDeleteTarget(null);
+    };
 
     /**
      * Flipping access re-runs the assignment, which overwrites everything it is
@@ -455,7 +482,8 @@ export const RosterPage = () => {
                                 onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
                                 onReset={() => setResetTarget(student)}
                                 onArchive={() => setArchiveTarget(student)}
-                                onRestore={() => void restore(student)}
+                                onRestore={() => setRestoreTarget(student)}
+                                onDelete={() => setDeleteTarget(student)}
                                 onSetAccess={setAccess}
                                 onUnassign={unassign}
                             />
@@ -529,11 +557,36 @@ export const RosterPage = () => {
                         // sticky header, and a long name wrapping there would leave the body and
                         // actions a sliver of scroll room on a short screen.
                         title="Archive this student?"
-                        body={`${archiveTarget.display_name}’s seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was.`}
+                        body={`${archiveTarget.display_name}’s seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted yet — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was. An archived student is deleted for good after 12 months.`}
                         confirmLabel="Archive"
                         busy={busy}
                         onConfirm={() => void confirmArchive()}
                         onCancel={() => setArchiveTarget(null)}
+                    />
+                </div>
+            ) : null}
+
+            {restoreTarget ? (
+                <div className="contents [overflow-wrap:anywhere]">
+                    <RestoreDialog
+                        student={restoreTarget}
+                        busy={busy}
+                        onConfirm={(attestation) => void confirmRestore(attestation)}
+                        onCancel={() => setRestoreTarget(null)}
+                    />
+                </div>
+            ) : null}
+
+            {deleteTarget ? (
+                <div className="contents [overflow-wrap:anywhere]">
+                    <ConfirmDialog
+                        title="Delete this student?"
+                        body={`${deleteTarget.display_name}’s account is deleted for good, along with every mark they made on your scores (lesson history included), their assignments and your practice notes about them. This can’t be undone — to keep their work, archive them instead.`}
+                        confirmLabel="Delete student"
+                        danger
+                        busy={busy}
+                        onConfirm={() => void confirmDelete()}
+                        onCancel={() => setDeleteTarget(null)}
                     />
                 </div>
             ) : null}
@@ -550,7 +603,7 @@ export const RosterPage = () => {
  * something went wrong that belongs under these fields rather than above them.
  */
 const SIGN_IN_METHODS: ReadonlyArray<{ value: 'code' | 'email'; label: string; hint: string }> = [
-    { value: 'code', label: 'Setup code', hint: 'No email needed — best for younger students' },
+    { value: 'code', label: 'Setup code', hint: 'No email needed — a printed card they set up once' },
     { value: 'email', label: 'Email invite', hint: 'They’ll get a link to set their password' },
 ];
 
@@ -565,6 +618,8 @@ const AddStudentForm = ({
     const [email, setEmail] = useState('');
     const [method, setMethod] = useState<'code' | 'email'>('code');
     const [studentEmail, setStudentEmail] = useState('');
+    const [country, setCountry] = useState('');
+    const [ageConfirmed, setAgeConfirmed] = useState(false);
     const [error, setError] = useState<string | null>(null);
     // Separate from `busy`, which is every roster action at once. Disabling this
     // form while an archive runs is right — two mutations should not overlap —
@@ -583,18 +638,27 @@ const AddStudentForm = ({
             setError('Enter the student’s email address.');
             return;
         }
+        const ageProblem = attestationProblem(country, ageConfirmed);
+        if (ageProblem) {
+            setError(ageProblem);
+            return;
+        }
         setError(null);
         const parentEmail = email.trim() || undefined;
+        const attestation = attestationFor(country, countryName(country));
         setSubmitting(true);
         try {
             const opts: ProvisionOptions =
                 method === 'email'
-                    ? { parentEmail, method: 'email', studentEmail: trimmedStudentEmail }
-                    : { parentEmail, method: 'code' };
+                    ? { parentEmail, method: 'email', studentEmail: trimmedStudentEmail, attestation }
+                    : { parentEmail, method: 'code', attestation };
             if (await onAdd(displayName, opts)) {
                 setName('');
                 setEmail('');
                 setStudentEmail('');
+                // The country is likely the next student's too; the tick is
+                // about this student, so it is asked again.
+                setAgeConfirmed(false);
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not add that student.');
@@ -685,6 +749,17 @@ const AddStudentForm = ({
                 </div>
             ) : null}
 
+            <div className="mt-4">
+                <AgeAttestationFields
+                    idPrefix="roster"
+                    country={country}
+                    onCountryChange={setCountry}
+                    confirmed={ageConfirmed}
+                    onConfirmedChange={setAgeConfirmed}
+                    disabled={busy}
+                />
+            </div>
+
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs text-stone-500">
                     Parent email is for your records and for sending the card home — it is never a sign-in.
@@ -710,6 +785,7 @@ const StudentRow = ({
     onReset,
     onArchive,
     onRestore,
+    onDelete,
     onSetAccess,
     onUnassign,
 }: {
@@ -725,6 +801,7 @@ const StudentRow = ({
     onReset: () => void;
     onArchive: () => void;
     onRestore: () => void;
+    onDelete: () => void;
     onSetAccess: (assignment: AssignmentRow, access: AssignmentAccess) => void;
     onUnassign: (assignment: AssignmentRow) => void;
 }) => {
@@ -777,6 +854,7 @@ const StudentRow = ({
                         onReset={onReset}
                         onArchive={onArchive}
                         onRestore={onRestore}
+                        onDelete={onDelete}
                     />
                 </div>
 
@@ -961,6 +1039,7 @@ const RosterRowMenu = ({
     onReset,
     onArchive,
     onRestore,
+    onDelete,
 }: {
     archived: boolean;
     busy: boolean;
@@ -968,6 +1047,7 @@ const RosterRowMenu = ({
     onReset: () => void;
     onArchive: () => void;
     onRestore: () => void;
+    onDelete: () => void;
 }) => {
     const [open, setOpen] = useState(false);
     const rootRef = useRef<HTMLDivElement | null>(null);
@@ -1020,29 +1100,90 @@ const RosterRowMenu = ({
                     className="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     {archived ? (
-                        <MenuItem label="Restore" onClick={() => pick(onRestore)} />
+                        <MenuItem label="Restore…" onClick={() => pick(onRestore)} />
                     ) : (
                         <>
                             <MenuItem label={resetLabel} onClick={() => pick(onReset)} />
                             <MenuItem label="Archive…" onClick={() => pick(onArchive)} />
                         </>
                     )}
+                    <MenuItem label="Delete student…" danger onClick={() => pick(onDelete)} />
                 </div>
             ) : null}
         </div>
     );
 };
 
-const MenuItem = ({ label, onClick }: { label: string; onClick: () => void }) => (
+const MenuItem = ({ label, danger = false, onClick }: { label: string; danger?: boolean; onClick: () => void }) => (
     <button
         type="button"
         role="menuitem"
         onClick={onClick}
-        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5"
+        className={`w-full cursor-pointer px-3 py-2 text-left text-sm transition hover:bg-ink/5 ${
+            danger ? 'text-danger' : 'text-stone-800'
+        }`}
     >
         {label}
     </button>
 );
+
+/**
+ * Restoring re-admits a student, so the teacher vouches for their age again —
+ * with the country the row last had, where it has one (rows archived before
+ * attestations existed have none).
+ */
+const RestoreDialog = ({
+    student,
+    busy,
+    onConfirm,
+    onCancel,
+}: {
+    student: ManagedStudentRow;
+    busy: boolean;
+    onConfirm: (attestation: TeacherAttestation) => void;
+    onCancel: () => void;
+}) => {
+    const [country, setCountry] = useState(student.country ?? '');
+    const [confirmed, setConfirmed] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const confirm = () => {
+        const problem = attestationProblem(country, confirmed);
+        if (problem) {
+            setError(problem);
+            return;
+        }
+        onConfirm(attestationFor(country, countryName(country)));
+    };
+
+    return (
+        <Dialog label="Restore this student?" onClose={onCancel}>
+            <p className="text-sm leading-relaxed text-stone-600">
+                {student.display_name} takes a seat again and can sign in as before, with their assignments, marks and
+                notes as they were.
+            </p>
+            <div className="mt-4">
+                <AgeAttestationFields
+                    idPrefix="restore"
+                    country={country}
+                    onCountryChange={setCountry}
+                    confirmed={confirmed}
+                    onConfirmedChange={setConfirmed}
+                    disabled={busy}
+                />
+            </div>
+            {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
+            <div className="mt-5 flex justify-end gap-2">
+                <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+                    Cancel
+                </Button>
+                <Button size="sm" onClick={confirm} disabled={busy}>
+                    Restore
+                </Button>
+            </div>
+        </Dialog>
+    );
+};
 
 /** Run-length grouping: the query already ordered by day, so runs are the groups. */
 const groupByDay = (entries: TimelineEntry[]): Array<{ day: string; entries: TimelineEntry[] }> => {

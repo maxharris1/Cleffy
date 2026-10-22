@@ -53,7 +53,7 @@ const fetchAccountDeleted = vi.fn();
 vi.mock('@/features/auth/session', () => ({
     useSession: () => ({ session: SESSION, loading: false, lastEvent: null }),
     isRegisteredSession: () => true,
-    displayNameOf: () => 'Teacher',
+    presenceNameOf: () => 'Teacher',
     userTypeOf: () => sessionKind.userType,
     signOutKeepingChanges: (...args: unknown[]) => signOutKeepingChanges(...args),
     signOutDeletedAccount: (...args: unknown[]) => signOutDeletedAccount(...args),
@@ -91,18 +91,26 @@ const lastSync = vi.hoisted(() => ({
     current: null as null | { onRejected?: (r: unknown) => void; onHeld?: (h: unknown) => void },
 }));
 
+const storeReady = vi.hoisted(() => ({ enabled: false }));
+
 vi.mock('@/features/viewer/PdfViewport', () => ({
     PdfViewport: ({
         readOnly,
         authorId,
         sync,
         playback,
+        onStoreReady,
     }: {
         readOnly?: boolean;
         authorId?: string | null;
         sync?: { onMembershipChanged?: () => void; onScoreAnalysis?: unknown } & NonNullable<typeof lastSync.current>;
         playback?: unknown;
+        onStoreReady?: (store: unknown) => void;
     }) => {
+        // The smart-import test needs a store to exist; nothing else reads it.
+        if (storeReady.enabled) {
+            queueMicrotask(() => onStoreReady?.({}));
+        }
         viewportSync.current = sync;
         lastSync.current = sync ?? null;
         return (
@@ -171,7 +179,7 @@ vi.mock('@/features/playback/useScoreAnalysis', () => ({
     useScoreAnalysis: (docId: string, enabled: boolean) => useScoreAnalysis(docId, enabled),
 }));
 /** Release flags (src/lib/features.ts), flipped per test; read at render. */
-const flags = vi.hoisted(() => ({ playalong: false, fingering: false, printHandwriting: false }));
+const flags = vi.hoisted(() => ({ playalong: false, fingering: false, printHandwriting: false, smartImport: false }));
 vi.mock('@/lib/features', () => ({ features: flags }));
 
 const DOC_ID = '11111111-2222-4333-8444-555555555555';
@@ -210,9 +218,9 @@ const deferred = <T,>() => {
     return { promise, resolve, reject };
 };
 
-const renderViewer = () =>
+const renderViewer = (entry = `/doc/${DOC_ID}`) =>
     render(
-        <MemoryRouter initialEntries={[`/doc/${DOC_ID}`]}>
+        <MemoryRouter initialEntries={[entry]}>
             <Routes>
                 <Route path="/doc/:documentId" element={<ViewerPage />} />
                 <Route path="/" element={<div>home</div>} />
@@ -253,6 +261,8 @@ beforeEach(() => {
     fetchSignInStillValid.mockResolvedValue(true);
     fetchAccountDeleted.mockResolvedValue(false);
     flags.playalong = false;
+    flags.smartImport = false;
+    storeReady.enabled = false;
     pdfProps.current = null;
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
     loadDocumentSource.mockResolvedValue({ bytes: new ArrayBuffer(16) });
@@ -1006,6 +1016,27 @@ describe('CloudViewer membership changes', () => {
         expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Share' }));
         expect(screen.getByTestId('share-dialog')).toHaveAttribute('data-role', 'owner');
+    });
+
+    it('offers the owner no smart import while the feature is off, even on the post-upload ?import=1', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        storeReady.enabled = true;
+        renderViewer(`/doc/${DOC_ID}?import=1`);
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
+        expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();
+    });
+
+    it('offers the owner smart import once the feature is on', async () => {
+        flags.smartImport = true;
+        storeReady.enabled = true;
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        expect(await screen.findByTestId('import-scan-button')).toBeInTheDocument();
     });
 
     it('gives a roster student no way to leave an assigned score', async () => {

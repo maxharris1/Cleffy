@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { JoinPage } from '@/features/share/JoinPage';
+import { passAgeScreen } from '@/test/ageScreen';
 
 const peekShareLink = vi.hoisted(() => vi.fn());
 const redeemShareLink = vi.hoisted(() => vi.fn());
@@ -71,6 +72,7 @@ beforeEach(() => {
 
 afterEach(() => {
     cleanup();
+    window.localStorage.clear();
     vi.clearAllMocks();
 });
 
@@ -89,13 +91,20 @@ describe('JoinPage', () => {
         peekShareLink.mockResolvedValue({ valid: true, role: 'editor' });
         renderJoin();
         const user = userEvent.setup();
+        await passAgeScreen();
         await user.type(await screen.findByLabelText('Your name'), 'Sharon');
         await user.click(screen.getByRole('button', { name: 'Join' }));
         expect(await screen.findByText('viewer')).toBeInTheDocument();
         // The trailing null is the inertness guarantee: without
         // VITE_TURNSTILE_SITE_KEY this page renders no widget and requires no
         // token, so a share link joins exactly as it did before.
-        expect(signInAnonymouslyWithName).toHaveBeenCalledWith('Sharon', null);
+        // The age gate is the outcome only: country and the age it requires.
+        expect(signInAnonymouslyWithName).toHaveBeenCalledWith('Sharon', null, {
+            country: 'US',
+            min_age: 13,
+            source: 'self',
+            v: 1,
+        });
         expect(redeemShareLink).toHaveBeenCalledWith('tok');
     });
 
@@ -103,6 +112,7 @@ describe('JoinPage', () => {
         peekShareLink.mockResolvedValueOnce({ valid: true, role: 'viewer' }).mockResolvedValueOnce({ valid: false });
         renderJoin();
         const user = userEvent.setup();
+        await passAgeScreen();
         await user.type(await screen.findByLabelText('Your name'), 'Sharon');
         await user.click(screen.getByRole('button', { name: 'Join' }));
         expect(await screen.findByText(DEAD)).toBeInTheDocument();
@@ -115,6 +125,7 @@ describe('JoinPage', () => {
         peekShareLink.mockResolvedValue(null);
         renderJoin();
         const user = userEvent.setup();
+        await passAgeScreen();
         await user.type(await screen.findByLabelText('Your name'), 'Sharon');
         await user.click(screen.getByRole('button', { name: 'Join' }));
         expect(await screen.findByText('viewer')).toBeInTheDocument();
@@ -125,6 +136,7 @@ describe('JoinPage', () => {
         redeemShareLink.mockRejectedValue(new Error('invalid_link'));
         renderJoin();
         const user = userEvent.setup();
+        await passAgeScreen();
         await user.type(await screen.findByLabelText('Your name'), 'Sharon');
         await user.click(screen.getByRole('button', { name: 'Join' }));
         expect(await screen.findByText(DEAD)).toBeInTheDocument();
@@ -162,6 +174,24 @@ describe('JoinPage', () => {
             answer({ valid: true, role: 'viewer' });
             await Promise.resolve();
         });
+        await passAgeScreen();
         expect(await screen.findByLabelText('Your name')).toBeInTheDocument();
+    });
+
+    it('asks the age screen after a live check and before the name', async () => {
+        peekShareLink.mockResolvedValue({ valid: true, role: 'editor' });
+        renderJoin();
+        expect(await screen.findByLabelText('Where do you live?')).toBeInTheDocument();
+        expect(screen.queryByLabelText('Your name')).not.toBeInTheDocument();
+    });
+
+    it('creates no guest for someone under the age for their country', async () => {
+        peekShareLink.mockResolvedValue({ valid: true, role: 'editor' });
+        renderJoin();
+        // Germany's age is 16; someone born this year is nowhere near it.
+        await passAgeScreen('DE', String(new Date().getFullYear()));
+        expect(await screen.findByText('You can’t create a Cleffy account at this time.')).toBeInTheDocument();
+        expect(screen.queryByLabelText('Your name')).not.toBeInTheDocument();
+        expect(signInAnonymouslyWithName).not.toHaveBeenCalled();
     });
 });

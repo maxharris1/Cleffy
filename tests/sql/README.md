@@ -413,3 +413,138 @@ Use the helpers at the top of the file:
 - `pg_temp.removed(name, table, where, rows)` — row removal that must succeed.
 
 Write each SQL argument in `$q$ … $q$` so it needs no escaping.
+
+`launch_consent.sql` proves the launch consent and retention migrations
+(`20261021120000` through `20261021120300`, and the fix pass's `120400` to `120600`): `consent_age()` answers the
+EU/EEA ages and 13 elsewhere; `hook_before_user_created` lets a passing
+`age_gate` through, refuses a missing one with 400 and an under-age one with
+403 whose message names no age, and is callable by `supabase_auth_admin`
+alone; the roster's attestation columns refuse a lower-case country and a
+partial attestation, a teacher reads their own `teacher_attestations` and
+nobody else's and cannot write one; `scrub_student_markings` refuses a
+non-student, tombstones the student's marks with their content replaced by
+a valid empty shape (bumping `seq`), cuts them out of a lesson-history
+snapshot that keeps the teacher's marks and stops naming the student, and
+finds nothing to cut a second time; and the purges remove an archived
+student 13 months on (scrubbed, account and roster row gone) while keeping
+one archived six months ago, remove a guest idle for 100 days while keeping
+an old guest whose session refreshed today, a new guest and an old
+registered account, drop stale rate-limit and login buckets but not live
+ones, and drop support mail older than 24 months; the five cron jobs are
+scheduled off the hour. Proven against the local stack (PostgreSQL 17.11) on
+2026-10-21: all 29 checks passed, and 43 with the fix pass's checks below.
+
+The fix pass adds `20261021120400_delete_student_one_transaction.sql`:
+`revoke_and_scrub_student` is the service role's alone and refuses an account
+with no roster row; it leaves the student archived with their sessions ended
+and their markings scrubbed, after which the student can write no mark while
+the teacher still can; and the write guard is a BEFORE statement trigger on
+`annotations` and `annotation_snapshots`.
+
+`20261021120600_tombstone_resync_floor.sql` is proven there too: compaction
+removes a 100-day-old tombstone and keeps a live mark, and records the score's
+floor (the highest seq it removed); a member of the score is told the floor
+by `annotation_resync_floor`, someone who cannot read the score is told
+nothing (null), and no client reads `annotation_sync_floors` directly. The
+client half (a device below the floor resyncs in full and drops marks the
+server no longer has) is in `src/sync/syncEngine.test.ts`, "SyncEngine after
+tombstone compaction".
+
+`launch_consent_concurrency.mjs` proves what one transaction cannot: the
+races. It drives two or three real `psql` sessions against the **local stack
+only** (it refuses any host but localhost), orders them by waiting until a
+session is blocked on a lock (never by sleeping), commits its fixtures under a
+per-run id prefix and removes them at the end, pass or fail:
+
+- **Delete student vs. the student's writes** — a mark the student is still
+  writing when Delete student starts makes the deletion wait, then is scrubbed;
+  a mark the student starts while the deletion runs waits, then is refused
+  (`42501`), and nothing escapes the scrub. Disabling
+  `annotations_refuse_revoked_student` makes the first case fail (the deletion
+  no longer waits, and the in-flight mark outlives the scrub).
+
+- **Retention vs. a restore** (`20261021120500_retention_recheck_under_lock.sql`)
+  — the archived-student purge is stalled on its first candidate after it has
+  listed a second; the second is restored in that gap and is kept, while the
+  first is purged. The same for guests: one that signs in after the list was
+  read is kept. A roster row a restore is still writing is skipped
+  (`SKIP LOCKED`) rather than waited on and deleted, and the restore lands.
+  Against the 20261021120300 purges the restored student is purged and the
+  guest case stalls.
+
+```sh
+node tests/sql/launch_consent_concurrency.mjs          # every scenario
+node tests/sql/launch_consent_concurrency.mjs delete   # one group
+```
+
+`district_retention.sql` proves `20261021120700_district_retention.sql`
+(decision 1: district data goes 30 days after `contract_ends_at`), moving time
+with the functions' `p_now`: only the service role may run the purge, its dry
+run, read the billing record or the log, or claim notices; the purge ships
+unscheduled; the dry run counts a district's students and seated teachers,
+never lists one whose `contract_ends_at` is null, and writes nothing; the run
+queues one notice to the owner at contract end + 16 days and logs its counts;
+nothing is soft deleted while the notice is unsent, nor within 14 days of it
+being sent; the sender's claim holds a notice against a second sender, a
+failed send is kept for a retry and a delivered one is stamped and logged; the
+soft delete archives the district's students (refusing their tokens) and
+leaves another teacher's alone; a renewed contract cancels and un-archives
+only the students the soft delete archived; the next cycle mails the owner
+again; a student the teacher restored after the soft delete survives the hard
+delete, which scrubs and deletes the rest and removes the studio, its seats
+and its billing record, while teachers' own accounts, scores and other
+students stay; the log keeps the counts after the studio is gone. Proven
+against the local stack (PostgreSQL 17.11) on 2026-10-21: all 26 checks
+passed. Round 2 adds `20261021120900_district_notice_mail_budget.sql`: a notice
+the shared mail budget holds back is deferred (`defer_district_retention_notice`
+releases the claim, takes the claim's attempt back and leaves it unsent, so the
+purge keeps waiting), and only the service role may defer: 28 checks.
+
+`district_student_scope.sql` proves `20261021120800_district_student_attribution.sql`
+(Codex round-2 review of #64, new major 1; round 3, item A1): each roster row
+records the district its provisioning named, and the district purge takes those
+students and nobody else's. Only positive evidence counts: a seated teacher (or
+the district's owner) who names no district provisions a private student, and
+naming a district the teacher is not in (never joined, has left, or a studio
+that is not a district) is refused. A private student from before joining
+stays private; a teacher seated in two districts provisions into the one named;
+a departed teacher's district students stay the district's, and the students
+they provision after leaving are their own. The service role cannot change the
+record (or how it was decided) by UPDATE, and every new row is recorded as
+decided at provisioning whatever the insert says; clients cannot read it, ask
+`district_provisionable`, or call the logged admin correction. The backfill
+reads legacy rows only and never revisits a row decided at provisioning
+(round 3, items A2 and Max's decision 3): a seat or ownership when a legacy
+student was created attributes nothing on its own; only the district's recorded
+evidence (`admin_record_district_evidence`, service role only) does, and only
+for a student created within the teacher's seat tenure, which
+`studio_seat_tenures` keeps after the teacher leaves -- so a departed teacher's
+legacy student created while seated is attributed, and evidence from before
+the seat started or after it ended is not. Evidence recorded later is picked up
+by the next run, and a run with nothing new is a no-op. Item A3: nothing is
+ever attributed to a time before the district existed (its studio, or its
+contract) or the seat started -- neither by the backfill (an owner's students
+from before the studio or the contract stay unattributed even with evidence)
+nor by a back-dated insert, which is refused. Evidence naming two districts is
+ambiguous and left unattributed. Each run returns and logs its counts:
+attributed, and skipped by reason (no evidence, ambiguous, district gone,
+before the district, outside the tenure), per district named and once for the
+run. Two districts' contracts then end: the soft and hard
+deletes take exactly the four district students and leave every private
+student, an unrelated teacher's, every teacher account and the score untouched,
+with per-district counts in the log. Proven against the local stack on
+2026-10-21: all 47 checks passed. Each item's checks were run against the
+previous state first: the item-A1 checks (33) had 20 failing on the round-2
+migration, the item-A2 checks (41) 13 on the item-A1 migration, and the
+item-A3 checks (47) 13 on the item-A2 migration.
+
+`district_billing_canonical.sql` is a byte-for-byte copy of PR #61's proof of
+the canonical `public.district_billing` block, which this branch's
+`20261021120700_district_retention.sql` carries unchanged
+(`tests/legal/districtBillingCanonical.test.ts` pins the block to #61's sha256).
+With the table removed inside the transaction, the block alone builds it, and a
+second run leaves the same columns, constraints, indexes, RLS and grants (the
+service role's SELECT, and nothing for any client role). Proven against the
+local stack on 2026-10-21 with this branch's migrations: all 12 checks passed,
+and `district_retention.sql` (26), `district_student_scope.sql` (22) and
+`launch_consent.sql` (43) still pass under the narrowed grant.

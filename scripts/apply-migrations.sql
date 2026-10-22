@@ -16293,3 +16293,1914 @@ revoke all on function public.admin_set_district_contract_end (uuid, timestamptz
 revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from anon;
 revoke all on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) from authenticated;
 grant execute on function public.admin_set_district_contract_end (uuid, timestamptz, text, text, boolean) to service_role;
+
+-- ===== supabase/migrations/20261021120000_consent_age.sql =====
+-- Age at sign-up: nobody creates a Cleffy account below the consent age for
+-- their country, whichever door they come in by.
+--
+-- The front end asks first (src/features/auth/AgeScreen.tsx, on /register and
+-- before a share-link guest is made on /join): the visitor's country and their
+-- birth month and year, compared against the age for that country and thrown
+-- away. Nothing about their birthday is stored. What the account keeps is the
+-- outcome, in its user_metadata:
+--
+--     age_gate: { "country": "DE", "min_age": 16, "source": "self", "v": 1 }
+--
+-- meaning "this person said they live in Germany and are at least 16". A
+-- teacher adding a student (student-provision) writes the same object with
+-- "source": "teacher", from the attestation the teacher ticked.
+--
+-- The screen alone would be advisory: an old cached build, or anyone calling
+-- GoTrue's /signup directly, would skip it. So GoTrue asks the database before
+-- every new user is written — the before_user_created Auth hook below — and
+-- this function refuses any user whose age_gate is missing, malformed, or
+-- names an age below what consent_age() says that country requires. The hook
+-- runs for every creation path: email sign-up, anonymous sign-in (the share
+-- link's guest), and the admin API's createUser and inviteUserByEmail.
+--
+-- The hook has to be switched on per project; config.toml does it for the
+-- local stack. On the hosted projects it is a dashboard step (Authentication →
+-- Hooks → Before User Created → Postgres function public.hook_before_user_created),
+-- listed for Max in the PR. Until it is on, the function exists and nothing
+-- calls it.
+
+-- ---------------------------------------------------------------------------
+-- The table. Mirrors supabase/functions/_shared/consentAge.ts and
+-- src/features/legal/consentAge.ts; tests/legal/consentAgeInSync.test.ts holds
+-- the three together.
+-- ---------------------------------------------------------------------------
+create or replace function public.consent_age (p_country text) returns int
+language sql immutable parallel safe
+set search_path = '' as $$
+    select case upper(coalesce(p_country, ''))
+        when 'AT' then 14
+        when 'BE' then 13
+        when 'BG' then 14
+        when 'HR' then 16
+        when 'CY' then 14
+        when 'CZ' then 15
+        when 'DK' then 13
+        when 'EE' then 13
+        when 'FI' then 13
+        when 'FR' then 15
+        when 'DE' then 16
+        when 'GR' then 15
+        when 'HU' then 16
+        when 'IE' then 16
+        when 'IT' then 14
+        when 'LV' then 13
+        when 'LT' then 14
+        when 'LU' then 16
+        when 'MT' then 13
+        when 'NL' then 16
+        when 'PL' then 16
+        when 'PT' then 13
+        when 'RO' then 16
+        when 'SK' then 16
+        when 'SI' then 15
+        when 'ES' then 14
+        when 'SE' then 13
+        when 'IS' then 13
+        when 'LI' then 16
+        when 'NO' then 13
+        when 'GB' then 13
+        else 13
+    end;
+$$;
+
+-- Pure, and nothing secret: anyone may ask it.
+revoke all on function public.consent_age (text) from public;
+grant execute on function public.consent_age (text) to anon, authenticated, service_role, supabase_auth_admin;
+
+-- ---------------------------------------------------------------------------
+-- The check, separate from the hook so it can be tested on its own.
+--
+-- Null for a user who may be created; otherwise the reason, which the hook
+-- turns into a refusal.
+-- ---------------------------------------------------------------------------
+create or replace function public.age_gate_problem (p_user_metadata jsonb) returns text
+language plpgsql immutable
+set search_path = '' as $$
+declare
+    gate jsonb := p_user_metadata -> 'age_gate';
+    country text;
+begin
+    if gate is null or jsonb_typeof(gate) <> 'object' then
+        return 'age_check_missing';
+    end if;
+    country := gate ->> 'country';
+    if country is null or country !~ '^[A-Za-z]{2}$' then
+        return 'age_check_missing';
+    end if;
+    if jsonb_typeof(gate -> 'min_age') <> 'number' then
+        return 'age_check_missing';
+    end if;
+    if (gate ->> 'min_age')::numeric < public.consent_age (country) then
+        return 'below_consent_age';
+    end if;
+    return null;
+end;
+$$;
+
+revoke all on function public.age_gate_problem (jsonb) from public, anon, authenticated;
+grant execute on function public.age_gate_problem (jsonb) to service_role, supabase_auth_admin;
+
+-- ---------------------------------------------------------------------------
+-- The Auth hook. GoTrue calls it as supabase_auth_admin with
+-- { "metadata": {…}, "user": {…} } and creates the user only on `{}`.
+--
+-- Neutral wording on purpose: a refusal must not say which age would have
+-- passed, or the next attempt simply claims it.
+-- ---------------------------------------------------------------------------
+create or replace function public.hook_before_user_created (event jsonb) returns jsonb
+language plpgsql stable
+set search_path = '' as $$
+declare
+    problem text := public.age_gate_problem (coalesce(event -> 'user' -> 'user_metadata', '{}'::jsonb));
+begin
+    if problem is null then
+        return '{}'::jsonb;
+    end if;
+    if problem = 'age_check_missing' then
+        return jsonb_build_object(
+            'error',
+            jsonb_build_object(
+                'http_code', 400,
+                'message', 'Sign-up needs the age check first. Reload the page and try again.'
+            )
+        );
+    end if;
+    return jsonb_build_object(
+        'error',
+        jsonb_build_object('http_code', 403, 'message', 'Sorry, you can’t create a Cleffy account.')
+    );
+end;
+$$;
+
+revoke all on function public.hook_before_user_created (jsonb) from public, anon, authenticated;
+grant execute on function public.hook_before_user_created (jsonb) to supabase_auth_admin;
+
+-- ===== supabase/migrations/20261021120100_teacher_attestations.sql =====
+-- A teacher vouches for a student's age, and the record of it is kept.
+--
+-- A roster student never sees the age screen: their account is made by their
+-- teacher through student-provision. So the teacher answers for them instead.
+-- Adding a student, and restoring an archived one, now needs the student's
+-- country and a ticked statement that the student is at least the consent age
+-- there (consent_age(), 20261021120000_consent_age.sql). student-provision
+-- refuses either action without both, and writes:
+--
+--  * managed_students.country / age_attested_at / age_attested_min_age — the
+--    current state, on the row the teacher already reads;
+--  * one teacher_attestations row per create or restore — the history: who
+--    attested, for which student, which country and age, the exact sentence
+--    they ticked and its wording version, and when.
+--
+-- Nothing about the student's birthday is asked or stored, here or anywhere.
+--
+-- Existing rows predate this and carry nulls; the restore flow asks the
+-- teacher for them the next time it runs, and nothing reads a null as "old
+-- enough".
+
+alter table public.managed_students
+    add column if not exists country text,
+    add column if not exists age_attested_at timestamptz,
+    add column if not exists age_attested_min_age int;
+
+alter table public.managed_students
+    drop constraint if exists managed_students_country_shape;
+
+alter table public.managed_students
+    add constraint managed_students_country_shape check (country is null or country ~ '^[A-Z]{2}$');
+
+alter table public.managed_students
+    drop constraint if exists managed_students_attestation_complete;
+
+-- All three or none: an attestation without its country (or age) is no record at all.
+alter table public.managed_students
+    add constraint managed_students_attestation_complete check (
+        (country is null and age_attested_at is null and age_attested_min_age is null)
+        or (country is not null and age_attested_at is not null and age_attested_min_age is not null)
+    );
+
+-- The teacher reads their own roster with a column-level grant
+-- (20260826194426_roster.sql, 20260827150000_student_credentials.sql); the new
+-- columns join it. Writes stay the service role's alone.
+grant select (country, age_attested_at, age_attested_min_age) on table public.managed_students to authenticated;
+
+create table if not exists public.teacher_attestations (
+    id uuid primary key default gen_random_uuid(),
+    teacher_id uuid not null references auth.users (id) on delete cascade,
+    -- Survives the student: a deleted roster row leaves the attestation that
+    -- was given for it, with the link cleared.
+    managed_student_id uuid references public.managed_students (id) on delete set null,
+    action text not null check (action in ('create', 'restore')),
+    country text not null check (country ~ '^[A-Z]{2}$'),
+    min_age int not null check (min_age between 13 and 21),
+    wording text not null check (length(wording) between 1 and 500),
+    wording_version text not null check (length(wording_version) between 1 and 40),
+    attested_at timestamptz not null default now()
+);
+
+create index if not exists teacher_attestations_teacher on public.teacher_attestations (teacher_id, attested_at desc);
+
+create index if not exists teacher_attestations_student on public.teacher_attestations (managed_student_id);
+
+alter table public.teacher_attestations enable row level security;
+
+revoke all on table public.teacher_attestations from public, anon, authenticated;
+
+grant all on table public.teacher_attestations to service_role;
+
+-- A teacher may read what they attested; nobody but the service role writes.
+drop policy if exists teacher_attestations_select on public.teacher_attestations;
+
+create policy teacher_attestations_select on public.teacher_attestations for select to authenticated
+using (teacher_id = (select auth.uid()));
+
+grant select on table public.teacher_attestations to authenticated;
+
+-- ===== supabase/migrations/20261021120200_delete_student_markings.sql =====
+-- Deleting a roster student takes their markings with them.
+--
+-- Account deletion keeps a departed collaborator's marks on other people's
+-- scores, authorless (20261007120600_account_deletion.sql): a fellow teacher's
+-- fingerings on a shared score are part of that score. A roster student is a
+-- different case. Their teacher is deleting a child's or teenager's account,
+-- usually because the family asked, and what that student drew is the
+-- student's data — so the teacher's "Delete student" (student-provision
+-- action 'delete') and the 12-month purge of archived students
+-- (20261021120300_retention_jobs.sql) both scrub it first:
+--
+--  * every live annotation the student made is TOMBSTONED (deleted_at set),
+--    never hard-deleted, so annotations_stamp bumps `seq`,
+--    annotations_broadcast fires, and every device that already pulled the
+--    mark converges by sync the ordinary way. Its payload is replaced in the
+--    same write by the smallest shape annotation_payload_valid() admits, so
+--    the strokes and text themselves are gone at once rather than when
+--    compact_annotation_tombstones() finally removes the row;
+--  * every lesson-history snapshot loses the student's marks from its
+--    payload, and stops naming the student as the one who captured it. The
+--    rest of each snapshot (the teacher's marks) stays.
+--
+-- Only then is the auth user deleted, whose cascades take the roster row,
+-- assignments, memberships and practice notes.
+--
+-- Service role (student-provision) and the owner (the cron job) only. It
+-- refuses an account that is not a provisioned student, so it can never be
+-- pointed at a teacher's own marks.
+
+create or replace function public.scrub_student_markings (p_student uuid) returns jsonb
+language plpgsql security definer
+set search_path = public as $$
+declare
+    marks int;
+    snapshots int;
+begin
+    if not exists (
+        select 1 from auth.users u
+        where u.id = p_student and u.raw_app_meta_data ->> 'user_type' = 'student'
+    ) then
+        raise exception 'scrub_student_markings: % is not a provisioned student', p_student
+            using errcode = '22023';
+    end if;
+
+    update public.annotations a
+    set deleted_at = coalesce(a.deleted_at, now()),
+        payload = case
+            when a.kind = 'text' then '{"x":0,"y":0,"size":0.01,"text":""}'::jsonb
+            else '{"pts":[0,0,0],"w":0.001}'::jsonb
+        end
+    where a.created_by = p_student;
+    get diagnostics marks = row_count;
+
+    update public.annotation_snapshots s
+    set payload = coalesce(
+            (
+                select jsonb_agg(e order by ord)
+                from jsonb_array_elements(s.payload) with ordinality as t (e, ord)
+                where e ->> 'createdBy' is distinct from p_student::text
+            ),
+            '[]'::jsonb
+        ),
+        created_by = case when s.created_by = p_student then null else s.created_by end
+    where jsonb_typeof(s.payload) = 'array'
+      and (
+          s.created_by = p_student
+          or exists (
+              select 1 from jsonb_array_elements(s.payload) e
+              where e ->> 'createdBy' = p_student::text
+          )
+      );
+    get diagnostics snapshots = row_count;
+
+    return jsonb_build_object('annotations', marks, 'snapshots', snapshots);
+end;
+$$;
+
+revoke all on function public.scrub_student_markings (uuid) from public, anon, authenticated;
+grant execute on function public.scrub_student_markings (uuid) to service_role;
+
+-- ===== supabase/migrations/20261021120300_retention_jobs.sql =====
+-- Retention: what Cleffy keeps, and for how long, enforced by pg_cron.
+--
+-- The launch retention decisions, as jobs rather than promises:
+--
+--   archived roster students   12 months after archiving   daily
+--   share-link guests          90 days without activity     daily
+--   rate-limit / login buckets 1 day after they last mattered daily
+--   inbound support mail       24 months after receipt      daily
+--   annotation tombstones      90 days after deletion       weekly
+--
+-- Each job is its own function, returning how many rows it removed (pg_cron
+-- keeps that in cron.job_run_details), and each is bounded per run so a
+-- backlog drains over several nights instead of one long lock.
+--
+-- pg_cron and pg_net are already installed (20260806140000_omr_cron.sql). Jobs
+-- run as the postgres role, which owns these functions; nothing else may call
+-- them but the service role.
+--
+-- District data (30 days after a contract ends) is not here: district
+-- contracts are not modelled yet (mh/district-seats adds the seat override,
+-- not an end date).
+
+-- ---------------------------------------------------------------------------
+-- Archived roster students: 12 months after the teacher archived them.
+--
+-- The same as the teacher's own "Delete student": markings scrubbed first
+-- (20261021120200_delete_student_markings.sql), then the auth user, whose
+-- cascades take the roster row, assignments, memberships and practice notes.
+-- A row whose account is not a provisioned student is skipped rather than
+-- guessed at: the scrub refuses it, and so does this.
+-- ---------------------------------------------------------------------------
+create or replace function public.retention_purge_archived_students (
+    p_older_than interval default interval '12 months',
+    p_batch int default 200
+) returns int
+language plpgsql security definer
+set search_path = public as $$
+declare
+    student record;
+    purged int := 0;
+begin
+    for student in
+        select m.id, m.student_user_id
+        from public.managed_students m
+        join auth.users u on u.id = m.student_user_id
+        where m.archived_at is not null
+          and m.archived_at < now() - p_older_than
+          and u.raw_app_meta_data ->> 'user_type' = 'student'
+        order by m.archived_at
+        limit greatest(p_batch, 0)
+    loop
+        perform public.scrub_student_markings (student.student_user_id);
+        delete from auth.users where id = student.student_user_id;
+        purged := purged + 1;
+    end loop;
+    return purged;
+end;
+$$;
+
+revoke all on function public.retention_purge_archived_students (interval, int) from public, anon, authenticated;
+grant execute on function public.retention_purge_archived_students (interval, int) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Share-link guests: 90 days since the guest last did anything.
+--
+-- "Anything" is the latest of the account's creation, its last sign-in, its
+-- last update, and the last time any of its sessions refreshed — a guest who
+-- keeps a tab open on a teacher's score keeps refreshing, and stays. A guest
+-- who added an email is no longer anonymous and is never touched here.
+--
+-- Deleting the auth user is what account deletion does for a guest
+-- (_shared/accountDeletion.ts): memberships cascade, and marks the guest drew
+-- on a teacher's score stay there with their author cleared
+-- (20261007120600_account_deletion.sql).
+-- ---------------------------------------------------------------------------
+create or replace function public.retention_purge_stale_guests (
+    p_idle interval default interval '90 days',
+    p_batch int default 1000
+) returns int
+language plpgsql security definer
+set search_path = public as $$
+declare
+    purged int;
+begin
+    with stale as (
+        select u.id
+        from auth.users u
+        where u.is_anonymous
+          and greatest(
+              u.created_at,
+              coalesce(u.last_sign_in_at, u.created_at),
+              coalesce(u.updated_at, u.created_at),
+              coalesce(
+                  (
+                      select max(greatest(s.updated_at, s.refreshed_at at time zone 'UTC', s.created_at))
+                      from auth.sessions s
+                      where s.user_id = u.id
+                  ),
+                  u.created_at
+              )
+          ) < now() - p_idle
+        order by u.created_at
+        limit greatest(p_batch, 0)
+    )
+    delete from auth.users u
+    using stale
+    where u.id = stale.id;
+    get diagnostics purged = row_count;
+    return purged;
+end;
+$$;
+
+revoke all on function public.retention_purge_stale_guests (interval, int) from public, anon, authenticated;
+grant execute on function public.retention_purge_stale_guests (interval, int) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Rate-limit buckets: a day after they stopped mattering.
+--
+-- edge_rate_buckets rows are dead once their window resets; edge_login_attempts
+-- rows once their last attempt, their lock and their counting window are all
+-- in the past (STUDENT_LOGIN_THROTTLE's longest window is an hour). A day's
+-- margin keeps anything still being read well clear.
+-- ---------------------------------------------------------------------------
+create or replace function public.retention_purge_rate_limits (p_idle interval default interval '1 day') returns int
+language plpgsql security definer
+set search_path = public as $$
+declare
+    buckets int;
+    attempts int;
+begin
+    delete from public.edge_rate_buckets where reset_at < now() - p_idle;
+    get diagnostics buckets = row_count;
+
+    delete from public.edge_login_attempts
+    where greatest(last_attempt_at, coalesce(locked_until, last_attempt_at), coalesce(window_ends_at, last_attempt_at))
+        < now() - p_idle;
+    get diagnostics attempts = row_count;
+
+    return buckets + attempts;
+end;
+$$;
+
+revoke all on function public.retention_purge_rate_limits (interval) from public, anon, authenticated;
+grant execute on function public.retention_purge_rate_limits (interval) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Inbound support mail: 24 months after it arrived.
+-- ---------------------------------------------------------------------------
+create or replace function public.retention_purge_support_messages (
+    p_older_than interval default interval '24 months'
+) returns int
+language plpgsql security definer
+set search_path = public as $$
+declare
+    purged int;
+begin
+    delete from public.support_messages where received_at < now() - p_older_than;
+    get diagnostics purged = row_count;
+    return purged;
+end;
+$$;
+
+revoke all on function public.retention_purge_support_messages (interval) from public, anon, authenticated;
+grant execute on function public.retention_purge_support_messages (interval) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Schedules. Off the hour, so they do not queue behind everyone else's :00
+-- jobs, and unscheduled first so a re-applied migration replaces rather than
+-- duplicates. Tombstone compaction is the existing
+-- compact_annotation_tombstones (20260802044133_free_plan_efficiency.sql),
+-- which until now nothing called.
+-- ---------------------------------------------------------------------------
+do $$
+begin
+    perform cron.unschedule (jobid)
+    from cron.job
+    where jobname in (
+        'retention-archived-students',
+        'retention-stale-guests',
+        'retention-rate-limits',
+        'retention-support-messages',
+        'retention-compact-tombstones'
+    );
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('retention-archived-students', '17 3 * * *', $$select public.retention_purge_archived_students ()$$);
+
+select cron.schedule ('retention-stale-guests', '27 3 * * *', $$select public.retention_purge_stale_guests ()$$);
+
+select cron.schedule ('retention-rate-limits', '37 3 * * *', $$select public.retention_purge_rate_limits ()$$);
+
+select cron.schedule ('retention-support-messages', '47 3 * * *', $$select public.retention_purge_support_messages ()$$);
+
+select cron.schedule (
+    'retention-compact-tombstones',
+    '23 4 * * 0',
+    $$select public.compact_annotation_tombstones (interval '90 days')$$
+);
+
+-- ===== supabase/migrations/20261021120400_delete_student_one_transaction.sql =====
+-- Delete student: revoke and scrub in one transaction, serialized against the
+-- student's own writes.
+--
+-- 20261021120200 scrubbed first and revoked after, in separate transactions
+-- (student-provision called scrub_student_markings, then end_student_sessions).
+-- An active student could draw a mark in between: it committed after the scrub
+-- had looked, the account deletion then cleared its author (ON DELETE SET NULL,
+-- 20261007120600), and nothing could ever tell it was the student's again.
+--
+-- Revoking first is not enough on its own either. RLS reads the roster row with
+-- the writing statement's snapshot, so an insert that began just before the
+-- revocation committed still passes its policy check, and can commit after a
+-- scrub that ran in the meantime. So two parts:
+--
+--  1. Every annotation or lesson-history write by a roster student takes a
+--     FOR SHARE lock on their managed_students row and re-reads it under that
+--     lock (student_write_allowed). A locked read sees the latest committed
+--     row, not the statement's snapshot. The trigger is per STATEMENT, so the
+--     roster row is locked before any annotation row is: the same order the
+--     deletion takes them in, so the two cannot deadlock.
+--  2. revoke_and_scrub_student() takes FOR UPDATE on the same row, then
+--     archives it, ends the student's sessions (stamping access_revoked_at)
+--     and scrubs their markings, all before it commits. A write already
+--     holding the share lock finishes first and its mark is there for the
+--     scrub to find; a write that arrives later waits for the commit and is
+--     then refused, because the row it re-reads is archived (or, once the
+--     account is deleted, gone).
+--
+-- Nothing changes for an account without a roster row: the guard is one probe
+-- of managed_students' unique student_user_id index, finding nothing.
+
+-- ---------------------------------------------------------------------------
+-- 1. The guard on student writes
+-- ---------------------------------------------------------------------------
+-- About the caller only, like student_access_revoked() (20261010120300), whose
+-- reading it repeats on a locked row. VOLATILE, because it locks.
+create or replace function public.student_write_allowed () returns boolean language plpgsql volatile security definer
+set search_path = public as $$
+declare
+    v_uid uuid := auth.uid();
+    v_archived_at timestamptz;
+    v_revoked_at timestamptz;
+    v_iat text;
+begin
+    if v_uid is null then
+        return true;
+    end if;
+
+    select ms.archived_at, ms.access_revoked_at into v_archived_at, v_revoked_at
+    from public.managed_students ms
+    where ms.student_user_id = v_uid
+    for share;
+
+    if not found then
+        -- A token that still calls itself a student, with no roster row behind
+        -- it, belonged to a student who has been deleted.
+        return coalesce(auth.jwt () -> 'app_metadata' ->> 'user_type', '') <> 'student';
+    end if;
+
+    if v_archived_at is not null then
+        return false;
+    end if;
+
+    if v_revoked_at is null then
+        return true;
+    end if;
+
+    v_iat := auth.jwt () ->> 'iat';
+    if v_iat is null or v_iat !~ '^[0-9]{1,12}(\.[0-9]+)?$' then
+        return false;
+    end if;
+
+    return to_timestamp(v_iat::double precision) >= v_revoked_at;
+end;
+$$;
+
+revoke all on function public.student_write_allowed () from public;
+grant execute on function public.student_write_allowed () to authenticated, anon;
+
+-- SECURITY INVOKER, so current_user is the writer: the service role, the cron
+-- job and the scrub itself are not client writes and are never refused here.
+-- A statement trigger: it returns nothing, and runs once per statement (an
+-- upsert, or each statement of the batch RPCs) before any row is locked.
+create or replace function public.refuse_revoked_student_write () returns trigger language plpgsql
+set search_path = public as $$
+begin
+    if current_user in ('authenticated', 'anon') and not public.student_write_allowed () then
+        raise exception 'this student''s access has been withdrawn' using errcode = '42501';
+    end if;
+    return null;
+end;
+$$;
+
+revoke all on function public.refuse_revoked_student_write () from public, anon, authenticated;
+
+drop trigger if exists annotations_refuse_revoked_student on public.annotations;
+
+create trigger annotations_refuse_revoked_student before insert or update on public.annotations
+for each statement execute function public.refuse_revoked_student_write ();
+
+drop trigger if exists annotation_snapshots_refuse_revoked_student on public.annotation_snapshots;
+
+create trigger annotation_snapshots_refuse_revoked_student before insert on public.annotation_snapshots
+for each statement execute function public.refuse_revoked_student_write ();
+
+-- ---------------------------------------------------------------------------
+-- 2. Revoke and scrub, in one transaction (student-provision 'delete')
+-- ---------------------------------------------------------------------------
+-- Service role only, like end_student_sessions, which it calls. Leaves the
+-- student archived, signed out everywhere and with no markings; deleting the
+-- account afterwards (GoTrue's admin delete) can no longer race a write,
+-- because every write from here on is refused. A retry after a failed account
+-- deletion runs this again harmlessly.
+create or replace function public.revoke_and_scrub_student (p_student uuid) returns jsonb language plpgsql
+security definer
+set search_path = public as $$
+declare
+    v_id uuid;
+begin
+    if coalesce(auth.jwt () ->> 'role', '') <> 'service_role' then
+        raise exception 'service role only' using errcode = '42501';
+    end if;
+
+    select ms.id into v_id
+    from public.managed_students ms
+    where ms.student_user_id = p_student
+    for update;
+
+    if not found then
+        raise exception 'not a roster student' using errcode = 'P0002';
+    end if;
+
+    update public.managed_students
+    set archived_at = coalesce(archived_at, now())
+    where id = v_id;
+
+    perform public.end_student_sessions (p_student);
+
+    return public.scrub_student_markings (p_student);
+end;
+$$;
+
+revoke all on function public.revoke_and_scrub_student (uuid) from public, anon, authenticated;
+grant execute on function public.revoke_and_scrub_student (uuid) to service_role;
+
+-- ===== supabase/migrations/20261021120500_retention_recheck_under_lock.sql =====
+-- Retention: lock each candidate and re-check it before purging it.
+--
+-- The purges in 20261021120300 listed their candidates once and then acted on
+-- the list. A teacher who restored an archived student after the list was read
+-- (or a guest who came back) was purged anyway: the loop scrubbed and deleted
+-- whatever the list held, without looking again.
+--
+-- Now the list is only a list of names. Each candidate is locked in a statement
+-- of its own, FOR UPDATE SKIP LOCKED, with the eligibility test repeated in
+-- that statement:
+--
+--  * a restore (or sign-in) that committed since the list was read is seen,
+--    because the locking statement takes a fresh snapshot and FOR UPDATE
+--    re-tests its conditions against the newest row; the candidate is no
+--    longer eligible and is skipped;
+--  * a restore still in flight holds the row, so SKIP LOCKED passes over it
+--    rather than waiting to delete it the moment it commits; the next night's
+--    run looks again;
+--  * a restore that arrives after the lock waits for the purge to commit, and
+--    then finds no row: student-provision now reports that instead of
+--    answering ok for a restore that matched nothing.
+--
+-- The archived-student lock is on the managed_students row, the same row
+-- Delete student (20261021120400) locks and every student write shares, so a
+-- purge and the student's own writes serialize the same way.
+
+create or replace function public.retention_purge_archived_students (
+    p_older_than interval default interval '12 months',
+    p_batch int default 200
+) returns int
+language plpgsql security definer
+set search_path = public as $$
+declare
+    candidate record;
+    v_student uuid;
+    v_cutoff timestamptz := now() - p_older_than;
+    purged int := 0;
+begin
+    for candidate in
+        select m.id
+        from public.managed_students m
+        join auth.users u on u.id = m.student_user_id
+        where m.archived_at is not null
+          and m.archived_at < v_cutoff
+          and u.raw_app_meta_data ->> 'user_type' = 'student'
+        order by m.archived_at
+        limit greatest(p_batch, 0)
+    loop
+        select m.student_user_id into v_student
+        from public.managed_students m
+        join auth.users u on u.id = m.student_user_id
+        where m.id = candidate.id
+          and m.archived_at is not null
+          and m.archived_at < v_cutoff
+          and u.raw_app_meta_data ->> 'user_type' = 'student'
+        for update of m skip locked;
+
+        if not found then
+            continue;
+        end if;
+
+        perform public.scrub_student_markings (v_student);
+        delete from auth.users where id = v_student;
+        purged := purged + 1;
+    end loop;
+    return purged;
+end;
+$$;
+
+revoke all on function public.retention_purge_archived_students (interval, int) from public, anon, authenticated;
+grant execute on function public.retention_purge_archived_students (interval, int) to service_role;
+
+-- When a guest last did anything: the latest of the account's creation, its
+-- last sign-in, its last update and its sessions' last refresh (the same
+-- reading 20261021120300 used, now in one place so the list and the re-check
+-- cannot drift apart).
+create or replace function public.retention_guest_last_active (p_user uuid) returns timestamptz
+language sql stable security definer
+set search_path = public as $$
+    select greatest(
+        u.created_at,
+        coalesce(u.last_sign_in_at, u.created_at),
+        coalesce(u.updated_at, u.created_at),
+        coalesce(
+            (
+                select max(greatest(s.updated_at, s.refreshed_at at time zone 'UTC', s.created_at))
+                from auth.sessions s
+                where s.user_id = u.id
+            ),
+            u.created_at
+        )
+    )
+    from auth.users u
+    where u.id = p_user;
+$$;
+
+revoke all on function public.retention_guest_last_active (uuid) from public, anon, authenticated;
+grant execute on function public.retention_guest_last_active (uuid) to service_role;
+
+create or replace function public.retention_purge_stale_guests (
+    p_idle interval default interval '90 days',
+    p_batch int default 1000
+) returns int
+language plpgsql security definer
+set search_path = public as $$
+declare
+    candidate record;
+    v_cutoff timestamptz := now() - p_idle;
+    purged int := 0;
+begin
+    for candidate in
+        select u.id
+        from auth.users u
+        where u.is_anonymous
+          and public.retention_guest_last_active (u.id) < v_cutoff
+        order by u.created_at
+        limit greatest(p_batch, 0)
+    loop
+        perform 1
+        from auth.users u
+        where u.id = candidate.id
+          and u.is_anonymous
+          and public.retention_guest_last_active (u.id) < v_cutoff
+        for update skip locked;
+
+        if not found then
+            continue;
+        end if;
+
+        delete from auth.users where id = candidate.id;
+        purged := purged + 1;
+    end loop;
+    return purged;
+end;
+$$;
+
+revoke all on function public.retention_purge_stale_guests (interval, int) from public, anon, authenticated;
+grant execute on function public.retention_purge_stale_guests (interval, int) to service_role;
+
+-- ===== supabase/migrations/20261021120600_tombstone_resync_floor.sql =====
+-- Tombstone compaction: a device that missed a compacted deletion resyncs.
+--
+-- Devices pull annotations by watermark (seq). A deletion reaches a device as
+-- its tombstone, a row with deleted_at set and a newer seq. Compaction
+-- (compact_annotation_tombstones, weekly since 20261021120300) hard-deletes
+-- tombstones after 90 days, so a device that last synced before a mark was
+-- deleted and comes back after its tombstone is compacted pulls nothing for
+-- that mark and keeps drawing it for good — including marks Delete student
+-- scrubbed.
+--
+-- So compaction now leaves a floor per score: the highest seq it removed
+-- there. A device whose watermark is below a score's floor may have missed a
+-- deletion it can no longer learn about, and the server says so
+-- (annotation_resync_floor): the device then pulls the score's whole current
+-- set and drops every synced mark the server no longer has
+-- (SyncEngine.pullOnce). A device at or past the floor saw every compacted
+-- tombstone before it went, and pulls by watermark as before.
+
+create table if not exists public.annotation_sync_floors (
+    document_id uuid primary key references public.documents (id) on delete cascade,
+    floor_seq bigint not null,
+    compacted_at timestamptz not null default now()
+);
+
+comment on table public.annotation_sync_floors is
+'Per score, the highest annotation seq tombstone compaction has removed. A device whose sync watermark is below it must resync in full.';
+
+alter table public.annotation_sync_floors enable row level security;
+
+revoke all on table public.annotation_sync_floors from public, anon, authenticated;
+
+grant all on table public.annotation_sync_floors to service_role;
+
+-- What a member of the score is told: its floor, or 0 when nothing there was
+-- ever compacted. Null for anyone who cannot read the score at all, the same
+-- answer as for a score that does not exist.
+create or replace function public.annotation_resync_floor (p_document uuid) returns bigint language sql stable
+security definer
+set search_path = public as $$
+    select case
+        when public.document_role (p_document) is null then null
+        else coalesce((select f.floor_seq from public.annotation_sync_floors f where f.document_id = p_document), 0)
+    end;
+$$;
+
+revoke all on function public.annotation_resync_floor (uuid) from public, anon;
+grant execute on function public.annotation_resync_floor (uuid) to authenticated;
+
+-- Same signature, defaults and grants as 20260802044133; it now records each
+-- score's floor in the statement that removes the tombstones.
+create or replace function public.compact_annotation_tombstones (p_older_than interval default interval '90 days')
+returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    deleted_count int;
+begin
+    with gone as (
+        delete from public.annotations
+        where deleted_at is not null
+          and deleted_at < now() - p_older_than
+        returning document_id, seq
+    ),
+    floors as (
+        insert into public.annotation_sync_floors (document_id, floor_seq, compacted_at)
+        select g.document_id, max(g.seq), now()
+        from gone g
+        where exists (select 1 from public.documents d where d.id = g.document_id)
+        group by g.document_id
+        on conflict (document_id) do update
+        set floor_seq = greatest(public.annotation_sync_floors.floor_seq, excluded.floor_seq),
+            compacted_at = excluded.compacted_at
+        returning 1
+    )
+    select count(*) into deleted_count from gone;
+    return deleted_count;
+end;
+$$;
+
+revoke all on function public.compact_annotation_tombstones (interval) from public, anon, authenticated;
+grant execute on function public.compact_annotation_tombstones (interval) to service_role;
+
+-- ===== supabase/migrations/20261021120700_district_retention.sql =====
+-- District retention: district data goes 30 days after the contract ends.
+--
+-- Decision 1 of the launch fix pass: a district's billing record carries
+-- contract_ends_at (set by an admin from the contract, or from the Stripe
+-- subscription's cancel / ended date; mh/district-seats owns how it is set).
+-- Thirty days after it, the district's data is purged:
+--
+--   contract_ends_at + 16 days   the owner is sent an export notice (14 days
+--                                before the purge), through the
+--                                district-retention-notices function
+--   contract_ends_at + 30 days,  SOFT delete: the district's roster students
+--   and >= 14 days after the     are archived (signed out of everything, by
+--   notice was actually SENT     student_access_revoked) and listed for the
+--                                purge. Undone if the contract comes back.
+--   soft delete + 7 days         HARD delete: each listed student still
+--                                archived is scrubbed and deleted, exactly as
+--                                Delete student does, then the district studio
+--                                (its seats, its override, this billing record
+--                                cascade with it)
+--
+-- contract_ends_at null means never. A contract that is cleared or moved (a
+-- renewal, an admin correction) cancels whatever stage the purge reached and
+-- un-archives every student the soft delete archived. Every step is logged
+-- with its counts in district_retention_log, which outlives the studio.
+--
+-- What "district data" is here: the district studio and everything keyed to
+-- it, and the roster students (with their markings) provisioned under the
+-- district -- the school-provided student data the contract covered.
+-- Teachers' own accounts and scores are theirs, not the district's, and are
+-- not touched. See retention_district_students(), which
+-- 20261021120800_district_student_attribution.sql scopes to the district each
+-- student was provisioned under (not to whoever is seated on the day).
+--
+-- PAUSED. Nothing schedules retention_district_run(): Max first reads the
+-- counts from retention_district_dry_run() against production, then schedules
+-- it (DEPLOY note below). The notice sender needs the vault secrets
+-- district_notice_url / district_notice_secret; without them notices queue and
+-- nothing is purged, because nothing is purged before its notice was sent.
+
+-- ---------------------------------------------------------------------------
+-- The district billing record
+-- ---------------------------------------------------------------------------
+-- mh/district-seats (#61) creates this table in 20261020180500, which sorts
+-- first. The block below is byte-identical to the one there, so on a
+-- database that already has the table it changes nothing, and on this branch
+-- alone the purge has its record. The purge functions that write it are
+-- SECURITY DEFINER and need no grant beyond the block's.
+-- >>> canonical public.district_billing >>>
+-- One definition, byte-identical in 20261020180500_district_seat_cap_and_grace.sql
+-- (mh/district-seats, PR #61) and 20261021120700_district_retention.sql
+-- (mh/launch-consent, PR #64), from this marker line to the closing one. It is
+-- rerunnable on its own: the table only if it is missing, each constraint only
+-- if it is missing by name, and the privileges reset to the same end state
+-- every time. Clients get nothing; the service role may read it; every write is
+-- made by SECURITY DEFINER functions, which need no grant.
+--
+-- contract_ends_at: null means the district's data is never auto-purged.
+-- contract_ends_source: 'admin' (pinned from the contract, null allowed: never)
+-- or 'stripe' (Stripe's actual end); null only with a null contract_ends_at.
+-- grace_extended_until: full access while past due lasts until the later of
+-- 30 days and this.
+create table if not exists public.district_billing (
+    studio_id uuid primary key references public.studios (id) on delete cascade,
+    stripe_subscription_id text references public.subscriptions (stripe_subscription_id) on delete set null,
+    contract_ends_at timestamptz,
+    contract_ends_source text,
+    grace_extended_until timestamptz,
+    updated_by text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+do $district_billing$
+begin
+    if not exists (
+        select 1 from pg_constraint
+        where conrelid = 'public.district_billing'::regclass
+          and conname = 'district_billing_contract_ends_source_check'
+    ) then
+        alter table public.district_billing
+        add constraint district_billing_contract_ends_source_check
+        check (contract_ends_source in ('admin', 'stripe'));
+    end if;
+
+    if not exists (
+        select 1 from pg_constraint
+        where conrelid = 'public.district_billing'::regclass
+          and conname = 'district_billing_contract_ends_source_matches'
+    ) then
+        alter table public.district_billing
+        add constraint district_billing_contract_ends_source_matches
+        check ((contract_ends_source is null) = (contract_ends_at is null) or contract_ends_source is not distinct from 'admin');
+    end if;
+end;
+$district_billing$;
+
+create index if not exists district_billing_subscription on public.district_billing (stripe_subscription_id);
+
+create index if not exists district_billing_contract_ends on public.district_billing (contract_ends_at)
+where contract_ends_at is not null;
+
+alter table public.district_billing enable row level security;
+
+revoke all on table public.district_billing from public, anon, authenticated, service_role;
+
+grant select on table public.district_billing to service_role;
+-- <<< canonical public.district_billing <<<
+
+-- ---------------------------------------------------------------------------
+-- Purge state, the student list, the notice outbox and the log
+-- ---------------------------------------------------------------------------
+-- No foreign keys to studios: each of these outlives the studio it describes,
+-- which is the point of a record of a deletion.
+
+-- One row per district in a purge cycle, for the contract end it was started
+-- for. Removed when the cycle is cancelled; kept (hard_deleted_at set) when it
+-- completes.
+create table if not exists public.district_retention (
+    studio_id uuid primary key,
+    owner_id uuid,
+    contract_ends_at timestamptz not null,
+    notice_queued_at timestamptz not null default now(),
+    notice_sent_at timestamptz,
+    soft_deleted_at timestamptz,
+    hard_deleted_at timestamptz
+);
+
+-- The students a soft delete archived, and whether they were archived already
+-- (a cancel un-archives only the ones it archived itself).
+create table if not exists public.district_retention_students (
+    studio_id uuid not null,
+    managed_student_id uuid not null,
+    student_user_id uuid not null,
+    was_archived boolean not null,
+    primary key (studio_id, managed_student_id)
+);
+
+create table if not exists public.district_retention_notices (
+    id bigint generated by default as identity primary key,
+    studio_id uuid not null,
+    owner_id uuid,
+    to_email text not null,
+    studio_name text not null,
+    contract_ends_at timestamptz not null,
+    purge_not_before timestamptz not null,
+    created_at timestamptz not null default now(),
+    attempts int not null default 0,
+    lease_until timestamptz,
+    last_error text,
+    sent_at timestamptz,
+    unique (studio_id, contract_ends_at)
+);
+
+create table if not exists public.district_retention_log (
+    id bigint generated by default as identity primary key,
+    studio_id uuid not null,
+    step text not null check (step in ('notice_queued', 'notice_sent', 'soft_deleted', 'hard_deleted', 'cancelled')),
+    contract_ends_at timestamptz,
+    counts jsonb not null default '{}'::jsonb,
+    at timestamptz not null default now()
+);
+
+create index if not exists district_retention_log_studio on public.district_retention_log (studio_id, at desc);
+
+alter table public.district_retention enable row level security;
+
+alter table public.district_retention_students enable row level security;
+
+alter table public.district_retention_notices enable row level security;
+
+alter table public.district_retention_log enable row level security;
+
+revoke all on table public.district_retention, public.district_retention_students, public.district_retention_notices,
+public.district_retention_log
+from public, anon, authenticated;
+
+grant all on table public.district_retention, public.district_retention_students, public.district_retention_notices,
+public.district_retention_log
+to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Which roster students are the district's
+-- ---------------------------------------------------------------------------
+-- Provisioned by the studio's owner or by a teacher seated in it.
+create or replace function public.retention_district_students (p_studio uuid) returns setof public.managed_students
+language sql stable security definer
+set search_path = public as $$
+    select ms.*
+    from public.managed_students ms
+    where ms.teacher_id in (
+        select st.owner_id from public.studios st where st.id = p_studio
+        union
+        select sm.user_id from public.studio_members sm where sm.studio_id = p_studio
+    );
+$$;
+
+-- ---------------------------------------------------------------------------
+-- The next step for one district, the one rule the run and the dry run share
+-- ---------------------------------------------------------------------------
+-- 'notice' | 'soft_delete' | 'hard_delete' | 'cancel' | null (nothing due).
+create or replace function public.retention_district_next_step (
+    p_contract_ends_at timestamptz,
+    p_state public.district_retention,
+    p_now timestamptz,
+    p_notice_after interval default interval '16 days',
+    p_purge_after interval default interval '30 days',
+    p_notice_lead interval default interval '14 days',
+    p_hard_after interval default interval '7 days'
+) returns text language sql immutable
+set search_path = public as $$
+    select case
+        when p_state.studio_id is not null and p_state.hard_deleted_at is not null then null
+        -- The contract was cleared or moved since this cycle began.
+        when p_state.studio_id is not null
+             and p_contract_ends_at is distinct from p_state.contract_ends_at then 'cancel'
+        when p_contract_ends_at is null then null
+        when p_state.studio_id is null then
+            case when p_now >= p_contract_ends_at + p_notice_after then 'notice' end
+        when p_state.soft_deleted_at is not null then
+            case when p_now >= p_state.soft_deleted_at + p_hard_after then 'hard_delete' end
+        when p_state.notice_sent_at is not null
+             and p_now >= greatest(p_contract_ends_at + p_purge_after, p_state.notice_sent_at + p_notice_lead)
+            then 'soft_delete'
+    end;
+$$;
+
+-- Every district with a step due or a cycle open: the billing records, and
+-- the cycles whose billing record is gone (the studio was deleted another way).
+create or replace function public.retention_district_candidates (p_now timestamptz)
+returns table (studio_id uuid, contract_ends_at timestamptz, next_step text)
+language sql stable security definer
+set search_path = public as $$
+    select coalesce(b.studio_id, r.studio_id),
+           b.contract_ends_at,
+           public.retention_district_next_step (b.contract_ends_at, r, p_now)
+    from public.district_billing b
+    full join public.district_retention r on r.studio_id = b.studio_id
+    where public.retention_district_next_step (b.contract_ends_at, r, p_now) is not null;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Dry run: counts only, writes nothing
+-- ---------------------------------------------------------------------------
+create or replace function public.retention_district_dry_run (p_now timestamptz default now()) returns jsonb
+language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_studios jsonb;
+begin
+    select coalesce(jsonb_agg(jsonb_build_object(
+               'studio_id', c.studio_id,
+               'contract_ends_at', c.contract_ends_at,
+               'next_step', c.next_step,
+               'students', (select count(*) from public.retention_district_students (c.studio_id)),
+               'listed_students', (select count(*) from public.district_retention_students s
+                                   where s.studio_id = c.studio_id),
+               'members', (select count(*) from public.studio_members sm where sm.studio_id = c.studio_id),
+               'notice_sent_at', (select r.notice_sent_at from public.district_retention r
+                                  where r.studio_id = c.studio_id)
+           ) order by c.contract_ends_at nulls last), '[]'::jsonb)
+    into v_studios
+    from public.retention_district_candidates (p_now) c;
+
+    return jsonb_build_object(
+        'now', p_now,
+        'studios', v_studios,
+        'notices_due', (select count(*) from jsonb_array_elements(v_studios) e where e ->> 'next_step' = 'notice'),
+        'soft_deletes_due', (select count(*) from jsonb_array_elements(v_studios) e
+                             where e ->> 'next_step' = 'soft_delete'),
+        'hard_deletes_due', (select count(*) from jsonb_array_elements(v_studios) e
+                             where e ->> 'next_step' = 'hard_delete'),
+        'cancels_due', (select count(*) from jsonb_array_elements(v_studios) e where e ->> 'next_step' = 'cancel'),
+        'students_to_archive', (select coalesce(sum((e ->> 'students')::int), 0) from jsonb_array_elements(v_studios) e
+                                where e ->> 'next_step' = 'soft_delete'),
+        'students_to_delete', (select coalesce(sum((e ->> 'listed_students')::int), 0)
+                               from jsonb_array_elements(v_studios) e where e ->> 'next_step' = 'hard_delete'),
+        'unsent_notices', (select count(*) from public.district_retention_notices where sent_at is null)
+    );
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- The run
+-- ---------------------------------------------------------------------------
+-- Each district is locked through its billing record (FOR UPDATE SKIP LOCKED,
+-- so an admin editing it is passed over until tomorrow) and its next step is
+-- worked out again under that lock: a contract renewed after the candidates
+-- were listed is cancelled, not purged.
+create or replace function public.retention_district_run (p_now timestamptz default now(), p_batch int default 20)
+returns jsonb language plpgsql security definer
+set search_path = public, extensions, vault as $$
+declare
+    candidate record;
+    v_billing public.district_billing;
+    v_state public.district_retention;
+    v_step text;
+    v_owner uuid;
+    v_email text;
+    v_name text;
+    v_student record;
+    v_n int;
+    v_members int;
+    v_url text;
+    v_secret text;
+    v_done jsonb := '{"notice":0,"soft_delete":0,"hard_delete":0,"cancel":0,"students_archived":0,"students_deleted":0,"students_restored":0}';
+begin
+    for candidate in
+        select c.studio_id from public.retention_district_candidates (p_now) c
+        order by c.contract_ends_at nulls first
+        limit greatest(p_batch, 0)
+    loop
+        v_billing := null;
+        select b.* into v_billing from public.district_billing b where b.studio_id = candidate.studio_id
+        for update skip locked;
+        if not found and exists (select 1 from public.district_billing b where b.studio_id = candidate.studio_id) then
+            continue; -- locked by someone else: tomorrow
+        end if;
+
+        v_state := null;
+        select r.* into v_state from public.district_retention r where r.studio_id = candidate.studio_id for update;
+
+        v_step := public.retention_district_next_step (v_billing.contract_ends_at, v_state, p_now);
+
+        if v_step = 'cancel' then
+            update public.managed_students ms
+            set archived_at = null
+            from public.district_retention_students s
+            where s.studio_id = candidate.studio_id
+              and s.managed_student_id = ms.id
+              and not s.was_archived
+              and ms.archived_at is not null;
+            get diagnostics v_n = row_count;
+            delete from public.district_retention_students where studio_id = candidate.studio_id;
+            delete from public.district_retention_notices
+            where studio_id = candidate.studio_id and sent_at is null;
+            delete from public.district_retention where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'cancelled', v_state.contract_ends_at,
+                    jsonb_build_object('students_restored', v_n, 'new_contract_ends_at', v_billing.contract_ends_at));
+            v_done := v_done || jsonb_build_object(
+                'cancel', (v_done ->> 'cancel')::int + 1,
+                'students_restored', (v_done ->> 'students_restored')::int + v_n);
+
+        elsif v_step = 'notice' then
+            select st.owner_id, st.name, u.email into v_owner, v_name, v_email
+            from public.studios st
+            left join auth.users u on u.id = st.owner_id
+            where st.id = candidate.studio_id;
+            if v_email is null then
+                -- Nobody to tell, so nothing will be purged: the next stage
+                -- waits for a SENT notice. Logged loudly for a human.
+                raise warning 'district retention: studio % has no owner address; not purging', candidate.studio_id;
+                continue;
+            end if;
+            insert into public.district_retention (studio_id, owner_id, contract_ends_at, notice_queued_at)
+            values (candidate.studio_id, v_owner, v_billing.contract_ends_at, p_now);
+            insert into public.district_retention_notices
+                (studio_id, owner_id, to_email, studio_name, contract_ends_at, purge_not_before)
+            values (candidate.studio_id, v_owner, v_email, v_name, v_billing.contract_ends_at,
+                    greatest(v_billing.contract_ends_at + interval '30 days', p_now + interval '14 days'))
+            -- A cycle cancelled and begun again for the same date mails again:
+            -- the owner may have been told the purge was off.
+            on conflict (studio_id, contract_ends_at) do update
+            set to_email = excluded.to_email,
+                studio_name = excluded.studio_name,
+                purge_not_before = excluded.purge_not_before,
+                created_at = now(),
+                attempts = 0,
+                lease_until = null,
+                last_error = null,
+                sent_at = null;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'notice_queued', v_billing.contract_ends_at,
+                    jsonb_build_object('students', (select count(*) from public.retention_district_students (candidate.studio_id)),
+                                       'members', (select count(*) from public.studio_members sm
+                                                   where sm.studio_id = candidate.studio_id)));
+            v_done := v_done || jsonb_build_object('notice', (v_done ->> 'notice')::int + 1);
+
+        elsif v_step = 'soft_delete' then
+            insert into public.district_retention_students (studio_id, managed_student_id, student_user_id, was_archived)
+            select candidate.studio_id, ds.id, ds.student_user_id, ds.archived_at is not null
+            from public.retention_district_students (candidate.studio_id) ds
+            on conflict do nothing;
+
+            -- Archived and every token refused (student_access_revoked), under
+            -- the roster row's lock that student writes share (20261021120400).
+            update public.managed_students ms
+            set archived_at = coalesce(ms.archived_at, p_now),
+                access_revoked_at = clock_timestamp()
+            from public.district_retention_students s
+            where s.studio_id = candidate.studio_id and s.managed_student_id = ms.id;
+            get diagnostics v_n = row_count;
+
+            delete from auth.refresh_tokens
+            where user_id in (select s.student_user_id::text from public.district_retention_students s
+                              where s.studio_id = candidate.studio_id);
+            delete from auth.sessions
+            where user_id in (select s.student_user_id from public.district_retention_students s
+                              where s.studio_id = candidate.studio_id);
+
+            update public.district_retention set soft_deleted_at = p_now where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'soft_deleted', v_state.contract_ends_at,
+                    jsonb_build_object('students_archived', v_n,
+                                       'members', (select count(*) from public.studio_members sm
+                                                   where sm.studio_id = candidate.studio_id)));
+            v_done := v_done || jsonb_build_object(
+                'soft_delete', (v_done ->> 'soft_delete')::int + 1,
+                'students_archived', (v_done ->> 'students_archived')::int + v_n);
+
+        elsif v_step = 'hard_delete' then
+            v_n := 0;
+            for v_student in
+                select s.managed_student_id, s.student_user_id
+                from public.district_retention_students s
+                where s.studio_id = candidate.studio_id
+            loop
+                -- Still archived (a teacher's restore since the soft delete
+                -- wins) and still a provisioned student: the same re-check
+                -- under the same lock as the 12-month purge (20261021120500).
+                perform 1
+                from public.managed_students m
+                join auth.users u on u.id = m.student_user_id
+                where m.id = v_student.managed_student_id
+                  and m.archived_at is not null
+                  and u.raw_app_meta_data ->> 'user_type' = 'student'
+                for update of m;
+                if found then
+                    perform public.scrub_student_markings (v_student.student_user_id);
+                    delete from auth.users where id = v_student.student_user_id;
+                    v_n := v_n + 1;
+                end if;
+            end loop;
+
+            select count(*) into v_members from public.studio_members sm where sm.studio_id = candidate.studio_id;
+            -- Takes the seats, the override and the billing record with it.
+            delete from public.studios where id = candidate.studio_id;
+            delete from public.district_retention_students where studio_id = candidate.studio_id;
+            update public.district_retention set hard_deleted_at = p_now where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'hard_deleted', v_state.contract_ends_at,
+                    jsonb_build_object('students_deleted', v_n, 'members_removed', v_members, 'studios', 1));
+            v_done := v_done || jsonb_build_object(
+                'hard_delete', (v_done ->> 'hard_delete')::int + 1,
+                'students_deleted', (v_done ->> 'students_deleted')::int + v_n);
+        end if;
+    end loop;
+
+    -- Wake the sender when there is mail to send. No-op without its secrets.
+    if exists (select 1 from public.district_retention_notices where sent_at is null) then
+        begin
+            select decrypted_secret into v_url from vault.decrypted_secrets where name = 'district_notice_url' limit 1;
+            select decrypted_secret into v_secret from vault.decrypted_secrets
+            where name = 'district_notice_secret' limit 1;
+            if v_url is not null and v_secret is not null then
+                perform net.http_post(
+                    url := v_url,
+                    headers := jsonb_build_object('Content-Type', 'application/json', 'x-district-notice-secret', v_secret),
+                    body := '{}'::jsonb,
+                    timeout_milliseconds := 5000
+                );
+            end if;
+        exception
+            when others then
+                raise warning 'district retention: could not wake the notice sender: %', sqlerrm;
+        end;
+    end if;
+
+    return v_done;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- The notice sender's two calls (district-retention-notices)
+-- ---------------------------------------------------------------------------
+-- Claims unsent notices for ten minutes, so two senders never mail one twice
+-- and a sender that dies hands them on.
+create or replace function public.claim_district_retention_notices (p_limit int default 20)
+returns setof public.district_retention_notices language plpgsql security definer
+set search_path = public as $$
+begin
+    return query
+    update public.district_retention_notices n
+    set lease_until = now() + interval '10 minutes',
+        attempts = n.attempts + 1
+    where n.id in (
+        select q.id from public.district_retention_notices q
+        where q.sent_at is null and (q.lease_until is null or q.lease_until < now())
+        order by q.id
+        limit greatest(p_limit, 0)
+        for update skip locked
+    )
+    returning n.*;
+end;
+$$;
+
+-- p_error null: sent, which is what lets the purge go ahead 14 days later.
+-- Otherwise the failure is kept and the notice is retried on the next run.
+create or replace function public.finish_district_retention_notice (p_id bigint, p_error text default null)
+returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_notice public.district_retention_notices;
+begin
+    if p_error is not null then
+        update public.district_retention_notices
+        set lease_until = null, last_error = left(p_error, 500)
+        where id = p_id and sent_at is null;
+        return;
+    end if;
+
+    update public.district_retention_notices
+    set sent_at = now(), lease_until = null, last_error = null
+    where id = p_id and sent_at is null
+    returning * into v_notice;
+    if not found then
+        return;
+    end if;
+
+    update public.district_retention
+    set notice_sent_at = v_notice.sent_at
+    where studio_id = v_notice.studio_id and contract_ends_at = v_notice.contract_ends_at;
+
+    insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+    values (v_notice.studio_id, 'notice_sent', v_notice.contract_ends_at,
+            jsonb_build_object('attempts', v_notice.attempts));
+end;
+$$;
+
+do $$
+declare
+    fn text;
+begin
+    foreach fn in array array[
+        'public.retention_district_students (uuid)',
+        'public.retention_district_next_step (timestamptz, public.district_retention, timestamptz, interval, interval, interval, interval)',
+        'public.retention_district_candidates (timestamptz)',
+        'public.retention_district_dry_run (timestamptz)',
+        'public.retention_district_run (timestamptz, int)',
+        'public.claim_district_retention_notices (int)',
+        'public.finish_district_retention_notice (bigint, text)'
+    ]
+    loop
+        execute format('revoke all on function %s from public, anon, authenticated', fn);
+        execute format('grant execute on function %s to service_role', fn);
+    end loop;
+end;
+$$;
+
+-- DEPLOY (Max, after reading retention_district_dry_run()'s counts):
+--   select cron.schedule ('retention-district', '57 3 * * *',
+--       $$select public.retention_district_run ()$$);
+-- and the vault secrets district_notice_url (the function's URL) and
+-- district_notice_secret (= DISTRICT_NOTICE_SECRET in the function's env).
+
+-- ===== supabase/migrations/20261021120800_district_student_attribution.sql =====
+-- District retention: purge only the students the district provided.
+--
+-- Codex round-2 review of #64, new major 1: retention_district_students()
+-- (20261021120700) picked every roster student of the district's owner and of
+-- whoever was seated in the district on the day the purge ran. That is the
+-- wrong boundary both ways:
+--
+--  * a teacher with private students who joins a district handed that whole
+--    roster to the district's contract-end purge, and
+--  * a teacher who left the district took the district's students out of it,
+--    so the school-provided data the contract covered outlived the contract.
+--
+-- So each roster row records the district it was provisioned under, at the
+-- moment it was provisioned, and the purge selects on that record alone.
+-- Current membership plays no part.
+--
+-- Codex round-3 review of #64: that record must be POSITIVE EVIDENCE, never a
+-- guess from membership. Holding a seat does not make every student a teacher
+-- creates a district student; a teacher seated in a district still keeps a
+-- private studio of their own. So the rule is:
+--
+--  * A student belongs to a district only when they were provisioned in the
+--    district's context: the provisioning call names the district
+--    (student-provision's districtStudioId), and the teacher owns or holds a
+--    seat in that district studio (one with a district_billing record) at that
+--    moment. A call that names no district provisions a private student, seated
+--    or not; one that names a district the teacher is not in is refused.
+--  * Cleffy has no classes or invite records a student is created under, so
+--    the provisioning call is the only place that context exists.
+--  * Never for a time before the district (its studio and its contract) or
+--    the teacher's seat in it existed (district_held_at), and when in doubt,
+--    not at all: an unattributed student is never purged.
+--
+-- The record is checked by a BEFORE INSERT trigger, whatever path inserts the
+-- row (both student-provision branches today). It cannot be changed by an
+-- UPDATE, short of the service role's admin_set_student_district() for a
+-- correction a human has decided on. No foreign key: like district_retention,
+-- it must outlive the studio it names, and a dangling id selects nothing.
+--
+-- district_attribution says how the record was decided:
+--  'provisioned'  at provisioning, by the rule above (null: a private student)
+--  'legacy'       provisioned before this migration, with no record of the
+--                 context; the backfill below decides it, or leaves it pending
+--  'backfilled'   decided by the backfill
+--  'admin'        decided by a human, through admin_set_student_district()
+
+alter table public.managed_students
+add column if not exists district_studio_id uuid;
+
+-- Every row that exists when the column is added is legacy: nothing recorded
+-- the context it was provisioned in. The default fills them without an UPDATE
+-- (so no trigger fires and updated_at is untouched); every later row is
+-- decided by the trigger below. Rerunnable: the column is added once.
+alter table public.managed_students
+add column if not exists district_attribution text not null default 'legacy';
+
+alter table public.managed_students
+alter column district_attribution set default 'provisioned';
+
+do $district_attribution$
+begin
+    if not exists (
+        select 1 from pg_constraint
+        where conrelid = 'public.managed_students'::regclass
+          and conname = 'managed_students_district_attribution_check'
+    ) then
+        alter table public.managed_students
+        add constraint managed_students_district_attribution_check
+        check (district_attribution in ('provisioned', 'legacy', 'backfilled', 'admin'));
+    end if;
+end;
+$district_attribution$;
+
+create index if not exists managed_students_district on public.managed_students (district_studio_id)
+where district_studio_id is not null;
+
+-- ---------------------------------------------------------------------------
+-- May this teacher provision into this district, now?
+-- ---------------------------------------------------------------------------
+-- The district's owner, or a teacher holding a seat in it. student-provision
+-- asks first, so a refused teacher gets a 403 before any account is created;
+-- the trigger asks again, so no other insert path can skip it.
+create or replace function public.district_provisionable (p_teacher uuid, p_studio uuid)
+returns boolean language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1
+        from public.district_billing b
+        join public.studios st on st.id = b.studio_id
+        where b.studio_id = p_studio
+          and (st.owner_id = p_teacher
+               or exists (select 1 from public.studio_members sm
+                          where sm.studio_id = p_studio and sm.user_id = p_teacher))
+    );
+$$;
+
+create or replace function public.managed_students_district_attribution () returns trigger language plpgsql
+security definer
+set search_path = public as $$
+begin
+    if tg_op = 'INSERT' then
+        -- Whatever the caller wrote, a new row is decided here and now.
+        new.district_attribution := 'provisioned';
+        if new.district_studio_id is not null
+           and not public.district_provisionable (new.teacher_id, new.district_studio_id) then
+            raise exception 'the teacher does not own or hold a seat in that district'
+                using errcode = '42501';
+        end if;
+        -- Never a student dated before the district or the seat existed: a
+        -- back-dated insert (none of the app's paths writes created_at) is
+        -- refused rather than attributed to a time the district did not cover.
+        if new.district_studio_id is not null
+           and not public.district_held_at (new.teacher_id, new.district_studio_id, new.created_at) then
+            raise exception 'the student predates the teacher''s seat in that district, or the district itself'
+                using errcode = '42501';
+        end if;
+    elsif (new.district_studio_id is distinct from old.district_studio_id
+           or new.district_attribution is distinct from old.district_attribution)
+          and current_setting('cleffy.district_attribution', true) is distinct from 'admin' then
+        raise exception 'district attribution is recorded at provisioning and cannot be changed'
+            using errcode = '42501';
+    end if;
+    return new;
+end;
+$$;
+
+drop trigger if exists managed_students_district_attribution on public.managed_students;
+
+create trigger managed_students_district_attribution before insert or update on public.managed_students
+for each row execute function public.managed_students_district_attribution ();
+
+-- A human's correction (a student provisioned into the wrong district, a legacy
+-- row the backfill left pending, or a private student a district bought out):
+-- the service role's alone, and logged where the purge logs, so the purge's
+-- scope can always be explained.
+create or replace function public.admin_set_student_district (p_managed_student uuid, p_studio uuid, p_actor text)
+returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_old uuid;
+begin
+    if coalesce(trim(p_actor), '') = '' then
+        raise exception 'say who is making the change' using errcode = '22023';
+    end if;
+    select ms.district_studio_id into v_old from public.managed_students ms where ms.id = p_managed_student for update;
+    if not found then
+        raise exception 'no such roster student' using errcode = 'P0002';
+    end if;
+    perform set_config('cleffy.district_attribution', 'admin', true);
+    update public.managed_students
+    set district_studio_id = p_studio, district_attribution = 'admin'
+    where id = p_managed_student;
+    perform set_config('cleffy.district_attribution', '', true);
+    insert into public.district_retention_log (studio_id, step, counts)
+    values (coalesce(p_studio, v_old, p_managed_student), 'attribution_changed',
+            jsonb_build_object('managed_student_id', p_managed_student, 'from', v_old, 'to', p_studio,
+                               'actor', p_actor));
+end;
+$$;
+
+alter table public.district_retention_log drop constraint if exists district_retention_log_step_check;
+
+alter table public.district_retention_log
+add constraint district_retention_log_step_check check (
+    step in ('notice_queued', 'notice_sent', 'soft_deleted', 'hard_deleted', 'cancelled', 'attribution_changed',
+             'attribution_backfilled', 'attribution_backfill_run')
+);
+
+-- ---------------------------------------------------------------------------
+-- Seat tenure: when each teacher held each seat, kept after they leave
+-- ---------------------------------------------------------------------------
+-- Codex round-3 review of #64, item A2: studio_members forgets a teacher the
+-- moment they leave, so a departed teacher's legacy students had no record to
+-- be attributed by. This keeps one row per seat held, from the seat's
+-- created_at to the moment it was removed (open while it is held), written by
+-- trigger so no path that seats or unseats a teacher can skip it. Seats
+-- removed before this migration left nothing behind; their legacy students
+-- stay unattributed (never purged) until a human decides.
+--
+-- No foreign key to studios: the history must outlive a deleted district, as
+-- district_retention's does. The teacher's account does cascade: their roster,
+-- and with it everything this history could attribute, goes with it.
+create table if not exists public.studio_seat_tenures (
+    id bigint generated by default as identity primary key,
+    studio_id uuid not null,
+    user_id uuid not null references auth.users (id) on delete cascade,
+    started_at timestamptz not null,
+    ended_at timestamptz,
+    constraint studio_seat_tenures_order check (ended_at is null or ended_at >= started_at)
+);
+
+create unique index if not exists studio_seat_tenures_open on public.studio_seat_tenures (studio_id, user_id)
+where ended_at is null;
+
+create index if not exists studio_seat_tenures_user on public.studio_seat_tenures (user_id, studio_id);
+
+alter table public.studio_seat_tenures enable row level security;
+
+revoke all on table public.studio_seat_tenures from public, anon, authenticated, service_role;
+
+grant select on table public.studio_seat_tenures to service_role;
+
+create or replace function public.studio_members_seat_tenure () returns trigger language plpgsql
+security definer
+set search_path = public as $$
+begin
+    if tg_op = 'INSERT' then
+        insert into public.studio_seat_tenures (studio_id, user_id, started_at)
+        values (new.studio_id, new.user_id, new.created_at)
+        on conflict (studio_id, user_id) where ended_at is null do nothing;
+    else
+        update public.studio_seat_tenures t
+        set ended_at = greatest(now(), t.started_at)
+        where t.studio_id = old.studio_id and t.user_id = old.user_id and t.ended_at is null;
+    end if;
+    return null;
+end;
+$$;
+
+drop trigger if exists studio_members_seat_tenure on public.studio_members;
+
+create trigger studio_members_seat_tenure after insert or delete on public.studio_members
+for each row execute function public.studio_members_seat_tenure ();
+
+-- Every seat held now opens its tenure at the seat's own created_at.
+-- Rerunnable: a seat with an open tenure is skipped.
+insert into public.studio_seat_tenures (studio_id, user_id, started_at)
+select sm.studio_id, sm.user_id, sm.created_at
+from public.studio_members sm
+where not exists (
+    select 1 from public.studio_seat_tenures t
+    where t.studio_id = sm.studio_id and t.user_id = sm.user_id and t.ended_at is null
+);
+
+-- ---------------------------------------------------------------------------
+-- Rows provisioned before this migration
+-- ---------------------------------------------------------------------------
+-- A legacy row carries no record of the context it was provisioned in, and a
+-- seat (or ownership) when the student was created is NOT evidence: a seated
+-- teacher keeps a private roster too (Codex round 3; Max's decision 3). So
+-- the backfill attributes a legacy row only on a recorded piece of positive
+-- evidence -- the district's own record that this student was provisioned for
+-- it (its roster export, its invite list), entered through
+-- admin_record_district_evidence() -- and only where the student was created
+-- while the teacher held a seat in (or owned) that district. A row with no
+-- evidence, with evidence for more than one district, or with evidence that
+-- falls outside the teacher's tenure stays unattributed, and an unattributed
+-- student is never purged.
+--
+-- The superseded round-2 rule (a district inferred from membership) is gone.
+drop function if exists public.district_studio_for_teacher (uuid, timestamptz);
+
+create table if not exists public.district_student_evidence (
+    managed_student_id uuid not null references public.managed_students (id) on delete cascade,
+    studio_id uuid not null,
+    source text not null check (length(trim(source)) > 0),
+    recorded_by text not null check (length(trim(recorded_by)) > 0),
+    recorded_at timestamptz not null default now(),
+    primary key (managed_student_id, studio_id)
+);
+
+alter table public.district_student_evidence enable row level security;
+
+revoke all on table public.district_student_evidence from public, anon, authenticated, service_role;
+
+grant select on table public.district_student_evidence to service_role;
+
+create or replace function public.admin_record_district_evidence (
+    p_managed_student uuid, p_studio uuid, p_source text, p_actor text
+) returns void language plpgsql security definer
+set search_path = public as $$
+begin
+    if coalesce(trim(p_actor), '') = '' or coalesce(trim(p_source), '') = '' then
+        raise exception 'say who is recording the evidence, and what it is' using errcode = '22023';
+    end if;
+    if not exists (select 1 from public.district_billing b where b.studio_id = p_studio) then
+        raise exception 'that studio is not a district' using errcode = '22023';
+    end if;
+    insert into public.district_student_evidence (managed_student_id, studio_id, source, recorded_by)
+    values (p_managed_student, p_studio, trim(p_source), trim(p_actor))
+    on conflict (managed_student_id, studio_id) do nothing;
+end;
+$$;
+
+-- Did this teacher hold this district at this moment? Only if the district
+-- existed then -- its studio, and its district contract (district_billing's
+-- created_at: a studio is not a district before it has one) -- and the teacher
+-- owned the studio (from its creation; ownership never moves) or held a seat
+-- whose tenure covers the moment, from the seat's start to its end. So a
+-- departed teacher counts for the students they created while seated and for
+-- none after, and nobody counts for a time before the district existed.
+drop function if exists public.district_evidence_in_tenure (uuid, uuid);
+
+create or replace function public.district_held_at (p_teacher uuid, p_studio uuid, p_at timestamptz)
+returns boolean language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1
+        from public.district_billing b
+        join public.studios st on st.id = b.studio_id
+        where b.studio_id = p_studio
+          and p_at >= greatest(st.created_at, b.created_at)
+          and (st.owner_id = p_teacher
+               or exists (select 1 from public.studio_seat_tenures t
+                          where t.studio_id = p_studio and t.user_id = p_teacher
+                            and t.started_at <= p_at
+                            and (t.ended_at is null or p_at < t.ended_at)))
+    );
+$$;
+
+-- A record of each backfill run that is about no one studio has no studio_id.
+alter table public.district_retention_log alter column studio_id drop not null;
+
+alter table public.district_retention_log drop constraint if exists district_retention_log_studio_present;
+
+alter table public.district_retention_log
+add constraint district_retention_log_studio_present check (
+    studio_id is not null or step = 'attribution_backfill_run'
+);
+
+-- Legacy rows only. A row provisioned under this migration was decided at
+-- provisioning, a private one included, and the backfill never revisits it.
+-- Every undecided legacy row ends a run in exactly one outcome:
+--  attributed       one district's evidence, inside the teacher's tenure there
+--  no_evidence      no record names a district (a seat alone is not evidence)
+--  ambiguous        records name more than one district
+--  district_gone    the district named is no longer a district
+--  before_district  created before the district (its studio or its contract)
+--  outside_tenure   created when the teacher neither owned nor sat in it
+-- Only 'attributed' changes anything; every other row stays unattributed,
+-- and an unattributed student is never purged. The counts are logged per
+-- district named and once for the run, and returned. Rerunnable: it touches
+-- undecided legacy rows only, and evidence recorded later is picked up by
+-- running it again.
+drop function if exists public.backfill_district_student_attribution ();
+
+create function public.backfill_district_student_attribution () returns jsonb language plpgsql
+security definer
+set search_path = public as $$
+declare
+    v_totals jsonb;
+    v_districts jsonb;
+    v_attributed int;
+    v_result jsonb;
+    v_district jsonb;
+begin
+    perform set_config('cleffy.district_attribution', 'admin', true);
+    with legacy as (
+        select ms.id, ms.teacher_id, ms.created_at,
+               array(select e.studio_id from public.district_student_evidence e
+                     where e.managed_student_id = ms.id order by e.studio_id) as studios
+        from public.managed_students ms
+        where ms.district_attribution = 'legacy' and ms.district_studio_id is null
+    ), classified as (
+        select l.id, l.studios,
+               case
+                   when cardinality(l.studios) = 0 then 'no_evidence'
+                   when cardinality(l.studios) > 1 then 'ambiguous'
+                   when not exists (select 1 from public.district_billing b
+                                    join public.studios st on st.id = b.studio_id
+                                    where b.studio_id = l.studios[1]) then 'district_gone'
+                   when l.created_at < (select greatest(st.created_at, b.created_at)
+                                        from public.district_billing b
+                                        join public.studios st on st.id = b.studio_id
+                                        where b.studio_id = l.studios[1]) then 'before_district'
+                   when not public.district_held_at (l.teacher_id, l.studios[1], l.created_at) then 'outside_tenure'
+                   else 'attributed'
+               end as outcome
+        from legacy l
+    ), updated as (
+        update public.managed_students ms
+        set district_studio_id = c.studios[1], district_attribution = 'backfilled'
+        from classified c
+        where c.outcome = 'attributed' and ms.id = c.id
+        returning ms.id
+    ), by_district as (
+        select d.studio_id, jsonb_object_agg(d.outcome, d.n) as counts
+        from (select s.studio_id, c.outcome, count(*) as n
+              from classified c cross join lateral unnest(c.studios) as s(studio_id)
+              group by s.studio_id, c.outcome) d
+        group by d.studio_id
+    )
+    select (select count(*) from updated),
+           coalesce((select jsonb_object_agg(o.outcome, o.n)
+                     from (select outcome, count(*) as n from classified group by outcome) o), '{}'::jsonb),
+           coalesce((select jsonb_agg(jsonb_build_object('studio_id', studio_id, 'counts', counts))
+                     from by_district), '[]'::jsonb)
+    into v_attributed, v_totals, v_districts;
+    perform set_config('cleffy.district_attribution', '', true);
+
+    v_result := jsonb_build_object(
+        'attributed', v_attributed,
+        'skipped_no_evidence', coalesce((v_totals ->> 'no_evidence')::int, 0),
+        'skipped_ambiguous', coalesce((v_totals ->> 'ambiguous')::int, 0),
+        'skipped_district_gone', coalesce((v_totals ->> 'district_gone')::int, 0),
+        'skipped_before_district', coalesce((v_totals ->> 'before_district')::int, 0),
+        'skipped_outside_tenure', coalesce((v_totals ->> 'outside_tenure')::int, 0)
+    );
+
+    if v_totals <> '{}'::jsonb then
+        for v_district in select * from jsonb_array_elements(v_districts) loop
+            insert into public.district_retention_log (studio_id, step, counts)
+            values ((v_district ->> 'studio_id')::uuid, 'attribution_backfilled', v_district -> 'counts');
+        end loop;
+        insert into public.district_retention_log (studio_id, step, counts)
+        values (null, 'attribution_backfill_run', v_result);
+    end if;
+    raise notice 'district attribution backfill: %', v_result;
+    return v_result;
+end;
+$$;
+
+select public.backfill_district_student_attribution ();
+
+-- ---------------------------------------------------------------------------
+-- The purge's scope: the district's own students, and nobody else's
+-- ---------------------------------------------------------------------------
+create or replace function public.retention_district_students (p_studio uuid) returns setof public.managed_students
+language sql stable security definer
+set search_path = public as $$
+    select ms.* from public.managed_students ms where ms.district_studio_id = p_studio;
+$$;
+
+do $$
+declare
+    fn text;
+begin
+    foreach fn in array array[
+        'public.district_provisionable (uuid, uuid)',
+        'public.studio_members_seat_tenure ()',
+        'public.admin_record_district_evidence (uuid, uuid, text, text)',
+        'public.district_held_at (uuid, uuid, timestamptz)',
+        'public.managed_students_district_attribution ()',
+        'public.admin_set_student_district (uuid, uuid, text)',
+        'public.backfill_district_student_attribution ()',
+        'public.retention_district_students (uuid)'
+    ]
+    loop
+        execute format('revoke all on function %s from public, anon, authenticated', fn);
+        execute format('grant execute on function %s to service_role', fn);
+    end loop;
+end;
+$$;
+
+-- Clients read the roster through column grants (20260826194426_roster.sql);
+-- these columns are the purge's, and stay out of them.
+
+-- ===== supabase/migrations/20261021120900_district_notice_mail_budget.sql =====
+-- District retention notices: deferred, not failed, when the mail budget is spent.
+--
+-- Codex round-2 review of #64, new major 2 (and the cross-PR mail ceiling):
+-- district-retention-notices sent straight through Resend, outside the shared
+-- mail budget. It now reserves the `retentionNotice` share of LAUNCH_MAIL_SPLIT
+-- (_shared/mailBudget.ts) before each send. A notice the budget holds back is
+-- handed back to the outbox (district_retention_notices) with this function:
+-- its claim released and the attempt the claim counted taken back, because no
+-- send was tried. It stays unsent, so the purge keeps waiting for it, and the
+-- next wake of the sender claims it again.
+
+create or replace function public.defer_district_retention_notice (p_id bigint) returns void language plpgsql
+security definer
+set search_path = public as $$
+begin
+    update public.district_retention_notices
+    set lease_until = null,
+        attempts = greatest(attempts - 1, 0),
+        last_error = 'deferred: the retention notice mail budget is spent'
+    where id = p_id and sent_at is null;
+end;
+$$;
+
+revoke all on function public.defer_district_retention_notice (bigint) from public, anon, authenticated;
+
+grant execute on function public.defer_district_retention_notice (bigint) to service_role;

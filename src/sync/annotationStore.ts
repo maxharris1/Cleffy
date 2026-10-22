@@ -469,6 +469,39 @@ export class AnnotationStore {
         await this.db.annotations.put({ ...mirror, pending: 0, createdBy: attributed });
     }
 
+    /**
+     * After a full resync (the device was away past tombstone compaction):
+     * remove every synced mark at or below `upToSeq` that the server did not
+     * return in `seen`. Marks with local intent (queued, unsaved, another
+     * account's) and marks never synced (seq 0) are left alone. Returns how
+     * many went.
+     */
+    async dropAbsent(seen: ReadonlySet<string>, upToSeq: number, pendingIds: ReadonlySet<string>): Promise<number> {
+        await this.ensureLoaded();
+        const gone = [...this.byId.values()].filter(
+            (a) =>
+                a.seq > 0 &&
+                a.seq <= upToSeq &&
+                !seen.has(a.id) &&
+                !pendingIds.has(a.id) &&
+                !this.unpersisted.has(a.id) &&
+                !this.committing.has(a.id) &&
+                !this.foreign.has(a.id),
+        );
+        if (gone.length === 0) {
+            return 0;
+        }
+        const pages = new Set<number>();
+        for (const a of gone) {
+            this.byId.delete(a.id);
+            this.pageMap(a.page).delete(a.id);
+            pages.add(a.page);
+        }
+        await this.db.annotations.bulkDelete(gone.map((a) => a.id));
+        pages.forEach((page) => this.notifyPage(page));
+        return gone.length;
+    }
+
     /** Remove an annotation the server rejected/never had (sync repair path). */
     async discardLocal(id: string): Promise<void> {
         await this.ensureLoaded();

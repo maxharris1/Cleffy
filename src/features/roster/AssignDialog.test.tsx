@@ -30,6 +30,9 @@ const student = (id: string, displayName: string, archivedAt: string | null = nu
     archived_at: archivedAt,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
+    country: null,
+    age_attested_at: null,
+    age_attested_min_age: null,
 });
 
 const rosterAssignment = (documentId: string, studentUserId: string): RosterAssignment => ({

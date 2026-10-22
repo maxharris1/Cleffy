@@ -1224,8 +1224,10 @@ describe('SyncEngine watermark hold across a gap (takedown topics, #63)', () => 
 
 describe('SyncEngine.applyServerRow (broadcast path)', () => {
     it('applies rows and advances the watermark monotonically', async () => {
-        // Once a pull has run: until then the watermark is held (see the hold below).
+        // The cursor only moves once a pull has run the compaction check (and,
+        // until then, the watermark is held: see the hold above).
         await engine.pullSince();
+        expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 0, checkedSeq: 0 });
         await engine.applyServerRow(serverRow('b1', { page: 4, color: '#123', seq: 9 }));
         expect(store.getPage(4).has('b1')).toBe(true);
         expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(9);
@@ -2656,5 +2658,208 @@ describe('SyncEngine with another account’s changes queued on the device', () 
         await vi.waitFor(() => expect(viewerStore.getPage(0).has('mine')).toBe(true));
         viewerStore.setAuthor(OTHER);
         await vi.waitFor(() => expect(viewerStore.getPage(0).has('mine')).toBe(false));
+    });
+});
+
+/**
+ * A fake server that compacts tombstones the way compact_annotation_tombstones
+ * does since 20261021120600: the tombstone rows go, and the score's floor
+ * becomes the highest seq removed.
+ */
+class CompactingApi extends FakeApi {
+    floor = 0;
+    floorError: ApiError | null = null;
+    floorChecks = 0;
+
+    async fetchResyncFloor() {
+        this.floorChecks += 1;
+        return this.floorError ? { floor: null, error: this.floorError } : { floor: this.floor, error: null };
+    }
+
+    tombstone(id: string) {
+        const row = this.rows.get(id)!;
+        this.rows.set(id, { ...row, deleted_at: '2026-01-02T00:00:00Z', seq: this.nextSeq++ });
+    }
+
+    compact() {
+        for (const [id, row] of this.rows) {
+            if (row.deleted_at) {
+                this.floor = Math.max(this.floor, row.seq);
+                this.rows.delete(id);
+            }
+        }
+    }
+
+    add(id: string) {
+        this.rows.set(id, serverRow(id, { seq: this.nextSeq++ }));
+    }
+}
+
+describe('SyncEngine after tombstone compaction', () => {
+    let server: CompactingApi;
+    let device: SyncEngine;
+
+    beforeEach(async () => {
+        server = new CompactingApi();
+        device = new SyncEngine({ db, store, api: server, docId: DOC, getUserId: () => USER });
+        // The device syncs two marks, then goes away.
+        server.add('m1');
+        server.add('m2');
+        await device.pullSince();
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(2);
+    });
+
+    afterEach(() => device.stop());
+
+    it('a live row arriving before the first pull back does not let the device off', async () => {
+        server.tombstone('m1');
+        server.add('m3');
+        server.compact();
+        server.add('m4');
+        await device.applyServerRow(server.rows.get('m4')!); // broadcast, seq 5
+
+        await device.pullSince();
+
+        expect(store.getPage(0).has('m1')).toBe(false);
+        expect(store.getPage(0).has('m4')).toBe(true);
+    });
+
+    it('upgrade: state cached before checkedSeq existed is not advanced by a broadcast ahead of the first pull', async () => {
+        // The device synced m1 and m2 on the old client, which wrote no
+        // checkedSeq. Then it upgrades, and while it was away m1 was deleted
+        // and the tombstone compacted (floor 3).
+        await db.syncState.put({ docId: DOC, watermarkSeq: 2 });
+        server.tombstone('m1');
+        server.add('m3');
+        server.compact();
+        expect(server.floor).toBe(3);
+        server.add('m4');
+
+        // The first thing the upgraded client hears is a live broadcast (seq 5).
+        await device.applyServerRow(server.rows.get('m4')!);
+        expect(store.getPage(0).has('m4')).toBe(true);
+        // The cursor is gated: the old watermark still marks the last full check.
+        expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 2 });
+
+        await device.pullSince();
+
+        expect(store.get('m1')).toBeUndefined();
+        expect(store.getPage(0).has('m1')).toBe(false);
+        expect(store.getPage(0).has('m4')).toBe(true);
+        expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 5, checkedSeq: 5 });
+
+        // Once the first full sync has run, broadcasts move the cursor again.
+        server.add('m5');
+        await device.applyServerRow(server.rows.get('m5')!);
+        expect(await db.syncState.get(DOC)).toEqual({ docId: DOC, watermarkSeq: 6, checkedSeq: 5 });
+    });
+
+    it('upgrade: a legacy device whose first floor check fails keeps its old watermark as the checked position', async () => {
+        await db.syncState.put({ docId: DOC, watermarkSeq: 2 });
+        server.tombstone('m1');
+        server.compact();
+        server.add('m3');
+        server.floorError = { kind: 'retry', message: 'down' };
+        await device.pullSince();
+        // The pull ran but could not check: checkedSeq records where the last
+        // real check stood (the legacy watermark), not where the pull reached.
+        expect((await db.syncState.get(DOC))?.checkedSeq).toBe(2);
+
+        server.add('m4');
+        await device.applyServerRow(server.rows.get('m4')!);
+        server.floorError = null;
+        await device.pullSince();
+        expect(store.getPage(0).has('m1')).toBe(false);
+    });
+
+    it('a device that has never pulled the score does not take a broadcast as its starting point', async () => {
+        const other = 'doc-never-pulled';
+        server.rows.set('n1', serverRow('n1', { document_id: other, seq: server.nextSeq++ }));
+        const freshStore = new AnnotationStore(db, other);
+        await freshStore.load();
+        const fresh = new SyncEngine({ db, store: freshStore, api: server, docId: other, getUserId: () => USER });
+        try {
+            server.rows.set('n2', serverRow('n2', { document_id: other, seq: server.nextSeq++ }));
+            await fresh.applyServerRow(server.rows.get('n2')!);
+            expect(await db.syncState.get(other)).toBeUndefined();
+        } finally {
+            fresh.stop();
+        }
+    });
+
+    it('a device back after its missed deletion was compacted resyncs, and the mark disappears', async () => {
+        // Meanwhile: m1 is deleted (say, a deleted student's mark), its
+        // tombstone is compacted, and someone adds m3.
+        server.tombstone('m1');
+        server.add('m3');
+        server.compact();
+        expect(server.floor).toBe(3);
+
+        await device.pullSince();
+
+        expect(store.get('m1')).toBeUndefined();
+        expect(store.getPage(0).has('m1')).toBe(false);
+        expect(await db.annotations.get('m1')).toBeUndefined();
+        expect(store.getPage(0).has('m2')).toBe(true);
+        expect(store.getPage(0).has('m3')).toBe(true);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(4);
+    });
+
+    it('keeps a mark with a change still queued, and one never synced', async () => {
+        server.tombstone('m1');
+        server.compact();
+        server.offline = true;
+        await store.update('m1', { color: '#123456' });
+        await store.create(makeStroke('local'));
+        server.offline = false;
+
+        await device.pullSince();
+
+        expect(store.get('m1')).toBeDefined();
+        expect(store.getPage(0).has('local')).toBe(true);
+        expect(store.getPage(0).has('m2')).toBe(true);
+    });
+
+    it('resyncs once: the watermark is then at or past the floor, and pulls go back to the watermark', async () => {
+        server.tombstone('m1');
+        server.compact();
+        await device.pullSince();
+        expect(store.get('m1')).toBeUndefined();
+
+        const fetchSince = vi.spyOn(server, 'fetchSince');
+        await device.pullSince();
+        expect(fetchSince).toHaveBeenCalledWith(DOC, 0, expect.any(Number)); // 3 - overlap, clamped
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(3);
+        expect(store.getPage(0).has('m2')).toBe(true);
+    });
+
+    it('a device that saw the tombstone before it was compacted pulls by watermark and drops nothing', async () => {
+        server.tombstone('m1');
+        await device.pullSince(); // sees the tombstone (seq 3)
+        server.add('m3');
+        server.compact();
+        const dropAbsent = vi.spyOn(store, 'dropAbsent');
+
+        await device.pullSince();
+
+        expect(dropAbsent).not.toHaveBeenCalled();
+        expect(store.getPage(0).has('m1')).toBe(false);
+        expect(store.getPage(0).has('m3')).toBe(true);
+    });
+
+    it('a failed floor check does not hold sync up: it pulls by watermark and asks again next time', async () => {
+        server.tombstone('m1');
+        server.add('m3');
+        server.compact();
+        server.floorError = { message: 'not deployed yet', kind: 'retry' };
+
+        await device.pullSince();
+        expect(store.getPage(0).has('m3')).toBe(true);
+        expect(store.getPage(0).has('m1')).toBe(true);
+
+        server.floorError = null;
+        await device.pullSince();
+        expect(store.getPage(0).has('m1')).toBe(false);
+        expect(server.floorChecks).toBe(2); // the first pull ever had nothing to check
     });
 });

@@ -865,6 +865,28 @@ describe('parseMembershipChange', () => {
     });
 });
 
+describe('DocRealtimeChannel presence names', () => {
+    it('never passes on an email an older build announces as a name', () => {
+        const onPeers = vi.fn();
+        const { live } = setup({ onPeers });
+        live.presenceState = () =>
+            ({
+                [PEER]: [{ userId: PEER, name: 'teacher@example.com', color: '#000000', page: 0, isAnonymous: false }],
+                guest: [{ userId: 'guest', name: 'Sharon', color: '#000000', page: 0, isAnonymous: true }],
+            }) as ReturnType<FakeChannel['presenceState']>;
+        for (const h of live.handlers) {
+            if (h.type === 'presence' && h.event === 'sync') {
+                h.handler({ payload: undefined });
+            }
+        }
+        const peers = onPeers.mock.calls.at(-1)?.[0] as Array<{ userId: string; name: string }>;
+        expect(peers.map((p) => [p.userId, p.name])).toEqual([
+            [PEER, 'Collaborator'],
+            ['guest', 'Sharon'],
+        ]);
+    });
+});
+
 const toRead = (epoch: number | null | undefined): TopicEpochRead =>
     epoch === undefined ? { status: 'failed' } : epoch === null ? { status: 'denied' } : { status: 'epoch', epoch };
 

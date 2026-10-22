@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ForgotPasswordPage } from '@/features/auth/ForgotPasswordPage';
 import { LoginPage } from '@/features/auth/LoginPage';
 import { RegisterPage } from '@/features/auth/RegisterPage';
+import { passAgeScreen } from '@/test/ageScreen';
 
 const signInWithPassword = vi.hoisted(() => vi.fn());
 const signUpWithPassword = vi.hoisted(() => vi.fn());
@@ -27,7 +28,7 @@ afterEach(() => {
     requestPasswordReset.mockReset();
 });
 
-const renderRegister = () =>
+const renderRegister = async () => {
     render(
         <MemoryRouter initialEntries={['/register']}>
             <Routes>
@@ -36,6 +37,9 @@ const renderRegister = () =>
             </Routes>
         </MemoryRouter>,
     );
+    // Past the age screen: these tests are about the form behind it.
+    await passAgeScreen();
+};
 
 describe('Auth pages', () => {
     it('renders login form with links to register and forgot password', () => {
@@ -109,7 +113,7 @@ describe('Auth pages', () => {
         expect(await screen.findByText('assignments')).toBeInTheDocument();
     });
 
-    it('renders register form with link to login', () => {
+    it('asks the age screen first, then renders the register form with a link to login', async () => {
         render(
             <MemoryRouter initialEntries={['/register']}>
                 <Routes>
@@ -117,6 +121,10 @@ describe('Auth pages', () => {
                 </Routes>
             </MemoryRouter>,
         );
+        expect(screen.getByLabelText('Where do you live?')).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', '/login');
+        expect(screen.queryByLabelText('Email')).not.toBeInTheDocument();
+        await passAgeScreen();
         expect(screen.getByRole('heading', { name: 'Create account' })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Create account' })).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', '/login');
@@ -128,7 +136,7 @@ describe('Auth pages', () => {
 
     it('holds a new password to the account policy before calling sign-up', async () => {
         const user = userEvent.setup();
-        renderRegister();
+        await renderRegister();
         expect(screen.getByText('At least 8 characters, with a letter and a number.')).toBeInTheDocument();
 
         await user.type(screen.getByLabelText('Email'), 'teacher@example.com');
@@ -153,7 +161,12 @@ describe('Auth pages', () => {
         await user.type(screen.getByLabelText('Confirm password'), 'letters4ever');
         signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: false });
         await user.click(screen.getByRole('button', { name: 'Create account' }));
-        expect(signUpWithPassword).toHaveBeenCalledExactlyOnceWith('teacher@example.com', 'letters4ever', null);
+        expect(signUpWithPassword).toHaveBeenCalledExactlyOnceWith('teacher@example.com', 'letters4ever', null, {
+            country: 'US',
+            min_age: 13,
+            source: 'self',
+            v: 1,
+        });
     });
 
     it('never applies the new-password policy at sign-in, so older short passwords still log in', async () => {

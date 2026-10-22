@@ -42,6 +42,16 @@ const CAPTCHA_FAILED = 'That “I’m human” check didn’t go through. Try it
 const EMAIL_NOT_CONFIRMED =
     'Confirm your email address first — open the link in the email we sent you, then log in. Links expire after an hour; you can send a new one below.';
 
+/**
+ * The before_user_created hook's two refusals
+ * (supabase/migrations/20261021120000_consent_age.sql), passed through as the
+ * hook words them. The first means this page skipped the age screen (an old
+ * cached build); the second that the server's consent-age table is stricter
+ * than the one this build checked against.
+ */
+const AGE_CHECK_MISSING = 'Sign-up needs the age check first. Reload the page and try again.';
+const BELOW_CONSENT_AGE = 'Sorry, you can’t create a Cleffy account.';
+
 /** Closed map of Auth API `error.code` → product copy. */
 const BY_CODE: Readonly<Record<string, string>> = {
     invalid_credentials: INVALID_CREDENTIALS,
@@ -76,6 +86,8 @@ const BY_MESSAGE: readonly { pattern: RegExp; message: string }[] = [
     // rather than as a thrown AuthApiError — the form of error authUrlError.ts
     // reads out of the address bar, which carries only a sentence.
     { pattern: /email not confirmed/i, message: EMAIL_NOT_CONFIRMED },
+    { pattern: /needs the age check first/i, message: AGE_CHECK_MISSING },
+    { pattern: /can[’']t create a Cleffy account/i, message: BELOW_CONSENT_AGE },
 ];
 
 const readAuthFields = (err: unknown): { code: string; message: string } => {

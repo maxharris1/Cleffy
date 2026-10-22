@@ -471,6 +471,8 @@ export type StudioMemberRow = {
  * service role. That is also why the queries below name their columns instead
  * of `*`. `access_revoked_at` (20261010120300) is absent for the same reason:
  * no client is granted it; only student_access_revoked() reads it.
+ * `district_studio_id` (20261021120800) likewise: the district a student was
+ * provisioned under, read only by the district retention purge.
  */
 export type ManagedStudentRow = {
     id: string;
@@ -488,6 +490,14 @@ export type ManagedStudentRow = {
     archived_at: string | null;
     created_at: string;
     updated_at: string;
+    /**
+     * The teacher's latest age attestation (20261021120100): the student's
+     * country, when it was given, and the age it vouched for. All null on rows
+     * from before attestations, until their next restore.
+     */
+    country: string | null;
+    age_attested_at: string | null;
+    age_attested_min_age: number | null;
 };
 
 /** 'edit' makes the student an editor on the score; 'view' makes them a viewer. */
@@ -941,6 +951,13 @@ export type Database = {
             student_access_revoked: {
                 Args: Record<string, never>;
                 Returns: boolean;
+            };
+            // The highest seq tombstone compaction removed on the score (0 when
+            // none; null when the caller cannot read it). A sync watermark below
+            // it means the device must resync in full (20261021120600).
+            annotation_resync_floor: {
+                Args: { p_document: string };
+                Returns: number | null;
             };
             // True when the caller holds a read-only Academy seat (past its
             // academy's limit): RLS refuses every write it makes, on any score.

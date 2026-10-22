@@ -1,4 +1,5 @@
 import { callEdgeFunction, limitErrorFrom } from '@/features/billing/billingApi';
+import { TEACHER_ATTESTATION_VERSION, consentAgeFor, teacherAttestationText } from '@/features/legal/consentAge';
 import { getSupabase } from '@/lib/supabase';
 import type { AssignmentAccess, AssignmentRow, ManagedStudentRow, PracticeNoteRow } from '@/types/database';
 
@@ -31,7 +32,40 @@ import type { AssignmentAccess, AssignmentRow, ManagedStudentRow, PracticeNoteRo
  * from each other, when a column is added.
  */
 export const MANAGED_STUDENT_COLUMNS =
-    'id, teacher_id, student_user_id, display_name, parent_email, auth_method, username, student_email, claimed_at, archived_at, created_at, updated_at';
+    'id, teacher_id, student_user_id, display_name, parent_email, auth_method, username, student_email, claimed_at, archived_at, created_at, updated_at, country, age_attested_at, age_attested_min_age';
+
+/**
+ * The teacher vouching for a student's age, as student-provision reads it
+ * (readTeacherAttestation in supabase/functions/_shared/consentAge.ts): the
+ * country, and the exact sentence the teacher ticked. The server recomputes
+ * the age from the country and refuses wording that does not match it.
+ */
+export interface TeacherAttestation {
+    country: string;
+    countryName: string;
+    confirmed: true;
+    wording: string;
+    version: string;
+}
+
+export const attestationFor = (country: string, countryName: string): TeacherAttestation => ({
+    country,
+    countryName,
+    confirmed: true,
+    wording: teacherAttestationText(consentAgeFor(country), countryName),
+    version: TEACHER_ATTESTATION_VERSION,
+});
+
+/** What a form shows when the two fields are not both answered, or null when they are. */
+export const attestationProblem = (country: string, confirmed: boolean): string | null => {
+    if (!country) {
+        return 'Choose the country the student lives in.';
+    }
+    if (!confirmed) {
+        return 'Confirm the student meets the minimum age for their country.';
+    }
+    return null;
+};
 
 export interface ProvisionedStudent {
     id: string;
@@ -47,8 +81,9 @@ export interface ProvisionedStudent {
  * the student's own and exists only on the invite path. Conflating them would
  * mean a parent's address could be turned into a child's sign-in.
  */
-export type ProvisionOptions =
-    { parentEmail?: string; method: 'code' } | { parentEmail?: string; method: 'email'; studentEmail: string };
+export type ProvisionOptions = { attestation: TeacherAttestation } & (
+    { parentEmail?: string; method: 'code' } | { parentEmail?: string; method: 'email'; studentEmail: string }
+);
 
 /** A printed card, or an invite already in flight — never both. */
 export type ProvisionResult =
@@ -136,6 +171,7 @@ export const provisionStudent = async (displayName: string, opts: ProvisionOptio
         action: 'create',
         displayName: displayName.trim(),
         method: opts.method,
+        attestation: opts.attestation,
         ...(trimmedEmail ? { parentEmail: trimmedEmail } : {}),
         ...(opts.method === 'email' ? { studentEmail: opts.studentEmail.trim(), redirectTo: welcomeRedirect() } : {}),
     });
@@ -197,11 +233,26 @@ export const archiveStudent = async (studentId: string): Promise<void> => {
     }
 };
 
-/** Re-occupies a seat, so this can be refused with LimitReachedError exactly as create is. */
-export const restoreStudent = async (studentId: string): Promise<void> => {
-    const response = await provision({ action: 'restore', studentId });
+/**
+ * Re-occupies a seat, so this can be refused with LimitReachedError exactly as
+ * create is. Needs the teacher's attestation again, as create does.
+ */
+export const restoreStudent = async (studentId: string, attestation: TeacherAttestation): Promise<void> => {
+    const response = await provision({ action: 'restore', studentId, attestation });
     if (!response.ok) {
         await failFrom(response, 'Could not restore that student.');
+    }
+};
+
+/**
+ * Deletes the student for good: their markings are scrubbed from every score
+ * and lesson-history snapshot, then their account goes, and with it the
+ * roster row, assignments and practice notes. Nothing brings it back.
+ */
+export const deleteStudent = async (studentId: string): Promise<void> => {
+    const response = await provision({ action: 'delete', studentId });
+    if (!response.ok) {
+        await failFrom(response, 'Could not delete that student.');
     }
 };
 

@@ -11,6 +11,7 @@ import {
     turnstileSiteKey,
     type TurnstileRenderOptions,
 } from '../../src/features/auth/turnstile';
+import { passAgeScreen } from '../../src/test/ageScreen';
 
 /**
  * The widget half of the Turnstile work, and above all the claim the whole
@@ -51,7 +52,7 @@ afterEach(() => {
     document.getElementById('cf-turnstile-script')?.remove();
 });
 
-const renderRegister = () =>
+const renderRegister = async () => {
     render(
         <MemoryRouter initialEntries={['/register']}>
             <Routes>
@@ -60,6 +61,9 @@ const renderRegister = () =>
             </Routes>
         </MemoryRouter>,
     );
+    // Past the age screen: these tests are about the form behind it.
+    await passAgeScreen();
+};
 
 describe('with no site key — every build today', () => {
     it('reports Turnstile off', () => {
@@ -77,7 +81,7 @@ describe('with no site key — every build today', () => {
 
     it('leaves the sign-up form submittable with no token at all', async () => {
         const user = userEvent.setup();
-        renderRegister();
+        await renderRegister();
         expect(screen.queryByTestId('turnstile-field')).not.toBeInTheDocument();
         await user.type(screen.getByLabelText('Email'), 'teacher@example.com');
         await user.type(screen.getByLabelText('Password'), 'letters4ever');
@@ -173,7 +177,7 @@ describe('with a site key set', () => {
         vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
         const { rendered } = stubTurnstile();
         const user = userEvent.setup();
-        renderRegister();
+        await renderRegister();
         await waitFor(() => expect(rendered).toHaveLength(1));
 
         await user.type(screen.getByLabelText('Email'), 'teacher@example.com');

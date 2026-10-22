@@ -138,7 +138,7 @@ describe('imslp-sync — the cron job the push has to pause', () => {
      * functions that migration defines, and what it writes (a read-only seat's
      * plan_lapse archive) is undone by the same restore paths a payment runs.
      */
-    it('and omr-sweep, district-seat-reconcile (and the billing mail outbox) are the only jobs any migration touches', () => {
+    it('and omr-sweep, district-seat-reconcile (and the billing mail outbox, plus the retention jobs) are the only jobs any migration touches', () => {
         const touched = new Map<string, string[]>();
         for (const { name, sql } of migrations()) {
             for (const match of sql.matchAll(/cron\.(?:schedule|unschedule)\s*\(\s*'([a-z0-9-]+)'/gi)) {
@@ -152,6 +152,13 @@ describe('imslp-sync — the cron job the push has to pause', () => {
         // `billing-mail-outbox` (launch checkout fix pass) is safe to schedule
         // mid-push: its tick only tidies its own table and posts nowhere until
         // the Vault secrets exist, which are created after the push.
+        // The five retention jobs (20261021120300) are safe to let run across
+        // a push: each calls a function the same migration defines, against
+        // tables no pending migration drops, and touches only rows already past
+        // their retention period. What they do on their first night — delete
+        // archived students older than 12 months and guests idle for 90 days —
+        // is the policy, and the PR lists the counts to check beforehand.
+        const retention = ['20261021120300_retention_jobs.sql'];
         expect(Object.fromEntries([...touched].sort())).toEqual({
             'billing-mail-outbox': ['20261020160200_billing_mail_outbox.sql'],
             // Safe to leave running across a push: it calls a function its own
@@ -160,6 +167,11 @@ describe('imslp-sync — the cron job the push has to pause', () => {
             'district-seat-reconcile': ['20261020180500_district_seat_cap_and_grace.sql'],
             'imslp-sync': ['20260902120000_imslp_category_index.sql'],
             'omr-sweep': ['20260806140000_omr_cron.sql'],
+            'retention-archived-students': retention,
+            'retention-compact-tombstones': retention,
+            'retention-rate-limits': retention,
+            'retention-stale-guests': retention,
+            'retention-support-messages': retention,
         });
     });
 });

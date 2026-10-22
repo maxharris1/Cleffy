@@ -53,6 +53,14 @@ export interface SyncState {
     docId: string;
     /** Highest server seq applied locally (pull watermark). */
     watermarkSeq: number;
+    /**
+     * The watermark as of the last pull that checked it against the server's
+     * tombstone-compaction floor (SyncEngine.pullOnce). Broadcasts and pulls
+     * that could not check move watermarkSeq but not this, so a device back
+     * after a compaction is still caught. Absent in rows written before it
+     * existed: watermarkSeq stands in.
+     */
+    checkedSeq?: number;
 }
 
 /** Bytes as read back from Dexie: ArrayBuffer now, Blob in rows written before. */

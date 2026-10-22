@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 
-import { displayNameOf, isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
+import { isRegisteredSession, presenceNameOf, userTypeOf, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
 import { makeCloudClassifyFn } from '@/features/import/analyzeApi';
@@ -810,7 +810,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // ?import=1 (post-upload prompt) auto-opens the import panel once; the
     // param is consumed so a refresh doesn't rescan (the AI pass costs money).
     const [searchParams, setSearchParams] = useSearchParams();
-    const [autoOpenImport] = useState(() => searchParams.get('import') === '1');
+    const [autoOpenImport] = useState(() => features.smartImport && searchParams.get('import') === '1');
     useEffect(() => {
         if (searchParams.get('import') === '1') {
             const next = new URLSearchParams(searchParams);
@@ -898,7 +898,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     <Badge>view only</Badge>
                 ) : null}
                 {/* Needs the whole file: a first open shows it once the stream ends. */}
-                {annotationStore && confirmed && state.role === 'owner' && ownBytes ? (
+                {/* Smart import is off at launch (features.smartImport). */}
+                {features.smartImport && annotationStore && confirmed && state.role === 'owner' && ownBytes ? (
                     <ImportScanButton
                         store={annotationStore}
                         docId={docId}
@@ -1046,7 +1047,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                 syncing
                                     ? {
                                           userId: resolvedUserId,
-                                          name: displayNameOf(session),
+                                          name: presenceNameOf(session),
                                           isAnonymous: Boolean(session?.user.is_anonymous),
                                           canWrite: !readOnly,
                                           isOwner: state.role === 'owner',
@@ -1213,7 +1214,7 @@ const LocalViewer = ({ docId }: { docId: string }) => {
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
                 <Badge>this device only</Badge>
-                {annotationStore ? (
+                {features.smartImport && annotationStore ? (
                     <ImportScanButton
                         store={annotationStore}
                         docId={docId}

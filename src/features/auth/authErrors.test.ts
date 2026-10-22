@@ -117,3 +117,15 @@ describe('passwordResetProblem', () => {
         );
     });
 });
+
+describe('mapAuthError — the consent-age hook', () => {
+    it('passes both of the before_user_created refusals through as worded', () => {
+        // The wording lives in supabase/migrations/20261021120000_consent_age.sql.
+        expect(
+            mapAuthError({ message: 'Sign-up needs the age check first. Reload the page and try again.' }, 'x'),
+        ).toBe('Sign-up needs the age check first. Reload the page and try again.');
+        expect(mapAuthError({ message: 'Sorry, you can’t create a Cleffy account.' }, 'x')).toBe(
+            'Sorry, you can’t create a Cleffy account.',
+        );
+    });
+});
