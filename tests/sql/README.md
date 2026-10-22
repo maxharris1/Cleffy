@@ -1049,6 +1049,16 @@ new order (folder lock, then the object's row `FOR KEY SHARE NOWAIT`). Ends with
 passed; with 20261022101000's publish, the first interleaving ended in
 `deadlock detected` and the held-row publish waited until the row was freed.
 
+`my_storage_usage.sql` proves
+`supabase/migrations/20261022140600_my_storage_usage.sql` (decision 50(3)):
+`my_storage_usage()` answers the signed-in owner's own `used_bytes` (both
+buckets) and their plan's `limit_bytes`, the figures the quota uses, for the
+storage-full message; it takes no argument, refuses a caller without a user
+(42501) and is not anon's. The caps are read from the stack
+(`storage_quota_bytes()`), since CI's Storage API test changes the free one.
+Ends with `failures | total`. Proven against the local stack on 2026-10-22: all
+6 checks passed; without the function, 5 of the 6 failed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

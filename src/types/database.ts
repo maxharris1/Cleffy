@@ -958,6 +958,12 @@ export type Database = {
                 Args: { p_document?: string; p_claim?: string };
                 Returns: PdfExportClaim;
             };
+            // The caller's own storage use and cap (20261022140600), for the
+            // storage-full message.
+            my_storage_usage: {
+                Args: Record<string, never>;
+                Returns: { used_bytes: number; limit_bytes: number };
+            };
             // Legacy name for claim_pdf_export, kept for bundles already in the
             // field; same body, same answer.
             consume_pdf_export: {
