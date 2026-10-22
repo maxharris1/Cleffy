@@ -249,7 +249,27 @@ The test run was made with `.env.local` moved aside, as in CI. With it in place,
 
 ## CI on the final head (`0ca6c92ec186de1bc0038d4e65cd81f638ee221f`)
 
-Runs: push 39761010499, pull_request 39761016648. Still running at the time of this commit; the final table follows in the next commit on this branch.
+There are two workflow runs, one for the push and one for the pull request. Every job concluded **success**, each on its first run.
+
+| Check | Run id (job id) | Result |
+| --- | --- | --- |
+| checks | 39761016648 (119764906571) | success (lint, typecheck, test, build) |
+| supabase-local | 39761016648 (119764906751) | success |
+| supabase-drift | 39761016648 (119764906730) | success |
+| omr-service | 39761016648 (119764906838) | success |
+| checks | 39761010499 (119764885658) | success |
+| supabase-local | 39761010499 (119764886078) | success |
+| supabase-drift | 39761010499 (119764886162) | success |
+| omr-service | 39761010499 (119764886241) | success |
+| Vercel (commit status) | n/a | success ("Deployment has completed") |
+| Vercel Preview Comments | check 119765202789 | success |
+| Supabase Preview | check 119764881541 | skipped (integration skip; not a failure) |
+
+- Run 39761016648 is the pull_request run; 39761010499 is the push run.
+- There is no Claude Approvals check on this repo.
+- No CI fix pushes were needed.
+- The build log shows `inkRecoverySignal` as its own 0.2 kB chunk and `SignedOutInkNotice` as a lazy 3.4 kB chunk, so the app shell does not load the export stack for the new banner.
+- PR #68 remains a draft with base `dev`.
 
 ## Files touched (`86f632c..0ca6c92`: 23 files, +1865/−230)
 
