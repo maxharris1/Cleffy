@@ -15,14 +15,16 @@ const read = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8'
 describe('deletion-pending wiring', () => {
     it('delete-account binds the marker ports to their RPCs', () => {
         const source = read('supabase/functions/delete-account/index.ts');
-        expect(source).toContain("admin.rpc('begin_account_deletion', { p_user: userId })");
-        expect(source).toContain("admin.rpc('settle_account_deletion', {");
+        expect(source).toContain("admin.rpc('begin_account_deletion_attempt', { p_user: userId })");
+        expect(source).toContain("admin.rpc('mark_account_deletion_destructive', {");
+        expect(source).toContain("admin.rpc('settle_account_deletion_attempt', {");
+        expect(source).toContain('p_attempt: attempt');
     });
 
     it('student-provision checks the marker before it creates any student account', () => {
         const source = read('supabase/functions/student-provision/index.ts');
         const create = source.slice(source.indexOf('const createStudent = async'));
-        const check = create.indexOf(".from('account_deletions')");
+        const check = create.indexOf("admin.rpc('account_deletion_pending'");
         expect(check).toBeGreaterThan(-1);
         expect(check).toBeLessThan(create.indexOf('createCodeStudent('));
         expect(check).toBeLessThan(create.indexOf('createEmailStudent('));

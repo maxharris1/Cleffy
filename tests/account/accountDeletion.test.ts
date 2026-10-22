@@ -93,9 +93,21 @@ class FakeWorld {
     studios = new Map<string, string>(); // studio -> owner
     seats = new Set<string>(); // `${studioId}:${userId}`
     customers: Array<StripeCustomerRef & { userId: string }> = [];
-    /** account_deletions: user -> the marker, as 20261022110100 keeps it. */
-    pending = new Map<string, { attempts: number; lastError: string | null }>();
+    /**
+     * account_deletions and account_deletion_attempts, as 20261022110100 and
+     * 20261022110400 keep them: `attempts` is the history; `active` holds the
+     * attempts that have not ended, by lease expiry (on `now`).
+     */
+    pending = new Map<
+        string,
+        { attempts: number; lastError: string | null; destructive: boolean; active: Map<string, number> }
+    >();
+    /** The database clock, in ms, for attempt leases. */
+    now = 0;
+    static readonly LEASE_MS = 600_000;
+    private attemptIds = 0;
     failBeginDeletion = false;
+    failMarkDestructive = false;
     stored: Array<StoredSubscriptionRef & { userId: string }> = [];
     stripe: Record<StripeMode, FakeStripe | null> = { live: new FakeStripe(this.log), test: new FakeStripe(this.log) };
 
@@ -115,9 +127,18 @@ class FakeWorld {
     /** Runs once, the first time a document listing happens — "another tab". */
     onFirstDocumentListing: (() => void) | null = null;
 
+    /** account_deletion_pending(): an active attempt, or destructive cleanup begun. */
+    isPending(owner: string): boolean {
+        const marker = this.pending.get(owner);
+        if (!marker) {
+            return false;
+        }
+        return marker.destructive || [...marker.active.values()].some((leaseUntil) => leaseUntil > this.now);
+    }
+
     /** documents_refuse_during_account_deletion / managed_students_refuse_during_account_deletion. */
     private refuseWhilePending(owner: string) {
-        if (this.pending.has(owner)) {
+        if (this.isPending(owner)) {
             this.log.push(`refused:${owner}`);
             throw new Error('account_deletion_pending');
         }
@@ -170,27 +191,48 @@ class FakeWorld {
                     throw new Error('db down');
                 }
                 if (!this.users.has(userId)) {
-                    return;
+                    return null;
+                }
+                const marker = this.pending.get(userId) ?? {
+                    attempts: 0,
+                    lastError: null,
+                    destructive: false,
+                    active: new Map<string, number>(),
+                };
+                marker.attempts += 1;
+                const attempt = `attempt-${(this.attemptIds += 1)}`;
+                marker.active.set(attempt, this.now + FakeWorld.LEASE_MS);
+                this.pending.set(userId, marker);
+                this.log.push(`pending:${userId}`);
+                return attempt;
+            },
+            markDestructive: async (userId, attempt) => {
+                if (this.failMarkDestructive) {
+                    throw new Error('db down');
                 }
                 const marker = this.pending.get(userId);
-                this.pending.set(userId, {
-                    attempts: (marker?.attempts ?? 0) + 1,
-                    lastError: marker?.lastError ?? null,
-                });
-                this.log.push(`pending:${userId}`);
+                const leaseUntil = marker?.active.get(attempt);
+                if (!marker || leaseUntil === undefined || leaseUntil <= this.now) {
+                    return false;
+                }
+                marker.destructive = true;
+                this.log.push(`destructive:${userId}`);
+                return true;
             },
-            settleDeletion: async (userId, outcome, code) => {
+            settleDeletion: async (userId, attempt, outcome, code) => {
                 this.log.push(`settle:${outcome}:${code}`);
                 const marker = this.pending.get(userId);
-                if (outcome === 'abandoned') {
-                    // settle_account_deletion: only a lone first attempt's marker.
-                    if (marker && marker.attempts === 1 && marker.lastError === null) {
-                        this.pending.delete(userId);
-                    }
-                } else {
-                    if (marker) {
-                        marker.lastError = code;
-                    }
+                if (!marker) {
+                    return;
+                }
+                marker.active.delete(attempt);
+                if (outcome === 'failed') {
+                    marker.lastError = code;
+                }
+                // settle_account_deletion_attempt: gone once no attempt is
+                // active and no cleanup ever began.
+                if (!marker.destructive && ![...marker.active.values()].some((until) => until > this.now)) {
+                    this.pending.delete(userId);
                 }
             },
             billingCustomers: async (userId) => {
@@ -857,7 +899,12 @@ describe('the pending marker (account_deletions)', () => {
         world.failAuthDelete = true;
         const first = await deleteAccount(teacher(), world.ports());
         expect(first).toMatchObject({ ok: false, code: 'auth_delete_failed' });
-        expect(world.pending.get(TEACHER)).toEqual({ attempts: 1, lastError: 'auth_delete_failed' });
+        expect(world.pending.get(TEACHER)).toMatchObject({
+            attempts: 1,
+            lastError: 'auth_delete_failed',
+            destructive: true,
+        });
+        expect(world.pending.get(TEACHER)?.active.size).toBe(0);
         expect(() => world.addDocument('while-half-deleted', TEACHER)).toThrow('account_deletion_pending');
 
         world.failAuthDelete = false;
@@ -887,5 +934,99 @@ describe('the pending marker (account_deletions)', () => {
         });
         expect(world.pending.get(TEACHER)).toMatchObject({ attempts: 2, lastError: 'auth_delete_failed' });
         expect(() => world.addDocument('after-abandoned-retry', TEACHER)).toThrow('account_deletion_pending');
+    });
+
+    it('records that cleanup began after billing is stopped and before the first thing is deleted', async () => {
+        const world = payingTeacher();
+        world.addStudent('student-1', TEACHER);
+        await deleteAccount(teacher(), world.ports());
+        const destructive = world.log.indexOf(`destructive:${TEACHER}`);
+        expect(destructive).toBeGreaterThan(world.log.findIndex((entry) => entry.startsWith('stripe.')));
+        expect(destructive).toBeLessThan(world.log.indexOf('row:doc-1'));
+        expect(destructive).toBeLessThan(world.log.indexOf('storage:scores/doc-1'));
+        expect(destructive).toBeLessThan(world.log.indexOf('auth:student-1'));
+    });
+
+    it('does not start deleting when it cannot record that cleanup began: abandoned, nothing deleted', async () => {
+        const world = payingTeacher();
+        world.failMarkDestructive = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'deletion_unavailable' });
+        expect(world.documents.has('doc-1')).toBe(true);
+        expect(world.pending.has(TEACHER)).toBe(false);
+        expect(() => world.addDocument('still-mine', TEACHER)).not.toThrow();
+    });
+
+    it('two attempts that both abandon clear the marker: the account works as before (Codex r1 finding 1)', async () => {
+        const world = payingTeacher();
+        world.failBillingRead = true;
+        // Two tabs, both started before either gave up.
+        const ports = world.ports();
+        const first = deleteAccount(teacher(), ports);
+        const second = deleteAccount(teacher(), ports);
+        expect(await first).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(await second).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(world.pending.has(TEACHER)).toBe(false);
+        expect(world.isPending(TEACHER)).toBe(false);
+        expect(() => world.addDocument('after-two-abandoned', TEACHER)).not.toThrow();
+
+        // A third abandoned attempt later on is no different: history is not a gate.
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: false });
+        expect(world.isPending(TEACHER)).toBe(false);
+    });
+
+    it('one tab abandoning while another is still working keeps the restriction until that one ends', async () => {
+        const world = payingTeacher();
+        const ports = world.ports();
+        const working = await ports.beginDeletion(TEACHER);
+        world.failBillingRead = true;
+        expect(await deleteAccount(teacher(), ports)).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(world.isPending(TEACHER)).toBe(true);
+        expect(() => world.addDocument('mid-other-tab', TEACHER)).toThrow('account_deletion_pending');
+        await ports.settleDeletion(TEACHER, working as string, 'abandoned', 'billing_cancel_failed');
+        expect(world.isPending(TEACHER)).toBe(false);
+    });
+
+    it('a crashed attempt that deleted nothing stops restricting once its lease runs out', async () => {
+        const world = payingTeacher();
+        const ports = world.ports();
+        // The request dies right after begin: it never settles.
+        await ports.beginDeletion(TEACHER);
+        expect(() => world.addDocument('during-crash', TEACHER)).toThrow('account_deletion_pending');
+        world.now += FakeWorld.LEASE_MS + 1;
+        expect(world.isPending(TEACHER)).toBe(false);
+        expect(() => world.addDocument('after-lease', TEACHER)).not.toThrow();
+
+        // And a later deletion still works from the leftover row.
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.pending.has(TEACHER)).toBe(false);
+    });
+
+    it('an attempt that crashes after cleanup began keeps the restriction, and a retry finishes it', async () => {
+        const world = payingTeacher();
+        world.addDocument('doc-2', TEACHER);
+        const ports = world.ports();
+        // The request dies inside the sweep, after deleting one score.
+        ports.deleteDocument = async (documentId) => {
+            world.documents.delete(documentId);
+            throw new Error('isolate killed');
+        };
+        expect(await deleteAccount(teacher(), ports)).toMatchObject({ ok: false, code: 'document_delete_failed' });
+        // Model the crash fully: the attempt's lease runs out unsettled.
+        world.now += FakeWorld.LEASE_MS + 1;
+        expect(world.pending.get(TEACHER)).toMatchObject({ destructive: true });
+        expect(world.isPending(TEACHER)).toBe(true);
+        expect(() => world.addDocument('into-half-deleted', TEACHER)).toThrow('account_deletion_pending');
+
+        // A retry that deletes nothing cannot lift it either.
+        world.failBillingRead = true;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: false });
+        expect(world.isPending(TEACHER)).toBe(true);
+
+        // A retry that completes takes the marker away with the account.
+        world.failBillingRead = false;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.pending.has(TEACHER)).toBe(false);
+        expect(world.users.has(TEACHER)).toBe(false);
     });
 });
