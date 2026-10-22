@@ -83,7 +83,7 @@ insert into t_client_expected values
 ('document_favorites', 'authenticated', 'SELECT INSERT DELETE'),
 ('document_imports', 'authenticated', 'SELECT INSERT UPDATE'),
 ('document_members', 'authenticated', 'SELECT'),
-('document_storage_cleanup', 'authenticated', 'SELECT DELETE'),
+('document_storage_cleanup', 'authenticated', 'SELECT'),
 ('document_tags', 'authenticated', 'SELECT INSERT DELETE'),
 ('documents', 'authenticated', 'SELECT INSERT UPDATE DELETE'),
 ('library_tags', 'authenticated', 'SELECT INSERT UPDATE DELETE'),

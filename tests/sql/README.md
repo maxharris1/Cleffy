@@ -38,7 +38,9 @@ guards, the change fanned out on `doc-db:{id}`, the membership event on
 `doc:{id}`, and the deleted owner's scores left as tombstones for
 delete-account to drain). It sets `storage.allow_delete_query` before removing
 `storage.objects` rows, as the Storage API does, so hosted Storage's
-`protect_delete` lets the RLS policies decide.
+`protect_delete` lets the RLS policies decide. Since `20261022100900` the former
+owner cannot delete the tombstone; `finish_document_storage_cleanup` clears it
+once both folders are empty. 39 checks.
 
 `share_link_errors.sql` proves
 `supabase/migrations/20261009120200_share_link_errors_and_peek.sql`: a dead
@@ -569,7 +571,8 @@ privilege that an RLS policy does not let that role use; a table created now
 gives the client roles nothing; and with the default ACL revoked in the
 transaction, the fifteen BL-3 tables, stripped of what the default gave the
 service role, get it back from the migration alone, the client roles
-unchanged. 22 checks. Run it against the local stack. `column_integrity.sql`
+unchanged. 22 checks (`document_storage_cleanup` is SELECT only for
+authenticated since `20261022100900`). Run it against the local stack. `column_integrity.sql`
 checks 58, 76 and 80 now expect the client's update of a snapshot, a document
 tag or a favourite to be refused (42501) rather than to match no row.
 `tests/security/explicitServiceRoleGrants.test.ts` holds every table a
@@ -612,7 +615,9 @@ object; a new thumbnail puts the folder's other objects on
 `thumbnail_storage_cleanup`, which clears itself as they are removed; a client
 may write a thumbnail only while its folder holds at most one other object and
 only for a revision from 0 to the score's `content_rev` (at most 1,000,000);
-and the migration ledgers covers superseded before it. 62 checks.
+and the migration ledgers covers superseded before it. 63 checks: check 69 now
+holds the service role to the folder count (69b), which `20261022100900`
+enforces in committed state on every writer.
 
 `superseded_studio_members.sql` proves
 `20261022100600_superseded_studio_followups.sql` (Codex round 1 on #69, MAJOR 1
@@ -623,6 +628,28 @@ studio) are skipped; a rerun changes nothing; a studio superseded later is
 followed by the trigger and one brought back restores; and in the last minutes
 of the owner's grace a member of the retired studio only is no longer refused
 live ink, while a member of the live studio still is. 20 checks.
+
+`storage_cleanup_and_thumbnail_cap.sql` proves
+`20261022100900_storage_cleanup_markers_and_thumbnail_cap.sql` (Codex round 2
+on #69; decision 52): a deleted score's cleanup marker cannot be deleted by its
+owner (no DELETE grant or policy) and its bytes keep counting until
+`finish_document_storage_cleanup` finds both folders empty; an over-quota owner
+replaces a file with one no larger, the Storage API's size-less policy test
+included, while growth is refused; a third object in a thumbnail folder is
+refused (`thumbnail_limit`) on the real service-role write and on the policy
+test; `claim_superseded_thumbnails` claims an upload whose publish failed but
+never the published revision, and a claimed cover cannot be published
+(`thumbnail_claimed`). 58 checks.
+
+`storage_thumbnail_concurrency.sql` proves the same migration under real
+concurrency, through `dblink` backends that commit (it is not one transaction:
+it removes its fixtures at the start and the end, and drops `dblink` again if
+it created it; it connects back with the local stack's default password, so it
+is local and CI only). Three uploads into one folder at once: the later two
+wait on the first's lock and exactly one of them commits. A claim and a
+publish of the same cover, in both orders; clearing a deleted score's marker
+and an upload into its folder, in both orders (`storage_folder_gone`). 18
+checks.
 
 Each `\ir`s its migrations to rerun them, so it is psql only.
 

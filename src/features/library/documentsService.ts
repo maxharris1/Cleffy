@@ -467,8 +467,8 @@ const listFolder = async (bucket: 'scores' | 'thumbnails', docId: string): Promi
 };
 
 /**
- * Remove a deleted score's bytes from both buckets, then drop its tombstone.
- * Returns whether the folder is now provably empty.
+ * Remove a deleted score's bytes from both buckets, then have the server
+ * clear its tombstone. Returns whether the folder is now provably empty.
  *
  * Runs AFTER the documents row is gone: the storage policies that normally
  * key off membership no longer apply, and the scores_cleanup_* /
@@ -499,7 +499,7 @@ export const purgeDocumentStorage = async (
             throw new Error(liveError.message);
         }
         if (live) {
-            await supabase.from('document_storage_cleanup').delete().eq('document_id', docId);
+            await supabase.rpc('finish_document_storage_cleanup', { p_document_id: docId });
             return true;
         }
         // The whole folder, so import backups go too; the stamped path is
@@ -529,12 +529,14 @@ export const purgeDocumentStorage = async (
             console.warn('Deleted score still has stored files; will retry', docId);
             return false;
         }
-        const { error: tombstoneError } = await supabase
-            .from('document_storage_cleanup')
-            .delete()
-            .eq('document_id', docId);
-        if (tombstoneError) {
-            console.warn('Could not clear the storage cleanup marker', tombstoneError.message);
+        // The tombstone is what keeps these bytes on the owner's quota, so
+        // only the server clears it, once it too finds both folders empty
+        // (20261022100900); false means something is still stored.
+        const { data: cleared, error: tombstoneError } = await supabase.rpc('finish_document_storage_cleanup', {
+            p_document_id: docId,
+        });
+        if (tombstoneError || cleared !== true) {
+            console.warn('Could not clear the storage cleanup marker', tombstoneError?.message ?? 'files remain');
             return false;
         }
         return true;

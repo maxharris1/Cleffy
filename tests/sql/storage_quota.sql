@@ -253,8 +253,12 @@ select pg_temp.as_user(3);
 select pg_temp.refused('68 nor can the owner remove one by hand (the object''s removal does)',
     'del' || 'ete from public.thumbnail_storage_cleanup', '42501');
 select pg_temp.as_server();
-select pg_temp.allowed('69 the service role is held to neither the revision cap nor the folder count',
-    pg_temp.put('thumbnails', :'d' || '/2000000.jpg', 10, 3) || '; ' || pg_temp.put('thumbnails', :'d' || '/7.jpg', 10, 3));
+select pg_temp.allowed('69 the service role is not held to the revision cap',
+    pg_temp.put('thumbnails', :'d' || '/2000000.jpg', 10, 3));
+-- 20261022100900: the folder count holds in committed state, on every writer
+-- (the Storage API's real write is the service role's).
+select pg_temp.refused('69b ... but is held to the folder count (a third object)',
+    pg_temp.put('thumbnails', :'d' || '/7.jpg', 10, 3), '42501', 'thumbnail_limit');
 
 -- ===========================================================================
 -- Covers superseded before the migration, and a rerun

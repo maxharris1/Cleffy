@@ -111,6 +111,8 @@ export type ThumbnailStorageCleanupRow = {
     document_id: string;
     owner_id: string;
     superseded_at: string;
+    /** Set once a client was told to remove it; a claimed cover is never published. */
+    claimed_at: string | null;
 };
 
 export type ImportStatusValue = 'prompted' | 'declined' | 'imported';
@@ -623,7 +625,8 @@ export type Database = {
                 Relationships: [];
             };
             document_storage_cleanup: {
-                // Trigger-written tombstones; clients only read and delete them.
+                // Trigger-written tombstones; clients only read them, and the
+                // server clears them (finish_document_storage_cleanup).
                 Row: DocumentStorageCleanupRow;
                 Insert: never;
                 Update: never;
@@ -776,6 +779,19 @@ export type Database = {
             document_storage_cleanup_pending: {
                 Args: { folder: string };
                 Returns: boolean;
+            };
+            // Clears the caller's tombstone once both folders are empty (or the
+            // score is live again); false while anything is still stored.
+            finish_document_storage_cleanup: {
+                Args: { p_document_id: string };
+                Returns: boolean;
+            };
+            // Claims (and names) the covers the caller may remove now: the
+            // superseded ones, or with p_writing_rev every one but the
+            // published revision and that one. At most 100 scores.
+            claim_superseded_thumbnails: {
+                Args: { p_document_ids: string[]; p_writing_rev?: number };
+                Returns: string[];
             };
             redeem_share_link: {
                 Args: { p_token: string };

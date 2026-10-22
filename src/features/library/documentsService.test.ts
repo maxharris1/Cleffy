@@ -209,6 +209,8 @@ interface StubOptions {
     /** Storage list() never answers (a hung request on a bad connection). */
     listHangs?: boolean;
     tombstoneDeleteError?: string;
+    /** What finish_document_storage_cleanup answers (true: cleared). */
+    tombstoneCleared?: boolean;
     /** Rows document_storage_cleanup returns to the sweep. */
     tombstones?: Array<{ document_id: string; storage_path: string; thumb_rev: number | null }>;
     /** library_documents() page, or its error. */
@@ -307,6 +309,14 @@ const makeStub = (options: StubOptions = {}) => {
         storage: { from: (bucket: string) => storageApi(bucket) },
         rpc: (fn: string, args: unknown) => {
             calls.rpc(fn, args);
+            if (fn === 'finish_document_storage_cleanup') {
+                calls.events.push('tombstone:finish');
+                return Promise.resolve(
+                    options.tombstoneDeleteError
+                        ? { data: null, error: { message: options.tombstoneDeleteError } }
+                        : { data: options.tombstoneCleared ?? true, error: null },
+                );
+            }
             if (fn !== 'library_documents') {
                 const result = options.rpcAnswer ?? { data: null, error: null };
                 return result instanceof Error ? Promise.reject(result) : Promise.resolve(result);
@@ -393,16 +403,10 @@ const makeStub = (options: StubOptions = {}) => {
                     if (table === 'documents') {
                         calls.events.push('row:delete');
                     } else if (table === 'document_storage_cleanup') {
+                        // Clients hold no DELETE on tombstones (20261022100900).
                         calls.events.push('tombstone:delete');
                     }
-                    const error =
-                        table === 'document_storage_cleanup'
-                            ? options.tombstoneDeleteError
-                                ? { message: options.tombstoneDeleteError }
-                                : null
-                            : options.deleteError
-                              ? { message: options.deleteError }
-                              : null;
+                    const error = options.deleteError ? { message: options.deleteError } : null;
                     const rows = Array.from({ length: options.deletedRows ?? 1 }, () => ({ id: 'x' }));
                     return thenable(
                         { data: null, error },
@@ -958,7 +962,7 @@ describe('leaveSharedDocument', () => {
 });
 
 describe('deleteDocument ordering (row first, bytes after)', () => {
-    it('deletes the row before any stored file is touched, then clears the tombstone', async () => {
+    it('deletes the row before any stored file is touched, then has the server clear the tombstone', async () => {
         const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: ['0.jpg'] });
         await (
             await deleteDocument(doc())
@@ -967,8 +971,19 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
             'row:delete',
             'storage:remove:scores',
             'storage:remove:thumbnails',
-            'tombstone:delete',
+            'tombstone:finish',
         ]);
+        expect(calls.rpc).toHaveBeenCalledWith('finish_document_storage_cleanup', { p_document_id: doc().id });
+    });
+
+    it('reports the folder not yet empty when the server keeps the tombstone (files remain)', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const calls = makeStub({ listNames: ['original.pdf'], tombstoneCleared: false });
+        const { storageCleanup } = await deleteDocument(doc());
+        await expect(storageCleanup).resolves.toBe(false);
+        expect(calls.events).toContain('tombstone:finish');
+        expect(calls.events).not.toContain('tombstone:delete');
+        warn.mockRestore();
     });
 
     it('leaves the PDF alone when the row delete fails, so the score still opens', async () => {
@@ -1003,7 +1018,7 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
         const { storageCleanup } = await deleteDocument(doc());
         await expect(storageCleanup).resolves.toBe(false);
         expect(libraryMutationEpoch()).toBe(before + 2);
-        expect(calls.events).not.toContain('tombstone:delete');
+        expect(calls.events).not.toContain('tombstone:finish');
         expect(warn).toHaveBeenCalled();
         warn.mockRestore();
     });
@@ -1014,7 +1029,7 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
         await (
             await deleteDocument(doc())
         ).storageCleanup;
-        expect(calls.events).not.toContain('tombstone:delete');
+        expect(calls.events).not.toContain('tombstone:finish');
         warn.mockRestore();
     });
 
@@ -1027,7 +1042,7 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
         ).storageCleanup;
         // The stamped path is still removed even though the listing failed.
         expect(calls.removeFrom).toHaveBeenCalledWith('scores', [d.storage_path]);
-        expect(calls.events).not.toContain('tombstone:delete');
+        expect(calls.events).not.toContain('tombstone:finish');
         warn.mockRestore();
     });
 });
@@ -1047,7 +1062,7 @@ describe('deleteDocument does not wait on Storage', () => {
         });
         await new Promise((resolve) => setTimeout(resolve, 0));
         expect(settled).toBe(false);
-        expect(calls.events).not.toContain('tombstone:delete');
+        expect(calls.events).not.toContain('tombstone:finish');
     });
 });
 
@@ -1064,7 +1079,7 @@ describe('purge of a re-created id', () => {
         });
         await sweepPendingStorageCleanup('user-1');
         expect(calls.remove).not.toHaveBeenCalled();
-        expect(calls.events).toEqual(['tombstone:delete']);
+        expect(calls.events).toEqual(['tombstone:finish']);
     });
 });
 
@@ -1102,7 +1117,7 @@ describe('sweepPendingStorageCleanup', () => {
         expect(calls.removeFrom).toHaveBeenCalledWith('scores', ['doc-a/original.pdf']);
         expect(calls.removeFrom).toHaveBeenCalledWith('scores', ['doc-b/original.pdf']);
         expect(calls.removeFrom).toHaveBeenCalledWith('thumbnails', ['doc-b/3.jpg']);
-        expect(calls.events.filter((e) => e === 'tombstone:delete')).toHaveLength(2);
+        expect(calls.events.filter((e) => e === 'tombstone:finish')).toHaveLength(2);
 
         calls.removeFrom.mockClear();
         await sweepPendingStorageCleanup('user-1');
