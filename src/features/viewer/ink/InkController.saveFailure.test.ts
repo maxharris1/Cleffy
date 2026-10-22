@@ -5,6 +5,7 @@ import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { InkController } from '@/features/viewer/ink/InkController';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
+import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import { useViewerStore } from '@/state/store';
 
 /**
@@ -98,12 +99,12 @@ beforeEach(async () => {
     useViewerStore.getState().setTool('pen');
 });
 
-afterEach(async () => {
+afterEach(() => {
     process.off('unhandledRejection', unhandled);
     ink.destroy();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
-    await store.retryFailedPersist();
+    resetInkRecoveryForTests();
 });
 
 describe('InkController when the device cannot store a mark', () => {

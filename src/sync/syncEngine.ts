@@ -632,6 +632,8 @@ export class SyncEngine {
             this.announce('written', ids);
             this.requestFlush();
         });
+        // Ink the store could not write: the status says so (see drain).
+        this.deps.store.setHeldHook(() => this.requestFlush());
         window.addEventListener('online', this.onlineListener);
         window.addEventListener('offline', this.offlineListener);
         activeEngines.set(this.deps.docId, this);
@@ -647,6 +649,7 @@ export class SyncEngine {
     stop(): void {
         this.stopped = true;
         this.deps.store.setDirtyHook(null);
+        this.deps.store.setHeldHook(null);
         window.removeEventListener('online', this.onlineListener);
         window.removeEventListener('offline', this.offlineListener);
         if (activeEngines.get(this.deps.docId) === this) {
@@ -1046,9 +1049,10 @@ export class SyncEngine {
             // (AnnotationStore.hasPersistFailure) waits, queued ops and all:
             // what is queued is not all the user did to it, so neither a
             // push nor a reconcile verdict may be based on it. Its retry
-            // queues the rest and wakes this engine.
+            // queues the rest and wakes this engine. A held new mark has
+            // nothing queued at all, so the store's count says it too.
             const ops = owned.filter((op) => !store.hasPersistFailure(op.annotationId));
-            heldForRetry = ops.length < owned.length;
+            heldForRetry = ops.length < owned.length || store.persistFailureCount > 0;
             if (ops.length === 0) {
                 break;
             }
@@ -1213,13 +1217,13 @@ export class SyncEngine {
                     // nothing for reconcile here, and the pass looks again.
                     return null;
                 }
+                if (store.hasPersistFailure(annotationId)) {
+                    // An edit of it never reached the outbox: no verdict
+                    // without it (see drain).
+                    return 'failed' as const;
+                }
                 if (store.hasUnsavedEdit(annotationId)) {
                     return 'unsaved' as const;
-                }
-                if (store.hasPersistFailure(annotationId)) {
-                    // The edit it waited for never reached the outbox:
-                    // no verdict without it (see drain).
-                    return 'failed' as const;
                 }
                 const outcome = reconcileWithServer(ops, row);
                 const kept = new Set(outcome.kind === 'send' ? outcome.ops.map((op) => op.opId as number) : []);
@@ -1255,7 +1259,10 @@ export class SyncEngine {
             }
             if (decided === 'unsaved') {
                 // Decide with that edit in the queue, against the same read.
-                await store.whenSaved(annotationId);
+                if (!(await store.whenSaved(annotationId))) {
+                    // Its write failed: left as queued, held back next pass.
+                    return true;
+                }
                 continue;
             }
             decided?.kept.forEach((id) => this.reconciled.add(id));

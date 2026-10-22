@@ -293,6 +293,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         onStoreReady?.(annotationStore);
     }, [annotationStore, onStoreReady]);
 
+    // Open while mounted: export falls back on this store's memory when the
+    // database cannot be read (inkRecovery). Ink it could not store outlives
+    // the unmount there, for the next open of the score to draw and retry.
+    useEffect(() => annotationStore.attach(), [annotationStore]);
+
     const syncUserId = sync?.userId;
     const syncName = sync?.name;
     const syncIsAnonymous = sync?.isAnonymous ?? false;

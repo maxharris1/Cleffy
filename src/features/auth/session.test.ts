@@ -28,6 +28,7 @@ vi.mock('@/sync/signOutSync', async (importOriginal) => {
 
 import { signOut, syncBeforeSignOut } from '@/features/auth/session';
 import { AnnotationStore } from '@/sync/annotationStore';
+import { heldMarksFor, resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import type { Annotation } from '@/types/models';
 
 const CLOUD_DOC = 'c0ffee00-0000-4000-8000-0000000000bb';
@@ -164,6 +165,29 @@ describe('signOut', () => {
         expect((await db.annotationSnapshots.toArray()).map((r) => r.id)).toEqual(['s-local']);
         expect(await db.entitlements.count()).toBe(0);
     });
+
+    it('forgets the account’s marks this device could not store, after the warning (SF-1)', async () => {
+        const db = getDb();
+        const store = new AnnotationStore(db, CLOUD_DOC);
+        store.setAuthor('user-1');
+        await store.load();
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        try {
+            await store.create(mark('cloud-unsaved', CLOUD_DOC)).catch(() => undefined);
+        } finally {
+            full.mockRestore();
+        }
+        expect(heldMarksFor('user-1', CLOUD_DOC)).toHaveLength(1);
+
+        await signOut();
+
+        // The next account in this tab finds nothing of it to draw, export or retry.
+        expect(heldMarksFor('user-1', CLOUD_DOC)).toEqual([]);
+        expect(store.persistFailureCount).toBe(0);
+        resetInkRecoveryForTests();
+    });
 });
 
 describe('syncBeforeSignOut', () => {
@@ -196,6 +220,7 @@ describe('syncBeforeSignOut', () => {
     it('counts marks an open viewer could not even write to this device (SF-1)', async () => {
         const db = getDb();
         const store = new AnnotationStore(db, CLOUD_DOC);
+        store.setAuthor('user-1');
         await store.load();
         const full = vi
             .spyOn(db.ops, 'bulkAdd')

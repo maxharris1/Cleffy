@@ -5,6 +5,7 @@ import { noteRetryAfter } from '@/lib/retryAfter';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb, type PendingOp, type PendingOpType } from '@/sync/db';
+import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import {
     classifyFailure,
     createSupabaseAnnotationsApi,
@@ -275,6 +276,7 @@ beforeEach(async () => {
 afterEach(() => {
     engine.stop();
     vi.restoreAllMocks();
+    resetInkRecoveryForTests();
 });
 
 describe('classifyFailure', () => {
@@ -1644,16 +1646,16 @@ describe('SyncEngine: changes queued while reconcile reads the server (QA C1)', 
         collaboratorErases();
         const reads = holdReads();
         // The edit's outbox write is held back until reconcile has looked at the queue.
-        const writes = store as unknown as { writeMany(ops: unknown[]): Promise<void> };
+        const writes = store as unknown as { writeMany(...args: unknown[]): Promise<void> };
         const write = writes.writeMany.bind(store);
         let writeOut!: () => void;
         const writeHeld = new Promise<void>((resolve) => (writeOut = resolve));
         let releaseWrite!: () => void;
         const writeReleased = new Promise<void>((resolve) => (releaseWrite = resolve));
-        vi.spyOn(writes, 'writeMany').mockImplementation(async (ops) => {
+        vi.spyOn(writes, 'writeMany').mockImplementation(async (...args) => {
             writeOut();
             await writeReleased;
-            return write(ops);
+            return write(...args);
         });
 
         let flushed = false;
@@ -2902,5 +2904,84 @@ describe('SyncEngine and an edit that could not be written to this device (SF-1)
         } finally {
             held.stop();
         }
+    });
+
+    it('never reads synced while a new mark is held, though nothing of it is queued (minor 1)', async () => {
+        const statuses: string[] = [];
+        const held = new SyncEngine({
+            db,
+            store,
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+            onStatus: (s) => statuses.push(s),
+        });
+        try {
+            const full = vi
+                .spyOn(db.ops, 'bulkAdd')
+                .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+            await store.create(makeStroke('a1')).catch(() => undefined);
+            full.mockRestore();
+            await store.create(makeStroke('b1'));
+
+            await held.flush();
+
+            // b1 went up and the outbox is empty, but a1 is on this screen only.
+            expect(api.rows.has('b1')).toBe(true);
+            expect(await db.ops.count()).toBe(0);
+            expect(statuses.at(-1)).toBe('error');
+
+            await expect(store.retryFailedPersist()).resolves.toBe(true);
+            await held.flush();
+            expect(api.rows.has('a1')).toBe(true);
+            expect(statuses.at(-1)).toBe('synced');
+        } finally {
+            held.stop();
+        }
+    });
+
+    it('hears of a failed write at once, so the status changes without another edit (minor 1)', async () => {
+        const statuses: string[] = [];
+        const live = new SyncEngine({
+            db,
+            store,
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+            onStatus: (s) => statuses.push(s),
+        });
+        live.start();
+        try {
+            await vi.waitFor(() => expect(statuses.at(-1)).toBe('synced'));
+            const full = vi
+                .spyOn(db.ops, 'bulkAdd')
+                .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+            await store.create(makeStroke('a1')).catch(() => undefined);
+            full.mockRestore();
+
+            await vi.waitFor(() => expect(statuses.at(-1)).toBe('error'));
+        } finally {
+            live.stop();
+        }
+    });
+
+    it('a reconcile waiting on an edit whose write then fails leaves the mark queued (C1 whenSaved)', async () => {
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+        await store.delete('a1');
+        await store.restore('a1');
+        // A restore makes the mark one reconcile checks against its row.
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        await store.update('a1', { color: '#ff0000' }).catch(() => undefined);
+        full.mockRestore();
+        const fetches = api.fetchManys;
+
+        await engine.flush();
+
+        expect(api.fetchManys).toBe(fetches);
+        expect((await db.ops.toArray()).map((op) => op.type)).toEqual(['delete', 'restore']);
+        await expect(store.whenSaved('a1')).resolves.toBe(false);
     });
 });

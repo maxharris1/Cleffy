@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
+import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import type { DocumentRow } from '@/types/database';
 
 const fetchDocument = vi.fn();
@@ -95,7 +96,7 @@ const lastSync = vi.hoisted(() => ({
 
 /** What the viewport mock reports as its store: a stub, or a real AnnotationStore. */
 const storeReady = vi.hoisted(() => {
-    const stub = { subscribeMeta: () => () => undefined, persistFailureCount: 0 };
+    const stub = { subscribeMeta: () => () => undefined, persistFailureCount: 0, refusedEditCount: 0 };
     return { enabled: false, stub, store: stub as unknown };
 });
 
@@ -287,6 +288,7 @@ beforeEach(() => {
 afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    resetInkRecoveryForTests();
 });
 
 describe('CloudViewer warm open', () => {
