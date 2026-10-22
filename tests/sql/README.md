@@ -961,7 +961,15 @@ win, that triggers and cron jobs exist once, and that the run still works on
 the replayed data. psql only (`\ir`); ends with `failures | total`. Proven
 against the local stack on 2026-10-22: all 8 checks passed; with a row in the
 step 00f48a65 added, the same replay stopped at 20261021120800 ("check
-constraint district_retention_log_step_check ... is violated by some row").
+constraint district_retention_log_step_check ... is violated by some row"). Since launch-fix item 16 (decision 70(8)) the list is every migration from
+`20261020160300` to the newest, P1 to P6 and the `14xxxx` follow-ups included
+(it had stopped at `20261022130400`), and `tests/legal/districtReattribution.test.ts`
+fails when it no longer equals the directory. The fixtures' deferred trigger
+events fire before the replay (`set constraints all immediate`), as at the
+commit a recovery replays after; otherwise `20261022120000`'s ALTER TABLE on
+the rotation queue refuses the table's pending events. Check 13c holds the
+follow-ups' definitions. Proven against the local stack on 2026-10-22: all 10
+checks passed; with the old list (through `20261022130400`), 13c failed.
 
 ## Launchfix follow-ups
 
@@ -1132,6 +1140,19 @@ bounded runs (`p_limit` 1) reach a newer crashed marker past older
 reported-only half-deleted ones and a live one, which stay as they were. Ends
 with `failures | total`. Proven against the local stack on 2026-10-22: all 12
 checks passed; check 11 fails with the first version of the function.
+
+## Launch-fix item 16
+
+`stripe_webhook_deletion_pending.sql` proves the database half of
+stripe-webhook's refusal while an account's deletion is pending (decision
+70(1); `stripeEvents.ts` `deletionRefusal`), as the service role: the
+predicate is true while an attempt is live and false once it is abandoned or
+the deletion completes; a claim released on the refusal is claimed afresh by
+Stripe's retry, finished once and read as `done` by every later delivery
+(processed exactly once); once the deletion has completed, the retry's
+subscription write answers `missing_user` (the deleted-account path) and its
+customer link fails on the user FK. Ends with `failures | total`. Proven
+against the local stack on 2026-10-22: all 16 checks passed.
 
 ## In CI
 
