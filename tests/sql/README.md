@@ -1033,6 +1033,22 @@ migration was needed. Same harness as `superseded_studio_members.sql` with the
 rotation proof's `at_commit()`; ends with `failures | total`. Proven against the
 local stack on 2026-10-22: all 10 checks passed.
 
+`thumbnail_publish_lock_order.sql` proves
+`supabase/migrations/20261022140500_thumbnail_publish_lock_order.sql` with real
+concurrent backends (dblink, committed fixtures, removed at the end; same
+harness as `storage_quota_lock_concurrency.sql`): a removal that holds the
+score's folder lock (it reached the published cover first) and a publish of the
+next cover no longer deadlock. The publish waits for the folder holding no row,
+the removal takes the cover at once, and the publish is then refused
+`thumbnail_gone`; a removal of two covers in one statement waits for a publish
+under way and then leaves the newly published one; a publish whose object's row
+another writer holds is refused at once with `thumbnail_folder_busy`, and its
+retry publishes. `storage_quota_lock_and_cover_reuse.sql` check 36 now pins the
+new order (folder lock, then the object's row `FOR KEY SHARE NOWAIT`). Ends with
+`failures | total`. Proven against the local stack on 2026-10-22: all 11 checks
+passed; with 20261022101000's publish, the first interleaving ended in
+`deadlock detected` and the held-row publish waited until the row was freed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
