@@ -569,3 +569,42 @@ transaction is skipped, and no client role reaches the queue. Needs the local
 stack running (today's `realtime.messages` partition). Proven against the local
 stack on 2026-10-22: all 59 checks passed; with the migration's three queueing
 triggers dropped inside the transaction, 27 of them fail.
+
+Since `20261022120100_realtime_revocation_races.sql` (Codex round 1 on #71) the
+same proof also shows: an archived score gives no member (its owner included)
+a generation, a join, live ink or presence, archiving moves it once at commit,
+and restoring moves nothing and gives realtime back; `document_realtime_epochs`
+holds no foreign key on `documents` (so the commit-time rotation never waits
+on the score) yet a deleted score's generation still goes, after the
+cascades; every assignment and membership insert locks the student's roster
+row first, and an assignment for an archived student is refused under that
+lock whoever writes it; and two rotations in a row tell generation 0, then
+generation 1. Proven against the local stack (Realtime started) on
+2026-10-22: all 78 checks passed; with the pre-fix definitions restored, 9 of
+them fail.
+
+`realtime_revocation_race.sql` proves the races in that migration between two
+(or three) real sessions, in dblink connections as `postgres` that COMMIT their
+own rows (random ids per run, since a deleted score leaves a tombstone; the
+accounts, scores and districts are deleted again at the start and the end). A
+step that must wait is sent asynchronously and the proof polls `pg_locks`
+until that session is blocked before it moves the other on. R1: an archive,
+then an assignment of the same student -- the assignment waits on the roster
+row and is refused once the archive commits. R2: the other way round -- the
+archive waits, and its rotation moves the score just granted. R3: a reset
+(`end_student_sessions`), then an assignment -- it waits and goes through,
+and the token from before the reset is refused the score while a fresh one
+joins. R4: an assignment, then a reset -- the reset waits and moves that
+score. R5: an archive, then the student redeeming a share link -- the
+redemption waits, and the archived student is refused the score with either
+token. R6: one `retention_district_run` soft-deleting two districts between
+an assignment that locked first (the run waits, then moves that score) and
+one that came after (it waits, then is refused); it first checks that only
+its own two districts are due, since the run soft-deletes every due district.
+D1/D2: a member removed, or an editor turned viewer, then the score deleted
+-- no deadlock, and nothing left of the score. C1: two removals rotating one
+score at once -- the second tells generation 1, not generation 0 again. Run it
+against the LOCAL stack only, with Realtime started; pass `-v
+peer_password=...` for anything but the local stack's password. Proven on
+2026-10-22: all 41 checks passed; with the pre-fix definitions restored, 20 of
+them fail (the deadlock aborts the deletion in D1 and D2).

@@ -5,8 +5,13 @@
 -- turned viewer joins without being able to send live ink. Paths: role
 -- downgrade, assign_score flipping to view-only, remove, leave, link revoke
 -- with removal, unassign, a student's sessions ended (reset), archive, and the
--- district soft delete. Needs the local stack running, so today's
--- realtime.messages partition exists (`npm run cloud:up`).
+-- district soft delete. Then 20261022120100_realtime_revocation_races.sql: an
+-- archived score has no realtime and archiving moves it, the generation no
+-- longer holds a foreign key yet still goes with its score, an archived
+-- student's assignment is refused under the roster lock whoever writes it, and
+-- back-to-back rotations each tell the generation they replaced (the races
+-- themselves are in realtime_revocation_race.sql). Needs the local stack
+-- running, so today's realtime.messages partition exists (`npm run cloud:up`).
 --
 -- Runs inside one transaction and ROLLS BACK — nothing persists:
 --
@@ -85,6 +90,19 @@ begin
     perform set_config('realtime.topic', '', true);
     return true;
 end $f$;
+-- A presence update is the same insert with extension 'presence'.
+create function pg_temp.can_track(p_topic text) returns boolean language plpgsql as $f$
+begin
+    perform set_config('realtime.topic', p_topic, true);
+    begin
+        insert into realtime.messages (topic, extension, event, payload, private) values (p_topic, 'presence', 'presence', '{}', true);
+    exception when insufficient_privilege then
+        perform set_config('realtime.topic', '', true);
+        return false;
+    end;
+    perform set_config('realtime.topic', '', true);
+    return true;
+end $f$;
 create function pg_temp.live(p_doc uuid, p_epoch int) returns text language sql immutable as $f$
     select 'doc:' || p_doc::text || case when p_epoch = 0 then '' else ':' || p_epoch::text end
 $f$;
@@ -109,7 +127,7 @@ create function pg_temp.told(p_doc uuid) returns bigint language sql as $f$
     select count(*) from realtime.messages where event = 'topic_rotated' and payload ->> 'document_id' = p_doc::text
 $f$;
 create function pg_temp.snap() returns void language sql as $f$
-    insert into t_snap select pg_temp.d(n), pg_temp.epoch(pg_temp.d(n)), pg_temp.told(pg_temp.d(n)) from generate_series(1, 9) n
+    insert into t_snap select pg_temp.d(n), pg_temp.epoch(pg_temp.d(n)), pg_temp.told(pg_temp.d(n)) from generate_series(1, 11) n
     on conflict (doc) do update set epoch = excluded.epoch, told = excluded.told
 $f$;
 -- How many generations the score moved since the snapshot.
@@ -154,11 +172,11 @@ select pg_temp.u(n), 'p4-' || n || '@revocation.test',
 from generate_series(1, 15) n;
 -- 1-3 the teacher's; 4 and 5 the roster students' scores, and 8 (deleted in
 -- the same transaction as a removal), teacher 15's; 6 and 7 the district
--- teacher's, and 9, a score nobody loses.
+-- teacher's, and 9, a score nobody loses; 10 (archived) and 11 (deleted) 14's.
 insert into public.documents (id, owner_id, title, storage_path)
-select pg_temp.d(n), case when n in (6, 7, 9) then pg_temp.u(13) when n in (4, 5, 8) then pg_temp.u(15) else pg_temp.u(1) end, 'P4 score ' || n,
+select pg_temp.d(n), case when n in (6, 7, 9) then pg_temp.u(13) when n in (4, 5, 8) then pg_temp.u(15) when n in (10, 11) then pg_temp.u(14) else pg_temp.u(1) end, 'P4 score ' || n,
        pg_temp.d(n)::text || '/original.pdf'
-from generate_series(1, 9) n;
+from generate_series(1, 11) n;
 insert into public.studios (id, owner_id, name) values (pg_temp.d(50), pg_temp.u(13), 'P4 District');
 insert into public.district_billing (studio_id, contract_ends_at, contract_ends_source, updated_by)
 values (pg_temp.d(50), now() - interval '17 days', 'admin', 'test');
@@ -187,7 +205,10 @@ insert into public.document_members (document_id, user_id, role) values
 (pg_temp.d(6), pg_temp.u(11), 'editor'),
 (pg_temp.d(7), pg_temp.u(10), 'viewer'),
 (pg_temp.d(8), pg_temp.u(2), 'editor'),
-(pg_temp.d(9), pg_temp.u(2), 'editor');
+(pg_temp.d(9), pg_temp.u(2), 'editor'),
+(pg_temp.d(10), pg_temp.u(2), 'editor'),
+(pg_temp.d(11), pg_temp.u(2), 'editor'),
+(pg_temp.d(11), pg_temp.u(3), 'viewer');
 insert into public.assignments (id, document_id, student_user_id, assigned_by, access) values
 (pg_temp.d(30), pg_temp.d(3), pg_temp.u(7), pg_temp.u(1), 'edit'),
 (pg_temp.d(31), pg_temp.d(5), pg_temp.u(8), pg_temp.u(15), 'edit');
@@ -385,6 +406,69 @@ select pg_temp.chk('35b nor write it', $q$select not has_table_privilege('authen
 select pg_temp.chk('35c nor queue or run a rotation', $q$select not has_function_privilege('authenticated', 'public.queue_document_realtime_rotation(uuid)', 'execute') and not has_function_privilege('anon', 'public.queue_document_realtime_rotation(uuid)', 'execute') and not has_function_privilege('authenticated', 'public.rotate_queued_document_realtime()', 'execute')$q$);
 select pg_temp.as_postgres();
 select pg_temp.chk('36 the score nobody lost never moved', $q$select pg_temp.epoch(pg_temp.d(9)) = 0$q$);
+
+-- ---- an archived score (20261022120100): no realtime, and archiving moves it
+select pg_temp.snap();
+select pg_temp.as_user(14);
+select pg_temp.chk('37 before: the owner and an editor of a live score join, send and track', $q$select pg_temp.joins(pg_temp.d(10), 0) and pg_temp.can_send(pg_temp.live(pg_temp.d(10), 0)) and pg_temp.can_track(pg_temp.live(pg_temp.d(10), 0))$q$);
+select pg_temp.as_postgres();
+update public.documents set archived_at = now(), archived_reason = 'plan_lapse' where id = pg_temp.d(10);
+select pg_temp.chk('37b archive: nothing moves before the transaction commits', $q$select pg_temp.still(pg_temp.d(10)) and not pg_temp.queue_empty()$q$);
+select pg_temp.at_commit();
+select pg_temp.chk('38 archive: the score moved once, both old topics told topic_rotated', $q$select pg_temp.moved_once(pg_temp.d(10)) and pg_temp.queue_empty()$q$);
+select pg_temp.as_user(14);
+select pg_temp.chk('39 archived: the owner is told no generation and joins neither generation', $q$select public.realtime_topic_epoch(pg_temp.d(10)) is null and pg_temp.refused(pg_temp.d(10), 1) and pg_temp.refused(pg_temp.d(10), 0)$q$);
+select pg_temp.chk('39b archived: nor sends live ink or presence on the current doc:{id}:1', $q$select not pg_temp.can_send(pg_temp.live(pg_temp.d(10), 1)) and not pg_temp.can_track(pg_temp.live(pg_temp.d(10), 1))$q$);
+select pg_temp.as_user(2);
+select pg_temp.chk('39c archived: nor does an editor', $q$select public.realtime_topic_epoch(pg_temp.d(10)) is null and pg_temp.refused(pg_temp.d(10), 1) and not pg_temp.can_send(pg_temp.live(pg_temp.d(10), 1)) and not pg_temp.can_track(pg_temp.live(pg_temp.d(10), 1))$q$);
+select pg_temp.chk('39d archived: the editor''s other scores are untouched', $q$select pg_temp.joins(pg_temp.d(9), 0) and pg_temp.can_send(pg_temp.live(pg_temp.d(9), 0))$q$);
+select pg_temp.as_postgres();
+select pg_temp.snap();
+update public.documents set archived_at = null where id = pg_temp.d(10);
+select pg_temp.at_commit();
+select pg_temp.chk('40 restore: moves nothing', $q$select pg_temp.still(pg_temp.d(10))$q$);
+select pg_temp.as_user(14);
+select pg_temp.chk('40b restored: the owner is told generation 1, joins it and sends there again', $q$select public.realtime_topic_epoch(pg_temp.d(10)) = 1 and pg_temp.joins(pg_temp.d(10), 1) and pg_temp.can_send(pg_temp.live(pg_temp.d(10), 1)) and pg_temp.can_track(pg_temp.live(pg_temp.d(10), 1))$q$);
+select pg_temp.as_postgres();
+
+-- ---- the generation without a foreign key (20261022120100)
+select pg_temp.chk('41 document_realtime_epochs holds no foreign key on documents (the rotation never waits on the score)', $q$select not exists (select 1 from pg_constraint where conrelid = 'public.document_realtime_epochs'::regclass and contype = 'f')$q$);
+select pg_temp.as_user(14);
+select public.remove_document_member(pg_temp.d(11), pg_temp.u(3));
+select pg_temp.as_postgres();
+select pg_temp.at_commit();
+select pg_temp.chk('41b a rotated score has a generation row', $q$select pg_temp.epoch(pg_temp.d(11)) = 1$q$);
+select pg_temp.remove_score(pg_temp.d(11));
+select pg_temp.chk('41c deleting the score removes its generation at once, after the cascades', $q$select not exists (select 1 from public.document_realtime_epochs where document_id = pg_temp.d(11)) and not exists (select 1 from public.document_members where document_id = pg_temp.d(11))$q$);
+select pg_temp.chk('41d the rotation never locks the score (no FOR KEY SHARE / FOR SHARE left in it)', $q$select prosrc !~* 'for (key )?share' from pg_proc where oid = 'public.rotate_queued_document_realtime()'::regprocedure$q$);
+
+-- ---- grants take the student's roster lock (20261022120100)
+select pg_temp.chk('42 every assignment and membership insert locks the student''s roster row first', $q$select (select count(*) from pg_trigger where not tgisinternal and tgenabled = 'O' and tgtype & 2 = 2 and tgtype & 4 = 4
+        and ((tgrelid = 'public.assignments'::regclass and tgname = 'assignments_lock_student')
+          or (tgrelid = 'public.document_members'::regclass and tgname = 'document_members_lock_student'))) = 2
+   and (select prosrc ~* 'for share' from pg_proc where oid = 'public.lock_student_for_grant(uuid)'::regprocedure)$q$);
+create function pg_temp.assign_raw(p_doc uuid, p_student uuid) returns void language plpgsql as $f$
+begin
+    insert into public.assignments (id, document_id, student_user_id, assigned_by, access)
+    values (gen_random_uuid(), p_doc, p_student, pg_temp.u(13), 'edit');
+end $f$;
+select pg_temp.chk('42b (district student 10 is archived by the soft delete above)', $q$select archived_at is not null from public.managed_students where id = pg_temp.d(100)$q$);
+do $d$
+begin
+    perform pg_temp.assign_raw(pg_temp.d(9), pg_temp.u(10));
+    insert into t_results values ('42c the raw insert for archived district student 10 raised', false, 'no error raised');
+exception when others then
+    insert into t_results values ('42c the raw insert for archived district student 10 raised', sqlstate = 'P0002' and sqlerrm = 'not on your roster', sqlstate || ' ' || sqlerrm);
+end $d$;
+select pg_temp.assign_raw(pg_temp.d(9), pg_temp.u(7));
+select pg_temp.chk('42d an active student''s assignment still goes through', $q$select exists (select 1 from public.assignments where student_user_id = pg_temp.u(7) and document_id = pg_temp.d(9))$q$);
+
+-- ---- back to back, each rotation tells the generation it replaced (20261022120100)
+select pg_temp.snap();
+select pg_temp.chk('43 two rotations in a row: generations 1 and 2', $q$select public.rotate_document_realtime(pg_temp.d(9)) = 1 and public.rotate_document_realtime(pg_temp.d(9)) = 2$q$);
+select pg_temp.chk('43b the first told generation 0 and the second generation 1, on both topics each', $q$select (select count(*) from realtime.messages m where m.event = 'topic_rotated' and m.topic in (pg_temp.live(pg_temp.d(9), 0), pg_temp.db(pg_temp.d(9), 0))) = 2
+   and (select count(*) from realtime.messages m where m.event = 'topic_rotated' and m.topic in (pg_temp.live(pg_temp.d(9), 1), pg_temp.db(pg_temp.d(9), 1))) = 2
+   and pg_temp.told(pg_temp.d(9)) - (select s.told from t_snap s where s.doc = pg_temp.d(9)) = 4$q$);
 
 select name, ok, detail from t_results order by name;
 select count(*) filter (where not ok) as failures, count(*) as total from t_results;
