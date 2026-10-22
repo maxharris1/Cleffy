@@ -2182,54 +2182,161 @@ were never deleted. Find them:
 
 ```sql
 select i.roster_id, i.teacher_id, i.auth_email, i.created_at, i.expires_at,
-       f.student_user_id,
-       u.email, u.created_at as account_created_at, u.last_sign_in_at, u.email_confirmed_at,
-       u.raw_app_meta_data ->> 'user_type'  as user_type,
-       u.raw_app_meta_data ->> 'teacher_id' as flagged_teacher,
        exists (select 1 from auth.users t where t.id = i.teacher_id) as teacher_exists,
-       exists (select 1 from public.managed_students m where m.student_user_id = f.student_user_id) as has_roster_row
+       i.student_user_id as recorded_user_id,
+       r.id is not null as recorded_account_exists,
+       r.created_at between i.created_at - interval '1 minute' and i.expires_at as recorded_in_window,
+       c.id as email_candidate_id,
+       c.created_at as email_candidate_created_at,
+       c.created_at between i.created_at - interval '1 minute' and i.expires_at as email_candidate_in_window
 from public.student_provision_intents i
-left join lateral public.student_provision_intents_for (i.teacher_id) f on f.roster_id = i.roster_id
-left join auth.users u on u.id = f.student_user_id
+left join auth.users r on r.id = i.student_user_id
+left join lateral (
+    select u.id, u.created_at
+    from auth.users u
+    where lower(u.email) = i.auth_email
+      and u.id is distinct from i.student_user_id
+) c on true
 where i.expires_at < now()
-order by i.created_at;
+order by i.created_at, c.created_at;
 ```
 
 Only rows with `expires_at` in the past are orphans. A live intent belongs to
-a request that may still be running. Resolve each row:
+a request that may still be running.
 
-1. **`student_user_id` is null** (no account was created, or none can be found
-   by address): nothing to delete. Run
+The two account columns are kept apart on purpose:
+
+- `recorded_user_id` is the account `student-provision` wrote on the intent
+  (`attach_student_provision`) the moment it had created it.
+- `email_candidate_id` is any other account at the intent's address. Account
+  deletion's `student_provision_intents_for()` falls back to such an account
+  when nothing was recorded, with no upper time bound (`20261022110600`), so it
+  can be a separate signup made later at the same address. It is a lead, never
+  proof. An intent shows on more than one row when several accounts match.
+- The window runs from one minute before the intent's `created_at` (the
+  fallback's own allowance) to its `expires_at`, after which the request that
+  wrote the intent can no longer be running.
+
+Look at each account the row names (recorded or candidate) with:
+
+```sql
+select u.id, u.email, u.created_at, u.email_confirmed_at, u.last_sign_in_at,
+       u.raw_app_meta_data ->> 'user_type'  as user_type,
+       u.raw_app_meta_data ->> 'teacher_id' as flagged_teacher,
+       exists (select 1 from public.managed_students m where m.student_user_id = u.id) as has_roster_row
+from auth.users u
+where u.id = '<user_id>';
+```
+
+**Proof that this provisioning created the account.** The account was created
+inside the window (`recorded_in_window` or `email_candidate_in_window` is
+true), and either:
+
+- **(A) recorded:** it is the intent's `recorded_user_id`; or
+- **(B) flagged:** nothing was recorded (`recorded_user_id` is null), it is the
+  email candidate, and its `app_metadata` carries the student flag naming this
+  teacher (`user_type = 'student'` and `flagged_teacher` equals the intent's
+  `teacher_id`). The flag is admin-only and only `student-provision` writes it:
+  at creation for a code student, just after the invite for an email student.
+  So an unrecorded flagged account is a code student whose request died
+  before `attach_student_provision`.
+
+That is everything dev records about who made an account. There is no other
+provisioning marker (`code_reset_worker` belongs to the code reset). A matching
+address, a candidate created inside the window, or null
+`email_confirmed_at`/`last_sign_in_at` are not proof: each also fits a separate
+signup at the same address. Without proof (A) or (B), nothing is deleted.
+
+Resolve each row:
+
+1. **No account to resolve:** `recorded_user_id` and `email_candidate_id` are
+   both null (no account was created), or `recorded_user_id` is set and
+   `recorded_account_exists` is false (the account this provisioning made is
+   already deleted; leave any email candidate on that row alone, it is not
+   this provisioning's). Run
    `select public.finish_student_provision('<roster_id>');`.
-2. **`has_roster_row` is true** (the roster insert did land): not an orphan.
-   Run `select public.finish_student_provision('<roster_id>');`.
-3. **Flagged as this teacher's student** (`user_type = 'student'` and
-   `flagged_teacher = teacher_id`) with **no roster row**: the account belongs
-   to nobody.
-    1. Delete the Auth user (Dashboard → Authentication → Users → the user →
-       Delete, or the admin API `DELETE /auth/v1/admin/users/<student_user_id>`
-       with the service-role key).
-    2. If the deleted account owned any scores, delete their Storage objects
-       under `scores/<student_user_id>/` and `thumbnails/<student_user_id>/`.
-    3. Run `select public.finish_student_provision('<roster_id>');`.
-4. **Not flagged** (`user_type` null, or `flagged_teacher` differs): an email
-   invite whose student flag never landed. Do **not** delete it blindly; it is
-   a real address.
+2. **Valid roster row confirmed:** the recorded account (or, when nothing was
+   recorded, the email candidate) has `has_roster_row` true. It is a rostered
+   student, not an orphan; delete nothing. Run
+   `select public.finish_student_provision('<roster_id>');`.
+3. **Proven (A) or (B), flagged as this teacher's student, no roster row:** the
+   account belongs to nobody. Delete it, its Storage first, as account deletion
+   does (`supabase/functions/_shared/accountDeletion.ts`, `purgeOwnedDocuments`):
+    1. List the score folders it owns or still has pending. Storage keeps each
+       score under its document id: `scores/<document_id>/original.pdf` and
+       `thumbnails/<document_id>/<rev>.jpg`. This lists every object in them:
+
+        ```sql
+        with docs as (
+            select d.id as document_id, 'document' as source
+            from public.documents d
+            where d.owner_id = '<user_id>'
+            union
+            select c.document_id, 'pending cleanup'
+            from public.document_storage_cleanup c
+            where c.owner_id = '<user_id>'
+              and not exists (select 1 from public.documents d where d.id = c.document_id)
+        )
+        select docs.document_id, docs.source, o.bucket_id, o.name
+        from docs
+        left join storage.objects o
+          on o.bucket_id in ('scores', 'thumbnails')
+         and o.name like docs.document_id::text || '/%'
+        order by docs.document_id, o.bucket_id, o.name;
+        ```
+
+    2. Delete every listed object (rows with a non-null `name`) in both
+       buckets: Dashboard → Storage → `scores` (then `thumbnails`) → the
+       `<document_id>` folder → select all → Delete, or the Storage API with the
+       service-role key, `DELETE /storage/v1/object/<bucket>` with
+       `{"prefixes": ["<name>", ...]}`. SQL cannot delete Storage objects
+       (`storage.protect_delete`).
+    3. Run the query again. Every row must have a null `name` (or there are no
+       rows). Until then, repeat step 2; go no further.
+    4. Delete the Auth user (Dashboard → Authentication → Users → the user →
+       Delete, or the admin API `DELETE /auth/v1/admin/users/<user_id>` with
+       the service-role key). Its scores go with it, and each writes a pending
+       cleanup record for its (now empty) folders.
+    5. Run the query again; every `name` must still be null. Then clear those
+       records:
+
+        ```sql
+        delete from public.document_storage_cleanup c
+        where c.owner_id = '<user_id>'
+          and not exists (select 1 from public.documents d where d.id = c.document_id);
+        ```
+
+    6. Only now run `select public.finish_student_provision('<roster_id>');`.
+4. **Proven (A), not flagged** (`user_type` and `flagged_teacher` null): an
+   email invite whose student flag never landed. It is an ordinary account at
+   a real address. Proof (A) shows provisioning made it; the sign-in fields
+   only show whether anyone has used it since.
     - If `last_sign_in_at` and `email_confirmed_at` are both null (the invite
-      was never accepted), delete the Auth user as in case 3, then finish the
-      intent.
+      was never accepted), delete it as in case 3, steps 1 to 6.
     - If the person has signed in, they now hold an ordinary (non-student)
       account. Contact the address, or the teacher if `teacher_exists` is
-      true, before deleting anything. If they keep it, just finish the intent.
-5. **`teacher_exists` is false** (the teacher's account was deleted while this
-   provisioning was live or unflagged): handle it as in cases 1 to 4. The
+      true, before deleting anything. If they agree to its deletion, delete it
+      as in case 3. If they keep it, finish the intent and leave the account.
+5. **No proof:** any other account with no roster row: an email candidate on
+   an unrecorded intent without this teacher's flag, an account created
+   outside the window, or one flagged for another teacher. It may be a
+   separate person's signup. Delete nothing and do not finish the intent: it
+   stays open. Resolve it by hand and escalate to Max with the row and the
+   account's details.
+6. **`teacher_exists` is false** (the teacher's account was deleted while this
+   provisioning was live or unflagged): handle it as in cases 1 to 5. The
    intent outlives the teacher on purpose (it has no foreign key), so that
    this case stays findable.
 
-Never delete a `student_provision_intents` row by hand while its account still
-exists. `finish_student_provision` comes last, after the account is resolved.
-Later, a scheduled sweep could take over cases 1 to 3 (decision 49(6)
-follow-up). Case 4 stays manual.
+An intent is unresolved until there is no account to resolve (case 1), its
+account is confirmed on a valid roster row (case 2), its account and Storage
+are deleted (cases 3 and 4), or the person has agreed to keep the ordinary
+account (case 4). Never clear an unresolved intent, by
+`finish_student_provision` or by deleting its `student_provision_intents` row
+by hand; a case 5 intent stays open until Max resolves it. Once resolved,
+`finish_student_provision` is the last step, including in cases 2 and 4 where
+the account stays. Later, a scheduled sweep could take over cases 1 to 3
+(decision 49(6) follow-up). Cases 4 and 5 stay manual.
 
 **Half-deleted accounts** (a deletion's destructive cleanup started and never
 finished). Find them:
