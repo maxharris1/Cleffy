@@ -64,10 +64,12 @@ P5 add migrations.
 
 Steps are in order. Steps 3 to 6 are one sitting: from the wipe in step 3 until
 Vercel finishes the build in step 6, cleffy.io serves the old bundle against an
-empty database. Do them outside lesson hours. Names that the launchfix packets
-P1 to P5 add were not on any branch when this was written (no
-`mh/launchfix-p1…p5` branch existed at 47e9b38f). They are marked
-"(confirm after P<N>)". Replace each one with the real name before you start.
+empty database. Do them outside lesson hours.
+
+Most of what the launchfix packets P1 to P4 add was not on any branch when this
+was written; P5 was (`mh/launchfix-p5-district-retention` at 00f48a6). Every
+name not yet settled is marked "(confirm after P<N>)". Replace each one with
+the real name before you start.
 
 ### 1. Land P1 to P6, CI green
 
@@ -572,16 +574,21 @@ checklist's steps 12 and 13 where they still apply.
 
 It stays unscheduled at launch. Schedule it only when all of these hold:
 
-1. **P5 is merged** and deployed (confirm after P5: P5's change to the district
-   purge).
+1. **P5 is merged**: migration `20261022130000_district_retention_reattribution`.
+   With it, `admin_set_student_district()` takes a re-attributed student off
+   every other district's purge list. The hard delete also re-checks that the
+   roster row still names the district being purged; a student that fails the
+   check is skipped and logged as `skipped_reattributed`. P5's other migration,
+   `20261022130100_content_strikes_survive_deletion`, keeps copyright strikes
+   after the account is deleted.
 2. `district-retention-notices` is deployed with `DISTRICT_NOTICE_SECRET`, and
    the Vault pair `district_notice_url` / `district_notice_secret` exists
    (step 8).
 3. **The dry-run counts are read and expected**:
    `select public.retention_district_dry_run();` on production. On a fresh
    production it is empty until a district has a `contract_ends_at`.
-4. **The hourly notice-sender cron** from decision 11 is scheduled (confirm
-   after P5: its job name and schedule). Without it, a notice deferred by the
+4. **The hourly notice-sender cron** from decision 11 is scheduled. Its job
+   name and schedule are not on P5's branch at 00f48a6 (confirm after P5). Without it, a notice deferred by the
    mail budget (`20261021120900`) waits for the next daily purge run, and
    nothing is purged before its notice is sent.
 
