@@ -1,0 +1,241 @@
+-- Behaviour proof for 20261022110000_student_claim_reservation.sql: a student
+-- claim reserves the roster row, bound to its code hash, before any password
+-- is written, and commits only while the hash and the holder still match.
+--
+-- The interleavings are written out statement by statement -- each call is what
+-- one request does at that moment -- so every ordering the Edge Functions can
+-- produce is pinned, not sampled:
+--
+--   1. one claim, start to finish, and the card is spent;
+--   2. two claims on one card: the second is told to wait and never reaches
+--      the password write; the first commits;
+--   3. a claim against a teacher's reset, both ways round: whichever comes
+--      second waits, and a rotated code can never be committed with the old one;
+--   4. expiry: a holder that died is taken over, and its late commit is lost;
+--   5. archive clears a reservation; release hands back only its own;
+--   6. no client role can call any of it or read the table.
+--
+-- Runs inside one transaction and ROLLS BACK -- nothing persists. Same harness
+-- and reading as tests/sql/launch_checkout_fixes.sql:
+--
+--     psql "$DATABASE_URL" -q -t -A -F ' | ' -f tests/sql/student_claim_reservation.sql
+--
+-- Every row of the result table should read `t`; the last line is
+-- `failures | total`. Run it against a local or branch database.
+\set ON_ERROR_STOP on
+begin;
+create temp table t_results (name text, ok boolean, detail text);
+grant all on t_results to anon, authenticated, service_role;
+create temp table t_res (label text primary key, reservation uuid);
+grant all on t_res to anon, authenticated, service_role;
+create function pg_temp.u(n int) returns uuid language sql immutable as $f$ select ('c1a10000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid $f$;
+create function pg_temp.chk(p_name text, p_sql text) returns void language plpgsql as $f$
+declare v boolean;
+begin execute p_sql into v; insert into t_results values (p_name, coalesce(v, false), null);
+exception when others then insert into t_results values (p_name, false, sqlstate || ' ' || sqlerrm); end $f$;
+create function pg_temp.refused(p_name text, p_sql text, p_state text) returns void language plpgsql as $f$
+declare v_state text; v_message text;
+begin
+execute p_sql;
+insert into t_results values (p_name, false, 'no error raised');
+exception when others then
+get stacked diagnostics v_state = returned_sqlstate, v_message = message_text;
+insert into t_results values (p_name, v_state = p_state, v_state || ' ' || v_message);
+end $f$;
+create function pg_temp.as_service() returns void language plpgsql as $f$
+begin
+perform set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
+perform set_config('role', 'service_role', true);
+end $f$;
+create function pg_temp.as_user(n int) returns void language plpgsql as $f$
+begin
+perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.u(n), 'role', 'authenticated')::text, true);
+perform set_config('role', 'authenticated', true);
+end $f$;
+create function pg_temp.as_anon() returns void language plpgsql as $f$
+begin
+perform set_config('request.jwt.claims', json_build_object('role', 'anon')::text, true);
+perform set_config('role', 'anon', true);
+end $f$;
+-- Take a claim reservation and remember it under `label`; true when reserved.
+create function pg_temp.reserve(p_label text, p_hash text) returns boolean language plpgsql as $f$
+declare v jsonb;
+begin
+v := public.reserve_student_claim (p_hash);
+if v ->> 'status' = 'reserved' then
+    insert into t_res values (p_label, (v ->> 'reservation')::uuid)
+    on conflict (label) do update set reservation = excluded.reservation;
+    return true;
+end if;
+return false;
+end $f$;
+create function pg_temp.res(p_label text) returns uuid language sql as $f$ select reservation from t_res where label = p_label $f$;
+create function pg_temp.status(p_hash text) returns text language sql as $f$ select public.reserve_student_claim (p_hash) ->> 'status' $f$;
+grant execute on all functions in schema pg_temp to anon, authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- Fixtures (as postgres): one teacher, seven code students, all Invited.
+-- ---------------------------------------------------------------------------
+insert into auth.users (id, aud, role, email)
+values (pg_temp.u(1), 'authenticated', 'authenticated', 'claim-teacher@example.invalid');
+insert into auth.users (id, aud, role, email, raw_app_meta_data)
+select pg_temp.u(100 + n), 'authenticated', 'authenticated', 'st-claim-' || n || '@students.cleffy.app', '{"user_type":"student"}'
+from generate_series (1, 7) n;
+insert into public.managed_students (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method)
+select pg_temp.u(200 + n), pg_temp.u(1), pg_temp.u(100 + n), 'Student ' || n, 'hash-' || n, 'code'
+from generate_series (1, 7) n;
+
+select pg_temp.as_service();
+
+-- ===========================================================================
+-- 1. One claim, start to finish
+-- ===========================================================================
+select pg_temp.chk('01 a claim reserves the row its code selects',
+$q$select pg_temp.reserve ('a1', 'hash-1')$q$);
+select pg_temp.chk('02 ... bound to that code hash, as a claim, for longer than a function can run',
+$q$select kind = 'claim' and login_code_hash = 'hash-1' and reserved_until > now() + interval '400 seconds'
+   from public.student_claim_reservations where student_id = pg_temp.u(201)$q$);
+select pg_temp.chk('03 a code that selects nothing is not_found, and reserves nothing',
+$q$select pg_temp.status ('hash-nobody') = 'not_found'
+      and not exists (select 1 from public.student_claim_reservations where login_code_hash = 'hash-nobody')$q$);
+select pg_temp.chk('04 completing with someone else''s reservation is lost',
+$q$select public.complete_student_claim (pg_temp.u(201), gen_random_uuid(), 'hash-1', 'ada_one') = 'lost'$q$);
+select pg_temp.chk('05 completing with the right reservation but another hash is lost',
+$q$select public.complete_student_claim (pg_temp.u(201), pg_temp.res('a1'), 'hash-2', 'ada_one') = 'lost'$q$);
+select pg_temp.chk('06 ... and neither touched the row',
+$q$select claimed_at is null and login_code_hash = 'hash-1' and username is null
+   from public.managed_students where id = pg_temp.u(201)$q$);
+select pg_temp.chk('07 the holder completes',
+$q$select public.complete_student_claim (pg_temp.u(201), pg_temp.res('a1'), 'hash-1', 'ada_one') = 'claimed'$q$);
+select pg_temp.chk('08 ... spending the card, storing the name, and handing the row back',
+$q$select claimed_at is not null and login_code_hash is null and username = 'ada_one'
+      and not exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(201))
+   from public.managed_students where id = pg_temp.u(201)$q$);
+select pg_temp.chk('09 the spent card selects nothing any more',
+$q$select pg_temp.status ('hash-1') = 'not_found'$q$);
+select pg_temp.chk('10 a replay of the same completion is lost',
+$q$select public.complete_student_claim (pg_temp.u(201), pg_temp.res('a1'), 'hash-1', 'ada_one') = 'lost'$q$);
+
+-- ===========================================================================
+-- 2. Two claims on one card
+-- ===========================================================================
+select pg_temp.chk('20 claim A reserves the card',
+$q$select pg_temp.reserve ('2a', 'hash-2')$q$);
+select pg_temp.chk('21 claim B, on the same card, is told it is busy (and so never writes a password)',
+$q$select (v ->> 'status') = 'busy' and (v ->> 'retry_after_seconds')::int between 1 and 600
+   from (select public.reserve_student_claim ('hash-2') as v) x$q$);
+select pg_temp.chk('22 ... and B''s attempt did not replace A''s reservation',
+$q$select reservation = pg_temp.res('2a') from public.student_claim_reservations where student_id = pg_temp.u(202)$q$);
+select pg_temp.refused('23 a username another row holds is refused by the unique index',
+$q$select public.complete_student_claim (pg_temp.u(202), pg_temp.res('2a'), 'hash-2', 'ada_one')$q$, '23505');
+select pg_temp.chk('24 ... leaving A''s reservation in place for A to release or retry',
+$q$select reservation = pg_temp.res('2a') from public.student_claim_reservations where student_id = pg_temp.u(202)$q$);
+select pg_temp.chk('25 A completes with a free name',
+$q$select public.complete_student_claim (pg_temp.u(202), pg_temp.res('2a'), 'hash-2', 'ben_two') = 'claimed'$q$);
+select pg_temp.chk('26 B, trying again afterwards, finds the card spent',
+$q$select pg_temp.status ('hash-2') = 'not_found'$q$);
+
+-- ===========================================================================
+-- 3. A claim against a teacher's reset, both ways round
+-- ===========================================================================
+-- 3a. The claim first.
+select pg_temp.chk('30 a claim reserves the card',
+$q$select pg_temp.reserve ('3a', 'hash-3')$q$);
+select pg_temp.chk('31 the teacher''s reset is told to wait: it must not scramble a password the claim is setting',
+$q$select public.begin_student_code_reset (pg_temp.u(203)) = 'busy'$q$);
+select pg_temp.refused('32 rotating the code under a live claim by any other path is refused',
+$q$update public.managed_students set login_code_hash = 'hash-3-new' where id = pg_temp.u(203)$q$, '55006');
+select pg_temp.chk('33 the claim commits (the card was valid when it was presented)',
+$q$select public.complete_student_claim (pg_temp.u(203), pg_temp.res('3a'), 'hash-3', 'cat_three') = 'claimed'$q$);
+select pg_temp.chk('34 the reset, retried, now goes ahead',
+$q$select public.begin_student_code_reset (pg_temp.u(203)) = 'reserved'$q$);
+update public.managed_students set login_code_hash = 'hash-3-new', claimed_at = null where id = pg_temp.u(203);
+select pg_temp.chk('35 ... and writing the new code hands the row back',
+$q$select not exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(203))$q$);
+
+-- 3b. The reset first.
+select pg_temp.chk('36 a reset reserves the row before it scrambles',
+$q$select public.begin_student_code_reset (pg_temp.u(204)) = 'reserved'$q$);
+select pg_temp.chk('37 a claim with the card the reset is replacing is told to wait',
+$q$select pg_temp.status ('hash-4') = 'busy'$q$);
+select pg_temp.chk('38 a reset retried after a partial failure takes its own reservation over',
+$q$select public.begin_student_code_reset (pg_temp.u(204)) = 'reserved'$q$);
+update public.managed_students set login_code_hash = 'hash-4-new' where id = pg_temp.u(204);
+select pg_temp.chk('39 once the new code is written, the old card selects nothing',
+$q$select pg_temp.status ('hash-4') = 'not_found'$q$);
+select pg_temp.chk('40 ... and the new card can be claimed',
+$q$select pg_temp.reserve ('3b', 'hash-4-new')$q$);
+select pg_temp.chk('41 a claim holding the OLD hash can never commit against the new one',
+$q$select public.complete_student_claim (pg_temp.u(204), pg_temp.res('3b'), 'hash-4', 'dee_four') = 'lost'$q$);
+select pg_temp.chk('42 the new card''s holder commits',
+$q$select public.complete_student_claim (pg_temp.u(204), pg_temp.res('3b'), 'hash-4-new', 'dee_four') = 'claimed'$q$);
+
+-- ===========================================================================
+-- 4. Expiry: a holder that died is taken over
+-- ===========================================================================
+select pg_temp.chk('50 claim A reserves',
+$q$select pg_temp.reserve ('4a', 'hash-5')$q$);
+update public.student_claim_reservations set reserved_until = now() - interval '1 second' where student_id = pg_temp.u(205);
+select pg_temp.chk('51 once A''s reservation has expired, claim B takes the row over',
+$q$select pg_temp.reserve ('4b', 'hash-5') and pg_temp.res('4a') <> pg_temp.res('4b')$q$);
+select pg_temp.chk('52 A''s late commit is lost',
+$q$select public.complete_student_claim (pg_temp.u(205), pg_temp.res('4a'), 'hash-5', 'eve_five') = 'lost'$q$);
+select pg_temp.chk('53 ... and A''s late release cannot hand back B''s reservation',
+$q$select not public.release_student_claim (pg_temp.u(205), pg_temp.res('4a'))
+      and exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(205)
+                  and reservation = pg_temp.res('4b'))$q$);
+select pg_temp.chk('54 B commits',
+$q$select public.complete_student_claim (pg_temp.u(205), pg_temp.res('4b'), 'hash-5', 'eve_five') = 'claimed'$q$);
+select pg_temp.chk('55 an expired claim does not block a reset',
+$q$select pg_temp.reserve ('4c', 'hash-6')$q$);
+update public.student_claim_reservations set reserved_until = now() - interval '1 second' where student_id = pg_temp.u(206);
+select pg_temp.chk('56 ... the reset takes the row',
+$q$select public.begin_student_code_reset (pg_temp.u(206)) = 'reserved'$q$);
+select pg_temp.chk('57 ... and the expired claim''s commit is lost',
+$q$select public.complete_student_claim (pg_temp.u(206), pg_temp.res('4c'), 'hash-6', 'fay_six') = 'lost'$q$);
+update public.managed_students set login_code_hash = 'hash-6-new' where id = pg_temp.u(206);
+
+-- ===========================================================================
+-- 5. Archive and release
+-- ===========================================================================
+select pg_temp.chk('60 a claim reserves',
+$q$select pg_temp.reserve ('5a', 'hash-7')$q$);
+select pg_temp.chk('61 releasing someone else''s reservation does nothing',
+$q$select not public.release_student_claim (pg_temp.u(207), gen_random_uuid())
+      and exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(207))$q$);
+select pg_temp.chk('62 the holder releases its own',
+$q$select public.release_student_claim (pg_temp.u(207), pg_temp.res('5a'))$q$);
+select pg_temp.chk('63 ... and the card can be reserved again at once',
+$q$select pg_temp.reserve ('5b', 'hash-7')$q$);
+update public.managed_students set archived_at = now() where id = pg_temp.u(207);
+select pg_temp.chk('64 archiving clears the reservation',
+$q$select not exists (select 1 from public.student_claim_reservations where student_id = pg_temp.u(207))$q$);
+select pg_temp.chk('65 ... and the holder''s commit is lost',
+$q$select public.complete_student_claim (pg_temp.u(207), pg_temp.res('5b'), 'hash-7', 'gus_seven') = 'lost'$q$);
+select pg_temp.chk('66 an archived student''s card reserves nothing',
+$q$select pg_temp.status ('hash-7') = 'not_found'$q$);
+
+-- ===========================================================================
+-- 6. Service role only
+-- ===========================================================================
+select pg_temp.as_user(1);
+select pg_temp.refused('70 a signed-in client cannot reserve a claim',
+$q$select public.reserve_student_claim ('hash-6-new')$q$, '42501');
+select pg_temp.refused('71 ... or complete one',
+$q$select public.complete_student_claim (gen_random_uuid(), gen_random_uuid(), 'x', 'x')$q$, '42501');
+select pg_temp.refused('72 ... or release one',
+$q$select public.release_student_claim (gen_random_uuid(), gen_random_uuid())$q$, '42501');
+select pg_temp.refused('73 ... or begin a reset',
+$q$select public.begin_student_code_reset (gen_random_uuid())$q$, '42501');
+select pg_temp.refused('74 ... or read the reservations',
+$q$select count(*) from public.student_claim_reservations$q$, '42501');
+select pg_temp.as_anon();
+select pg_temp.refused('75 anon cannot reserve a claim',
+$q$select public.reserve_student_claim ('hash-6-new')$q$, '42501');
+select pg_temp.refused('76 ... or read the reservations',
+$q$select count(*) from public.student_claim_reservations$q$, '42501');
+
+reset role;
+select name, ok, detail from t_results order by name;
+select count(*) filter (where not ok) as failures, count(*) as total from t_results;
+rollback;
