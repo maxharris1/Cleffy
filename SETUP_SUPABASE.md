@@ -429,17 +429,24 @@ supabase secrets set \
 ```
 
 Those seven `STRIPE_PRICE_*` names are exactly the seven `priceCatalog()` reads
-in `supabase/functions/_shared/stripeMode.ts`. A name that is unset is simply a price
-that does not exist: it maps to no tier, and checkout refuses it.
+in `supabase/functions/_shared/stripeMode.ts` for test mode; live reads
+`STRIPE_PRICE_LIVE_*`. Today both catalogues are committed (`PUBLISHED_PRICES`)
+and these secrets stay **unset**. An override is all-or-nothing per mode: one
+name set replaces that mode's whole catalogue, and every name left unset is then
+a price that does not exist, which maps to no tier and checkout refuses. DEPLOY.md
+_Go-live 2026-10_ (steps 4 and 9) audits production for leftovers.
 
-| Secret                       | Purpose                                                                   |
-| ---------------------------- | ------------------------------------------------------------------------- |
-| `STRIPE_SECRET_KEY`          | Sandbox: creating Checkout/Portal sessions and reading subscriptions      |
-| `STRIPE_WEBHOOK_SECRET`      | Sandbox: verifying the webhook signature — its own value, not the API key |
-| `STRIPE_SECRET_KEY_LIVE`     | The same, for the live account. Setting it is what puts cleffy.io on live |
-| `STRIPE_WEBHOOK_SECRET_LIVE` | The live endpoint's signing secret                                        |
-| `STRIPE_PRICE_*`             | The price→tier map. A price id absent from these is refused at checkout   |
-| `APP_URL`                    | Return URL when a caller sent no Origin (a known Origin wins over it)     |
+| Secret                       | Purpose                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| `STRIPE_SECRET_KEY_TEST`     | Sandbox: creating Checkout/Portal sessions and reading subscriptions       |
+| `STRIPE_WEBHOOK_SECRET_TEST` | Sandbox: verifying the webhook signature — its own value, not the API key  |
+| `STRIPE_SECRET_KEY`          | Legacy alias of `STRIPE_SECRET_KEY_TEST`, read only when that is unset     |
+| `STRIPE_WEBHOOK_SECRET`      | Legacy alias of `STRIPE_WEBHOOK_SECRET_TEST`, read only when that is unset |
+| `STRIPE_SECRET_KEY_LIVE`     | The same, for the live account. Setting it is what puts cleffy.io on live  |
+| `STRIPE_WEBHOOK_SECRET_LIVE` | The live endpoint's signing secret                                         |
+| `STRIPE_PRICE_*`             | Optional test-mode override; normally unset (committed catalogue)          |
+| `STRIPE_PRICE_LIVE_*`        | Optional live-mode override; normally unset (committed catalogue)          |
+| `APP_URL`                    | Return URL when a caller sent no Origin (a known Origin wins over it)      |
 
 cleffy.io and dev.cleffy.io share this one project, so the Edge Functions pick
 the account per request from the `Origin` header — live for cleffy.io, sandbox
@@ -450,15 +457,18 @@ keep their pre-split meaning as the **sandbox** pair. See
 `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` are provided
 by the platform — you do not set those.
 
-The client-visible values go in `.env` (see `.env.example`):
-`VITE_STRIPE_PUBLISHABLE_KEY`, the seven `VITE_STRIPE_PRICE_*` ids mirroring the
-secrets above, and `VITE_STRIPE_FOUNDING_OFFER`. Leave them blank to run without
+The client-visible values go in `.env` (see `.env.example`): the seven
+`VITE_STRIPE_PRICE_*` ids mirroring the secrets above, and
+`VITE_STRIPE_FOUNDING_OFFER`. Leave the price ids blank to run without
 billing — the pricing dialog then says so rather than offering buttons that
 cannot work. The dialog considers billing configured once both Personal and both
 Teacher ids are present; the two Academy ids are optional, and an Academy card
 with no id keeps its description but offers no button. Founding is optional
 twice over — it needs its id **and** `VITE_STRIPE_FOUNDING_OFFER=true`, or the
 card is not rendered at all.
+
+`VITE_STRIPE_PUBLISHABLE_KEY`, still in `.env.example`, is unused: no code
+reads it, because checkout redirects to the URL `stripe-checkout` returns.
 
 ### 6c. Deploy the functions
 
