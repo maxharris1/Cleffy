@@ -1059,6 +1059,15 @@ storage-full message; it takes no argument, refuses a caller without a user
 Ends with `failures | total`. Proven against the local stack on 2026-10-22: all
 6 checks passed; without the function, 5 of the 6 failed.
 
+`content_strikes_grants.sql` (launch-fix follow-up 13) checks P1's grants on
+`content_strikes`: its ACL names only `postgres` and `service_role`; anon,
+authenticated and PUBLIC hold no table or column privilege, on every column
+(20261022130100's included); RLS is on with no policy; the strike functions are
+the service role's and the pepper and key helpers their owner's alone; a client
+read or write is refused. The audit found no gap, so no migration; the proof
+keeps it so. Ends with `failures | total`. Proven against the local stack on
+2026-10-22: all 11 checks passed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
