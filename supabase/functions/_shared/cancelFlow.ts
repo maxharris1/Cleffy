@@ -1,5 +1,6 @@
 import type { Delivery, SendResult } from './billingOutbox.ts';
 import type * as BillingTerms from './billingTerms.ts';
+import type * as ReadCapped from './readCappedJson.ts';
 import type { StripeMode } from './stripeMode.ts';
 
 /**
@@ -228,6 +229,11 @@ export interface CancelLinkDeps {
 
 export interface CancelDeps {
     json: (body: unknown, status?: number) => Response;
+    /**
+     * _shared/readCappedJson.ts's readCappedJson, passed in because this file
+     * takes no runtime imports: the body read with a streamed cap.
+     */
+    readJson: typeof ReadCapped.readCappedJson;
     options: () => Response;
     clientKey: (req: Request) => string;
     checkRateLimit: (key: string, limit: number, windowMs: number) => Promise<Gate>;
@@ -708,6 +714,14 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     });
 };
 
+/**
+ * The cap on a request body, counted as it streams (Content-Length is not
+ * trusted): readCappedJson.ts's CONTROL_BODY_MAX_BYTES. Past it the answer
+ * is 413 with PAYLOAD_TOO_LARGE, before anything is parsed.
+ */
+export const BODY_MAX_BYTES = 16 * 1024;
+const PAYLOAD_TOO_LARGE = { error: 'Request body too large', code: 'payload_too_large' } as const;
+
 export const handleCancel = async (req: Request, deps: CancelDeps): Promise<Response> => {
     if (req.method === 'OPTIONS') {
         return deps.options();
@@ -715,13 +729,13 @@ export const handleCancel = async (req: Request, deps: CancelDeps): Promise<Resp
     if (req.method !== 'POST') {
         return deps.json({ error: 'Method not allowed' }, 405);
     }
-    let body: Record<string, unknown>;
-    try {
-        const parsed = (await req.json()) as unknown;
-        body = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-    } catch {
-        return deps.json({ error: 'Invalid JSON body' }, 400);
+    const read = await deps.readJson(req, BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? deps.json(PAYLOAD_TOO_LARGE, 413) : deps.json({ error: 'Invalid JSON body' }, 400);
     }
+    const parsed = read.value;
+    const body: Record<string, unknown> =
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
 
     if (body.action === 'start') {
         return startCancel(req, deps, body);

@@ -4,6 +4,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
+import { isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
 /**
@@ -109,12 +110,18 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    let body: AnalyzeBody;
-    try {
-        body = await req.json();
-    } catch {
+    // Content-Length above is only an early refusal; this is the cap, counted
+    // on the bytes as they arrive (a chunked body has no Content-Length).
+    const read = await readCappedJson(req, MAX_BODY_BYTES);
+    if (!read.ok) {
+        return read.status === 413
+            ? jsonResponse(PAYLOAD_TOO_LARGE, 413)
+            : jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    if (!isJsonObject(read.value)) {
         return jsonResponse({ error: 'Invalid JSON body' }, 400);
     }
+    const body = read.value as AnalyzeBody;
 
     const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
     if (!documentId || !uuidRe.test(documentId)) {

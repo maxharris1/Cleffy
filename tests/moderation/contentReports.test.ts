@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { REPEAT_INFRINGER_STRIKES, STRIKE_WINDOW_MONTHS } from '@/features/moderation/moderationRules';
 
 import {
+    REPORT_BODY_MAX_BYTES,
+    REPORT_FIELD_LIMITS,
     CONTENT_REPORT_LIMITS,
     REPEAT_INFRINGER_STRIKES as SERVER_STRIKES,
     CONTENT_NOTICE_OUTBOX,
@@ -37,6 +39,9 @@ import {
     sendViaResend,
     type ResendResult,
 } from '../../supabase/functions/_shared/resendDelivery';
+import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
+import { chunkedJson } from '../security/chunkedBody';
+import { CONTROL_BODY_MAX_BYTES, PAYLOAD_TOO_LARGE } from '../../supabase/functions/_shared/readCappedJson';
 
 const OPERATOR = {
     name: 'Cleffy LLC',
@@ -166,6 +171,7 @@ type Sent = { to: string; subject: string; text: string; bcc?: string; idempoten
 
 const commonDeps = (outbox: ReturnType<typeof fakeOutbox>, sent: Sent[]) => ({
     json,
+    readJson: readCappedJson,
     options: () => new Response('ok'),
     clientKey: () => '203.0.113.9',
     checkRateLimit: async () => ({ ok: true }) as const,
@@ -1014,5 +1020,30 @@ describe('the mail budget across uncertain sends (unknown keeps, a definite reje
         expect(refundsNoticeBudget(result('rejected'))).toBe(true);
         expect(refundsNoticeBudget(result('unknown'))).toBe(false);
         expect(refundsNoticeBudget(result('sent'))).toBe(false);
+    });
+});
+
+describe('content-report and content-moderation body cap', () => {
+    it('fits the longest report the field limits allow, in multi-byte text', () => {
+        const chars = Object.entries(REPORT_FIELD_LIMITS)
+            .filter(([key]) => key !== 'explanationMin')
+            .reduce((total, [, max]) => total + (max as number), 0);
+        // 3 UTF-8 bytes a character, plus room for keys and a captcha token.
+        expect(REPORT_BODY_MAX_BYTES).toBeGreaterThan(chars * 3 + 8 * 1024);
+        expect(REPORT_BODY_MAX_BYTES).toBeGreaterThan(CONTROL_BODY_MAX_BYTES);
+    });
+
+    it('content-report answers 413 to a chunked body past its cap and stores nothing', async () => {
+        const { deps, outbox } = reportDeps();
+        const response = await handleContentReport(chunkedJson(copyrightBody(), REPORT_BODY_MAX_BYTES + 1), deps);
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual(PAYLOAD_TOO_LARGE);
+        expect(outbox.rows).toHaveLength(0);
+    });
+
+    it('content-moderation answers 413 the same way', async () => {
+        const { deps } = moderationDeps();
+        const response = await handleContentModeration(chunkedJson(takedownBody, REPORT_BODY_MAX_BYTES + 1), deps);
+        expect(response.status).toBe(413);
     });
 });

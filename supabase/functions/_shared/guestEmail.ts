@@ -1,4 +1,5 @@
 import type * as PasswordPolicy from './passwordPolicy.ts';
+import type * as ReadCapped from './readCappedJson.ts';
 
 /**
  * A share-link guest attaching an email address (and a password) to their
@@ -251,6 +252,11 @@ interface CommonDeps {
     /** Key material for the code HMAC; null on a deploy missing it. */
     secret: () => string | null;
     logError: (message: string, err?: unknown) => void;
+    /**
+     * _shared/readCappedJson.ts's readCappedJson, passed in because this file
+     * takes no runtime imports: the body read with a streamed cap.
+     */
+    readJson: typeof ReadCapped.readCappedJson;
 }
 
 /** One send's result, as resendDelivery.ts sendViaResend places it (declared here: no runtime imports). */
@@ -353,13 +359,22 @@ const admit = async (
     return { ok: true, caller };
 };
 
-const readBody = async (req: Request): Promise<Record<string, unknown> | null> => {
-    try {
-        const body: unknown = await req.json();
-        return body && typeof body === 'object' ? (body as Record<string, unknown>) : null;
-    } catch {
-        return null;
+/**
+ * The cap on a request body, counted as it streams (Content-Length is not
+ * trusted): readCappedJson.ts's CONTROL_BODY_MAX_BYTES. Past it the answer
+ * is 413 with PAYLOAD_TOO_LARGE, before anything is parsed.
+ */
+export const BODY_MAX_BYTES = 16 * 1024;
+const PAYLOAD_TOO_LARGE = { error: 'Request body too large', code: 'payload_too_large' } as const;
+
+/** The body as an object; null for anything else, 'too_large' past BODY_MAX_BYTES. */
+const readBody = async (req: Request, deps: CommonDeps): Promise<Record<string, unknown> | null | 'too_large'> => {
+    const read = await deps.readJson(req, BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? 'too_large' : null;
     }
+    const body = read.value;
+    return body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
 };
 
 /**
@@ -388,7 +403,10 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
         return tooMany(json, userGate.retryAfterSec);
     }
 
-    const body = await readBody(req);
+    const body = await readBody(req, deps);
+    if (body === 'too_large') {
+        return json(PAYLOAD_TOO_LARGE, 413);
+    }
     const email = normalizeGuestEmail(typeof body?.['email'] === 'string' ? body['email'] : '');
     if (!isPlausibleGuestEmail(email)) {
         return json(GUEST_EMAIL_ERRORS.invalidEmail, 422);
@@ -552,7 +570,10 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
         return tooMany(json, userGate.retryAfterSec);
     }
 
-    const body = await readBody(req);
+    const body = await readBody(req, deps);
+    if (body === 'too_large') {
+        return json(PAYLOAD_TOO_LARGE, 413);
+    }
     const email = normalizeGuestEmail(typeof body?.['email'] === 'string' ? body['email'] : '');
     const code = normalizeGuestEmailCode(typeof body?.['code'] === 'string' ? body['code'] : '');
     // Exactly as typed — never trimmed: it is what GoTrue stores the hash of.

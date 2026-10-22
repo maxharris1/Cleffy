@@ -9,6 +9,7 @@ import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.t
 import { resendIdempotencyKey } from '../_shared/resendDelivery.ts';
 import { appOrigin, modeForRequest, slotForPrice, stripeClient, type StripeMode } from '../_shared/stripe.ts';
 import { liveSubscriptionOf, type StripeSubscriptionLike } from '../_shared/stripeEvents.ts';
+import { readCappedJson } from '../_shared/readCappedJson.ts';
 
 /**
  * Signed-out cancellation: /cancel's email lookup, its one-time link, and the
@@ -44,6 +45,7 @@ const liveOf = (sub: StripeSubscriptionLike): LiveSubscription => liveSubscripti
 Deno.serve((req) =>
     handleCancel(req, {
         json: jsonResponse,
+        readJson: readCappedJson,
         options: optionsResponse,
         clientKey,
         checkRateLimit,

@@ -5,6 +5,7 @@ import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { passwordProblem, passwordProblemMessage } from '../_shared/passwordPolicy.ts';
 import { loginThrottleSecret } from '../_shared/rateLimit.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 import {
     hashLoginCode,
     isPlausibleLoginCode,
@@ -120,12 +121,16 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
 
-    let body: { code?: string; username?: string; password?: string; captchaToken?: string };
-    try {
-        body = await req.json();
-    } catch {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413
+            ? jsonResponse(PAYLOAD_TOO_LARGE, 413)
+            : jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    if (!isJsonObject(read.value)) {
         return jsonResponse({ error: 'Invalid JSON body' }, 400);
     }
+    const body = read.value as { code?: string; username?: string; password?: string; captchaToken?: string };
 
     // Cards print XXXX-XXXX-XXXX, so normalizing first means the dashes, spaces
     // and lower case a child types are not a way to fail. A missing or non-string
