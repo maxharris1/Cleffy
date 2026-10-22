@@ -1370,6 +1370,15 @@ it paused.
     first, `student-provision` first among the functions) already gives all
     three. Nothing in them is scheduled.
 
+    **Launch-fix item 16 (deletion-pending policy per writer, decision 70(1)),
+    when merged.** No migration. Redeploy `stripe-webhook`, `billing-cancel`,
+    `guest-email-start` and `guest-email-confirm`, and the frontend (the cancel
+    page's "account is being deleted" answer). Each asks
+    `account_deletion_pending()` (`20261022110400`, P3), already in place. One
+    order: the frontend with or before `billing-cancel`, since an older cancel
+    page shows the new answer for an account being deleted as an ordinary
+    cancellation.
+
     **P3's code reset: `20261022110700` / `20261022110800` and the
     `student-provision` deploy go back to back, inside the freeze** (decision
     64). `20261022110700_student_code_reset_worker` **drops** the old
