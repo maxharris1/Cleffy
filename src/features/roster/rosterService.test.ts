@@ -6,6 +6,7 @@ import {
     deleteStudent,
     provisionStudent,
     RESET_INCOMPLETE_MESSAGE,
+    RESET_UNCONFIRMED_MESSAGE,
     resetStudentAccess,
     restoreStudent,
 } from '@/features/roster/rosterService';
@@ -140,6 +141,53 @@ describe('resetStudentAccess', () => {
         expect((callEdgeFunction.mock.calls[2] as [string, Record<string, unknown>])[1]).not.toHaveProperty(
             'resetToken',
         );
+    });
+
+    it('a reset whose password write could not be confirmed says to try again in a few minutes, and keeps the token', async () => {
+        // 20261022110800: the server quarantines the attempt, so the next try
+        // is held off until the write is confirmed or the hold runs out.
+        const token = '7a2d3b51-2c3d-4e4f-9a01-123456789abc';
+        callEdgeFunction.mockResolvedValueOnce(
+            jsonResponse({ error: 'whatever the server said', code: 'reset_unconfirmed', resetToken: token }, 502),
+        );
+        await expect(resetStudentAccess('s-unsure')).rejects.toThrow(RESET_UNCONFIRMED_MESSAGE);
+        expect(RESET_UNCONFIRMED_MESSAGE).toContain('held for up to 10 minutes');
+        expect(RESET_UNCONFIRMED_MESSAGE).toContain('Try the reset again in a few minutes.');
+
+        // The retry is told the reset is still finishing, in the server's words, and still sends the token.
+        callEdgeFunction.mockResolvedValueOnce(
+            jsonResponse(
+                {
+                    error: 'Another reset of this student is still finishing. Try again in a few minutes.',
+                    code: 'reset_in_progress',
+                },
+                409,
+            ),
+        );
+        await expect(resetStudentAccess('s-unsure')).rejects.toThrow('Try again in a few minutes.');
+        expect((callEdgeFunction.mock.calls[1] as [string, Record<string, unknown>])[1]).toMatchObject({
+            resetToken: token,
+        });
+    });
+
+    it('a deletion check that could not be answered keeps the token it hands back', async () => {
+        const token = '8b3e4c62-3d4e-4f50-8b12-23456789abcd';
+        callEdgeFunction.mockResolvedValueOnce(
+            jsonResponse(
+                {
+                    error: 'We could not check your account just now, so nothing was changed. Please try again in a minute.',
+                    code: 'deletion_check_unavailable',
+                    resetToken: token,
+                },
+                503,
+            ),
+        );
+        await expect(resetStudentAccess('s-check')).rejects.toThrow('Please try again in a minute.');
+        callEdgeFunction.mockResolvedValueOnce(jsonResponse({ loginCode: 'PQRS-TUVW-XYZ2', username: null }));
+        await resetStudentAccess('s-check');
+        expect((callEdgeFunction.mock.calls[1] as [string, Record<string, unknown>])[1]).toMatchObject({
+            resetToken: token,
+        });
     });
 
     it('another reset still finishing is reported in the server’s words, with no token sent', async () => {

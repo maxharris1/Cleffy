@@ -11,7 +11,8 @@
  * worker id and a fencing epoch) from reserveReset, and acts only while that
  * lease is the current one:
  *
- *   reserve -> fence -> password write -> fence -> end sessions -> complete
+ *   reserve -> deletion check -> fence -> password write -> fence
+ *     -> end sessions (lease checked in its own transaction) -> complete
  *
  * The fence is checked immediately before each Auth side effect. A stale
  * attempt -- a newer retry of the same token took over, or the student has
@@ -20,7 +21,23 @@
  * take over until it reports back (completes, or stopWorker on a failure) or
  * the hold runs out, because a password write already sent cannot be called
  * back.
+ *
+ * A failed password write reports back only when Auth DEFINITELY refused it
+ * (a 4xx other than 408). Any other failure -- a dropped connection, a
+ * timeout, a 5xx, a throw -- may still commit at Auth after the error came
+ * back, so the attempt is quarantined: it does not report back, and the hold
+ * stands (20261022110800_student_code_reset_quarantine.sql) until the write is
+ * confirmed or the hold runs out. The scramble carries a marker naming its
+ * worker (MARKER_KEY, in the same Auth update), and seeing it means the write
+ * has landed: the worker re-reads it straight after the error and carries on,
+ * and a later retry with the token re-reads it before reporting the
+ * quarantined worker back itself. The session revocation is a database call
+ * that checks the lease in its own transaction (end_student_sessions_fenced),
+ * so a late one from a stale worker does nothing.
  */
+
+/** The app_metadata key the scramble writes this worker's id to, in the same Auth update. */
+export const MARKER_KEY = 'code_reset_worker';
 
 export interface ResetLease {
     reservation: string;
@@ -29,19 +46,31 @@ export interface ResetLease {
 }
 
 export type ReserveResetAnswer =
-    ({ status: 'reserved' } & ResetLease) | { status: 'busy'; kind: 'reset' | 'claim' } | { status: 'not_found' };
+    | ({ status: 'reserved' } & ResetLease)
+    /** `worker`/`epoch`: this reset's own worker, inside an Auth call (only for the token's holder). */
+    | { status: 'busy'; kind: 'reset' | 'claim'; worker?: string; epoch?: number }
+    | { status: 'not_found' };
 
-export type AuthStep = { ok: true } | { ok: false; message: string };
+/** `definite`: Auth refused the write outright (a 4xx other than 408), so it cannot land later. */
+export type AuthStep = { ok: true } | { ok: false; message: string; definite?: boolean };
+
+/** Whether a failed Auth call's HTTP status says it was refused outright (not a timeout or a 5xx). */
+export const definiteRefusal = (status: unknown): boolean =>
+    typeof status === 'number' && status >= 400 && status < 500 && status !== 408;
 
 export interface CodeResetPorts {
     /** reserve_student_code_reset; throws (or returns null) when the RPC fails. */
     reserveReset(studentId: string, resumeToken: string | null): Promise<ReserveResetAnswer | null>;
     /** fence_student_code_reset: 'ok' to go ahead with the next Auth side effect. */
     fence(studentId: string, lease: ResetLease): Promise<'ok' | 'lost'>;
-    /** The Auth password write: a scramble nobody has seen. */
-    scramblePassword(studentUserId: string): Promise<AuthStep>;
-    /** Ends every open session (end_student_sessions). */
-    endSessions(studentUserId: string): Promise<AuthStep>;
+    /** account_deletion_pending() for the teacher, asked again right before the Auth write. */
+    deletionPending(): Promise<'clear' | 'pending' | 'unknown'>;
+    /** The Auth password write: a scramble nobody has seen, plus MARKER_KEY = lease.worker. */
+    scramblePassword(studentUserId: string, lease: ResetLease): Promise<AuthStep>;
+    /** Whether the Auth user carries MARKER_KEY = worker, i.e. that worker's write has landed. */
+    passwordWriteLanded(studentUserId: string, worker: string): Promise<boolean>;
+    /** end_student_sessions_fenced: 'lost' when this lease no longer owns the reset. */
+    endSessions(studentId: string, lease: ResetLease): Promise<AuthStep | 'lost'>;
     /** A fresh card and its hash. */
     mintCode(): Promise<{ code: string; hash: string }>;
     /** complete_student_code_reset. */
@@ -60,6 +89,12 @@ export type CodeResetOutcome =
     | { kind: 'unavailable' }
     /** Stopped part-way; the hold stays, and `resetToken` resumes it. */
     | { kind: 'incomplete'; resetToken: string }
+    /** The password write may still land: quarantined until confirmed or the hold runs out. */
+    | { kind: 'unconfirmed'; resetToken: string }
+    /** The teacher's account is being deleted; nothing was written to Auth. */
+    | { kind: 'deletion_pending' }
+    /** Whether the teacher's account is being deleted could not be checked; nothing was written. */
+    | { kind: 'deletion_unknown'; resetToken: string }
     /** Fenced out, or the completion was lost: a newer reset or a claim stands. */
     | { kind: 'lost' };
 
@@ -76,14 +111,36 @@ const fenced = async (
     }
 };
 
+const landed = async (ports: CodeResetPorts, studentUserId: string, worker: string): Promise<boolean> => {
+    try {
+        return await ports.passwordWriteLanded(studentUserId, worker);
+    } catch (err) {
+        ports.log(`could not re-read student account ${studentUserId}: ${String(err)}`);
+        return false;
+    }
+};
+
 export const runCodeReset = async (
     ports: CodeResetPorts,
     input: { studentId: string; studentUserId: string; resumeToken: string | null },
 ): Promise<CodeResetOutcome> => {
-    const { studentId, studentUserId } = input;
+    const { studentId, studentUserId, resumeToken } = input;
     let answer: ReserveResetAnswer | null;
     try {
-        answer = await ports.reserveReset(studentId, input.resumeToken);
+        answer = await ports.reserveReset(studentId, resumeToken);
+        // This reset's own worker is quarantined (or still inside its Auth
+        // call). Once its write is seen to have landed, nothing of it is in
+        // flight: report it back for it, and take a new lease.
+        if (
+            resumeToken &&
+            answer?.status === 'busy' &&
+            typeof answer.worker === 'string' &&
+            typeof answer.epoch === 'number' &&
+            (await landed(ports, studentUserId, answer.worker))
+        ) {
+            await ports.stopWorker(studentId, { reservation: resumeToken, worker: answer.worker, epoch: answer.epoch });
+            answer = await ports.reserveReset(studentId, resumeToken);
+        }
     } catch (err) {
         ports.log(`could not reserve student ${studentId} for a reset: ${String(err)}`);
         return { kind: 'unavailable' };
@@ -101,7 +158,8 @@ export const runCodeReset = async (
 
     // From here a failure keeps the reservation (the password may already be
     // scrambled, and the old card must not be claimable as if nothing had
-    // happened) but reports this worker back, so the token resumes at once.
+    // happened) but reports this worker back, so the token resumes at once --
+    // except after a password write that may still land, which is quarantined.
     const incomplete = async (): Promise<CodeResetOutcome> => {
         try {
             await ports.stopWorker(studentId, lease);
@@ -111,6 +169,23 @@ export const runCodeReset = async (
         return { kind: 'incomplete', resetToken: lease.reservation };
     };
 
+    // The dispatcher asked before the action began; asked again here, right
+    // before the Auth write, which no database trigger can refuse (decision 61).
+    let deletion: 'clear' | 'pending' | 'unknown';
+    try {
+        deletion = await ports.deletionPending();
+    } catch (err) {
+        ports.log(`could not check the deletion of the teacher of student ${studentId}: ${String(err)}`);
+        deletion = 'unknown';
+    }
+    if (deletion !== 'clear') {
+        // Nothing was sent to Auth: report back, so the token resumes later.
+        await incomplete();
+        return deletion === 'pending'
+            ? { kind: 'deletion_pending' }
+            : { kind: 'deletion_unknown', resetToken: lease.reservation };
+    }
+
     // Before the password write: still this worker's reset, and no claim since?
     const beforeScramble = await fenced(ports, studentId, lease);
     if (beforeScramble === 'lost') {
@@ -119,10 +194,23 @@ export const runCodeReset = async (
     if (beforeScramble === 'error') {
         return incomplete();
     }
-    const scrambled = await ports.scramblePassword(studentUserId);
+    let scrambled: AuthStep;
+    try {
+        scrambled = await ports.scramblePassword(studentUserId, lease);
+    } catch (err) {
+        scrambled = { ok: false, message: String(err) };
+    }
     if (!scrambled.ok) {
         ports.log(`could not revoke the password for student ${studentId}: ${scrambled.message}`);
-        return incomplete();
+        if (scrambled.definite) {
+            return incomplete();
+        }
+        // It may still land. Carry on only if it is seen to have; otherwise
+        // stay inside the Auth call -- no report-back -- so no retry or claim
+        // can start behind a write still on its way.
+        if (!(await landed(ports, studentUserId, lease.worker))) {
+            return { kind: 'unconfirmed', resetToken: lease.reservation };
+        }
     }
 
     // Again before the session revocation, which would end a student's fresh
@@ -134,7 +222,10 @@ export const runCodeReset = async (
     if (beforeSessions === 'error') {
         return incomplete();
     }
-    const ended = await ports.endSessions(studentUserId);
+    const ended = await ports.endSessions(studentId, lease);
+    if (ended === 'lost') {
+        return { kind: 'lost' };
+    }
     if (!ended.ok) {
         ports.log(`could not end the sessions of student ${studentId}: ${ended.message}`);
         return incomplete();

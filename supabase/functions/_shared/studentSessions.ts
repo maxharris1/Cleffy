@@ -46,3 +46,41 @@ export const endStudentSessions = async (
         return { ok: false, message: messageOf(err) };
     }
 };
+
+/** A teacher reset's worker lease (studentCodeReset.ts's ResetLease). */
+export interface SessionsLease {
+    reservation: string;
+    worker: string;
+    epoch: number;
+}
+
+/**
+ * The code reset's revocation: end_student_sessions_fenced
+ * (20261022110800_student_code_reset_quarantine.sql) ends the sessions of
+ * roster row `studentId`'s account only while `lease` still owns the live
+ * reset, checked in the same transaction. `'lost'` when it no longer does
+ * (nothing was ended). Never throws, like endStudentSessions.
+ */
+export const endStudentSessionsFenced = async (
+    client: SessionsRpcClient,
+    studentId: string,
+    lease: SessionsLease,
+): Promise<EndSessionsResult | 'lost'> => {
+    try {
+        const { data, error } = await client.rpc('end_student_sessions_fenced', {
+            p_student: studentId,
+            p_reservation: lease.reservation,
+            p_worker: lease.worker,
+            p_epoch: lease.epoch,
+        });
+        if (error) {
+            return { ok: false, message: messageOf(error) };
+        }
+        if (data === null || data === undefined) {
+            return 'lost';
+        }
+        return { ok: true, ended: typeof data === 'number' ? data : 0 };
+    } catch (err) {
+        return { ok: false, message: messageOf(err) };
+    }
+};

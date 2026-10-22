@@ -726,6 +726,20 @@ reservation (after the hold ran out, or a claim commit under it) fences the
 reset out. Proven against the local stack on 2026-10-22: all 99 checks passed
 (73 before fix round 2).
 
+Since the P3 fix round 3 it also proves
+`20261022110800_student_code_reset_quarantine.sql` (section 9): a worker whose
+password write came back ambiguous does not report back, so a retry with the
+token is `busy` (and is handed that worker's lease, which a caller without the
+token is not), a claim of the old card waits, and the hold cannot be released;
+once the write is confirmed the retry reports the worker back and takes a newer
+lease, and the quarantined worker's delayed fence, session revocation and
+completion all do nothing; an attempt never confirmed holds the row for the
+full window from its fence, after which a retry gets a fresh reservation or the
+student claims the old card, and the stale worker can do nothing more; and
+`end_student_sessions_fenced` ends sessions only for the current worker of a
+live hold that has passed a fence, with no claim since. Proven against the
+local stack on 2026-10-22: all 125 checks passed (99 before fix round 3).
+
 `account_deletion_pending.sql` proves
 `20261022110100_account_deletion_pending.sql` (launchfix P3, SF-13): once
 `begin_account_deletion` has written the marker (holding the account's

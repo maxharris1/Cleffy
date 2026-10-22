@@ -207,6 +207,15 @@ export const RESET_INCOMPLETE_MESSAGE =
     'The reset did not finish. The student’s current card is held for up to 10 minutes, so it cannot be used meanwhile. Try the reset again.';
 
 /**
+ * The same when the server could not tell whether the student's password was
+ * changed (20261022110800_student_code_reset_quarantine.sql): the retry is held
+ * off until that is settled, so it says to try again in a few minutes
+ * (decision 60(a)).
+ */
+export const RESET_UNCONFIRMED_MESSAGE =
+    'The reset did not finish, and we could not confirm whether the student’s password was changed. Their current card is held for up to 10 minutes. Try the reset again in a few minutes.';
+
+/**
  * The hold a failed reset left, by student: sent with the next reset of that
  * student so it resumes its own hold (20261022110500_student_code_reset_holder.sql).
  * In memory only: after a reload the hold simply runs out.
@@ -236,13 +245,17 @@ export const resetStudentAccess = async (studentId: string): Promise<ResetResult
             .clone()
             .json()
             .catch(() => ({}))) as { code?: string; resetToken?: unknown };
+        // The server kept the reset's hold on the student's current card; the
+        // token lets the teacher's next try resume it instead of waiting. Any
+        // failure that hands one back is kept, not just reset_incomplete.
+        if (typeof failure.resetToken === 'string') {
+            pendingResetTokens.set(studentId, failure.resetToken);
+        }
         if (failure.code === 'reset_incomplete') {
-            // The server kept the reset's hold on the student's current card;
-            // the token lets the teacher's next try resume it instead of waiting.
-            if (typeof failure.resetToken === 'string') {
-                pendingResetTokens.set(studentId, failure.resetToken);
-            }
             throw new Error(RESET_INCOMPLETE_MESSAGE);
+        }
+        if (failure.code === 'reset_unconfirmed') {
+            throw new Error(RESET_UNCONFIRMED_MESSAGE);
         }
         if (failure.code === 'reset_lost') {
             pendingResetTokens.delete(studentId);

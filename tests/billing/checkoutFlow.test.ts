@@ -10,6 +10,7 @@ import {
     BODY_MAX_BYTES,
     CHECKOUT_ATTEMPT_STALE_AFTER,
     CHECKOUT_ATTEMPT_STALE_AFTER_MS,
+    CHECKOUT_DELETION_CHECK_UNAVAILABLE,
     CHECKOUT_DELETION_PENDING,
     checkoutIdempotencyKey,
     EDGE_FUNCTION_WALL_CLOCK_MS,
@@ -1334,6 +1335,26 @@ describe('stripe-checkout flow', () => {
             expect(await body(response)).toEqual(CHECKOUT_DELETION_PENDING);
             expect(h.deps.createSession).not.toHaveBeenCalled();
             expect(h.deps.releaseAttempt).not.toHaveBeenCalled();
+        });
+
+        it('refuses, as a 503 retry prompt, when it cannot tell whether the account is being deleted', async () => {
+            // Fails closed (decision 60(b)): nothing was taken, and the next try
+            // usually gets its answer.
+            const h = harness({ customerId: 'cus_1' });
+            (h.deps.beginAttempt as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+                ok: false,
+                reason: 'deletion_check_failed',
+                error: new Error('rpc down'),
+            });
+
+            const response = await handleCheckout(post(), h.deps);
+
+            expect(response.status).toBe(503);
+            expect(await body(response)).toEqual(CHECKOUT_DELETION_CHECK_UNAVAILABLE);
+            expect(CHECKOUT_DELETION_CHECK_UNAVAILABLE.error).toMatch(/try again in a minute/);
+            expect(h.deps.createSession).not.toHaveBeenCalled();
+            expect(h.deps.releaseAttempt).not.toHaveBeenCalled();
+            expect(h.errors).toEqual(['deletion_check_failed']);
         });
 
         it("refuses when Stripe's own subscription list cannot be read", async () => {

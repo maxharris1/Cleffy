@@ -3,7 +3,11 @@ import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
 import { readTeacherAttestation, type TeacherAttestation } from '../_shared/consentAge.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../_shared/deletionPending.ts';
+import {
+    ACCOUNT_DELETION_PENDING,
+    accountDeletionPending,
+    DELETION_CHECK_UNAVAILABLE,
+} from '../_shared/deletionPending.ts';
 import { checkDistrictChoice, type DistrictRpc } from '../_shared/districtProvision.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements } from '../_shared/entitlements.ts';
@@ -14,8 +18,14 @@ import { mailLimit } from '../_shared/mailBudget.ts';
 import { loginThrottleSecret, refundRateLimit } from '../_shared/rateLimit.ts';
 import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 import { reserveStudentAccountMail, studentMailRefusal } from '../_shared/studentAccountMail.ts';
-import { type CodeResetPorts, type ReserveResetAnswer, runCodeReset } from '../_shared/studentCodeReset.ts';
-import { endStudentSessions } from '../_shared/studentSessions.ts';
+import {
+    type CodeResetPorts,
+    definiteRefusal,
+    MARKER_KEY,
+    type ReserveResetAnswer,
+    runCodeReset,
+} from '../_shared/studentCodeReset.ts';
+import { endStudentSessions, endStudentSessionsFenced } from '../_shared/studentSessions.ts';
 import {
     formatLoginCode,
     generateLoginCode,
@@ -327,6 +337,32 @@ const DELETION_PENDING = {
  */
 const RESET_INCOMPLETE_MESSAGE =
     'The reset did not finish. The student’s current card is held for up to 10 minutes, so it cannot be used meanwhile. Try the reset again.';
+
+/**
+ * The same, when the password write may still land (20261022110800): a retry
+ * waits for it (decision 60(a)). The roster UI shows these words for code
+ * 'reset_unconfirmed'.
+ */
+const RESET_UNCONFIRMED_MESSAGE =
+    'The reset did not finish, and we could not confirm whether the student’s password was changed. Their current card is held for up to 10 minutes. Try the reset again in a few minutes.';
+
+/**
+ * account_deletion_pending() for the teacher, as the dispatcher asks it: null
+ * when clear, else the refusal (409 while pending; 503 when it cannot be
+ * answered, decision 60(b)). Asked again right before the Auth writes that give
+ * a student access back -- a reset's scramble, a restore's unban -- since the
+ * dispatcher's answer can be stale by then (decision 61). Revocations (an
+ * archive's ban) and the creation path (whose intent the deletion sees, and
+ * whose student flag must land so it can) are not re-asked.
+ */
+const deletionRefusal = async (admin: SupabaseClient, userId: string): Promise<Response | null> => {
+    const pending = await accountDeletionPending(admin, userId);
+    if (!pending.ok) {
+        console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+        return jsonResponse(DELETION_CHECK_UNAVAILABLE, 503);
+    }
+    return pending.pending ? jsonResponse(ACCOUNT_DELETION_PENDING, 409) : null;
+};
 
 /** Whether an insert was refused by the deletion-pending trigger. */
 const isDeletionPending = (error: { code?: string; message?: string } | null): boolean =>
@@ -688,7 +724,7 @@ const createStudent = async (admin: SupabaseClient, userId: string, body: Provis
 };
 
 /** The code reset's database and Auth calls (../_shared/studentCodeReset.ts). */
-const codeResetPorts = (admin: SupabaseClient): CodeResetPorts => ({
+const codeResetPorts = (admin: SupabaseClient, userId: string): CodeResetPorts => ({
     reserveReset: async (studentId, resumeToken) => {
         const { data, error } = await admin.rpc('reserve_student_code_reset', {
             p_student: studentId,
@@ -711,15 +747,35 @@ const codeResetPorts = (admin: SupabaseClient): CodeResetPorts => ({
         }
         return data === 'ok' ? 'ok' : 'lost';
     },
-    scramblePassword: async (studentUserId) => {
+    deletionPending: async () => {
+        const pending = await accountDeletionPending(admin, userId);
+        if (!pending.ok) {
+            console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+            return 'unknown';
+        }
+        return pending.pending ? 'pending' : 'clear';
+    },
+    // The marker rides in the same Auth update as the password (one GoTrue
+    // transaction; app_metadata keys merge), so seeing it means the write landed.
+    scramblePassword: async (studentUserId, lease) => {
         const { error } = await admin.auth.admin.updateUserById(studentUserId, {
             password: generateProvisionPassword(),
+            app_metadata: { [MARKER_KEY]: lease.worker },
         });
-        return error ? { ok: false, message: error.message } : { ok: true };
+        return error
+            ? { ok: false, message: error.message, definite: definiteRefusal((error as { status?: unknown }).status) }
+            : { ok: true };
     },
-    endSessions: async (studentUserId) => {
-        const ended = await endStudentSessions(admin, studentUserId);
-        return ended.ok ? { ok: true } : ended;
+    passwordWriteLanded: async (studentUserId, worker) => {
+        const { data, error } = await admin.auth.admin.getUserById(studentUserId);
+        if (error || !data.user) {
+            throw new Error(error?.message ?? 'no user returned');
+        }
+        return data.user.app_metadata?.[MARKER_KEY] === worker;
+    },
+    endSessions: async (studentId, lease) => {
+        const ended = await endStudentSessionsFenced(admin, studentId, lease);
+        return ended === 'lost' ? 'lost' : ended.ok ? { ok: true } : ended;
     },
     mintCode: async () => {
         const code = generateLoginCode();
@@ -783,6 +839,14 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
         const mail = await reserveStudentMail(userId, row.student_email);
         if (!mail.ok) {
             return jsonResponse(studentMailRefusal(mail), 429);
+        }
+
+        // Asked again right before the scramble; nothing was sent, so the
+        // link's place goes back on a refusal.
+        const refused = await deletionRefusal(admin, userId);
+        if (refused) {
+            await mail.release();
+            return refused;
         }
 
         const { error: scrambleError } = await admin.auth.admin.updateUserById(row.student_user_id, {
@@ -866,7 +930,7 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
     // alone: the claim overwrites it, so keeping the old name is the student's
     // choice.
     const resumeToken = typeof body.resetToken === 'string' && uuidRe.test(body.resetToken) ? body.resetToken : null;
-    const outcome = await runCodeReset(codeResetPorts(admin), {
+    const outcome = await runCodeReset(codeResetPorts(admin, userId), {
         studentId: row.id,
         studentUserId: row.student_user_id,
         resumeToken,
@@ -899,6 +963,18 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
                 { error: RESET_INCOMPLETE_MESSAGE, code: 'reset_incomplete', resetToken: outcome.resetToken },
                 502,
             );
+        case 'unconfirmed':
+            // Quarantined (20261022110800): the password write may still land,
+            // so the hold stays and a retry waits until it is confirmed or the
+            // hold runs out. The token is what lets that retry confirm it.
+            return jsonResponse(
+                { error: RESET_UNCONFIRMED_MESSAGE, code: 'reset_unconfirmed', resetToken: outcome.resetToken },
+                502,
+            );
+        case 'deletion_pending':
+            return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
+        case 'deletion_unknown':
+            return jsonResponse({ ...DELETION_CHECK_UNAVAILABLE, resetToken: outcome.resetToken }, 503);
         case 'lost':
             // A newer try of this reset, or the student's claim, stands; this
             // one stopped before touching anything it no longer owned.
@@ -1010,6 +1086,12 @@ const restoreStudent = async (admin: SupabaseClient, userId: string, body: Provi
     // Recorded before anything changes, so a restore never happens unrecorded.
     if (!(await recordAttestation(admin, userId, owned.row.id, 'restore', checked.attestation))) {
         return jsonResponse({ error: 'Could not record the age confirmation' }, 502);
+    }
+
+    // Asked again right before the unban, which gives the student access back.
+    const refused = await deletionRefusal(admin, userId);
+    if (refused) {
+        return refused;
     }
 
     // The ban comes off BEFORE the row comes back, so the two can only ever fail
@@ -1158,7 +1240,7 @@ Deno.serve(async (req) => {
     const pending = await accountDeletionPending(admin, userId);
     if (!pending.ok) {
         console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
-        return jsonResponse({ error: 'Could not check your account. Please try again.' }, 502);
+        return jsonResponse(DELETION_CHECK_UNAVAILABLE, 503);
     }
     if (pending.pending) {
         return jsonResponse(ACCOUNT_DELETION_PENDING, 409);

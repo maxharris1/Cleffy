@@ -4,7 +4,11 @@ import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { CHECKOUT_ATTEMPT_STALE_AFTER } from '../../supabase/functions/_shared/checkoutFlow';
-import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../../supabase/functions/_shared/deletionPending';
+import {
+    ACCOUNT_DELETION_PENDING,
+    accountDeletionPending,
+    DELETION_CHECK_UNAVAILABLE,
+} from '../../supabase/functions/_shared/deletionPending';
 
 /**
  * The deletion-pending marker (20261022110100_account_deletion_pending.sql)
@@ -14,6 +18,13 @@ import { ACCOUNT_DELETION_PENDING, accountDeletionPending } from '../../supabase
  * auth account. tests/sql/account_deletion_pending.sql proves the SQL.
  */
 const read = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8');
+
+/** `check` comes before `first` in `body`, and both exist. */
+const before = (body: string, check: string, first: string) => {
+    const at = body.indexOf(check);
+    expect(at, check).toBeGreaterThan(-1);
+    expect(body.indexOf(first), first).toBeGreaterThan(at);
+};
 
 describe('deletion-pending wiring', () => {
     it('delete-account binds the marker ports to their RPCs', () => {
@@ -144,13 +155,6 @@ describe('service-role writers ask account_deletion_pending() first (Codex r2 on
         expect(ACCOUNT_DELETION_PENDING.code).toBe('account_deletion_pending');
     });
 
-    /** `check` comes before `first` in `body`, and both exist. */
-    const before = (body: string, check: string, first: string) => {
-        const at = body.indexOf(check);
-        expect(at, check).toBeGreaterThan(-1);
-        expect(body.indexOf(first), first).toBeGreaterThan(at);
-    };
-
     it('student-provision: before any action runs (Auth writes no trigger can refuse)', () => {
         const source = read('supabase/functions/student-provision/index.ts');
         const serve = source.slice(source.indexOf('Deno.serve('));
@@ -185,10 +189,84 @@ describe('service-role writers ask account_deletion_pending() first (Codex r2 on
             'supabase/functions/stripe-checkout/index.ts',
             'supabase/functions/imslp-download/index.ts',
             'supabase/functions/score-analyze/index.ts',
+            'supabase/functions/student-claim/index.ts',
         ]) {
             const source = read(path);
             const at = source.indexOf('await accountDeletionPending(');
             expect(source.slice(at, at + 400), path).toMatch(/if \(!pending\.ok\) \{[\s\S]{0,250}?return /);
         }
+    });
+
+    it('a failed check is a 503 with a retry message, not a bare 502 (decision 60(b))', () => {
+        expect(DELETION_CHECK_UNAVAILABLE.code).toBe('deletion_check_unavailable');
+        expect(DELETION_CHECK_UNAVAILABLE.error).toMatch(/try again in a minute/i);
+        for (const path of [
+            'supabase/functions/student-provision/index.ts',
+            'supabase/functions/imslp-download/index.ts',
+            'supabase/functions/score-analyze/index.ts',
+        ]) {
+            const source = read(path);
+            const sites = [...source.matchAll(/await accountDeletionPending\(/g)].map((m) => m.index ?? 0);
+            expect(sites.length, path).toBeGreaterThan(0);
+            for (const at of sites) {
+                // What the `!pending.ok` branch returns: the 503 itself, or a
+                // port's 'unknown' that the code using it answers with one.
+                const returned = /if \(!pending\.ok\) \{[\s\S]*?return ([^;]*);/.exec(source.slice(at, at + 500))?.[1];
+                expect(returned, path).toMatch(
+                    /^jsonResponse\(\{? ?(?:ok: false, \.\.\.)?DELETION_CHECK_UNAVAILABLE(?: \})?, 503\)$|^'unknown'$/,
+                );
+            }
+        }
+        const provision = read('supabase/functions/student-provision/index.ts');
+        expect(provision).toContain(
+            "case 'deletion_unknown':\n            return jsonResponse({ ...DELETION_CHECK_UNAVAILABLE, resetToken: outcome.resetToken }, 503);",
+        );
+        // stripe-checkout hands the failure to checkoutFlow, which answers 503.
+        const checkout = read('supabase/functions/stripe-checkout/index.ts');
+        const begin = checkout.slice(checkout.indexOf('beginAttempt: async'));
+        expect(begin.slice(0, 900)).toContain("reason: 'deletion_check_failed'");
+        const flow = read('supabase/functions/_shared/checkoutFlow.ts');
+        expect(flow).toMatch(
+            /start\.reason === 'deletion_check_failed'\) \{[\s\S]{0,160}?deps\.json\(CHECKOUT_DELETION_CHECK_UNAVAILABLE, 503\)/,
+        );
+        // student-claim's handler answers the port's 'unknown' with its own 503.
+        const claim = read('supabase/functions/student-claim/handler.ts');
+        expect(claim).toContain('json(CLAIM_CHECK_UNAVAILABLE, 503)');
+    });
+});
+
+describe('the deletion check is asked again right before the later Auth writes (decision 61)', () => {
+    it('student-provision: before the reset scramble on both paths, and before the restore unban', () => {
+        const source = read('supabase/functions/student-provision/index.ts');
+        const reset = source.slice(
+            source.indexOf('const resetStudentAccess = async'),
+            source.indexOf('const archiveStudent'),
+        );
+        before(reset, 'await deletionRefusal(admin, userId)', 'admin.auth.admin.updateUserById(row.student_user_id, {');
+        const restore = source.slice(source.indexOf('const restoreStudent = async'));
+        before(restore, 'await deletionRefusal(admin, userId)', "ban_duration: 'none'");
+        // The code path: the worker's port, asked after the reservation and before the first fence.
+        const ports = source.slice(
+            source.indexOf('const codeResetPorts = '),
+            source.indexOf('const resetStudentAccess'),
+        );
+        expect(ports).toMatch(
+            /deletionPending: async \(\) => \{\s+const pending = await accountDeletionPending\(admin, userId\);/,
+        );
+        const worker = read('supabase/functions/_shared/studentCodeReset.ts');
+        const run = worker.slice(worker.indexOf('export const runCodeReset'));
+        before(run, 'await ports.reserveReset(', 'await ports.deletionPending()');
+        before(run, 'await ports.deletionPending()', 'await fenced(ports, studentId, lease)');
+    });
+
+    it('student-claim: for the card’s teacher, after the reservation and before the password write', () => {
+        const index = read('supabase/functions/student-claim/index.ts');
+        const port = index.slice(index.indexOf('teacherDeletionPending: async'));
+        expect(port.slice(0, 800)).toContain(".select('teacher_id')");
+        expect(port.slice(0, 800)).toContain('await accountDeletionPending(admin, data.teacher_id as string)');
+        const handler = read('supabase/functions/student-claim/handler.ts');
+        const flow = handler.slice(handler.indexOf('export const handleStudentClaim'));
+        before(flow, 'await backend.reserveClaim(', 'await backend.teacherDeletionPending(studentId)');
+        before(flow, 'await backend.teacherDeletionPending(studentId)', 'await backend.setPassword(');
     });
 });

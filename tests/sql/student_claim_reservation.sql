@@ -25,6 +25,12 @@
 --      its fence and its completion; a worker inside an Auth call cannot be
 --      taken over or released under; a claim since the reservation fences the
 --      reset out.
+--   9. (20261022110800_student_code_reset_quarantine.sql) a password write
+--      whose outcome is unknown quarantines the attempt: the worker does not
+--      report back, so a retry and a claim both wait until the write is
+--      confirmed (the retry, holding the token, is handed the worker's lease
+--      and reports it back) or the hold runs out; and the session revocation
+--      checks the lease in its own transaction (end_student_sessions_fenced).
 --
 -- Runs inside one transaction and ROLLS BACK -- nothing persists. Same harness
 -- and reading as tests/sql/launch_checkout_fixes.sql:
@@ -107,6 +113,12 @@ select public.complete_student_code_reset (pg_temp.u(200 + p_n), pg_temp.res(p_l
 create function pg_temp.stop(p_label text, p_n int) returns boolean language sql as $f$
 select public.stop_student_code_reset_worker (pg_temp.u(200 + p_n), pg_temp.res(p_label),
     (select worker from t_lease where label = p_label), (select epoch from t_lease where label = p_label)) $f$;
+create function pg_temp.end_sessions(p_label text, p_n int) returns int language sql as $f$
+select public.end_student_sessions_fenced (pg_temp.u(200 + p_n), pg_temp.res(p_label),
+    (select worker from t_lease where label = p_label), (select epoch from t_lease where label = p_label)) $f$;
+-- reserve_student_code_reset's raw answer for student `n`, presenting the token under `p_token`.
+create function pg_temp.reset_answer(p_n int, p_token text default null) returns jsonb language sql as $f$
+select public.reserve_student_code_reset (pg_temp.u(200 + p_n), pg_temp.res(p_token)) $f$;
 create function pg_temp.epoch(p_label text) returns bigint language sql as $f$ select epoch from t_lease where label = p_label $f$;
 create function pg_temp.reset_kind(p_n int) returns text language sql as $f$ select public.reserve_student_code_reset (pg_temp.u(200 + p_n)) ->> 'kind' $f$;
 create function pg_temp.status(p_hash text) returns text language sql as $f$ select public.reserve_student_claim (p_hash) ->> 'status' $f$;
@@ -119,10 +131,10 @@ insert into auth.users (id, aud, role, email)
 values (pg_temp.u(1), 'authenticated', 'authenticated', 'claim-teacher@example.invalid');
 insert into auth.users (id, aud, role, email, raw_app_meta_data)
 select pg_temp.u(100 + n), 'authenticated', 'authenticated', 'st-claim-' || n || '@students.cleffy.app', '{"user_type":"student"}'
-from generate_series (1, 13) n;
+from generate_series (1, 17) n;
 insert into public.managed_students (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method)
 select pg_temp.u(200 + n), pg_temp.u(1), pg_temp.u(100 + n), 'Student ' || n, 'hash-' || n, 'code'
-from generate_series (1, 13) n;
+from generate_series (1, 17) n;
 
 select pg_temp.as_service();
 
@@ -386,6 +398,86 @@ $q$select not exists (select 1 from pg_proc where proname = 'complete_student_co
                      and pronargs = 3)$q$);
 
 -- ===========================================================================
+-- 9. An Auth write whose outcome is unknown quarantines the attempt (Codex r3
+--    MAJOR; 20261022110800_student_code_reset_quarantine.sql)
+-- ===========================================================================
+-- Student 14: worker A passes its fence and sends the scramble; the transport
+-- fails, so A does NOT report back. Later the write is seen to have landed.
+select pg_temp.chk('100 A reserves and passes its fence; its password write comes back ambiguous',
+$q$select pg_temp.reset ('14a', 14) = 'reserved' and pg_temp.fence ('14a', 14) = 'ok'$q$);
+select pg_temp.chk('100a a retry with the token is told the reset is still finishing, and handed A''s lease',
+$q$select v ->> 'status' = 'busy' and v ->> 'kind' = 'reset'
+      and (v ->> 'worker')::uuid = (select worker from t_lease where label = '14a')
+      and (v ->> 'epoch')::bigint = pg_temp.epoch('14a')
+   from pg_temp.reset_answer (14, '14a') v$q$);
+select pg_temp.chk('100b ... a caller without the token is refused and handed nothing',
+$q$select v ->> 'status' = 'busy' and not (v ? 'worker') and not (v ? 'epoch') from pg_temp.reset_answer (14) v$q$);
+select pg_temp.chk('100c ... a claim of the old card waits',
+$q$select pg_temp.status ('hash-14') = 'busy'$q$);
+select pg_temp.chk('100d ... and the hold cannot be released under A',
+$q$select not public.release_student_code_reset (pg_temp.u(214), pg_temp.res('14a'))$q$);
+-- A's write is confirmed (the marker it carried is on the Auth user): the
+-- retry reports A back with A's lease, then takes a lease of its own.
+select pg_temp.chk('101 once confirmed, the retry reports A back and takes a newer lease',
+$q$select pg_temp.stop ('14a', 14) and pg_temp.reset ('14b', 14, '14a') = 'reserved'
+      and pg_temp.res('14b') = pg_temp.res('14a') and pg_temp.epoch('14b') > pg_temp.epoch('14a')$q$);
+select pg_temp.chk('101a A''s delayed steps do nothing: no fence, no session revocation, no completion',
+$q$select pg_temp.fence ('14a', 14) = 'lost' and pg_temp.end_sessions ('14a', 14) is null
+      and pg_temp.complete_reset ('14a', 14, 'hash-14-a') = 'lost'$q$);
+select pg_temp.chk('101b B fences, ends the sessions under its own lease, and completes',
+$q$select pg_temp.fence ('14b', 14) = 'ok' and pg_temp.fence ('14b', 14) = 'ok'
+      and pg_temp.end_sessions ('14b', 14) is not null
+      and pg_temp.complete_reset ('14b', 14, 'hash-14-b') = 'reset'$q$);
+select pg_temp.chk('101c the student claims B''s card',
+$q$select pg_temp.reserve ('14c', 'hash-14-b')
+      and public.complete_student_claim (pg_temp.u(214), pg_temp.res('14c'), 'hash-14-b', 'ivy_fourteen') = 'claimed'$q$);
+select pg_temp.chk('101d ... and neither worker''s session revocation can land after the claim',
+$q$select pg_temp.end_sessions ('14a', 14) is null and pg_temp.end_sessions ('14b', 14) is null$q$);
+-- Student 15: never confirmed. The hold the fence renewed is the time limit.
+-- (Reads of the table are checks of their own: a subquery would see the
+-- statement's snapshot, from before the calls beside it.)
+select pg_temp.chk('102 an unconfirmed attempt: A reserves and passes its fence',
+$q$select pg_temp.reset ('15a', 15) = 'reserved' and pg_temp.fence ('15a', 15) = 'ok'$q$);
+select pg_temp.chk('102a ... and holds the row, inside its Auth call, for the full window from its fence',
+$q$select reserved_until >= now() + interval '600 seconds' and worker_in_auth
+   from public.student_claim_reservations where student_id = pg_temp.u(215)$q$);
+select pg_temp.chk('102b ... the retry and the claim both wait meanwhile',
+$q$select pg_temp.reset ('15b', 15, '15a') = 'busy' and pg_temp.status ('hash-15') = 'busy'$q$);
+update public.student_claim_reservations set reserved_until = now() - interval '1 second' where student_id = pg_temp.u(215);
+select pg_temp.chk('103 once the limit passes, the retry gets a fresh reservation',
+$q$select pg_temp.reset ('15b', 15, '15a') = 'reserved' and pg_temp.res('15b') <> pg_temp.res('15a')$q$);
+select pg_temp.chk('103a ... and the quarantined worker can do nothing more',
+$q$select pg_temp.fence ('15a', 15) = 'lost' and pg_temp.end_sessions ('15a', 15) is null
+      and pg_temp.complete_reset ('15a', 15, 'hash-15-a') = 'lost'$q$);
+-- Student 16: never confirmed, nobody retries; the limit passes and the
+-- student claims the old card.
+select pg_temp.chk('103b an unconfirmed attempt runs out, and the old card can be claimed',
+$q$select pg_temp.reset ('16a', 16) = 'reserved' and pg_temp.fence ('16a', 16) = 'ok'
+      and pg_temp.status ('hash-16') = 'busy'$q$);
+update public.student_claim_reservations set reserved_until = now() - interval '1 second' where student_id = pg_temp.u(216);
+select pg_temp.chk('103c ... (the claim)',
+$q$select pg_temp.reserve ('16c', 'hash-16')
+      and public.complete_student_claim (pg_temp.u(216), pg_temp.res('16c'), 'hash-16', 'ned_sixteen') = 'claimed'$q$);
+select pg_temp.chk('103d ... after which the stale worker can neither fence, end sessions, nor complete',
+$q$select pg_temp.fence ('16a', 16) = 'lost' and pg_temp.end_sessions ('16a', 16) is null
+      and pg_temp.complete_reset ('16a', 16, 'hash-16-a') = 'lost'$q$);
+-- Student 17: end_student_sessions_fenced checks the lease itself.
+select pg_temp.chk('104 a worker that has not passed a fence cannot end the sessions',
+$q$select pg_temp.reset ('17a', 17) = 'reserved' and pg_temp.end_sessions ('17a', 17) is null$q$);
+select pg_temp.chk('104a ... so nothing was stamped',
+$q$select access_revoked_at is null from public.managed_students where id = pg_temp.u(217)$q$);
+select pg_temp.chk('104b after its fence it can',
+$q$select pg_temp.fence ('17a', 17) = 'ok' and pg_temp.end_sessions ('17a', 17) = 0$q$);
+select pg_temp.chk('104c ... and the revocation is stamped',
+$q$select access_revoked_at is not null from public.managed_students where id = pg_temp.u(217)$q$);
+select pg_temp.chk('104d a newer lease of the same token fences the older one out of it',
+$q$select pg_temp.stop ('17a', 17) and pg_temp.reset ('17b', 17, '17a') = 'reserved'
+      and pg_temp.fence ('17b', 17) = 'ok' and pg_temp.end_sessions ('17a', 17) is null$q$);
+update public.managed_students set claimed_at = now(), login_code_hash = null, username = 'oz_seventeen' where id = pg_temp.u(217);
+select pg_temp.chk('104e a claim since the reservation fences even the current worker out of it',
+$q$select pg_temp.end_sessions ('17b', 17) is null$q$);
+
+-- ===========================================================================
 -- 6. Service role only
 -- ===========================================================================
 select pg_temp.as_user(1);
@@ -405,11 +497,15 @@ select pg_temp.refused('73c ... or fence one',
 $q$select public.fence_student_code_reset (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1)$q$, '42501');
 select pg_temp.refused('73d ... or stop its worker',
 $q$select public.stop_student_code_reset_worker (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1)$q$, '42501');
+select pg_temp.refused('73e ... or end a student''s sessions as a reset worker',
+$q$select public.end_student_sessions_fenced (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1)$q$, '42501');
 select pg_temp.refused('74 ... or read the reservations',
 $q$select count(*) from public.student_claim_reservations$q$, '42501');
 select pg_temp.as_anon();
 select pg_temp.refused('75 anon cannot reserve a claim',
 $q$select public.reserve_student_claim ('hash-6-new')$q$, '42501');
+select pg_temp.refused('75a ... or end a student''s sessions as a reset worker',
+$q$select public.end_student_sessions_fenced (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1)$q$, '42501');
 select pg_temp.refused('76 ... or read the reservations',
 $q$select count(*) from public.student_claim_reservations$q$, '42501');
 

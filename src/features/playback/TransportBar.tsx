@@ -47,6 +47,7 @@ const ERROR_COPY: Record<string, string> = {
     queue_full: 'The analysis service is busy — try again in a few minutes.',
     backlog_full: 'You already have several scores analyzing — try Generate again shortly.',
     service_unreachable: 'The analysis service is not reachable right now.',
+    deletion_check_unavailable: 'We could not check your account just now — try Generate again in a minute.',
     download_failed: 'The PDF could not be fetched for analysis.',
     worker_lost: 'The analysis was interrupted and will retry automatically.',
     stale: 'The analysis was interrupted.',
@@ -125,13 +126,12 @@ const StaleAnalysisNotice = (props: { engineVersion: string | null; canManage: b
         return null;
     }
     return (
-        <div className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900" role="status">
+        <div
+            className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900"
+            role="status"
+        >
             This play-along was made by an older version of the analysis.{' '}
-            <button
-                type="button"
-                onClick={props.onGenerate}
-                className="font-medium underline underline-offset-2"
-            >
+            <button type="button" onClick={props.onGenerate} className="font-medium underline underline-offset-2">
                 Regenerate it
             </button>{' '}
             to pick up the improvements.
@@ -155,7 +155,9 @@ const ScoreWarnings = (props: { warnings: readonly string[] }) => {
                 className="flex w-full items-center gap-1.5 text-left text-xs font-medium text-amber-900"
             >
                 {open ? <ChevronDownIcon size={13} /> : <ChevronUpIcon size={13} />}
-                {present.length === 1 ? '1 thing to know about this play-along' : `${present.length} things to know about this play-along`}
+                {present.length === 1
+                    ? '1 thing to know about this play-along'
+                    : `${present.length} things to know about this play-along`}
             </button>
             {open ? (
                 <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-xs text-amber-900">
@@ -478,7 +480,12 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
 
                 {/* Practice controls — collapsible on phones */}
                 <div className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 sm:flex`}>
-                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} inferred={tempoIsInferred(score)} />
+                    <TempoControl
+                        bpm={bpm}
+                        onBpm={setBpm}
+                        compound={isCompoundMeter(score)}
+                        inferred={tempoIsInferred(score)}
+                    />
 
                     <div className="mx-0.5 hidden h-6 w-px bg-stone-200 sm:block" />
 
