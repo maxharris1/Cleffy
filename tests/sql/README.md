@@ -858,6 +858,43 @@ peer_password=...` for anything but the local stack's password. Proven on
 2026-10-22: all 41 checks passed; with the pre-fix definitions restored, 20 of
 them fail (the deadlock aborts the deletion in D1 and D2).
 
+Since `20261022120200_realtime_archive_recovery.sql` (Codex round 2 on #71,
+decision 55) `realtime_revocation_rotation.sql` also shows that archiving is a
+temporary denial: `realtime_topic_access` tells a member of an archived score
+`{"status":"archived"}` (wait), the owner and an editor alike, on the token
+issued before the archive, while a non-member is told null as for any score it
+cannot open; once restored, the same token is told `{"status":"open","epoch":1}`
+and joins generation 1, not 0, sending and tracking there again, with no second
+rotation. It also checks who may call `realtime_topic_access` (signed-in users,
+not anon), that a deleted score answers null, and that `redeem_share_link`
+takes the roster lock before the membership. Proven against the local stack
+(Realtime started) on 2026-10-22: all 88 checks passed.
+
+`realtime_revocation_race.sql` adds H1/H2: a share redemption against the
+district hard delete (`retention_district_run`) of the redeeming student. H1:
+the redemption first, held open -- the hard delete waits on the roster row it
+holds, then deletes the student, no deadlock. H2: the hard delete first,
+stopped by a third session holding the student's account row between its
+roster lock and the account's deletion; the student then redeems a link to a
+score they are already on -- the redemption waits on the roster row before it
+touches the membership, so the hard delete's cascade never waits on it, and
+the redemption fails on the deleted account instead (a foreign-key error, not a
+deadlock). Each first checks that only its own district is due, since the run
+hard-deletes every due district. Its cleanup now also removes what deleting
+its fixtures leaves behind (`document_storage_cleanup`, `district_billing_log`,
+the membership hints in `realtime.messages`), so a run leaves no rows. Proven
+on 2026-10-22: all 53 checks passed, on three runs; with the pre-fix
+`redeem_share_link` restored, H2e fails (PostgreSQL's deadlock detector aborts
+the redemption).
+
+Both proofs need the Realtime container running, not only its schema: the
+schema and `realtime.send` exist without it, but the day's `realtime.messages`
+partition the checks write to is created by Realtime. With that partition
+detached (inside a rolled-back transaction, Realtime stopped),
+`realtime_revocation_rotation.sql` fails 49 of its 88 checks. So they belong
+in a CI job that starts Realtime and checks that the partition exists (P1's
+every-proof `supabase-local` job does both), not in one that excludes it.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

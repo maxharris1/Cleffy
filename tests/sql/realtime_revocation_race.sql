@@ -19,7 +19,17 @@
 --      while the deletion waited on the removed membership);
 --   D2 the same with an editor turned viewer;
 --   C1 two removals rotating one score at once: the second tells the
---      generation the first moved it to, not the one both started from.
+--      generation the first moved it to, not the one both started from;
+--   H1 a share redemption, then the district hard delete of the redeeming
+--      student (20261022120200): the hard delete waits on the roster row the
+--      redemption holds, then deletes the student, no deadlock;
+--   H2 the hard delete first, stopped (by a third session holding the
+--      student's account row) between its roster lock and the account's
+--      deletion, then the student redeems a link to a score they are already
+--      on: the redemption waits on the roster row before it touches the
+--      membership, so the hard delete's cascade to that membership never
+--      waits on it. Before, the redemption locked the membership first, and
+--      PostgreSQL aborted one of the two (deadlock).
 --
 -- Each step that must wait is sent asynchronously and the proof polls
 -- pg_locks until that session is blocked before it moves the other one on;
@@ -173,10 +183,17 @@ create function pg_temp.member(p_doc uuid, n int) returns text language sql as $
 $f$;
 
 -- Leftovers of an earlier run that stopped half way, then this run's
--- fixtures, all committed by session a.
+-- fixtures, all committed by session a. A hard-deleted district's studio is
+-- gone, so its retention rows are found by their owner too.
 create function pg_temp.cleanup() returns void language plpgsql as $f$
 begin
 perform pg_temp.on('a', $s$delete from public.documents where title like 'P4 race %'$s$);
+perform pg_temp.on('a', $s$delete from public.district_retention_log where studio_id in (select r.studio_id from public.district_retention r
+    join auth.users u on u.id = r.owner_id where u.email like '%@revocation-race.test')$s$);
+perform pg_temp.on('a', $s$delete from public.district_retention_students where studio_id in (select r.studio_id from public.district_retention r
+    join auth.users u on u.id = r.owner_id where u.email like '%@revocation-race.test')$s$);
+perform pg_temp.on('a', $s$delete from public.district_retention r using auth.users u
+    where u.id = r.owner_id and u.email like '%@revocation-race.test'$s$);
 perform pg_temp.on('a', $s$delete from public.district_retention_students where studio_id in (select id from public.studios where name like 'P4 race %')$s$);
 perform pg_temp.on('a', $s$delete from public.district_retention_log where studio_id in (select id from public.studios where name like 'P4 race %')$s$);
 perform pg_temp.on('a', $s$delete from public.district_retention where studio_id in (select id from public.studios where name like 'P4 race %')$s$);
@@ -184,24 +201,37 @@ perform pg_temp.on('a', $s$delete from public.district_billing where studio_id i
 perform pg_temp.on('a', $s$delete from public.studios where name like 'P4 race %'$s$);
 perform pg_temp.on('a', $s$delete from public.managed_students where username like 'p4race_%'$s$);
 perform pg_temp.on('a', $s$delete from auth.users where email like '%@revocation-race.test'$s$);
+-- What the deletions above leave behind them, any run's (this proof's scores
+-- are {run}-0000-4000-8000-0000000001NN, its studios ...-0000000003NN): the
+-- storage cleanup queue of each deleted score, the billing log of each
+-- district, and, last, the hints they broadcast (membership changes).
+perform pg_temp.on('a', $s$delete from public.document_storage_cleanup
+    where document_id::text ~ '^[0-9a-f]{8}-0000-4000-8000-0000000001[0-9]{2}$'$s$);
+perform pg_temp.on('a', $s$delete from public.district_billing_log
+    where studio_id::text ~ '^[0-9a-f]{8}-0000-4000-8000-0000000003[0-9]{2}$'$s$);
+perform pg_temp.on('a', $s$delete from realtime.messages
+    where topic ~ '^doc(-db)?:[0-9a-f]{8}-0000-4000-8000-0000000001[0-9]{2}(:[0-9]+)?$'$s$);
 end $f$;
 select pg_temp.cleanup();
 
 --   users:  1 and 10 teachers; 2 (R1, R2), 3 (R3), 4 (R5) teacher 1's roster
 --           students, 6 (R4) teacher 10's; 5 and 11 district students of
 --           districts 1 and 2, whose owners are 7 and 13; 12 a third teacher;
---           8 and 14 collaborators.
+--           8 and 14 collaborators; 16 and 18 district students of districts
+--           3 and 4 (H1, H2), whose owners are 15 and 17.
 --   scores: 1-3 teacher 1's (R1, R2, R3); 4-6 teacher 10's (R4, R5, D1);
---           7 and 8 teacher 12's (D2, C1); 9 owner 7's, 10 owner 13's (R6).
+--           7 and 8 teacher 12's (D2, C1); 9 owner 7's, 10 owner 13's (R6);
+--           11 owner 15's (H1), 12 owner 17's (H2).
 --   (Three each: the free plan's cap.)
 select pg_temp.on('a', format($s$insert into auth.users (id, email, raw_app_meta_data, raw_user_meta_data, is_anonymous)
     select (%L || '-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'race-' || n || '@revocation-race.test',
-           case when n in (2, 3, 4, 5, 6, 11) then '{"user_type":"student"}'::jsonb else '{}'::jsonb end, '{}', false
-    from generate_series(1, 14) n$s$, current_setting('race.run')));
+           case when n in (2, 3, 4, 5, 6, 11, 16, 18) then '{"user_type":"student"}'::jsonb else '{}'::jsonb end, '{}', false
+    from generate_series(1, 18) n$s$, current_setting('race.run')));
 select pg_temp.on('a', format($s$insert into public.documents (id, owner_id, title, storage_path)
-    select d.id, (%1$L || '-0000-4000-8000-' || lpad((case when n <= 3 then 1 when n <= 6 then 10 when n <= 8 then 12 when n = 9 then 7 else 13 end)::text, 12, '0'))::uuid,
+    select d.id, (%1$L || '-0000-4000-8000-' || lpad((case when n <= 3 then 1 when n <= 6 then 10 when n <= 8 then 12 when n = 9 then 7
+                                                          when n = 10 then 13 when n = 11 then 15 else 17 end)::text, 12, '0'))::uuid,
            'P4 race ' || n, d.id::text || '/original.pdf'
-    from generate_series(1, 10) n, lateral (select (%1$L || '-0000-4000-8000-' || lpad((100 + n)::text, 12, '0'))::uuid as id) d$s$, current_setting('race.run')));
+    from generate_series(1, 12) n, lateral (select (%1$L || '-0000-4000-8000-' || lpad((100 + n)::text, 12, '0'))::uuid as id) d$s$, current_setting('race.run')));
 create function pg_temp.s(n int) returns uuid language sql stable as $f$ select pg_temp.x(100 + n) $f$;
 select pg_temp.on('a', format($s$insert into public.managed_students
     (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at)
@@ -238,7 +268,7 @@ select pg_temp.on('a', format($s$insert into public.district_retention (studio_i
     pg_temp.x(301), pg_temp.x(302)));
 
 select pg_temp.chk('00 realtime is running (today''s realtime.messages partition exists)', $q$select exists (select 1 from pg_class where relnamespace = 'realtime'::regnamespace and relname = 'messages_' || to_char(now(), 'YYYY_MM_DD'))$q$);
-select pg_temp.chk('00b the fixtures are committed (a third session sees them)', $q$select r.n = 10 from extensions.dblink('c', format('select count(*) from public.documents where title like %L', 'P4 race %')) as r(n bigint)$q$);
+select pg_temp.chk('00b the fixtures are committed (a third session sees them)', $q$select r.n = 12 from extensions.dblink('c', format('select count(*) from public.documents where title like %L', 'P4 race %')) as r(n bigint)$q$);
 
 -- ===========================================================================
 -- R1. Archive first, then an assignment
@@ -413,15 +443,128 @@ select pg_temp.chk('C1c the first told generation 0 and the second generation 1 
 select pg_temp.chk('C1d the owner joins generation 2; the removed members join nothing', $q$select pg_temp.sees(12, pg_temp.s(8), 2) = '2/joins' and pg_temp.sees(8, pg_temp.s(8), 2) = 'none/refused' and pg_temp.sees(14, pg_temp.s(8), 2) = 'none/refused'$q$);
 
 -- ===========================================================================
+-- H1/H2. A share redemption and the district hard delete (20261022120200)
+-- ===========================================================================
+-- District p_n's student (roster row x(200 + p_student), account x(p_student),
+-- owner x(p_owner), studio x(300 + p_n)): soft-deleted eight days ago, so the
+-- next run hard-deletes it, the student already a viewer of score p_score
+-- through the owner's link (token p4race{run}h{p_n}), which grants editor.
+create function pg_temp.hard_delete_due(p_n int, p_owner int, p_student int, p_score int) returns void language plpgsql as $f$
+begin
+perform pg_temp.on('a', format($s$insert into public.managed_students
+    (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method, username, claimed_at)
+    values (%L, %L, %L, 'District', null, 'code', %L, now())$s$,
+    pg_temp.x(200 + p_student), pg_temp.x(p_owner), pg_temp.x(p_student), 'p4race_' || current_setting('race.run') || '_' || p_student));
+perform pg_temp.on('a', format($s$insert into public.document_members (document_id, user_id, role) values (%L, %L, 'viewer')$s$,
+    pg_temp.s(p_score), pg_temp.x(p_student)));
+perform pg_temp.on('a', format($s$insert into public.share_links (token, document_id, role, created_by) values (%L, %L, 'editor', %L)$s$,
+    'p4race' || current_setting('race.run') || 'h' || p_n, pg_temp.s(p_score), pg_temp.x(p_owner)));
+perform pg_temp.on('a', format($s$insert into public.studios (id, owner_id, name) values (%L, %L, %L)$s$,
+    pg_temp.x(300 + p_n), pg_temp.x(p_owner), 'P4 race D' || p_n));
+perform pg_temp.on('a', format($s$insert into public.district_billing (studio_id, contract_ends_at, contract_ends_source, updated_by)
+    values (%L, date_trunc('second', now()) - interval '60 days', 'admin', 'test')$s$, pg_temp.x(300 + p_n)));
+perform pg_temp.on('a', format($s$begin; set local cleffy.district_attribution = 'admin';
+    update public.managed_students set district_studio_id = %L, archived_at = now() - interval '8 days',
+        access_revoked_at = now() - interval '8 days' where id = %L; commit$s$,
+    pg_temp.x(300 + p_n), pg_temp.x(200 + p_student)));
+perform pg_temp.on('a', format($s$insert into public.district_retention (studio_id, owner_id, contract_ends_at, notice_queued_at, notice_sent_at, soft_deleted_at)
+    select b.studio_id, %L, b.contract_ends_at, now() - interval '45 days', now() - interval '44 days', now() - interval '8 days'
+    from public.district_billing b where b.studio_id = %L$s$, pg_temp.x(p_owner), pg_temp.x(300 + p_n)));
+perform pg_temp.on('a', format($s$insert into public.district_retention_students (studio_id, managed_student_id, student_user_id, was_archived)
+    values (%L, %L, %L, false)$s$, pg_temp.x(300 + p_n), pg_temp.x(200 + p_student), pg_temp.x(p_student)));
+end $f$;
+-- Whether this session could take p_id's roster row FOR SHARE right now (a
+-- subtransaction, rolled back: nothing stays locked).
+create function pg_temp.roster_free(p_id uuid) returns boolean language plpgsql as $f$
+begin
+    begin
+        perform 1 from public.managed_students where id = p_id for share nowait;
+        raise exception using errcode = 'P0001', message = 'free';
+    exception
+        when lock_not_available then return false;
+        when raise_exception then return true;
+    end;
+end $f$;
+-- Student n is gone: account, roster row, and every membership.
+create function pg_temp.gone(n int) returns boolean language sql as $f$
+    select not exists (select 1 from auth.users where id = pg_temp.x(n))
+       and not exists (select 1 from public.managed_students where student_user_id = pg_temp.x(n))
+       and not exists (select 1 from public.document_members where user_id = pg_temp.x(n))
+$f$;
+
+-- H1. The redemption first, then the hard delete.
+select pg_temp.hard_delete_due(3, 15, 16, 11);
+select pg_temp.chk('H1- only this proof''s district 3 is due (anything else would be hard-deleted for real)', $q$select array_agg(c.studio_id) = array[pg_temp.x(303)] and bool_and(c.next_step = 'hard_delete')
+   from public.retention_district_candidates (now()) c$q$);
+do $d$
+begin
+if not (select ok from t_results where name like 'H1- only%') then
+    perform pg_temp.note('H1 skipped: other districts are due on this database', false);
+    return;
+end if;
+perform pg_temp.on('a', 'begin');
+perform pg_temp.as_user('a', 16);
+perform pg_temp.keep('H1-redeem', pg_temp.q('a', format('(select r.granted_role from public.redeem_share_link(%L) r)',
+    'p4race' || current_setting('race.run') || 'h3')));
+perform pg_temp.on('b', 'begin');
+perform pg_temp.send('b', 'select public.retention_district_run(now())::text');
+perform pg_temp.note('H1a the hard delete waits on the roster row the open redemption holds', pg_temp.blocked(pg_temp.pid('b')));
+perform pg_temp.keep('H1-redeem-commit', extensions.dblink_exec('a', 'commit', false) || ' ' || extensions.dblink_error_message('a'));
+perform pg_temp.keep('H1-run', pg_temp.answer('b'));
+perform pg_temp.keep('H1-run-commit', extensions.dblink_exec('b', 'commit', false) || ' ' || extensions.dblink_error_message('b'));
+end $d$;
+select pg_temp.chk('H1b the redemption commits first (the link''s editor role), no deadlock', $q$select pg_temp.got('H1-redeem') = 'editor' and pg_temp.got('H1-redeem-commit') like 'COMMIT%' and pg_temp.got('H1-redeem-commit') !~* 'deadlock'$q$);
+select pg_temp.chk('H1c the hard delete goes through after it, no deadlock', $q$select (pg_temp.got('H1-run')::jsonb ->> 'hard_delete')::int = 1 and (pg_temp.got('H1-run')::jsonb ->> 'students_deleted')::int = 1
+   and pg_temp.got('H1-run-commit') like 'COMMIT%'$q$);
+select pg_temp.chk('H1d nothing is left of the student, the membership the redemption raised included', $q$select pg_temp.gone(16)$q$);
+
+-- H2. The hard delete first, held between its roster lock and the account's
+-- deletion; then the redemption.
+select pg_temp.hard_delete_due(4, 17, 18, 12);
+select pg_temp.chk('H2- only this proof''s district 4 is due', $q$select array_agg(c.studio_id) = array[pg_temp.x(304)] and bool_and(c.next_step = 'hard_delete')
+   from public.retention_district_candidates (now()) c$q$);
+do $d$
+begin
+if not (select ok from t_results where name like 'H2- only%') then
+    perform pg_temp.note('H2 skipped: other districts are due on this database', false);
+    return;
+end if;
+-- c holds the student's account row: deleting it waits.
+perform pg_temp.on('c', 'begin');
+perform pg_temp.on('c', format('do $l$ begin perform 1 from auth.users where id = %L for key share; end $l$', pg_temp.x(18)));
+perform pg_temp.on('b', 'begin');
+perform pg_temp.send('b', 'select public.retention_district_run(now())::text');
+perform pg_temp.note('H2a the hard delete waits to delete the student''s account', pg_temp.blocked(pg_temp.pid('b')));
+perform pg_temp.note('H2b holding the student''s roster row', not pg_temp.roster_free(pg_temp.x(218)));
+perform pg_temp.on('a', 'begin');
+perform pg_temp.as_user('a', 18);
+perform pg_temp.send('a', format('select r.granted_role from public.redeem_share_link(%L) r', 'p4race' || current_setting('race.run') || 'h4'));
+perform pg_temp.note('H2c the redemption waits on the roster row, before it touches the membership', pg_temp.blocked(pg_temp.pid('a')));
+perform pg_temp.on('c', 'commit');
+perform pg_temp.keep('H2-run', pg_temp.answer('b'));
+perform pg_temp.keep('H2-run-commit', extensions.dblink_exec('b', 'commit', false) || ' ' || extensions.dblink_error_message('b'));
+perform pg_temp.keep('H2-redeem', pg_temp.answer('a'));
+perform pg_temp.on('a', 'rollback');
+end $d$;
+select pg_temp.chk('H2d the hard delete goes through, no deadlock (its cascade never waits on the redemption)', $q$select (pg_temp.got('H2-run')::jsonb ->> 'hard_delete')::int = 1 and (pg_temp.got('H2-run')::jsonb ->> 'students_deleted')::int = 1
+   and pg_temp.got('H2-run-commit') like 'COMMIT%' and pg_temp.got('H2-run-commit') !~* 'deadlock'$q$);
+select pg_temp.note('H2e the redemption then fails on the deleted account (no membership for it), not on a deadlock',
+    pg_temp.got('H2-redeem') like 'ERROR: %' and pg_temp.got('H2-redeem') !~* 'deadlock', pg_temp.got('H2-redeem'));
+select pg_temp.chk('H2f nothing is left of the student', $q$select pg_temp.gone(18)$q$);
+
+-- ===========================================================================
 -- Cleanup
 -- ===========================================================================
-select pg_temp.on('a', format($s$delete from realtime.messages where topic like %L$s$, '%:' || current_setting('race.run') || '-0000-4000-8000-%'));
 select pg_temp.cleanup();
-select pg_temp.chk('Z the race''s accounts, scores, generations and districts are gone again', format($q$select r.ok from extensions.dblink('c', %L) as r(ok boolean)$q$,
+select pg_temp.chk('Z the race''s accounts, scores, generations, districts, logs and messages are gone again', format($q$select r.ok from extensions.dblink('c', %L) as r(ok boolean)$q$,
     format($s$select not exists (select 1 from auth.users where email like '%%@revocation-race.test')
         and not exists (select 1 from public.documents where title like 'P4 race %%')
         and not exists (select 1 from public.studios where name like 'P4 race %%')
-        and not exists (select 1 from public.document_realtime_epochs where document_id::text like %L)$s$, current_setting('race.run') || '-%')));
+        and not exists (select 1 from public.document_realtime_epochs where document_id::text like %L)
+        and not exists (select 1 from realtime.messages where topic like %L)
+        and not exists (select 1 from public.document_storage_cleanup where document_id::text like %1$L)
+        and not exists (select 1 from public.district_billing_log where studio_id::text like %1$L)$s$,
+        current_setting('race.run') || '-%', '%:' || current_setting('race.run') || '-0000-4000-8000-%')));
 select extensions.dblink_disconnect('a');
 select extensions.dblink_disconnect('b');
 select extensions.dblink_disconnect('c');

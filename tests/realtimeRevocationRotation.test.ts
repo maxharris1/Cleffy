@@ -166,4 +166,30 @@ describe('revocation rotation under concurrency', () => {
             /queue_document_realtime_rotation \(new\.id\)/,
         );
     });
+
+    it('tells a member of an archived score to wait, apart from a lost score (20261022120200)', () => {
+        const access = latestFunction('realtime_topic_access');
+        // Null first, for anyone document_role() refuses: no reason leaks.
+        const denied = access.indexOf('when public.document_role (p_document) is null then null');
+        const archived = access.indexOf(
+            "when public.document_is_archived (p_document) then jsonb_build_object('status', 'archived')",
+        );
+        expect(denied).toBeGreaterThan(-1);
+        expect(archived).toBeGreaterThan(denied);
+        expect(access).toMatch(
+            /else jsonb_build_object\('status', 'open', 'epoch', public\.document_realtime_epoch \(p_document\)\)/,
+        );
+        // Restoring still rotates nothing: the waiting members join the current generation.
+        expect(latestTrigger('documents_rotate_on_archive')).toMatch(
+            /old\.archived_at is null and new\.archived_at is not null/,
+        );
+    });
+
+    it('redeems a share link with the roster row locked before the membership (20261022120200)', () => {
+        const redeem = latestFunction('redeem_share_link');
+        const roster = redeem.indexOf('perform public.lock_student_for_grant (v_uid);');
+        expect(roster).toBeGreaterThan(-1);
+        expect(roster).toBeLessThan(redeem.indexOf('for update;'));
+        expect(roster).toBeLessThan(redeem.indexOf('insert into public.document_members'));
+    });
 });

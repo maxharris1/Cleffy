@@ -10,7 +10,10 @@
 -- longer holds a foreign key yet still goes with its score, an archived
 -- student's assignment is refused under the roster lock whoever writes it, and
 -- back-to-back rotations each tell the generation they replaced (the races
--- themselves are in realtime_revocation_race.sql). Needs the local stack
+-- themselves are in realtime_revocation_race.sql). Then
+-- 20261022120200_realtime_archive_recovery.sql: realtime_topic_access tells a
+-- member "archived" (wait) apart from a lost score (null, stop), and the same
+-- token is told the current generation again once the score is restored. Needs the local stack
 -- running, so today's realtime.messages partition exists (`npm run cloud:up`).
 --
 -- Runs inside one transaction and ROLLS BACK — nothing persists:
@@ -411,6 +414,7 @@ select pg_temp.chk('36 the score nobody lost never moved', $q$select pg_temp.epo
 select pg_temp.snap();
 select pg_temp.as_user(14);
 select pg_temp.chk('37 before: the owner and an editor of a live score join, send and track', $q$select pg_temp.joins(pg_temp.d(10), 0) and pg_temp.can_send(pg_temp.live(pg_temp.d(10), 0)) and pg_temp.can_track(pg_temp.live(pg_temp.d(10), 0))$q$);
+select pg_temp.chk('37c before: realtime_topic_access tells the owner the score is open at generation 0', $q$select public.realtime_topic_access(pg_temp.d(10)) = '{"status":"open","epoch":0}'::jsonb$q$);
 select pg_temp.as_postgres();
 update public.documents set archived_at = now(), archived_reason = 'plan_lapse' where id = pg_temp.d(10);
 select pg_temp.chk('37b archive: nothing moves before the transaction commits', $q$select pg_temp.still(pg_temp.d(10)) and not pg_temp.queue_empty()$q$);
@@ -422,6 +426,12 @@ select pg_temp.chk('39b archived: nor sends live ink or presence on the current 
 select pg_temp.as_user(2);
 select pg_temp.chk('39c archived: nor does an editor', $q$select public.realtime_topic_epoch(pg_temp.d(10)) is null and pg_temp.refused(pg_temp.d(10), 1) and not pg_temp.can_send(pg_temp.live(pg_temp.d(10), 1)) and not pg_temp.can_track(pg_temp.live(pg_temp.d(10), 1))$q$);
 select pg_temp.chk('39d archived: the editor''s other scores are untouched', $q$select pg_temp.joins(pg_temp.d(9), 0) and pg_temp.can_send(pg_temp.live(pg_temp.d(9), 0))$q$);
+-- 20261022120200: a temporary denial, told apart from a lost membership.
+select pg_temp.chk('39e archived: realtime_topic_access tells the editor "archived" (a member: wait, do not stop)', $q$select public.realtime_topic_access(pg_temp.d(10)) = '{"status":"archived"}'::jsonb$q$);
+select pg_temp.as_user(14);
+select pg_temp.chk('39f archived: and the owner, on the token issued before the archive', $q$select public.realtime_topic_access(pg_temp.d(10)) = '{"status":"archived"}'::jsonb$q$);
+select pg_temp.as_user(1);
+select pg_temp.chk('39g archived: a non-member is told null, as for any score it cannot open (no reason leaks)', $q$select public.realtime_topic_access(pg_temp.d(10)) is null and public.document_role(pg_temp.d(10)) is null$q$);
 select pg_temp.as_postgres();
 select pg_temp.snap();
 update public.documents set archived_at = null where id = pg_temp.d(10);
@@ -429,7 +439,13 @@ select pg_temp.at_commit();
 select pg_temp.chk('40 restore: moves nothing', $q$select pg_temp.still(pg_temp.d(10))$q$);
 select pg_temp.as_user(14);
 select pg_temp.chk('40b restored: the owner is told generation 1, joins it and sends there again', $q$select public.realtime_topic_epoch(pg_temp.d(10)) = 1 and pg_temp.joins(pg_temp.d(10), 1) and pg_temp.can_send(pg_temp.live(pg_temp.d(10), 1)) and pg_temp.can_track(pg_temp.live(pg_temp.d(10), 1))$q$);
+-- The restore path an open viewer takes (20261022120200): the same token that
+-- was told "archived" re-reads, is told the current generation, and joins it.
+select pg_temp.chk('40c restored: the owner''s re-read, on the token from before the archive, says open at generation 1', $q$select public.realtime_topic_access(pg_temp.d(10)) = '{"status":"open","epoch":1}'::jsonb$q$);
+select pg_temp.as_user(2);
+select pg_temp.chk('40d restored: so does the editor''s, and it joins generation 1 (not 0) and sends there again', $q$select public.realtime_topic_access(pg_temp.d(10)) = '{"status":"open","epoch":1}'::jsonb and pg_temp.joins(pg_temp.d(10), 1) and pg_temp.refused(pg_temp.d(10), 0) and pg_temp.can_send(pg_temp.live(pg_temp.d(10), 1)) and pg_temp.can_track(pg_temp.live(pg_temp.d(10), 1))$q$);
 select pg_temp.as_postgres();
+select pg_temp.chk('40e restored: that is the generation the archive moved the score to (no second rotation)', $q$select pg_temp.epoch(pg_temp.d(10)) = 1$q$);
 
 -- ---- the generation without a foreign key (20261022120100)
 select pg_temp.chk('41 document_realtime_epochs holds no foreign key on documents (the rotation never waits on the score)', $q$select not exists (select 1 from pg_constraint where conrelid = 'public.document_realtime_epochs'::regclass and contype = 'f')$q$);
@@ -469,6 +485,13 @@ select pg_temp.chk('43 two rotations in a row: generations 1 and 2', $q$select p
 select pg_temp.chk('43b the first told generation 0 and the second generation 1, on both topics each', $q$select (select count(*) from realtime.messages m where m.event = 'topic_rotated' and m.topic in (pg_temp.live(pg_temp.d(9), 0), pg_temp.db(pg_temp.d(9), 0))) = 2
    and (select count(*) from realtime.messages m where m.event = 'topic_rotated' and m.topic in (pg_temp.live(pg_temp.d(9), 1), pg_temp.db(pg_temp.d(9), 1))) = 2
    and pg_temp.told(pg_temp.d(9)) - (select s.told from t_snap s where s.doc = pg_temp.d(9)) = 4$q$);
+
+-- ---- 20261022120200: who may ask, and the redemption's lock order
+select pg_temp.chk('44 realtime_topic_access: a signed-in user may call it, anon may not', $q$select has_function_privilege('authenticated', 'public.realtime_topic_access(uuid)', 'execute') and not has_function_privilege('anon', 'public.realtime_topic_access(uuid)', 'execute')$q$);
+select pg_temp.chk('44b redeem_share_link takes the roster lock before it locks the membership', $q$select strpos(prosrc, 'lock_student_for_grant') > 0 and strpos(prosrc, 'lock_student_for_grant') < strpos(prosrc, 'for update') from pg_proc where oid = 'public.redeem_share_link(text)'::regprocedure$q$);
+select pg_temp.as_user(14);
+select pg_temp.chk('44c a deleted score: null, not archived', $q$select public.realtime_topic_access(pg_temp.d(11)) is null$q$);
+select pg_temp.as_postgres();
 
 select name, ok, detail from t_results order by name;
 select count(*) filter (where not ok) as failures, count(*) as total from t_results;
