@@ -1057,6 +1057,11 @@ describe('the barrier beyond scores and roster rows (20261022110600)', () => {
         world.checkoutLeaseLive = true;
         const result = await deleteAccount(teacher(), world.ports());
         expect(result).toMatchObject({ ok: false, status: 409, code: 'checkout_in_progress' });
+        // Decision 58(3): the 409 is fine only with a clear try-again message,
+        // which the Account page shows as given (DeleteAccountSection.test.tsx).
+        expect((result as { error: string }).error).toMatch(
+            /wait a few minutes, and try again\. Nothing has been deleted\./,
+        );
         expect(world.log.some((entry) => entry.startsWith('stripe.'))).toBe(false);
         expect(world.documents.has('doc-1')).toBe(true);
         expect(world.pending.has(TEACHER)).toBe(false);
