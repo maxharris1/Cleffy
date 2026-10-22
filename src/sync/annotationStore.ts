@@ -5,6 +5,7 @@ import {
     baseOf,
     boundTo,
     conflictCount,
+    conflictMarksFor,
     dismissConflicts,
     HeldInkFull,
     RecoveryCancelled,
@@ -824,6 +825,11 @@ export class AnnotationStore {
      */
     get conflictCount(): number {
         return conflictCount(this.author, this.docId);
+    }
+
+    /** Of conflictCount, those Export can draw: an overtaken erase has no version of its own to keep. */
+    get exportableConflictCount(): number {
+        return conflictMarksFor(this.author, this.docId).filter((a) => !a.deletedAt).length;
     }
 
     /** The user has seen the conflicts (the banner's Dismiss): they go. */
