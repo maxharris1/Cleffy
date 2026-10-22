@@ -22,9 +22,11 @@ import type { AnnotationRow } from '@/types/database';
  * collaborator hears the owner again, on the new topic.
  *
  * And when the owner's generation read fails after the takedown (forced on
- * the client; the server is real), the owner keeps its ink off the old topic,
- * even after the adversary updates its presence there, until a retry
- * succeeds; the collaborator's own app, told no, leaves both topics at once.
+ * the client; the server is real), the owner has already left the old topics
+ * on the server's hint, and its ink never reaches the adversary there, even
+ * after the adversary updates its presence, until a retry succeeds and it
+ * joins the new ones; the collaborator's own app, told no, leaves both topics
+ * at once.
  *
  * Local stack only (`npm run cloud:up`); skipped unless pointed at it:
  *
@@ -426,11 +428,12 @@ describe.skipIf(!LOCAL || !ANON || !SERVICE)('takedown against the live Realtime
         });
         expect(takedownError).toBeNull();
 
-        // The read failed, and a retry failed too: the owner is still on the
-        // old topics, where the adversary sits.
+        // The read failed, and a retry failed too. The owner left the old
+        // topics, where the adversary sits, the moment the server's hint
+        // arrived (20261022120100), and joins nothing until a read succeeds.
         await waitFor('two failed reads on the owner', () => a.epochReads.slice(readsBefore).length >= 2, 20_000);
         expect(a.epochReads.slice(readsBefore).every((status) => status === 'failed')).toBe(true);
-        expect(scoreTopics(owner)).toEqual(expect.arrayContaining([docTopic(scoreId), docDbTopic(scoreId)]));
+        expect(scoreTopics(owner)).toEqual([]);
 
         // The adversary updates its presence (b8adc513 let that restore the
         // owner's audience), and the owner draws.
