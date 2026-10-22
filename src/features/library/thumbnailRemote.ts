@@ -116,9 +116,11 @@ const PURGE_BATCH = 100;
  * under the score's lock (claim_superseded_thumbnails, 20261022100900): with
  * `writingRev`, everything in the folder but the published revision and the
  * one about to be written; without, the covers a newer revision replaced. A
- * claimed cover can no longer be published, so a removal never takes the
- * score's current cover, whatever another device does meanwhile. Never
- * throws: what is left is claimed again on the next library visit.
+ * claimed cover can no longer be published, and the database skips the
+ * score's published cover in any removal of ours (20261022101000), so a
+ * removal never takes the current cover, even one re-published under a name
+ * claimed earlier. Never throws: what is left is claimed again on the next
+ * library visit.
  */
 const removeClaimedThumbnails = async (docIds: string[], writingRev?: number): Promise<void> => {
     try {
