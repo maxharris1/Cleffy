@@ -649,7 +649,8 @@ is local and CI only). Three uploads into one folder at once: the later two
 wait on the first's lock and exactly one of them commits. A claim and a
 publish of the same cover, in both orders; clearing a deleted score's marker
 and an upload into its folder, in both orders (`storage_folder_gone`). 18
-checks.
+checks. `tests/storage/storageLifecycle.test.ts` covers the same through the
+Storage API itself.
 
 Each `\ir`s its migrations to rerun them, so it is psql only.
 
