@@ -179,6 +179,7 @@ set local client_min_messages = warning;
 \ir ../../supabase/migrations/20261022130000_district_retention_reattribution.sql
 \ir ../../supabase/migrations/20261022130100_content_strikes_survive_deletion.sql
 \ir ../../supabase/migrations/20261022130300_district_retention_late_students.sql
+\ir ../../supabase/migrations/20261022130400_district_retention_moveout_locks.sql
 
 reset client_min_messages;
 

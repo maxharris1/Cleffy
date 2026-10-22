@@ -158,10 +158,11 @@ describe('no migration logs a step 20261021120800’s replay would refuse', () =
         expect(included[0]).toBe('20261020160300_cancel_link_token_lifetime.sql');
         expect(included).toEqual([...included].sort());
         expect(included).toContain('20261021120800_district_student_attribution.sql');
-        expect(included.slice(-3)).toEqual([
+        expect(included.slice(-4)).toEqual([
             '20261022130000_district_retention_reattribution.sql',
             '20261022130100_content_strikes_survive_deletion.sql',
             '20261022130300_district_retention_late_students.sql',
+            '20261022130400_district_retention_moveout_locks.sql',
         ]);
         for (const name of included) expect(() => read(`supabase/migrations/${name}`), name).not.toThrow();
     });
