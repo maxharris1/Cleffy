@@ -283,6 +283,9 @@ export const PRIVACY_POLICY: LegalDocument = {
                     // district billing record (mh/district-seats), purged by the
                     // retention job (mh/launch-consent); null never purges.
                     'For a school or district under our School Use Addendum, its data is deleted 30 days after its contract ends: the end date in its contract, or the day its subscription ends or is cancelled. At least 14 days before, we email the account owner so the school can export its data first. Deletion takes the data out of use first, then erases it for good. If a contract has no end date, nothing is deleted automatically, and the school can ask us to delete its data at any time.',
+                    // Copyright strikes after deletion (20261022130100): keyed hash, purged
+                    // 12 months after the newest strike. Wording flagged for counsel.
+                    'If you delete your account while a copyright strike against it still counts, we keep the strike record and a keyed hash of your email address (not the address itself) for up to 12 months after your most recent strike, so that our repeat-infringer rules still apply if the address is used to sign up again. Then they are deleted.',
                     'Stripe keeps payment and invoice records for as long as tax and accounting law requires, even after your account is deleted.',
                     'Our providers keep request logs and backups for a limited period, after which deleted information is gone from them too.',
                 ),
@@ -303,6 +306,7 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'If you own an Academy studio, it is closed and its teachers lose their seats.',
                     'You are removed from scores other people shared with you. Markings you made on those scores stay there, no longer attributed to you.',
                     'Your sign-in account is deleted, and the information Cleffy kept in that browser is cleared.',
+                    'Copyright strikes that still count are kept, with a keyed hash of your email address, for up to 12 months (see “How long we keep information”).',
                 ),
                 p(
                     'This cannot be undone. Copies may persist in our providers’ backups and logs for a limited time before they expire.',

@@ -1,5 +1,6 @@
 -- District retention: a student re-attributed after the soft delete is not
--- hard deleted under the district they left.
+-- hard deleted under the district they left, and gets back what that
+-- district's purge took.
 --
 -- Launch re-audit, Codex A4: the soft delete (20261021120700) lists the
 -- district's students in district_retention_students, and the hard delete a
@@ -12,7 +13,8 @@
 -- (retention_district_students(), district_studio_id = the district) no longer
 -- included.
 --
--- Two halves, both logged as 'skipped_reattributed' in district_retention_log:
+-- Two halves, both logged in district_retention_log as attribution_changed
+-- with counts.event = 'skipped_reattributed':
 --
 --  * admin_set_student_district() drops the student from every purge list but
 --    the one of the district it now names, under the roster row's lock.
@@ -23,31 +25,105 @@
 --    not reach (a soft delete running concurrently with the correction, or a
 --    correction made before this migration).
 --
+-- No new step value. 20261021120800 drops and re-adds
+-- district_retention_log_step_check with its own fixed list, so a row with any
+-- step it does not know would stop an ordered replay of the migrations at
+-- 20261021120800 (Codex round 1 on #66, minor 1). The skip is an attribution
+-- change seen by the purge, and is logged as one. Add none here later either:
+-- put a new event in counts, as this does.
+--
+-- And the student gets their roster place back (Codex round 1 on #66, minor 2;
+-- Cleffy's decision): one the soft delete archived (was_archived false, so
+-- archived only because the district lapsed) is un-archived as part of the
+-- re-attribution, by district_reattributed_restore(), if their teacher's plan
+-- has room for them: the same check student-provision's restore makes
+-- (checkRosterStock: limits.students from the teacher's entitlements, 0 for
+-- no roster, -1 for unlimited, against their unarchived students), and only if
+-- no other district's purge lists them. One it cannot restore yet is carried
+-- over in district_retention_restores, and the left district's cancel (its
+-- contract renewed) tries again, under the same check, so the list entry's
+-- restore is not lost with the entry.
+--
 -- Everything else stands: soft then hard delete with logged counts (decision
 -- 1), attribution only on positive evidence (decisions 8-10: nothing here
--- attributes a student), the contract-end rules (21-22). A skipped student
--- stays archived as the soft delete left them; the teacher can restore them,
--- as after any archive (was_archived is logged for whoever decides).
+-- attributes a student), the contract-end rules (21-22).
 --
--- Rerunnable: the constraint is rebuilt inside a DO block, the functions are
--- replaced with the same signatures, and the privileges reset to the same end
--- state.
+-- Rerunnable: the table is created if missing, the functions are replaced
+-- with the same signatures, and the privileges reset to the same end state.
 
-do $district_retention_log_step$
+-- ---------------------------------------------------------------------------
+-- Restores carried over from a dropped purge entry
+-- ---------------------------------------------------------------------------
+-- A student the district's soft delete archived, whom a human then took out of
+-- the district, and whom district_reattributed_restore() could not restore at
+-- that moment. Cleared, with the district's list, by its cancel (which retries
+-- them) and its hard delete.
+create table if not exists public.district_retention_restores (
+    studio_id uuid not null,
+    managed_student_id uuid not null,
+    student_user_id uuid not null,
+    reattributed_at timestamptz not null default now(),
+    primary key (studio_id, managed_student_id)
+);
+
+alter table public.district_retention_restores enable row level security;
+
+revoke all on table public.district_retention_restores from public, anon, authenticated;
+
+grant all on table public.district_retention_restores to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Un-archive a re-attributed student, if their teacher's plan has room
+-- ---------------------------------------------------------------------------
+-- p_left_studio is the district whose purge archived them. Returns what
+-- happened: 'restored', or why not ('gone', 'not_archived', 'on_another_purge',
+-- 'no_roster_plan', 'roster_full'). Only the callers below decide that the
+-- archive was the purge's (was_archived false); this re-checks the rest under
+-- the roster row's lock, which those callers already hold. Check-then-write on
+-- the teacher's count, as student-provision's restore is.
+create or replace function public.district_reattributed_restore (p_managed_student uuid, p_left_studio uuid)
+returns text language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.managed_students;
+    v_limit int;
+    v_active int;
 begin
-    alter table public.district_retention_log drop constraint if exists district_retention_log_step_check;
-    alter table public.district_retention_log
-    add constraint district_retention_log_step_check check (
-        step in ('notice_queued', 'notice_sent', 'soft_deleted', 'hard_deleted', 'cancelled', 'attribution_changed',
-                 'attribution_backfilled', 'attribution_backfill_run', 'skipped_reattributed')
-    );
+    select * into v_row from public.managed_students ms where ms.id = p_managed_student for update;
+    if not found then
+        return 'gone';
+    end if;
+    if v_row.archived_at is null then
+        return 'not_archived';
+    end if;
+    -- Another district's purge archived or listed them too: its own cancel or
+    -- hard delete decides.
+    if exists (
+        select 1 from public.district_retention_students s
+        where s.managed_student_id = p_managed_student and s.studio_id is distinct from p_left_studio
+    ) then
+        return 'on_another_purge';
+    end if;
+    v_limit := (public.resolve_entitlements (v_row.teacher_id) -> 'limits' ->> 'students')::int;
+    if v_limit is null or v_limit = 0 then
+        return 'no_roster_plan';
+    end if;
+    if v_limit > 0 then
+        select count(*) into v_active from public.managed_students ms
+        where ms.teacher_id = v_row.teacher_id and ms.archived_at is null;
+        if v_active >= v_limit then
+            return 'roster_full';
+        end if;
+    end if;
+    update public.managed_students set archived_at = null where id = p_managed_student;
+    return 'restored';
 end;
-$district_retention_log_step$;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- The correction drops the student from any other district's purge
 -- ---------------------------------------------------------------------------
--- 20261021120800's definition, plus the list. A purge list entry for the
+-- 20261021120800's definition, plus the lists. A purge list entry for the
 -- district the student now names (an admin re-confirming the same district)
 -- stays: that district's purge still covers them.
 create or replace function public.admin_set_student_district (p_managed_student uuid, p_studio uuid, p_actor text)
@@ -55,6 +131,8 @@ returns void language plpgsql security definer
 set search_path = public as $$
 declare
     v_old uuid;
+    v_drop public.district_retention_students;
+    v_restore text;
 begin
     if coalesce(trim(p_actor), '') = '' then
         raise exception 'say who is making the change' using errcode = '22023';
@@ -73,26 +151,38 @@ begin
             jsonb_build_object('managed_student_id', p_managed_student, 'from', v_old, 'to', p_studio,
                                'actor', p_actor));
 
-    -- Logged under the district whose purge it left.
-    with dropped as (
+    -- Each district whose purge it left: the entry goes, the student gets back
+    -- what that purge took if their teacher's plan has room (or it is carried
+    -- over to the district's cancel), logged under that district.
+    for v_drop in
         delete from public.district_retention_students s
         where s.managed_student_id = p_managed_student
           and s.studio_id is distinct from p_studio
         returning s.*
-    )
-    insert into public.district_retention_log (studio_id, step, counts)
-    select d.studio_id, 'skipped_reattributed',
-           jsonb_build_object('students_skipped', 1, 'managed_student_id', d.managed_student_id,
-                              'student_user_id', d.student_user_id, 'was_archived', d.was_archived,
-                              'to', p_studio, 'actor', p_actor, 'by', 'admin_set_student_district')
-    from dropped d;
+    loop
+        v_restore := case when v_drop.was_archived then 'was_archived'
+                          else public.district_reattributed_restore (p_managed_student, v_drop.studio_id) end;
+        if v_restore in ('on_another_purge', 'no_roster_plan', 'roster_full') then
+            insert into public.district_retention_restores (studio_id, managed_student_id, student_user_id)
+            values (v_drop.studio_id, v_drop.managed_student_id, v_drop.student_user_id)
+            on conflict do nothing;
+        end if;
+        insert into public.district_retention_log (studio_id, step, counts)
+        values (v_drop.studio_id, 'attribution_changed',
+                jsonb_build_object('event', 'skipped_reattributed', 'students_skipped', 1,
+                                   'managed_student_id', v_drop.managed_student_id,
+                                   'student_user_id', v_drop.student_user_id, 'was_archived', v_drop.was_archived,
+                                   'restore', v_restore, 'to', p_studio, 'actor', p_actor,
+                                   'by', 'admin_set_student_district'));
+    end loop;
 end;
 $$;
 
 -- ---------------------------------------------------------------------------
 -- The run: the hard delete re-checks attribution under the row lock
 -- ---------------------------------------------------------------------------
--- 20261021120700's definition; only the hard-delete loop changes.
+-- 20261021120700's definition; only the cancel (it retries the restores
+-- carried over) and the hard-delete loop change.
 create or replace function public.retention_district_run (p_now timestamptz default now(), p_batch int default 20)
 returns jsonb language plpgsql security definer
 set search_path = public, extensions, vault as $$
@@ -107,6 +197,9 @@ declare
     v_student record;
     v_roster record;
     v_n int;
+    v_restored int;
+    v_restore text;
+    v_carried record;
     v_skipped jsonb;
     v_members int;
     v_url text;
@@ -139,16 +232,30 @@ begin
               and not s.was_archived
               and ms.archived_at is not null;
             get diagnostics v_n = row_count;
+            -- And the ones re-attributed away while the purge was pending, whom
+            -- the correction could not restore then: the same check again.
+            v_restored := 0;
+            for v_carried in
+                select r.managed_student_id from public.district_retention_restores r
+                where r.studio_id = candidate.studio_id
+                order by r.managed_student_id
+            loop
+                if public.district_reattributed_restore (v_carried.managed_student_id, candidate.studio_id) = 'restored' then
+                    v_restored := v_restored + 1;
+                end if;
+            end loop;
+            delete from public.district_retention_restores where studio_id = candidate.studio_id;
             delete from public.district_retention_students where studio_id = candidate.studio_id;
             delete from public.district_retention_notices
             where studio_id = candidate.studio_id and sent_at is null;
             delete from public.district_retention where studio_id = candidate.studio_id;
             insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
             values (candidate.studio_id, 'cancelled', v_state.contract_ends_at,
-                    jsonb_build_object('students_restored', v_n, 'new_contract_ends_at', v_billing.contract_ends_at));
+                    jsonb_build_object('students_restored', v_n + v_restored, 'reattributed_restored', v_restored,
+                                       'new_contract_ends_at', v_billing.contract_ends_at));
             v_done := v_done || jsonb_build_object(
                 'cancel', (v_done ->> 'cancel')::int + 1,
-                'students_restored', (v_done ->> 'students_restored')::int + v_n);
+                'students_restored', (v_done ->> 'students_restored')::int + v_n + v_restored);
 
         elsif v_step = 'notice' then
             select st.owner_id, st.name, u.email into v_owner, v_name, v_email
@@ -239,16 +346,24 @@ begin
                 -- Still in the purge's scope (retention_district_students():
                 -- the district this row names) and still the account that was
                 -- listed. Otherwise a human re-attributed the student after
-                -- the soft delete: skipped, and off the list.
+                -- the soft delete: skipped, and off the list. A student moved
+                -- to another district or roster gets back what this purge took,
+                -- as the correction would have done; a row whose account is not
+                -- the one listed is left as it is, for a human.
                 if v_roster.district_studio_id is distinct from candidate.studio_id
                    or v_roster.student_user_id is distinct from v_student.student_user_id then
                     delete from public.district_retention_students
                     where studio_id = candidate.studio_id and managed_student_id = v_student.managed_student_id;
+                    v_restore := case
+                        when v_roster.student_user_id is distinct from v_student.student_user_id then 'other_account'
+                        when v_student.was_archived then 'was_archived'
+                        else public.district_reattributed_restore (v_student.managed_student_id, candidate.studio_id) end;
                     v_skipped := v_skipped || jsonb_build_array(jsonb_build_object(
                         'managed_student_id', v_student.managed_student_id,
                         'student_user_id', v_student.student_user_id,
                         'was_archived', v_student.was_archived,
-                        'now_district_studio_id', v_roster.district_studio_id));
+                        'now_district_studio_id', v_roster.district_studio_id,
+                        'restore', v_restore));
                     continue;
                 end if;
 
@@ -267,8 +382,9 @@ begin
 
             if jsonb_array_length(v_skipped) > 0 then
                 insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
-                values (candidate.studio_id, 'skipped_reattributed', v_state.contract_ends_at,
-                        jsonb_build_object('students_skipped', jsonb_array_length(v_skipped),
+                values (candidate.studio_id, 'attribution_changed', v_state.contract_ends_at,
+                        jsonb_build_object('event', 'skipped_reattributed',
+                                           'students_skipped', jsonb_array_length(v_skipped),
                                            'students', v_skipped, 'by', 'retention_district_run'));
             end if;
 
@@ -276,6 +392,7 @@ begin
             -- Takes the seats, the override and the billing record with it.
             delete from public.studios where id = candidate.studio_id;
             delete from public.district_retention_students where studio_id = candidate.studio_id;
+            delete from public.district_retention_restores where studio_id = candidate.studio_id;
             update public.district_retention set hard_deleted_at = p_now where studio_id = candidate.studio_id;
             insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
             values (candidate.studio_id, 'hard_deleted', v_state.contract_ends_at,
@@ -326,6 +443,9 @@ begin
     end loop;
 end;
 $$;
+
+-- Internal: only the two above call it.
+revoke all on function public.district_reattributed_restore (uuid, uuid) from public, anon, authenticated;
 
 -- DEPLOY: unchanged. retention_district_run() stays unscheduled
 -- (20261021120700's DEPLOY note); schedule it only with this migration applied.
