@@ -102,3 +102,68 @@ describe('a lost membership moves the score to fresh realtime topics', () => {
         expect(queue).toMatch(/from public\.assignments a where a\.student_user_id = new\.student_user_id/);
     });
 });
+
+/**
+ * 20261022120100_realtime_revocation_races.sql (Codex round 1 on #71);
+ * tests/sql/realtime_revocation_race.sql proves each race between two sessions.
+ */
+describe('revocation rotation under concurrency', () => {
+    it('makes every grant take the student’s roster lock, and refuses an archived student’s assignment under it', () => {
+        expect(latestFunction('lock_student_for_grant')).toMatch(
+            /from public\.managed_students ms\s+where ms\.student_user_id = p_user\s+for share;/,
+        );
+        const assignments = latestTrigger('assignments_lock_student');
+        expect(assignments).toMatch(/before insert on public\.assignments/);
+        expect(latestFunction('assignments_lock_student')).toMatch(
+            /if public\.lock_student_for_grant \(new\.student_user_id\) then\s+raise exception 'not on your roster' using errcode = 'P0002'/,
+        );
+        const members = latestTrigger('document_members_lock_student');
+        expect(members).toMatch(/before insert on public\.document_members/);
+        expect(latestFunction('document_members_lock_student')).toMatch(/lock_student_for_grant \(new\.user_id\)/);
+        for (const name of ['assignments_lock_student', 'document_members_lock_student']) {
+            expect(neverDroppedAfterCreate(name), name).toBe(true);
+        }
+    });
+
+    it('never waits on the score at commit, and still forgets a deleted score’s generation', () => {
+        const rotate = latestFunction('rotate_queued_document_realtime');
+        expect(rotate).not.toMatch(/for (key )?share/i);
+        expect(rotate).toMatch(/if exists \(select 1 from public\.documents d where d\.id = v_doc\) then/);
+        expect(
+            latest(/alter table public\.document_realtime_epochs\s+drop constraint[^;]*;/i, 'the dropped key'),
+        ).toMatch(/document_realtime_epochs_document_id_fkey/);
+        expect(latestTrigger('documents_forget_realtime_epoch')).toMatch(/after delete on public\.documents/);
+        expect(neverDroppedAfterCreate('documents_forget_realtime_epoch')).toBe(true);
+        expect(latestFunction('documents_forget_realtime_epoch')).toMatch(
+            /delete from public\.document_realtime_epochs e where e\.document_id = old\.id/,
+        );
+    });
+
+    it('announces each rotation on the generation it replaced', () => {
+        const rotate = latestFunction('rotate_document_realtime');
+        expect(rotate.indexOf('returning e.epoch into v_epoch')).toBeLessThan(rotate.indexOf('realtime.send'));
+        expect(rotate).not.toMatch(/document_live_topic|document_db_topic/);
+        // The same names the app builds (docTopic / docDbTopic).
+        expect(latestFunction('document_topic_at')).toMatch(
+            /p_prefix \|\| ':' \|\| doc::text \|\| case when p_epoch = 0 then '' else ':' \|\| p_epoch::text end/,
+        );
+    });
+
+    it('gives an archived score no realtime, and moves it when it is archived', () => {
+        for (const fn of ['topic_document_role', 'db_topic_document_role']) {
+            expect(latestFunction(fn), fn).toMatch(
+                /if doc is null or public\.document_is_archived \(doc\) then\s+return null;/,
+            );
+        }
+        expect(latestFunction('realtime_topic_epoch')).toMatch(
+            /public\.document_role \(p_document\) is not null and not public\.document_is_archived \(p_document\)/,
+        );
+        const archive = latestTrigger('documents_rotate_on_archive');
+        expect(archive).toMatch(/after update of archived_at on public\.documents/);
+        expect(archive).toMatch(/old\.archived_at is null and new\.archived_at is not null/);
+        expect(neverDroppedAfterCreate('documents_rotate_on_archive')).toBe(true);
+        expect(latestFunction('documents_queue_rotation_on_archive')).toMatch(
+            /queue_document_realtime_rotation \(new\.id\)/,
+        );
+    });
+});
