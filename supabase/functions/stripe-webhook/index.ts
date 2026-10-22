@@ -7,6 +7,7 @@ import {
     FOREIGN_KEY_VIOLATION,
     stopDeletedAccountSubscription,
 } from '../_shared/deletedAccountBilling.ts';
+import { accountDeletionPending } from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 import { PAYLOAD_TOO_LARGE, readCappedText, WEBHOOK_BODY_MAX_BYTES } from '../_shared/readCappedJson.ts';
@@ -511,6 +512,18 @@ Deno.serve(async (req) => {
         },
         recordCancellationNotice: async (notice) => {
             await enqueueBillingMail('cancellation_confirmation', cancellationMailKey(notice), mode, { ...notice });
+        },
+        // Launch-fix item 16, decision 70(1): an event for an account being
+        // deleted writes nothing and is redelivered (stripeEvents.ts
+        // deletionRefusal). The same predicate every other writer asks
+        // (../_shared/deletionPending.ts); a failed check is `unknown`, refused.
+        accountDeletionPending: async (userId) => {
+            const pending = await accountDeletionPending(admin, userId);
+            if (!pending.ok) {
+                console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+                return 'unknown';
+            }
+            return pending.pending ? 'pending' : 'clear';
         },
         log: (message) => console.log(message),
     };

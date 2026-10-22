@@ -100,6 +100,8 @@ class BillingBackedStore implements WebhookStore {
     settleDuplicateUndo = async () => undefined;
     recordPurchaseNotice = async () => undefined;
     recordCancellationNotice = async () => undefined;
+    /** No account here is ever being deleted; webhook.test.ts covers one that is. */
+    accountDeletionPending = async () => 'clear' as const;
     log = () => undefined;
 }
 
