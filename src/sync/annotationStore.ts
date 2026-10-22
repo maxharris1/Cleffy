@@ -6,14 +6,17 @@ import {
     boundTo,
     conflictCount,
     conflictMarksFor,
-    dismissConflicts,
+    conflictNoticeHidden,
+    discardConflicts,
     HeldInkFull,
     RecoveryCancelled,
     heldMarkCount,
     heldMarkIds,
     heldMarksFor,
+    hideConflictNotice,
     holdOps,
     isHeld,
+    keepCutOff,
     noteEditsInFlight,
     noteRefusedEdit,
     overflowCount,
@@ -24,6 +27,7 @@ import {
     retryHeld,
     settleOvertaken,
     startingPointWritten,
+    sweepCutOffWrites,
     type CommitOp,
     type RetryOptions,
 } from '@/sync/inkRecovery';
@@ -146,6 +150,10 @@ export class AnnotationStore {
 
     private async hydrate(): Promise<void> {
         const generation = this.generation;
+        // Rows of a write a sign-out cut off (inkRecovery.sweepCutOffWrites)
+        // go first; any the sweep could not delete are nobody's
+        // (opOwnerFor), so `foreign` keeps them out of memory.
+        await sweepCutOffWrites(this.db, this.docId);
         const [rows, foreign] = await Promise.all([
             this.db.annotations.where('docId').equals(this.docId).toArray(),
             this.foreignIds(),
@@ -301,14 +309,23 @@ export class AnnotationStore {
         }
         const snapById = new Map(snapshot.filter((a) => !a.deletedAt).map((a) => [a.id, a]));
         const batch = this.beginBatch();
+        // Memory reset for another account part way (setAuthor): the rest of
+        // this account's restore is not that one's to make.
+        const generation = this.generation;
         try {
             for (const live of this.liveAnnotations()) {
+                if (generation !== this.generation) {
+                    return;
+                }
                 if (!snapById.has(live.id)) {
                     await this.delete(live.id);
                 }
             }
             const now = nowIso();
             for (const snap of snapById.values()) {
+                if (generation !== this.generation) {
+                    return;
+                }
                 const existing = this.byId.get(snap.id);
                 const next: Annotation = {
                     ...snap,
@@ -408,8 +425,8 @@ export class AnnotationStore {
 
     /**
      * Forget everything in memory and hydrate again, for the current author:
-     * the account changed (setAuthor), or a sign-out cleared this author's
-     * held ink (accountInkCleared). Writes of the previous account's still
+     * the account changed (setAuthor), or this author signed out
+     * (accountSignedOut). Writes of the previous account's still
      * on their way finish (or are cancelled, inkRecovery) as theirs, and are
      * that account's queued marks to this one (`foreign`).
      */
@@ -431,11 +448,12 @@ export class AnnotationStore {
     }
 
     /**
-     * A sign-out cleared this store's author's held ink (here or in another
-     * tab; inkRecovery.clearAccountInk): what it drew of it goes, with the
-     * rest of memory, and the mirror is read again.
+     * This store's author signed out (here or in another tab;
+     * inkRecovery.retireAccountInk): what it drew for it goes, with the rest
+     * of memory, and the mirror is read again. Its held ink is kept by
+     * inkRecovery for Export or Discard, not drawn here.
      */
-    accountInkCleared(): void {
+    accountSignedOut(): void {
         if (this.loading) {
             this.resetMemory();
         }
@@ -554,7 +572,13 @@ export class AnnotationStore {
         }
         const author = this.author;
         const live = boundTo(author);
+        const generation = this.generation;
         await this.captureStartingPoint(author, this.startingPointFor(author), live);
+        if (!live() || generation !== this.generation) {
+            // Signed out, or memory reset for another account, while it
+            // waited: none of these marks is applied here, or written.
+            throw new RecoveryCancelled();
+        }
         const touched = new Set<number>();
         const ops: CommitOp[] = [];
         for (const annotation of annotations) {
@@ -832,9 +856,20 @@ export class AnnotationStore {
         return conflictMarksFor(this.author, this.docId).filter((a) => !a.deletedAt).length;
     }
 
-    /** The user has seen the conflicts (the banner's Dismiss): they go. */
-    dismissConflicts(): void {
-        dismissConflicts(this.author, this.docId);
+    /** The user hid the conflict notice (its Dismiss): the conflicts stay for Export. */
+    get conflictNoticeHidden(): boolean {
+        return conflictNoticeHidden(this.author, this.docId);
+    }
+
+    /** The banner's Dismiss: hides the notice only; Export still has the conflicts. */
+    hideConflictNotice(): void {
+        hideConflictNotice(this.author, this.docId);
+        this.notifyMeta();
+    }
+
+    /** The banner's Discard, confirmed with Export offered first: the conflicts go for good. */
+    discardConflicts(): void {
+        discardConflicts(this.author, this.docId);
         this.notifyMeta();
     }
 
@@ -891,7 +926,30 @@ export class AnnotationStore {
      * (inkRecovery.registerOpenStore). Returns the detach, for the unmount.
      */
     attach(): () => void {
+        void this.sweepStale();
         return registerOpenStore(this);
+    }
+
+    /**
+     * Rows of writes a sign-out cut off (inkRecovery.sweepCutOffWrites):
+     * swept, and the marks they were on read again from what the mirror
+     * holds now. Until then they are another's to this store (`foreign`).
+     */
+    private async sweepStale(): Promise<void> {
+        const stale = await sweepCutOffWrites(this.db, this.docId);
+        if (stale.size === 0 || !this.loaded) {
+            return;
+        }
+        const generation = this.generation;
+        const foreign = await this.foreignIds().catch(() => null);
+        if (!foreign || generation !== this.generation) {
+            return;
+        }
+        const freed = [...stale].filter((id) => this.foreign.has(id) && !foreign.has(id));
+        freed.forEach((id) => this.foreign.delete(id));
+        if (freed.length > 0) {
+            await this.reloadFromMirror(freed).catch(() => undefined);
+        }
     }
 
     /**
@@ -1030,10 +1088,16 @@ export class AnnotationStore {
         const CHUNK = 4000;
         const author = this.author;
         const live = boundTo(author);
+        const generation = this.generation;
         const reversed = [...ops].reverse();
         const inverses: UndoableOp[] = [];
         const wrote: string[] = [];
         for (let start = 0; start < reversed.length; start += CHUNK) {
+            if (!live() || generation !== this.generation) {
+                // Signed out, or reset for another account, between chunks:
+                // the rest of the entry is not applied.
+                throw new RecoveryCancelled();
+            }
             const commits: CommitOp[] = [];
             const touched = new Set<number>();
             for (const op of reversed.slice(start, start + CHUNK)) {
@@ -1120,6 +1184,7 @@ export class AnnotationStore {
         // is written — and its epoch then: a sign-out before the write ends it.
         const author = this.author;
         const live = boundTo(author);
+        const generation = this.generation;
 
         // Creates apply to the live map before any IndexedDB yield so the
         // handwriting pause can start at pointer-up. Snapshot still uses the
@@ -1136,8 +1201,13 @@ export class AnnotationStore {
                     // Never written, but drawn: held for retry like a failed
                     // write, with the day's starting point it still owes —
                     // or, past the registry's bounds, undone and said so.
-                    // Not once its account has signed out: it went with it.
-                    const refused = live() ? holdOps(this.db, this.docId, [{ op, author }], preEdit) : [op];
+                    // Once its account has signed out: held as its signed-out
+                    // ink (Export or Discard), and no longer drawn here.
+                    const cancelled = !live();
+                    if (cancelled) {
+                        keepCutOff(this.db, author, this.docId, [{ op, author }]);
+                    }
+                    const refused = cancelled ? [op] : holdOps(this.db, this.docId, [{ op, author }], preEdit);
                     if (refused.length > 0) {
                         this.rollBack([op]);
                     }
@@ -1145,7 +1215,7 @@ export class AnnotationStore {
                     this.notifyPage(op.annotation.page);
                     this.notifyMeta();
                     this.onHeldChange?.();
-                    throw !live() ? new RecoveryCancelled() : refused.length > 0 ? new HeldInkFull([op], err) : err;
+                    throw cancelled ? new RecoveryCancelled() : refused.length > 0 ? new HeldInkFull([op], err) : err;
                 }
             }
             try {
@@ -1187,8 +1257,10 @@ export class AnnotationStore {
             }
 
             // The snapshot read yields. A peer erase in that window must not still
-            // tombstone (or undo-record) a row that is already gone.
-            if (!this.stillApplies(op)) {
+            // tombstone (or undo-record) a row that is already gone. Nor may
+            // the edit apply once its account has signed out, or memory been
+            // reset for another account: it was never drawn, so nothing is lost.
+            if (!live() || generation !== this.generation || !this.stillApplies(op)) {
                 return false;
             }
 
@@ -1321,6 +1393,13 @@ export class AnnotationStore {
             if (err instanceof HeldInkFull) {
                 // Neither written nor held: not made, so not drawn either.
                 this.rollBack(err.ops);
+                this.notifyMeta();
+                this.onHeldChange?.();
+            } else if (err instanceof RecoveryCancelled) {
+                // Its account signed out on the way: not written, and held
+                // as that account's signed-out ink (inkRecovery.keepCutOff),
+                // so not drawn here any more, whoever this store draws for now.
+                this.rollBack(ops);
                 this.notifyMeta();
                 this.onHeldChange?.();
             }

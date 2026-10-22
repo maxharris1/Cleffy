@@ -12,8 +12,9 @@ interface EndedSignInInkPromptProps {
 }
 
 /**
- * Says the account's unsaved ink will go with the sign-out and offers an
- * Export of each score it is on, before the sign-out runs. Stays up, Export
+ * Says the account's unsaved ink may not survive the sign-out and offers an
+ * Export of each score it is on, before the sign-out runs (what is still
+ * unsaved after it stays in this tab: SignedOutInkNotice). Stays up, Export
  * and all, until the sign-out has completed: the held ink is the export's
  * until then. Exports are made for the account signing out, whose marks
  * they are, though the session may already have lapsed under it.
@@ -42,8 +43,8 @@ export const EndedSignInInkPrompt = ({ prompt, signingOut, onSignOut }: EndedSig
             <div className="flex w-full max-w-md flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
                 <p className="text-sm leading-snug" role="status">
                     {prompt.accountDeleted
-                        ? 'Your account was removed, so you’re being signed out. Some marks you made couldn’t be saved on this device and will be lost. Export a copy first to keep them.'
-                        : 'Your teacher changed your access, so you’re being signed out. Some marks you made couldn’t be saved on this device. Signing out tries once more to save them; if that fails, they’re lost. Export a copy first to keep them.'}
+                        ? 'Your account was removed, so you’re being signed out. Some marks you made couldn’t be saved on this device, and can’t be saved now: they stay only in this tab until you close it. Export a copy first to keep them.'
+                        : 'Your teacher changed your access, so you’re being signed out. Some marks you made couldn’t be saved on this device. Signing out tries once more to save them; any it can’t stay only in this tab until you close it. Export a copy first to keep them.'}
                 </p>
                 <ul className="flex flex-col gap-2">
                     {prompt.docIds.map((docId) => {

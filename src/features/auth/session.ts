@@ -5,6 +5,7 @@ import type { AgeGate } from '@/features/auth/ageCheck';
 import { perfMark } from '@/lib/perf';
 import { safePresenceName } from '@/lib/presenceName';
 import { getSupabase, type TypedSupabaseClient } from '@/lib/supabase';
+import { noteAccountSignedIn } from '@/sync/inkRecoverySignal';
 
 export interface SessionState {
     session: Session | null;
@@ -49,6 +50,11 @@ let knownSession: Session | null | undefined = undefined;
 
 const rememberSession = (session: Session | null): void => {
     knownSession = session;
+    if (session) {
+        // A signed-out account's ink still held in this tab is its again,
+        // or goes once another account signs in here (inkRecovery).
+        noteAccountSignedIn(session.user.id);
+    }
 };
 
 /** Reactive Supabase session. */
@@ -231,12 +237,22 @@ const SIGN_OUT_SYNC_TIMEOUT_MS = 8000;
 const SIGN_OUT_SNAPSHOT_TIMEOUT_MS = 3000;
 
 /**
- * How long an ended sign-in's sign-out (signOutKeepingChanges) waits on
- * this device's storage — writing ink it could not store before, then each
- * later step — before it signs out regardless. A stalled IndexedDB never
- * answers, and the ended session must not stay installed waiting on it.
+ * How long an ended sign-in's sign-out (signOutKeepingChanges,
+ * signOutDeletedAccount) waits on this device's storage in all — writing
+ * ink it could not store before, then every later step — before it signs
+ * out regardless: one deadline for the lot, not one per step. A stalled
+ * IndexedDB never answers, and the ended session must not stay installed
+ * waiting on it.
  */
 export const SIGN_OUT_STORAGE_TIMEOUT_MS = 5000;
+
+/** Waits bounded together by one deadline: each gets what is left of it. */
+type Bounded = <T>(work: Promise<T>, fallback: T) => Promise<T>;
+
+const deadlineOf = (ms: number): Bounded => {
+    const end = Date.now() + ms;
+    return (work, fallback) => within(work, Math.max(0, end - Date.now()), fallback);
+};
 
 /** `work`, or `fallback` once `ms` have passed without it settling (or when it fails). */
 const within = async <T>(work: Promise<T>, ms: number, fallback: T): Promise<T> => {
@@ -468,12 +484,13 @@ export const signOut = async (): Promise<void> => {
  * sign-out would only say so again. Resolves to how many queued changes were
  * kept (0 when the outbox cannot be read).
  *
- * Ink this device could not store yet gets one more try first, for at most
- * SIGN_OUT_STORAGE_TIMEOUT_MS: written, it is kept with the rest. Whatever
- * is still unwritten then goes with the sign-out, and every write of it still
- * on its way is cancelled (inkRecovery.clearAccountInk) so none lands after.
- * The caller offers Export of it before this (EndedSignInInkPrompt): until
- * the sign-out completes, export still finds it.
+ * Ink this device could not store yet gets one more try first: written, it
+ * is kept with the rest. Every storage wait shares one deadline,
+ * SIGN_OUT_STORAGE_TIMEOUT_MS. Whatever is still unwritten then is not lost:
+ * the sign-out cuts off every write of it still on its way
+ * (inkRecovery.retireAccountInk, so none lands after), and keeps it in this
+ * tab, for Export or Discard (SignedOutInkNotice). The caller offers Export
+ * of it before this too (EndedSignInInkPrompt).
  */
 export const signOutKeepingChanges = async (): Promise<number> => {
     const [{ getDb }, { stampOwnCloudOps }, { retryAccountInk }] = await Promise.all([
@@ -482,12 +499,12 @@ export const signOutKeepingChanges = async (): Promise<number> => {
         import('@/sync/inkRecovery'),
     ]);
     // Before the PDFs (and with them the legacy ownership test) are cleared.
-    return signOutEndedSignIn(async (userId) => {
+    return signOutEndedSignIn(async (userId, bounded) => {
         if (userId) {
-            await within(retryAccountInk(userId), SIGN_OUT_STORAGE_TIMEOUT_MS, undefined);
+            await bounded(retryAccountInk(userId), undefined);
         }
         return {
-            count: userId ? await within(stampOwnCloudOps(getDb(), userId), SIGN_OUT_STORAGE_TIMEOUT_MS, 0) : 0,
+            count: userId ? await bounded(stampOwnCloudOps(getDb(), userId), 0) : 0,
             keepCloudAnnotations: true,
         };
     });
@@ -507,12 +524,12 @@ export const signOutDeletedAccount = async (): Promise<number> => {
         import('@/sync/db'),
         import('@/sync/signOutSync'),
     ]);
-    return signOutEndedSignIn(async (userId) => {
+    return signOutEndedSignIn(async (userId, bounded) => {
         const db = getDb();
-        const discarded = userId ? await within(dropOwnCloudOps(db, userId), SIGN_OUT_STORAGE_TIMEOUT_MS, 0) : 0;
+        const discarded = userId ? await bounded(dropOwnCloudOps(db, userId), 0) : 0;
         // Unreadable reads as "something is waiting": keeping marks nobody
         // will draw costs a little storage, clearing them could lose them.
-        const othersWaiting = await within(pendingCloudOpCount(db), SIGN_OUT_STORAGE_TIMEOUT_MS, 1);
+        const othersWaiting = await bounded(pendingCloudOpCount(db), 1);
         return { count: discarded, keepCloudAnnotations: othersWaiting > 0 };
     });
 };
@@ -522,12 +539,12 @@ export const signOutDeletedAccount = async (): Promise<number> => {
  * writer, settle the outbox (`settle`, before the PDFs and with them the
  * legacy ownership test are cleared), sign out locally, and clear the
  * account's caches. Resolves to `settle`'s count. No storage step can hold
- * it: `settle` bounds its own, and the cache clear is waited on for
- * SIGN_OUT_STORAGE_TIMEOUT_MS at most (the account's held ink, in memory,
- * goes at once, before any wait).
+ * it: `settle`'s waits and the cache clear share one deadline,
+ * SIGN_OUT_STORAGE_TIMEOUT_MS from the start (the account's writes are cut
+ * off at once, before any wait, and its held ink kept in this tab).
  */
 const signOutEndedSignIn = async (
-    settle: (userId: string | null) => Promise<{ count: number; keepCloudAnnotations: boolean }>,
+    settle: (userId: string | null, bounded: Bounded) => Promise<{ count: number; keepCloudAnnotations: boolean }>,
 ): Promise<number> => {
     const [{ noteLibraryMutation }, { stopSnapshotWrites }, { stopAllBackgroundDrains }] = await Promise.all([
         import('@/features/library/libraryCache'),
@@ -539,16 +556,13 @@ const signOutEndedSignIn = async (
     stopSnapshotWrites();
     stopAllBackgroundDrains();
     const supabase = getSupabase();
+    const bounded = deadlineOf(SIGN_OUT_STORAGE_TIMEOUT_MS);
     const userId = (await signedInUserId()) ?? null;
-    const { count, keepCloudAnnotations } = await settle(userId);
+    const { count, keepCloudAnnotations } = await settle(userId, bounded);
     await signOutThisDevice(supabase);
     noteLibraryMutation();
     rememberSession(null);
-    await within(
-        clearAccountCachesFromDevice({ keepCloudAnnotations, userId: userId ?? undefined }),
-        SIGN_OUT_STORAGE_TIMEOUT_MS,
-        undefined,
-    );
+    await bounded(clearAccountCachesFromDevice({ keepCloudAnnotations, userId: userId ?? undefined }), undefined);
     return count;
 };
 
@@ -559,19 +573,20 @@ const signOutEndedSignIn = async (
  * a guest profile (accountDeletion.ts), which ends the same way.
  * `keepCloudAnnotations` keeps the marks, their outbox, watermarks and day
  * snapshots (signOutKeepingChanges). `userId`: the account signing out
- * (undefined when that could not be told; see clearAccountInk).
+ * (undefined when that could not be told; see retireAccountInk).
  */
 export const clearAccountCachesFromDevice = async ({
     keepCloudAnnotations = false,
     userId,
 }: { keepCloudAnnotations?: boolean; userId?: string } = {}): Promise<void> => {
-    // Marks a viewer could not store, held in this tab's memory: callers ask
-    // first (syncBeforeSignOut counts them), and the next account in this
-    // tab must neither see, export nor retry them. Never in Dexie, so kept
-    // annotations cannot keep them. Only this account's: another account's
-    // held ink in this tab stays for that account. The other tabs hear too.
-    const { clearAccountInk } = await import('@/sync/inkRecovery');
-    clearAccountInk(userId);
+    // Marks a viewer could not store, held in this tab's memory: the
+    // account's writes are cut off at once (none lands after), and its held
+    // ink leaves every viewer and Retry — but is not dropped, being its only
+    // copy: it stays in this tab for Export or an explicit Discard
+    // (SignedOutInkNotice), until the tab closes or another account signs in
+    // here. Only this account's. The other tabs hear too, and do the same.
+    const { retireAccountInk } = await import('@/sync/inkRecovery');
+    retireAccountInk(userId, 'here');
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
     const { clearCloudAnnotationData } = await import('@/sync/signOutSync');

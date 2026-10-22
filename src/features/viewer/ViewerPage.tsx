@@ -46,6 +46,7 @@ import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
 import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import type { AnnotationStore } from '@/sync/annotationStore';
+import { rememberScoreSource } from '@/sync/inkRecovery';
 import type { SyncHold, SyncRejection, SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
 import type { DocumentRow, MemberRole } from '@/types/database';
@@ -253,6 +254,17 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             lastScoreRef.current = { title: state.doc.title, doc: state.doc, role: state.role };
         }
     }, [state]);
+    // The PDF and title, for Export of ink this account still holds here
+    // after it signs out (SignedOutInkNotice), when sign-out has cleared the
+    // device's copy. Kept by inkRecovery only while such ink is held.
+    const sourceTitle = state?.doc.title;
+    const sourceBytes = state?.bytes ?? undefined;
+    useEffect(() => {
+        if (!sourceTitle) {
+            return;
+        }
+        return rememberScoreSource(docId, sourceTitle, sourceBytes);
+    }, [docId, sourceTitle, sourceBytes]);
 
     const userId = session?.user.id;
 
@@ -352,10 +364,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 // archived or reset account signs in again and uploads what is
                 // queued; one deleted with its teacher never can.
                 const accountDeleted = await fetchAccountDeleted().catch(() => false);
-                // Ink this device could not store goes with the sign-out
-                // unless its last try writes it: Export is offered first.
+                // Ink this device could not store: Export is offered first,
+                // and the sign-out waits on the student. Unmounted first: no
+                // sign-out here, and the ink stays (the next page asks again).
                 const last = lastScoreRef.current;
-                await endedInk.askFirst(userId, accountDeleted, last ? { [docId]: last } : undefined);
+                if (!(await endedInk.askFirst(userId, accountDeleted, last ? { [docId]: last } : undefined))) {
+                    return;
+                }
                 const state = await signOutEndedStudent(accountDeleted);
                 navigate('/student', { replace: true, state });
                 return;

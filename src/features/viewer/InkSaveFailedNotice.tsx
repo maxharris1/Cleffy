@@ -3,6 +3,7 @@ import { useCallback, useState, useSyncExternalStore } from 'react';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { subscribeInkRecovery } from '@/sync/inkRecovery';
 import { Button } from '@/ui/Button';
+import { Dialog } from '@/ui/Dialog';
 
 interface InkSaveFailedNoticeProps {
     /** The viewer's store; null until the viewport has made it. */
@@ -51,7 +52,8 @@ const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { 
               };
     }
     if (state === 'conflicts') {
-        // An overtaken erase has no version of its own for Export to keep.
+        // An overtaken erase has no version of its own to draw: its Export
+        // is of the score as it is now, and says the erase was overtaken.
         return exportable
             ? {
                   short: 'Some marks changed elsewhere before saving. Export keeps yours.',
@@ -59,7 +61,7 @@ const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { 
               }
             : {
                   short: 'Some changes were overtaken elsewhere before saving.',
-                  long: 'Some of your unsaved changes were overtaken by newer ones made elsewhere before this device could save them, so the newer versions are shown.',
+                  long: 'Some of your unsaved changes were overtaken by newer ones made elsewhere before this device could save them, so the newer versions are shown. Export keeps a copy of the score as it is.',
               };
     }
     if (state === 'held') {
@@ -99,8 +101,10 @@ const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { 
  * this device already holds as many unsaved marks as it can (overflow):
  * undone on screen, with Export for the rest. And unsaved marks a newer
  * version overtook before they could be written (conflicts): the newer one
- * is drawn, Retry leaves them, and Export keeps them; Dismiss lets them go
- * once the user has seen them.
+ * is drawn, Retry leaves them, and Export keeps them (an overtaken erase
+ * too, its export saying so). Dismiss only hides the notice: they stay for
+ * Export until the tab closes. Only Discard lets them go, and only once the
+ * user has confirmed it in a dialog that offers Export first.
  *
  * Same amber strip as the viewer's other notices — the app has no toasts —
  * kept to one row on phones: short copy beside its buttons.
@@ -111,14 +115,20 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
     const overflow = useRecoveryCount(store, (s) => s.overflowCount);
     const conflicts = useRecoveryCount(store, (s) => s.conflictCount);
     const exportableConflicts = useRecoveryCount(store, (s) => s.exportableConflictCount);
+    const hidden = useRecoveryCount(store, (s) => (s.conflictNoticeHidden ? 1 : 0)) > 0;
     const [retrying, setRetrying] = useState(false);
     const [retryFailed, setRetryFailed] = useState(false);
+    const [confirmingDiscard, setConfirmingDiscard] = useState(false);
 
     if (!store || (count <= 0 && refused <= 0 && overflow <= 0 && conflicts <= 0)) {
         return null;
     }
     const state: NoticeState = overflow > 0 ? 'overflow' : count > 0 ? 'held' : refused > 0 ? 'refused' : 'conflicts';
-    const exportable = count > 0 || exportableConflicts > 0;
+    if (state === 'conflicts' && hidden && !confirmingDiscard) {
+        // Dismissed: hidden, not discarded. Export still has them.
+        return null;
+    }
+    const exportable = count > 0 || conflicts > 0;
 
     const retry = async () => {
         setRetrying(true);
@@ -127,7 +137,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
         setRetryFailed(!saved);
     };
 
-    const { short, long } = copy(state, retryFailed, exportable);
+    const { short, long } = copy(state, retryFailed, state === 'conflicts' ? exportableConflicts > 0 : exportable);
 
     return (
         <div
@@ -155,10 +165,71 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
                 </Button>
             ) : null}
             {state === 'conflicts' ? (
-                <Button size="sm" variant="ghost" className="shrink-0" onClick={() => store.dismissConflicts()}>
-                    Dismiss
-                </Button>
+                <>
+                    <Button size="sm" variant="ghost" className="shrink-0" onClick={() => store.hideConflictNotice()}>
+                        Dismiss
+                    </Button>
+                    {/* Only where Export can be offered first. */}
+                    {onExport ? (
+                        <Button
+                            size="sm"
+                            variant="ghost"
+                            className="shrink-0"
+                            onClick={() => setConfirmingDiscard(true)}
+                        >
+                            Discard
+                        </Button>
+                    ) : null}
+                </>
+            ) : null}
+            {confirmingDiscard && onExport ? (
+                <DiscardConflictsDialog
+                    count={conflicts}
+                    onExport={() => {
+                        setConfirmingDiscard(false);
+                        onExport();
+                    }}
+                    onDiscard={() => {
+                        setConfirmingDiscard(false);
+                        store.discardConflicts();
+                    }}
+                    onCancel={() => setConfirmingDiscard(false)}
+                />
             ) : null}
         </div>
     );
 };
+
+/** Discard asks first, and offers Export before it: the held versions exist nowhere else. */
+const DiscardConflictsDialog = ({
+    count,
+    onExport,
+    onDiscard,
+    onCancel,
+}: {
+    count: number;
+    onExport: () => void;
+    onDiscard: () => void;
+    onCancel: () => void;
+}) => (
+    <Dialog label="Discard your unsaved versions?" onClose={onCancel}>
+        <p className="text-sm leading-relaxed text-stone-600">
+            {count === 1
+                ? 'One of your unsaved changes was overtaken elsewhere, and is kept only in this tab.'
+                : `${count} of your unsaved changes were overtaken elsewhere, and are kept only in this tab.`}{' '}
+            Discarding deletes {count === 1 ? 'it' : 'them'} for good. Export a copy first to keep{' '}
+            {count === 1 ? 'it' : 'them'}.
+        </p>
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={onCancel}>
+                Cancel
+            </Button>
+            <Button variant="secondary" size="sm" onClick={onExport}>
+                Export first
+            </Button>
+            <Button variant="danger" size="sm" onClick={onDiscard}>
+                Discard
+            </Button>
+        </div>
+    </Dialog>
+);

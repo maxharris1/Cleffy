@@ -125,15 +125,18 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                         // promises. No row: it was deleted with its teacher,
                         // and nothing it queued can ever upload. (The viewer
                         // asks the same of the server: fetchAccountDeleted.)
-                        // Ink a viewer could not store on this device goes
-                        // with the sign-out: Export is offered first.
+                        // Ink a viewer could not store on this device: Export
+                        // is offered first, and the sign-out waits on the
+                        // student (not on an unmount: then it does not happen).
                         const known: Record<string, KnownScore> = Object.fromEntries(
                             (assigned.status === 'fulfilled' ? assigned.value : []).map(({ document }) => [
                                 document.id,
                                 { title: document.title, doc: document },
                             ]),
                         );
-                        await askAboutHeldInk(session.user.id, roster === null, known);
+                        if (!(await askAboutHeldInk(session.user.id, roster === null, known))) {
+                            return;
+                        }
                         const state = await signOutEndedStudent(roster === null);
                         navigate('/student', { replace: true, state });
                         return;

@@ -38,7 +38,15 @@ import {
 } from '@/features/auth/session';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
-import { heldMarksFor, resetInkRecoveryForTests } from '@/sync/inkRecovery';
+import Dexie from 'dexie';
+
+import {
+    accountSignedIn,
+    heldInkForExport,
+    heldMarksFor,
+    resetInkRecoveryForTests,
+    signedOutInk,
+} from '@/sync/inkRecovery';
 import type { Annotation } from '@/types/models';
 
 const CLOUD_DOC = 'c0ffee00-0000-4000-8000-0000000000bb';
@@ -176,7 +184,7 @@ describe('signOut', () => {
         expect(await db.entitlements.count()).toBe(0);
     });
 
-    it('forgets the account’s marks this device could not store, after the warning (SF-1), and no other account’s', async () => {
+    it('cuts off the account’s marks this device could not store (SF-1), keeping them in this tab for Export or Discard (round 3), and no other account’s', async () => {
         getSession.mockResolvedValueOnce({ data: { session: { user: { id: 'user-1' } } } });
         const db = getDb();
         const store = new AnnotationStore(db, CLOUD_DOC);
@@ -198,11 +206,17 @@ describe('signOut', () => {
 
         await signOut();
 
-        // The next account in this tab finds nothing of it to draw, export or retry.
+        // No viewer draws it and nothing retries it…
         expect(heldMarksFor('user-1', CLOUD_DOC)).toEqual([]);
         expect(store.persistFailureCount).toBe(0);
+        // …but it is not destroyed: kept, signed out, for Export or Discard.
+        expect(heldInkForExport('user-1', CLOUD_DOC).held.map((a) => a.id)).toEqual(['cloud-unsaved']);
+        expect(signedOutInk().map((account) => [account.userId, account.reason])).toEqual([['user-1', 'here']]);
         // An account whose session ended here earlier without signing out keeps its own.
         expect(heldMarksFor('user-0', CLOUD_DOC).map((a) => a.id)).toEqual(['cloud-earlier']);
+        // The next account to sign in here: the signed-out ink goes.
+        accountSignedIn('user-2');
+        expect(heldInkForExport('user-1', CLOUD_DOC).held).toEqual([]);
         resetInkRecoveryForTests();
     });
 });
@@ -320,10 +334,12 @@ describe('signOutKeepingChanges', () => {
         expect(stalledWrite).toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(SIGN_OUT_STORAGE_TIMEOUT_MS * 3);
 
-        // Signed out regardless: the ended session is gone and its held ink with it.
+        // Signed out regardless: the ended session is gone. Its held ink is
+        // out of every viewer, and kept in this tab for Export or Discard.
         await expect(signedOut).resolves.toBe(0);
         expect(signOutAuth).toHaveBeenCalledWith({ scope: 'local' });
         expect(heldMarksFor('user-1', CLOUD_DOC)).toEqual([]);
+        expect(heldInkForExport('user-1', CLOUD_DOC).held.map((a) => a.id)).toEqual(['cloud-unsaved']);
 
         // The stalled database answers at last: the Retry still waiting on it writes nothing.
         vi.useRealTimers();
@@ -331,8 +347,58 @@ describe('signOutKeepingChanges', () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         expect(await stalled.ops.count()).toBe(0);
         expect(await stalled.annotations.get('cloud-unsaved')).toBeUndefined();
-        expect(heldMarksFor('user-1', CLOUD_DOC)).toEqual([]);
+        expect(heldInkForExport('user-1', CLOUD_DOC).held.map((a) => a.id)).toEqual(['cloud-unsaved']);
     });
+
+    it('stalled inside the transaction, with every later step stalled too: signed out within one 5 s deadline, and the write rolls back when storage answers', async () => {
+        getSession.mockResolvedValue({ data: { session: { user: { id: 'user-1' } } } });
+        signOutAuth.mockClear();
+        const stalled = new ScribblerDb(`stalled-${crypto.randomUUID()}`);
+        await stalled.annotations.put({ ...mark('cloud-held', CLOUD_DOC), seq: 3, pending: 0 });
+        const store = new AnnotationStore(stalled, CLOUD_DOC);
+        store.setAuthor('user-1');
+        await store.load();
+        const full = vi
+            .spyOn(stalled.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        await store.update('cloud-held', { color: '#ff0000' }).catch(() => undefined);
+        full.mockRestore();
+        expect(heldMarksFor('user-1', CLOUD_DOC)).toHaveLength(1);
+
+        // The Retry gets inside its transaction — the mirror row put — and
+        // then the outbox write hangs, the transaction held open.
+        let unstall!: () => void;
+        const stall = new Promise<void>((resolve) => (unstall = resolve));
+        let inside = false;
+        const write = stalled.ops.bulkAdd.bind(stalled.ops);
+        vi.spyOn(stalled.ops, 'bulkAdd').mockImplementation(((...args: Parameters<typeof stalled.ops.bulkAdd>) => {
+            inside = true;
+            return Dexie.waitFor(stall, 120_000).then(() => write(...args));
+        }) as typeof stalled.ops.bulkAdd);
+        // Stamping the outbox, and the cache clear after it, stall as well.
+        stampStall.on = true;
+        const db = getDb();
+        vi.spyOn(db.scoreCache, 'clear').mockReturnValue(new Promise(() => undefined) as never);
+        // Real time: fake-indexeddb runs its transactions on timers, so they
+        // cannot be faked while one is under way.
+        const started = Date.now();
+        await expect(signOutKeepingChanges()).resolves.toBe(0);
+        const took = Date.now() - started;
+        expect(inside).toBe(true);
+        // One deadline for every step, not one per step: 5 s, not 10 or 15.
+        expect(took).toBeGreaterThanOrEqual(SIGN_OUT_STORAGE_TIMEOUT_MS - 50);
+        expect(took).toBeLessThan(SIGN_OUT_STORAGE_TIMEOUT_MS + 2000);
+        expect(signOutAuth).toHaveBeenCalledWith({ scope: 'local' });
+        expect(heldInkForExport('user-1', CLOUD_DOC).held.map((a) => a.color)).toEqual(['#ff0000']);
+
+        // Storage answers: the transaction's last check finds the account
+        // signed out, and it rolls back whole — the mirror row too.
+        unstall();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(await stalled.ops.count()).toBe(0);
+        expect((await stalled.annotations.get('cloud-held'))?.color).toBe('#111111');
+        expect(heldInkForExport('user-1', CLOUD_DOC).held.map((a) => a.color)).toEqual(['#ff0000']);
+    }, 20_000);
 
     it('writes the held ink first when storage answers, so it is kept with the account’s queued changes', async () => {
         getSession.mockResolvedValue({ data: { session: { user: { id: 'user-1' } } } });
