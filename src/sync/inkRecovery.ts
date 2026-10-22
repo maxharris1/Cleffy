@@ -159,6 +159,8 @@ const listeners = new Set<() => void>();
 const openStores = new Set<OpenStore>();
 /** Per account, moved on whenever its held ink is cleared (see epochOf). */
 const epochs = new Map<string | null, number>();
+/** Per score, moved on whenever it is lost to this device or deleted here (see closedSince). */
+const docEpochs = new Map<string, number>();
 /** Local edits applied in memory whose write has not finished (AnnotationStore.hasUnsavedEdit). */
 let inFlight = 0;
 
@@ -197,6 +199,22 @@ export const boundTo = (userId: string | null): (() => boolean) => {
     }
     const epoch = epochOf(userId);
     return () => epochOf(userId) === epoch;
+};
+
+/**
+ * A Retry's guard for its score: true until the score is lost to this device
+ * or deleted here (closeDocInk, forgetDocInk) after this was called. A Retry
+ * holds its entry across awaits, so the entry it holds may be closed (or
+ * gone) by the time it writes: this, checked after every await and inside
+ * the write's transaction, cuts it off, and the closed ink stays as it was.
+ */
+const openDocBoundTo = (docId: string): (() => boolean) => {
+    const epoch = docEpochs.get(docId) ?? 0;
+    return () => (docEpochs.get(docId) ?? 0) === epoch;
+};
+
+const closeDocEpoch = (docId: string): void => {
+    docEpochs.set(docId, (docEpochs.get(docId) ?? 0) + 1);
 };
 
 /** A write its account's sign-out overtook: it wrote nothing, and nothing of it is held. */
@@ -935,7 +953,9 @@ export interface RetryOptions {
  * this device's mirror, checked in the same transaction as the write — is
  * not replayed over it, but kept for Export (RecoveryEntry.conflicts).
  * `ok` false: a write failed again, and what was not written is still held.
- * Bound to the account's epoch at the call (see persistOps).
+ * Bound to the account's epoch at the call (see persistOps), and to the
+ * score staying on this device (openDocBoundTo): closed meanwhile, it writes
+ * nothing more and its closed ink is kept as it was.
  */
 export const retryHeld = (userId: string | null, docId: string, options: RetryOptions = {}): Promise<RetryResult> => {
     const entry = entryFor(userId, docId);
@@ -946,7 +966,10 @@ export const retryHeld = (userId: string | null, docId: string, options: RetryOp
         }
         return Promise.resolve({ ok: true, wrote: [], overtaken: [] });
     }
-    const live = boundTo(userId);
+    // Cut off by the account's sign-out, or by the score's loss to this device.
+    const account = boundTo(userId);
+    const open = openDocBoundTo(docId);
+    const live = () => account() && open();
     const run = entry.chain.then(() => writeHeld(entry, live, options));
     entry.chain = run.then(() => undefined);
     return run;
@@ -973,7 +996,7 @@ const askServer = async (
 
 const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: RetryOptions): Promise<RetryResult> => {
     if (!live()) {
-        // Signed out while it waited: nothing of it may be written now.
+        // Signed out, or the score lost, while it waited: nothing of it may be written now.
         return { ok: false, wrote: [], overtaken: [] };
     }
     if (entries.get(keyOf(entry.userId, entry.docId)) !== entry) {
@@ -1027,7 +1050,8 @@ const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: Ret
         }
     } catch (err) {
         if (err instanceof RecoveryCancelled || !live()) {
-            // Signed out meanwhile: what is not written stays held, signed out.
+            // Signed out, or the score lost, meanwhile: what is not written
+            // stays held, signed out or closed (never pruned from here).
             changed();
             return { ok: false, wrote: [...new Set(wrote)], overtaken };
         }
@@ -1206,6 +1230,8 @@ const heldScoreOf = (entry: RecoveryEntry): SignedOutScore => {
  * (only a refused edit, or an owed starting point) just goes.
  */
 export const closeDocInk = (docId: string): void => {
+    // A Retry still on its way writes nothing more (openDocBoundTo).
+    closeDocEpoch(docId);
     let any = false;
     for (const key of [...overflowNotes.keys()]) {
         if ((JSON.parse(key) as [string | null, string])[1] === docId) {
@@ -1296,6 +1322,7 @@ export const heldInkForExport = (
  * losing a score keeps it for Export or Discard (closeDocInk).
  */
 export const forgetDocInk = (docId: string): void => {
+    closeDocEpoch(docId);
     for (const key of [...overflowNotes.keys()]) {
         if ((JSON.parse(key) as [string | null, string])[1] === docId) {
             overflowNotes.delete(key);
@@ -1524,6 +1551,7 @@ export const resetInkRecoveryForTests = (): void => {
     entries.clear();
     openStores.clear();
     epochs.clear();
+    docEpochs.clear();
     overflowNotes.clear();
     retired.clear();
     sources.clear();

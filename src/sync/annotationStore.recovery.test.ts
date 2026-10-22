@@ -8,6 +8,7 @@ import { isCutOffWrite } from '@/sync/cutOffWrites';
 import {
     accountSignedIn,
     boundTo,
+    closeDocInk,
     conflictCount,
     conflictMarksFor,
     discardSignedOutInk,
@@ -15,6 +16,7 @@ import {
     heldInkForExport,
     heldMarksFor,
     holdOps,
+    lostAccessInk,
     MAX_HELD_OPS,
     MAX_HELD_SCORES,
     noteRefusedEdit,
@@ -786,5 +788,45 @@ describe('memory bounds without losing held ink (MAJOR 2, decision c)', () => {
 
         expect(store.overflowCount).toBe(0);
         expect(store.persistFailureCount).toBe(0);
+    });
+});
+
+describe('a Retry under way when the score is lost to this device (PR #72 fix 1)', () => {
+    /** The lost score's closed ink, for Export (mark ids and colours). */
+    const closedInk = (userId: string): string[] =>
+        heldInkForExport(userId, DOC, true).held.map((a) => `${a.id}:${a.color}`);
+
+    it('closed while its server check is out: the Retry writes nothing, and the closed ink stays for Export', async () => {
+        await heldRedOverSynced(A);
+        let answer!: (rows: Annotation[]) => void;
+        const serverRows = vi.fn(() => new Promise<Annotation[]>((resolve) => (answer = resolve)));
+
+        const retry = retryHeld(A, DOC, { serverRows });
+        await vi.waitFor(() => expect(serverRows).toHaveBeenCalled());
+        // Access lost (purgeLocalDocument) while the server is still answering.
+        closeDocInk(DOC);
+        answer([{ ...stroke('a1'), seq: 5 }]);
+
+        await expect(retry).resolves.toMatchObject({ ok: false, wrote: [] });
+        expect(await db.ops.count()).toBe(0);
+        expect((await db.annotations.get('a1'))?.color).toBe('#111111');
+        expect(closedInk(A)).toEqual(['a1:#ff0000']);
+        expect(lostAccessInk().map((score) => [score.userId, score.docId, score.marks])).toEqual([[A, DOC, 1]]);
+        expect(heldMarksFor(A, DOC)).toEqual([]);
+    });
+
+    it('closed while its write waits on storage: the write rolls back, and the closed ink stays for Export', async () => {
+        await heldRedOverSynced(A);
+        const { release } = gateWrites();
+
+        const retry = retryHeld(A, DOC);
+        await Promise.resolve();
+        closeDocInk(DOC);
+        release();
+
+        await expect(retry).resolves.toMatchObject({ ok: false, wrote: [] });
+        expect(await db.ops.count()).toBe(0);
+        expect((await db.annotations.get('a1'))?.color).toBe('#111111');
+        expect(closedInk(A)).toEqual(['a1:#ff0000']);
     });
 });
