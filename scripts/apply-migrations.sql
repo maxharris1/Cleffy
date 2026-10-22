@@ -20377,8 +20377,11 @@ grant execute on function public.claim_superseded_thumbnails (uuid[], integer) t
 -- busy and writes nothing. A teacher's reset takes a reservation of its own
 -- before it scrambles the password (begin_student_code_reset), so a reset and a
 -- claim can never interleave: whichever comes second is told to wait. Archiving
--- clears the reservation (the commit refuses an archived row in any case), and
--- any other change of the code hash refuses while a live claim holds it.
+-- BLOCKS a claim in flight -- its commit refuses an archived row -- but leaves
+-- the reservation until that claim lets go, so a reset of the archived student
+-- (or a new claim after a restore) still waits for the stale claim instead of
+-- racing its password write. Any other change of the code hash refuses while a
+-- live claim holds it.
 --
 -- The TTL is longer than an Edge Function can run (400 s wall clock on the paid
 -- plan), so by the time a reservation expires its holder can no longer be
@@ -20578,8 +20581,10 @@ grant execute on function public.begin_student_code_reset (uuid, integer) to ser
 -- ---------------------------------------------------------------------------
 -- The guard: what a change to the row does to its reservation.
 -- ---------------------------------------------------------------------------
---  * archived: the reservation is cleared. The claim's commit refuses an
---    archived row anyway, and the archive's ban stops any sign-in.
+--  * archived: nothing here. The claim's commit refuses an archived row, the
+--    archive's ban stops any sign-in, and the reservation stays until its
+--    holder releases it (or it expires), so a reset of the archived row waits
+--    for the claim rather than scrambling before its password write lands.
 --  * the code hash changes other than by the claim's own commit: refused while
 --    a live CLAIM holds the row (so no path can rotate a card under a claim in
 --    flight), otherwise the reservation is cleared -- a reset's own one
@@ -20587,10 +20592,6 @@ grant execute on function public.begin_student_code_reset (uuid, integer) to ser
 create or replace function public.student_claim_reservation_guard () returns trigger language plpgsql security definer
 set search_path = public as $$
 begin
-    if new.archived_at is not null and old.archived_at is null then
-        delete from public.student_claim_reservations where student_id = new.id;
-        return new;
-    end if;
     if new.login_code_hash is distinct from old.login_code_hash
         and not (old.claimed_at is null and new.claimed_at is not null) then
         if exists (
@@ -20612,7 +20613,7 @@ revoke all on function public.student_claim_reservation_guard () from public, an
 drop trigger if exists managed_students_claim_reservation_guard on public.managed_students;
 
 create trigger managed_students_claim_reservation_guard
-after update of login_code_hash, archived_at on public.managed_students
+after update of login_code_hash on public.managed_students
 for each row execute function public.student_claim_reservation_guard ();
 
 -- ===== supabase/migrations/20261022110100_account_deletion_pending.sql =====
@@ -20640,9 +20641,11 @@ for each row execute function public.student_claim_reservation_guard ();
 --   * begin_account_deletion   -- the first step of every attempt; counts it;
 --   * settle_account_deletion  -- 'abandoned' when the attempt deleted nothing
 --     (billing could not be stopped), which clears it and gives the account
---     back as it was; 'failed' when it stopped part-way, which KEEPS it (with
---     the error) so the half-deleted account cannot grow while the person
---     retries;
+--     back as it was -- but only if no other attempt is on record: a marker an
+--     earlier attempt left after deleting part of the account, or one a second
+--     tab is sweeping under right now, stays; 'failed' when it stopped part-way,
+--     which KEEPS it (with the error) so the half-deleted account cannot grow
+--     while the person retries;
 --   * the auth user's delete cascades it away when the deletion completes.
 --
 -- Service role only, like support_messages.
@@ -20707,7 +20710,10 @@ returns void language plpgsql security definer
 set search_path = public as $$
 begin
     if p_outcome = 'abandoned' then
-        delete from public.account_deletions where user_id = p_user;
+        -- Only a marker this attempt alone wrote: attempts counts every begin,
+        -- so 1 with no recorded failure means no earlier attempt deleted
+        -- anything and no other attempt is running on it.
+        delete from public.account_deletions where user_id = p_user and attempts = 1 and last_error is null;
     elsif p_outcome = 'failed' then
         update public.account_deletions
         set last_error = left(p_error, 200), updated_at = now()
@@ -20821,7 +20827,11 @@ alter table public.support_messages
     add column if not exists next_attempt_at timestamptz,
     add column if not exists completed_at timestamptz,
     -- Resend's id for the forward we sent, once it was accepted.
-    add column if not exists forward_resend_id text;
+    add column if not exists forward_resend_id text,
+    -- A forward whose outcome was unknown already spent its share of the mail
+    -- budget; its retry (same Idempotency-Key, which Resend replays) must not
+    -- reserve again.
+    add column if not exists forward_budget_held boolean not null default false;
 
 alter table public.support_messages alter column status set default 'processing';
 
@@ -20841,7 +20851,7 @@ where status <> 'completed';
 -- How many failed attempts a row gets before it is completed with its error.
 -- Budget deferrals are not attempts.
 create or replace function public.support_message_max_attempts () returns integer
-language sql immutable as $$ select 12 $$;
+language sql immutable as $$ select 16 $$;
 
 revoke all on function public.support_message_max_attempts () from public, anon, authenticated;
 
@@ -20849,9 +20859,10 @@ revoke all on function public.support_message_max_attempts () from public, anon,
 -- claim_support_message: the webhook's first write
 -- ---------------------------------------------------------------------------
 -- {status: 'claimed', id, holder, inserted, attempts, from_address, to_addresses,
--- received_for, subject, text_body, html_body}, {status: 'duplicate'} for a
--- completed row, or {status: 'busy', retry_after_seconds} while another
--- delivery holds the lease.
+-- received_for, subject, text_body, html_body, budget_held}, {status:
+-- 'duplicate'} for a completed row, or {status: 'busy', retry_after_seconds}
+-- while another delivery holds the lease or the row is backing off (a
+-- redelivery does not jump the backoff, and is not counted as an attempt).
 create or replace function public.claim_support_message (
     p_email_id text,
     p_message_id text,
@@ -20900,6 +20911,13 @@ begin
                 'retry_after_seconds', greatest(1, ceil(extract(epoch from v_row.lease_until - now()))::integer)
             );
         end if;
+        if v_row.next_attempt_at is not null and v_row.next_attempt_at > now() then
+            return jsonb_build_object(
+                'status', 'busy',
+                'id', v_row.id,
+                'retry_after_seconds', greatest(1, ceil(extract(epoch from v_row.next_attempt_at - now()))::integer)
+            );
+        end if;
         update public.support_messages
         set lease_holder = v_holder, lease_until = now() + v_lease, attempts = attempts + 1
         where id = v_row.id
@@ -20918,7 +20936,8 @@ begin
         'received_for', to_jsonb(v_row.received_for),
         'subject', v_row.subject,
         'text_body', v_row.text_body,
-        'html_body', v_row.html_body
+        'html_body', v_row.html_body,
+        'budget_held', v_row.forward_budget_held
     );
 end;
 $$;
@@ -20980,9 +20999,11 @@ $$;
 --                 rejected for good, a message with no body at all;
 --   deferred   -- forward_deferred: the budget is spent; retried after
 --                 p_retry_after_seconds; NOT an attempt;
---   retry      -- still processing: the body fetch failed, or the forward's
---                 outcome is unknown; retried with backoff, and completed
---                 with its error once it is out of attempts.
+--   retry      -- still processing: the body fetch failed, the forward's
+--                 outcome is unknown (p_budget_held: its budget is spent, the
+--                 retry must not reserve again), or the forward is not
+--                 configured; retried with backoff, and completed with its
+--                 error once it is out of attempts.
 -- False when p_holder no longer holds the row (its lease ran out and another
 -- delivery took it): that delivery's outcome stands, not this one.
 create or replace function public.finish_support_message (
@@ -20991,7 +21012,8 @@ create or replace function public.finish_support_message (
     p_outcome text,
     p_error text default null,
     p_retry_after_seconds integer default null,
-    p_forward_id text default null
+    p_forward_id text default null,
+    p_budget_held boolean default null
 ) returns boolean language plpgsql security definer
 set search_path = public as $$
 declare
@@ -21008,12 +21030,13 @@ begin
     if p_outcome = 'forwarded' then
         update public.support_messages
         set status = 'completed', forwarded_at = now(), forward_error = null, forward_resend_id = p_forward_id,
-            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null
+            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null,
+            forward_budget_held = false
         where id = p_id;
     elsif p_outcome in ('stored', 'refused') then
         update public.support_messages
         set status = 'completed', forward_error = left(p_error, 500), completed_at = now(),
-            lease_holder = null, lease_until = null, next_attempt_at = null
+            lease_holder = null, lease_until = null, next_attempt_at = null, forward_budget_held = false
         where id = p_id;
     elsif p_outcome = 'deferred' then
         update public.support_messages
@@ -21026,11 +21049,13 @@ begin
         update public.support_messages
         set status = 'completed',
             forward_error = left('gave up after ' || v_row.attempts || ' attempts: ' || coalesce(p_error, 'unknown'), 500),
-            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null
+            completed_at = now(), lease_holder = null, lease_until = null, next_attempt_at = null,
+            forward_budget_held = false
         where id = p_id;
     else
         update public.support_messages
         set forward_error = left(p_error, 500),
+            forward_budget_held = coalesce(p_budget_held, forward_budget_held),
             next_attempt_at = now() + coalesce(
                 make_interval(secs => p_retry_after_seconds),
                 least(interval '6 hours', interval '1 minute' * power(2, least(greatest(v_row.attempts - 1, 0), 20)))
@@ -21056,9 +21081,10 @@ revoke all on function public.save_support_message_body (uuid, uuid, text, text)
 
 grant execute on function public.save_support_message_body (uuid, uuid, text, text) to service_role;
 
-revoke all on function public.finish_support_message (uuid, uuid, text, text, integer, text) from public, anon, authenticated;
+revoke all on function public.finish_support_message (uuid, uuid, text, text, integer, text, boolean)
+from public, anon, authenticated;
 
-grant execute on function public.finish_support_message (uuid, uuid, text, text, integer, text) to service_role;
+grant execute on function public.finish_support_message (uuid, uuid, text, text, integer, text, boolean) to service_role;
 
 -- ---------------------------------------------------------------------------
 -- The retry tick (pg_cron + pg_net + vault, the content-notice pattern)

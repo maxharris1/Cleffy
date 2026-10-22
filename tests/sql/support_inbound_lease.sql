@@ -120,10 +120,15 @@ select pg_temp.chk('26 the retry finishes it',
 $q$select public.finish_support_message (
     (select id from pg_temp.msg('p3-lease-2')), (select lease_holder from pg_temp.msg('p3-lease-2')), 'forwarded')
    and (select status = 'completed' from pg_temp.msg('p3-lease-2'))$q$);
-select pg_temp.chk('27 a deferred row a webhook redelivery finds unleased is resumed by it',
+select pg_temp.chk('27 a deferred row is not jumped by a webhook redelivery before it is due',
 $q$with c as (select pg_temp.claim('d3', 'p3-lease-3') as v)
    select public.finish_support_message ((v ->> 'id')::uuid, (v ->> 'holder')::uuid, 'deferred', null, 600)
-      and (pg_temp.claim('d3b', 'p3-lease-3') ->> 'status') = 'claimed' from c$q$);
+      and (pg_temp.claim('d3b', 'p3-lease-3') ->> 'status') = 'busy' from c$q$);
+select pg_temp.chk('28 ... nor counted as an attempt',
+$q$select attempts = 0 from pg_temp.msg('p3-lease-3')$q$);
+update public.support_messages set next_attempt_at = now() - interval '1 second' where resend_email_id = 'p3-lease-3';
+select pg_temp.chk('29 once due, a redelivery resumes it',
+$q$select (pg_temp.claim('d3c', 'p3-lease-3') ->> 'status') = 'claimed'$q$);
 
 -- ===========================================================================
 -- 3. Failures: back off, give up at the cap; final outcomes
@@ -133,6 +138,9 @@ select pg_temp.chk('30 a failed attempt (body fetch, unknown send) stays process
 $q$select public.finish_support_message (pg_temp.row_id('r'), pg_temp.holder('r'), 'retry', 'fetch 503')
       and (select status = 'processing' and lease_holder is null and next_attempt_at > now()
               and forward_error = 'fetch 503' from pg_temp.msg('p3-lease-4'))$q$);
+select pg_temp.chk('30a a redelivery during the backoff is told to wait, and is not an attempt',
+$q$select (pg_temp.claim('r-early', 'p3-lease-4') ->> 'status') = 'busy'
+      and (select attempts = 1 from pg_temp.msg('p3-lease-4'))$q$);
 update public.support_messages set attempts = public.support_message_max_attempts () - 1, next_attempt_at = now() - interval '1 second'
 where resend_email_id = 'p3-lease-4';
 select pg_temp.chk('31 the last attempt allowed is taken',
@@ -140,7 +148,25 @@ $q$select count(*) = 1 from public.claim_due_support_messages (10) where resend_
 select pg_temp.chk('32 ... and when it fails too, the row is completed with its error',
 $q$select public.finish_support_message ((select id from pg_temp.msg('p3-lease-4')),
           (select lease_holder from pg_temp.msg('p3-lease-4')), 'retry', 'fetch 503')
-      and (select status = 'completed' and forward_error like 'gave up after 12 attempts%' from pg_temp.msg('p3-lease-4'))$q$);
+      and (select status = 'completed'
+              and forward_error like 'gave up after ' || public.support_message_max_attempts () || ' attempts%'
+           from pg_temp.msg('p3-lease-4'))$q$);
+select pg_temp.claim('u', 'p3-lease-7');
+select pg_temp.chk('33a a forward with an unknown outcome is retried with its budget marked as spent',
+$q$select public.finish_support_message (pg_temp.row_id('u'), pg_temp.holder('u'), 'retry', 'forward outcome unknown',
+          null, null, true)
+      and (select forward_budget_held from pg_temp.msg('p3-lease-7'))$q$);
+update public.support_messages set next_attempt_at = now() - interval '1 second' where resend_email_id = 'p3-lease-7';
+select pg_temp.chk('33b ... the retry is told so, and must not reserve again',
+$q$select (pg_temp.claim('u2', 'p3-lease-7') ->> 'budget_held') = 'true'$q$);
+select pg_temp.chk('33c ... and a later retry without news keeps it; the forward clears it',
+$q$select public.finish_support_message (pg_temp.row_id('u2'), pg_temp.holder('u2'), 'retry', 'fetch 503')
+      and (select forward_budget_held from pg_temp.msg('p3-lease-7'))$q$);
+update public.support_messages set next_attempt_at = now() - interval '1 second' where resend_email_id = 'p3-lease-7';
+select pg_temp.chk('33d ... cleared once forwarded',
+$q$with c as (select pg_temp.claim('u3', 'p3-lease-7') as v)
+   select public.finish_support_message ((v ->> 'id')::uuid, (v ->> 'holder')::uuid, 'forwarded')
+      and not (select forward_budget_held from pg_temp.msg('p3-lease-7')) from c$q$);
 select pg_temp.claim('s', 'p3-lease-5');
 select pg_temp.chk('33 store-only is completed with no error',
 $q$select public.finish_support_message (pg_temp.row_id('s'), pg_temp.holder('s'), 'stored')

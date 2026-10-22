@@ -702,8 +702,10 @@ reset is `busy` during a claim and rotating the code under a live claim is
 refused with 55006; a claim is `busy` during a reset, and the old hash can
 never be committed against the new code); expiry (a dead holder is taken
 over by a claim or a reset and its late commit and release are no-ops);
-archive clears a reservation; and no client role can call any of it or read
-the table. Proven against the local stack on 2026-10-22: all 52 checks passed.
+archive blocks a claim's commit but keeps its reservation until the claim
+releases it, so a reset of the archived student waits for it; and no client
+role can call any of it or read the table. Proven against the local stack on
+2026-10-22: all 53 checks passed.
 
 `account_deletion_pending.sql` proves
 `20261022110100_account_deletion_pending.sql` (launchfix P3, SF-13): once
@@ -712,11 +714,13 @@ advisory lock exclusively until it commits), a new score or roster row for
 that account is refused with 55000 whoever inserts it (service role, or the
 owner's own tab), while other accounts and updates to existing rows are
 unaffected and every insert takes the shared lock; a retry counts its attempt;
-`settle_account_deletion` keeps the marker with its error on `failed` and
-clears it on `abandoned`; deleting the auth user cascades it away, and a retry
-for an account already gone writes nothing; and no client role can call it or
-read the table. Proven against the local stack on 2026-10-22: all 29 checks
-passed.
+`settle_account_deletion` keeps the marker with its error on `failed`, and
+clears it on `abandoned` only when it is a lone first attempt's -- a retry that
+deletes nothing leaves an earlier part-way attempt's marker in place, and one
+tab abandoning cannot clear the marker a second tab is sweeping under;
+deleting the auth user cascades it away, and a retry for an account already
+gone writes nothing; and no client role can call it or read the table. Proven
+against the local stack on 2026-10-22: all 36 checks passed.
 
 `support_inbound_lease.sql` proves `20261022110200_support_inbound_lease.sql`
 (launchfix P3, SF-2 / Codex B1): the first webhook delivery inserts its
@@ -727,12 +731,14 @@ runs out (no second row, the stored body handed back, the dead holder's writes
 refused); a completed row is the only duplicate. A forward the budget cannot
 pay for is `forward_deferred` (not an attempt) and `claim_due_support_messages`
 takes it only once due, under a fresh lease that a second run or a webhook
-redelivery cannot share; a deferred row a redelivery finds unleased is resumed.
-Failed attempts back off and, at the attempt cap, are completed with their
-error; store-only and refused rows complete; the state is constrained to the
-three values; the retry tick runs and is scheduled; and no client role can
-call any of it or read the table. Proven against the local stack on
-2026-10-22: all 36 checks passed.
+redelivery cannot share; a redelivery before a row is due is told to wait and
+is not counted as an attempt, and once due it resumes the row. Failed attempts
+back off and, at the attempt cap, are completed with their error; a forward
+whose outcome was unknown is retried with its budget marked as spent (cleared
+once forwarded); store-only and refused rows complete; the state is
+constrained to the three values; the retry tick runs and is scheduled; and no
+client role can call any of it or read the table. Proven against the local
+stack on 2026-10-22: all 43 checks passed.
 
 ## In CI
 

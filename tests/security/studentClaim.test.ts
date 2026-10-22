@@ -154,9 +154,9 @@ class Roster {
         Object.assign(this.rows.get(id) as Row, { hash, claimed: false });
     }
 
+    /** Archiving blocks the commit; the reservation stays until its holder lets go. */
     archive(id: string): void {
         (this.rows.get(id) as Row).archived = true;
-        this.held.delete(id);
     }
 
     backend(): StudentClaimBackend & { [K in Step]: ReturnType<typeof vi.fn> } {
@@ -324,8 +324,9 @@ describe('student-claim: two claims on one card', () => {
         expect(backend.signOutSession).toHaveBeenCalledTimes(1);
         expect(roster.passwords.get('user-s1')).toBe('FreshPass2');
         expect(roster.rows.get('s1')?.username).toBe('ada_fresh');
-        // The stale request handed nothing back: the row was not its to release.
-        expect(backend.releaseClaim).not.toHaveBeenCalled();
+        // The stale request's release cannot touch the row: it was not its own.
+        expect(roster.held.size).toBe(0);
+        expect(backend.releaseClaim).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -362,16 +363,22 @@ describe('student-claim against a teacher reset', () => {
         expect((await handleStudentClaim(claim(CODE_B, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);
     });
 
-    it('archiving during a claim clears its reservation, so the commit is lost and the session dropped', async () => {
+    it('archiving during a claim blocks its commit; a reset waits until the claim lets go', async () => {
         const { roster, backend, deps } = await setup();
         const paused = roster.pause('completeClaim');
         const inFlight = handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
         await paused.arrived;
         roster.archive('s1');
+        // A reset of the archived student while the stale claim still runs
+        // must not scramble before that claim is done.
+        expect(roster.beginReset('s1')).toBe('busy');
         paused.resume();
         expect((await inFlight).status).toBe(401);
         expect(backend.signOutSession).toHaveBeenCalledTimes(1);
         expect(roster.rows.get('s1')?.claimed).toBe(false);
+        // The lost claim released its own reservation on the way out.
+        expect(roster.held.size).toBe(0);
+        expect(roster.beginReset('s1')).toBe('reserved');
     });
 });
 

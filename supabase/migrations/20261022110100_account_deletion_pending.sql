@@ -22,9 +22,11 @@
 --   * begin_account_deletion   -- the first step of every attempt; counts it;
 --   * settle_account_deletion  -- 'abandoned' when the attempt deleted nothing
 --     (billing could not be stopped), which clears it and gives the account
---     back as it was; 'failed' when it stopped part-way, which KEEPS it (with
---     the error) so the half-deleted account cannot grow while the person
---     retries;
+--     back as it was -- but only if no other attempt is on record: a marker an
+--     earlier attempt left after deleting part of the account, or one a second
+--     tab is sweeping under right now, stays; 'failed' when it stopped part-way,
+--     which KEEPS it (with the error) so the half-deleted account cannot grow
+--     while the person retries;
 --   * the auth user's delete cascades it away when the deletion completes.
 --
 -- Service role only, like support_messages.
@@ -89,7 +91,10 @@ returns void language plpgsql security definer
 set search_path = public as $$
 begin
     if p_outcome = 'abandoned' then
-        delete from public.account_deletions where user_id = p_user;
+        -- Only a marker this attempt alone wrote: attempts counts every begin,
+        -- so 1 with no recorded failure means no earlier attempt deleted
+        -- anything and no other attempt is running on it.
+        delete from public.account_deletions where user_id = p_user and attempts = 1 and last_error is null;
     elsif p_outcome = 'failed' then
         update public.account_deletions
         set last_error = left(p_error, 200), updated_at = now()
