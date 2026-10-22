@@ -109,6 +109,19 @@ export const epochRetryDelayMs = (attempt: number, random: () => number = Math.r
 };
 
 /**
+ * Spread before a `topic_rotated` hint is followed (the generation re-read,
+ * then the rejoin and its gap-fill pull): a rotation tells every member of the
+ * score at once, and one commit may rotate hundreds of scores (a district's
+ * soft delete, a plan lapse archiving a library), so without it every open
+ * device would read, join and pull in the same instant. Uniform over
+ * 0..ROTATION_JITTER_MAX_MS; hints that land while one is waiting join it.
+ */
+export const ROTATION_JITTER_MAX_MS = 2000;
+
+export const rotationJitterMs = (random: () => number = Math.random): number =>
+    Math.round(random() * ROTATION_JITTER_MAX_MS);
+
+/**
  * How long doc-db:{id} may be out before we stop waiting for it and pull
  * instead. A healthy (re-)join lands well inside this; anything slower means
  * the join is being refused or retried (e.g. the frontend is live before
@@ -221,7 +234,9 @@ export const docDbTopic = (docId: string, epoch = 0): string => `doc-db:${docId}
  * runs under this request's own token and returns null exactly when
  * document_role() does, i.e. the caller is not (or no longer) a member, a
  * takedown shuts them out (restricted: everyone but the owner; removed:
- * everyone), or the score is gone. That is the check RLS makes, read fresh on
+ * everyone), or the score is gone -- and also while the score is archived,
+ * when the realtime policies refuse every join (20261022120100), so the
+ * channels stop rather than retry. That is the check RLS makes, read fresh on
  * every request, so only a response that arrived with no error and a SQL
  * null body is 'denied'.
  *
@@ -284,6 +299,8 @@ export class DocRealtimeChannel {
     /** Failed reads in a row while held (see epochRetryDelayMs); a successful read resets it. */
     private epochRetryAttempts = 0;
     private epochRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    /** A rotation hint's jittered follow-up (see onTopicRotated); while it waits, reads decide nothing. */
+    private rotationTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Re-join after a drop (see scheduleRejoin).
     private readonly rejoinTimers: Record<ChannelKey, ReturnType<typeof setTimeout> | null> = { live: null, db: null };
@@ -366,7 +383,9 @@ export class DocRealtimeChannel {
         };
         this.epochCheck = run().then((read) => {
             this.epochCheck = null;
-            if (read && !this.stopped) {
+            // A hint landed meanwhile and its follow-up reads again: this
+            // answer may predate that rotation.
+            if (read && !this.stopped && !this.rotationTimer) {
                 this.applyEpochRead(read);
             }
         });
@@ -447,14 +466,21 @@ export class DocRealtimeChannel {
         this.opts.onMembershipChanged?.();
     }
 
-    /**
-     * Leave both topics for generation `epoch`'s. Treated as a re-join: once
-     * both are back, onReconnect clears live ink and pulls what was committed
-     * while neither topic was joined.
-     */
+    /** Leave both topics for generation `epoch`'s (see leaveTopics). */
     private moveToEpoch(epoch: number): void {
-        const { supabase } = this.opts;
         this.epoch = epoch;
+        this.leaveTopics();
+        this.openLive();
+        this.openDb();
+    }
+
+    /**
+     * Leave both topics. Whatever joins next is a re-join: once both are
+     * back, onReconnect clears live ink and pulls what was committed while
+     * neither topic was joined.
+     */
+    private leaveTopics(): void {
+        const { supabase } = this.opts;
         const old = [this.channel, this.dbChannel];
         this.channel = null;
         this.dbChannel = null;
@@ -471,18 +497,56 @@ export class DocRealtimeChannel {
                 void supabase.removeChannel(channel).catch(() => undefined);
             }
         }
-        this.openLive();
-        this.openDb();
     }
 
-    /** The server moved this score's topics: stop live ink now, then follow. */
-    private onTopicRotated(payload: unknown): void {
-        if (parseTopicRotated(payload)?.document_id !== this.opts.docId || !this.opts.fetchTopicEpoch) {
+    /**
+     * The server moved this score's topics: stop live ink and presence now,
+     * then follow.
+     *
+     * On the server's own word -- the hint on doc-db:{id}, where no client can
+     * send -- both old topics are left at once, before the new generation is
+     * even read. Realtime keeps the permissions it checked when a channel
+     * joined until that client refreshes its token, and cannot evict anyone,
+     * so a member who just lost the score, if their app ignores the hint,
+     * stays on the old topics for up to an hour (jwt_expiry) able to send and
+     * hear there (20261022120100). Leaving at once is what keeps this device's
+     * presence and anything it would hear out of their reach; the server
+     * already sends only on the new generation.
+     *
+     * The same hint on doc:{id} is left on at once only while doc-db:{id} is
+     * not joined, when it is the only word this device gets. Otherwise any
+     * member could send it there, so it holds and re-reads: a genuine one is
+     * followed by doc-db:{id}'s in the same commit, and a forged one moves
+     * nothing (applyEpochRead lets go on the same topics).
+     *
+     * The re-read and rejoin wait rotationJitterMs, once per burst: further
+     * hints while it waits (the other topic's, a second rotation) join it,
+     * and a read already in flight decides nothing.
+     */
+    private onTopicRotated(payload: unknown, from: RealtimeChannel): void {
+        if (
+            this.stopped ||
+            (from !== this.channel && from !== this.dbChannel) ||
+            parseTopicRotated(payload)?.document_id !== this.opts.docId ||
+            !this.opts.fetchTopicEpoch
+        ) {
             return;
         }
         this.inkHeld = true;
         this.dropLiveAudience();
-        this.refreshEpoch();
+        if (from === this.dbChannel || !this.joined.db) {
+            this.leaveTopics();
+            // Committed rows have no live path until the rejoin: pull if it is slow.
+            this.updateDbFallback();
+        }
+        if (this.rotationTimer) {
+            return;
+        }
+        this.clearEpochRetry();
+        this.rotationTimer = setTimeout(() => {
+            this.rotationTimer = null;
+            this.refreshEpoch();
+        }, rotationJitterMs());
     }
 
     /** Nobody is reachable on doc:{id} until a presence sync says so again. */
@@ -530,8 +594,9 @@ export class DocRealtimeChannel {
             }
         });
 
-        // Any member could forge this one here too; it only makes us re-read.
-        channel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload));
+        // Any member could forge this one here too; it only makes us re-read
+        // (and rejoin, while doc-db:{id} is down: see onTopicRotated).
+        channel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload, channel));
 
         channel.on('presence', { event: 'sync' }, () => {
             const state = channel.presenceState<Record<string, unknown>>();
@@ -611,8 +676,10 @@ export class DocRealtimeChannel {
                 this.opts.onScoreAnalysis?.(msg);
             }
         });
-        // Server-authored, so unforgeable here: the takedown moved the score.
-        dbChannel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) => this.onTopicRotated(payload));
+        // Server-authored, so unforgeable here: a takedown or a lost membership moved the score.
+        dbChannel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) =>
+            this.onTopicRotated(payload, dbChannel),
+        );
         dbChannel.on('system', {}, (payload: unknown) => this.onSystem(payload));
         this.dbChannel = dbChannel;
         dbChannel.subscribe((status, err) => {
@@ -879,6 +946,10 @@ export class DocRealtimeChannel {
     stop(): void {
         this.stopped = true;
         this.clearEpochRetry();
+        if (this.rotationTimer) {
+            clearTimeout(this.rotationTimer);
+            this.rotationTimer = null;
+        }
         this.leaveDbFallback();
         this.clearRejoinTimer('live');
         this.clearRejoinTimer('db');
