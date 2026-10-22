@@ -81,9 +81,10 @@ describe('ReportContentPage', () => {
         );
     });
 
-    it('says a queued confirmation goes out when mail capacity frees up, within 24 hours, not "shortly"', async () => {
-        // The acknowledgment budget can be spent for the rest of the day, so
-        // "shortly" would be a promise the outbox cannot keep.
+    it('says a queued confirmation goes out as soon as possible, with no deadline it cannot keep', async () => {
+        // The acknowledgment budget can be spent for the rest of the day, and
+        // nothing guarantees a backlog clears in any fixed time (Codex r2 Part A),
+        // so neither "shortly" nor "within 24 hours".
         submit.mockResolvedValue({ reference: 'CR-QUEUED0001', acknowledged: false });
         const user = userEvent.setup();
         renderPage('/report?url=https%3A%2F%2Fcleffy.io%2Fdoc%2Fabc');
@@ -94,9 +95,10 @@ describe('ReportContentPage', () => {
         await user.click(screen.getByRole('button', { name: 'Send report' }));
 
         expect(await screen.findByRole('heading', { name: 'Report received' })).toBeInTheDocument();
-        const note = screen.getByText(/Your confirmation email is queued/);
-        expect(note).toHaveTextContent('as soon as our mail capacity frees up, within 24 hours');
+        const note = screen.getByText(/We've received your report and will email a confirmation/);
+        expect(note).toHaveTextContent('as soon as possible');
         expect(note).toHaveTextContent('ada@example.com');
         expect(note).not.toHaveTextContent('shortly');
+        expect(note).not.toHaveTextContent(/\d+ hours/);
     });
 });

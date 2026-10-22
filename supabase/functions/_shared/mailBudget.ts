@@ -140,8 +140,10 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
  * The last two were added by the P3 fix round (decision 51), carved out of
  * guestEmailCode (28/150 before) so the reserve stays whole. Inbound forwards
  * used to spend contentReportAck, which let anyone who can mail support@ delay
- * the legally required acknowledgments; now each has its own buckets and
- * neither can starve the other. Student invites and resets go out through
+ * the legally required acknowledgments; now each has its own buckets, so
+ * neither can spend the other's share. That is all the split guarantees: every
+ * category still sends through the one Resend account, whose rate limit is
+ * shared and gives no category priority. Student invites and resets go out through
  * GoTrue, so they would otherwise spend the very auth capacity the reserve
  * protects, with nothing in our code counting them.
  *

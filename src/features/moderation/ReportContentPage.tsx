@@ -192,7 +192,7 @@ export const ReportContentPage = () => {
                     <p className="mt-3 text-[0.95rem] leading-relaxed text-stone-700">
                         {done.acknowledged
                             ? `We have emailed a confirmation to ${reporterEmail.trim()}.`
-                            : `Your confirmation email is queued. We will send it to ${reporterEmail.trim()} as soon as our mail capacity frees up, within 24 hours; keep this reference meanwhile.`}{' '}
+                            : `We've received your report and will email a confirmation to ${reporterEmail.trim()} as soon as possible; keep this reference meanwhile.`}{' '}
                         To follow up, write to{' '}
                         <a href={`mailto:${LEGAL_ENTITY.emails.legal}`} className={linkClassName}>
                             {LEGAL_ENTITY.emails.legal}

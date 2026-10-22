@@ -1004,7 +1004,7 @@ describe('the mail budget across uncertain sends (unknown keeps, a definite reje
         expect(keys).toEqual([`via-helper:content-notice-outbox:${id}`]);
     });
 
-    it('inbound support forwards spending their whole share cannot delay an acknowledgment', async () => {
+    it('inbound support forwards spending their whole share leave the acknowledgment budget untouched', async () => {
         // Codex r1 finding 1: inbound used to spend these very buckets. Now it
         // counts under its own (resend-inbound/handler.ts), so a flood of mail
         // to support@ exhausts only the inbound share.

@@ -64,7 +64,10 @@ const PAYLOAD_TOO_LARGE = { error: 'Request body too large', code: 'payload_too_
 /**
  * The edge rate-limit bucket inbound forwards are counted in, per window. Their
  * own: content-report acknowledgments count under `mail:content-report-ack:*`,
- * so no amount of inbound mail can delay them.
+ * so inbound mail cannot spend the acknowledgments' share -- the separate
+ * buckets prevent that starvation. They do not prioritise anything at Resend:
+ * both still send through one Resend account, whose rate limit is shared and
+ * has no priority, so heavy traffic of any kind can still slow an ack there.
  */
 export const supportInboundBudgetKey = (window: string): string => `mail:support-inbound:${window}`;
 
