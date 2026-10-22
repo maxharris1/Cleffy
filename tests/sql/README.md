@@ -1014,9 +1014,14 @@ created inside the intent's window (one minute before `created_at` to
 `expires_at`, inclusive) that no other intent recorded. A crash between the
 Auth create and the attach is still found; a separate signup after the window,
 an account from before it, and another intent's recorded account at the same
-address are not; a recorded account is named as before. Ends with
-`failures | total`. Proven against the local stack on 2026-10-22: all 8 checks
-passed; with 20261022110600's function, 3 of the 8 failed.
+address are not; a recorded account is named as before. It also proves
+`20261022140400_student_provision_intent_proven.sql` (launch-fix follow-up 18):
+the new `proven` column, the only thing account deletion's automatic cleanup
+deletes on, is true only for DEPLOY.md's proof (A), a recorded account made
+inside the window; never for an address match, a recorded account made outside
+the window, or one already deleted. Ends with `failures | total`. Proven
+against the local stack on 2026-10-22: all 13 checks passed; the first 8 with
+20261022140300 alone, of which 3 failed with 20261022110600's function.
 
 ## In CI
 

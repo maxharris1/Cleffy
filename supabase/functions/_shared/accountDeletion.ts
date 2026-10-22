@@ -142,10 +142,20 @@ export interface StudentAccountRef {
 
 export interface ProvisionIntent {
     rosterId: string;
-    /** The Auth account the provisioning created; null when none was found. */
+    /**
+     * The Auth account the intent points at: the one it recorded, or one at its
+     * address made inside its window. Null when there is none.
+     */
     studentUserId: string | null;
     /** True while the request that registered it may still be running. */
     live: boolean;
+    /**
+     * True only when studentUserId is the account the intent recorded and it
+     * was made inside the intent's window (DEPLOY.md's proof (A),
+     * 20261022140400). Nothing else permits deleting it: an address match
+     * also fits another intent's account or a separate signup.
+     */
+    proven: boolean;
 }
 
 export interface StripeSubscriptionRef {
@@ -533,6 +543,17 @@ export const purgeManagedStudents = async (
         const account = await ports.studentAccount(intent.studentUserId);
         if (!account) {
             await ports.clearProvisionIntent(intent.rosterId);
+            continue;
+        }
+        if (!intent.proven) {
+            // Named by address only, or recorded but made outside the window:
+            // it may be another intent's account or a separate signup at the
+            // same address. Never deleted here, whatever its flag says; left,
+            // with its intent, for a person (the orphaned-provisioning runbook).
+            ports.log(
+                `provisioning ${intent.rosterId} of ${teacherId} names ${intent.studentUserId} without proof that it ` +
+                    'made it; leaving it, and its intent, for review',
+            );
             continue;
         }
         if (account.userType !== 'student' || account.teacherId !== teacherId) {

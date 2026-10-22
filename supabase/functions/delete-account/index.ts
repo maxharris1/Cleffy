@@ -181,9 +181,20 @@ const ports = (admin: SupabaseClient): DeletionPorts => ({
         if (error) {
             throw new Error(`could not read provisioning intents: ${error.message}`);
         }
-        return ((data ?? []) as Array<{ roster_id: string; student_user_id: string | null; live: boolean }>).map(
-            (row) => ({ rosterId: row.roster_id, studentUserId: row.student_user_id, live: row.live === true }),
-        );
+        return (
+            (data ?? []) as Array<{
+                roster_id: string;
+                student_user_id: string | null;
+                live: boolean;
+                proven?: boolean;
+            }>
+        ).map((row) => ({
+            rosterId: row.roster_id,
+            studentUserId: row.student_user_id,
+            live: row.live === true,
+            // Absent before 20261022140400: nothing is proven, nothing deleted.
+            proven: row.proven === true,
+        }));
     },
     clearProvisionIntent: async (rosterId) => {
         const { error } = await admin.rpc('finish_student_provision', { p_roster_id: rosterId });

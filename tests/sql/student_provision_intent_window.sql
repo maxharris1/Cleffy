@@ -23,6 +23,11 @@
 --       made none: w4 never names w5's account
 --   w6  recorded: its own account is named
 --   w7/w8  accounts at expires_at exactly (named) and a second later (not)
+--   w9  recorded, but the account was made a year before the intent
+--
+-- And 20261022140400: `proven` (DEPLOY.md's proof (A), the only thing the
+-- automatic cleanup in delete-account deletes on) is true only for a recorded
+-- account made inside the window: never for an address match.
 
 begin;
 
@@ -92,7 +97,7 @@ values (pg_temp.u ('a1'), 'authenticated', 'authenticated', 'iw-teacher@example.
 set local role service_role;
 
 select public.begin_student_provision (pg_temp.u ('a1'), pg_temp.r (p), pg_temp.addr (case when p = 'b4' then 'b5' else p end))
-from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8']) as p;
+from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as p;
 
 reset role;
 
@@ -120,18 +125,23 @@ select pg_temp.account ('c7', pg_temp.addr ('b7'), now() - interval '50 minutes'
 
 select pg_temp.account ('c8', pg_temp.addr ('b8'), now() - interval '50 minutes' + interval '1 second');
 
+-- w9: an old account the intent recorded all the same.
+select pg_temp.account ('c9', pg_temp.addr ('b9'), now() - interval '1 year');
+
 set local role service_role;
 
 select public.attach_student_provision (pg_temp.r ('b5'), pg_temp.u ('c5'));
 
 select public.attach_student_provision (pg_temp.r ('b6'), pg_temp.u ('c6'));
 
+select public.attach_student_provision (pg_temp.r ('b9'), pg_temp.u ('c9'));
+
 -- ===========================================================================
 -- The checks, as the service role (delete-account's call)
 -- ===========================================================================
 select pg_temp.holds (
     'control: every intent is listed, none live (their requests ended 50 minutes ago)',
-    $q$select count(*) = 8 and bool_and(not live) from public.student_provision_intents_for (pg_temp.u ('a1'))$q$
+    $q$select count(*) = 9 and bool_and(not live) from public.student_provision_intents_for (pg_temp.u ('a1'))$q$
 );
 
 select pg_temp.holds (
@@ -162,6 +172,43 @@ select pg_temp.holds (
 select pg_temp.holds (
     'w7 / w8: the window ends at expires_at, inclusive',
     $q$select pg_temp.named ('b7') = pg_temp.u ('c7') and pg_temp.named ('b8') is null$q$
+);
+
+create function pg_temp.proven (p_intent text) returns boolean language sql as $$
+    select i.proven from public.student_provision_intents_for (pg_temp.u ('a1')) i
+    where i.roster_id = pg_temp.r (p_intent);
+$$;
+
+select pg_temp.holds (
+    'proven: a recorded account made inside the window (w5, w6) is proof (A)',
+    $q$select pg_temp.proven ('b5') and pg_temp.proven ('b6')$q$
+);
+
+select pg_temp.holds (
+    'proven: an account found by address alone (w1, w7) never is, however it fits the window',
+    $q$select not pg_temp.proven ('b1') and not pg_temp.proven ('b7')$q$
+);
+
+select pg_temp.holds (
+    'proven: a recorded account made outside the window (w9) is not proof either, though it is named',
+    $q$select not pg_temp.proven ('b9') and pg_temp.named ('b9') = pg_temp.u ('c9')$q$
+);
+
+select pg_temp.holds (
+    'proven: an intent naming nothing (w2, w3, w4, w8) is never proven',
+    $q$select bool_and(not i.proven) from public.student_provision_intents_for (pg_temp.u ('a1')) i
+       where i.roster_id in (pg_temp.r ('b2'), pg_temp.r ('b3'), pg_temp.r ('b4'), pg_temp.r ('b8'))$q$
+);
+
+reset role;
+
+delete from auth.users where id = pg_temp.u ('c6');
+
+set local role service_role;
+
+select pg_temp.holds (
+    'proven: a recorded account already deleted is not; the intent still names it, so the cleanup clears it',
+    $q$select not pg_temp.proven ('b6') and pg_temp.named ('b6') = pg_temp.u ('c6')$q$
 );
 
 reset role;
