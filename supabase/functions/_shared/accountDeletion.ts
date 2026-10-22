@@ -23,6 +23,17 @@
  *     do not apply, and a guest who added an email is no longer anonymous and
  *     goes the whole way, password and all.
  *
+ *  1b. Mark the deletion PENDING (account_deletions,
+ *     20261022110100_account_deletion_pending.sql) before anything else. From
+ *     that moment the database refuses any new score or roster row for this
+ *     account, whoever inserts it -- another tab, an import, student-provision
+ *     -- so steps 3 and 4 clean up a state that can no longer grow. Taking the
+ *     marker waits for any such insert already in flight. If this attempt then
+ *     deletes nothing (step 2 fails) the marker is cleared and the account is
+ *     exactly as it was; if it stops part-way the marker stays, with the
+ *     error, so the half-deleted account cannot grow while the person retries;
+ *     when the auth user goes, the marker cascades with it.
+ *
  *  2. Stop the money FIRST, and completely, before a single row is touched.
  *     Every subscription the caller has, in every Stripe account (live and
  *     test, see stripeMode.ts) we hold a customer for, is cancelled immediately,
@@ -51,9 +62,9 @@
  *     Both folders of each are emptied and only then is the tombstone dropped.
  *     This has to happen here, while the account exists: the library's own
  *     retry runs in the owner's session, and once the auth user is gone
- *     nothing else knows those folders are orphaned. Steps 3 and 4 run twice,
- *     the second pass sweeping up anything another tab created while the
- *     first was running.
+ *     nothing else knows those folders are orphaned. Steps 3 and 4 repeat
+ *     until a pass finds nothing left; with the marker in place the second
+ *     pass is the one that confirms it.
  *
  *  5. Remove the caller's memberships and dissolve any Academy studio they own.
  *     The auth delete would cascade these too; doing it explicitly first means
@@ -139,6 +150,19 @@ export interface StripePort {
 }
 
 export interface DeletionPorts {
+    /**
+     * begin_account_deletion(): writes (or re-counts) the pending marker, after
+     * any score or roster insert for this account still in flight. Throws on
+     * failure; nothing has been touched then.
+     */
+    beginDeletion: (userId: string) => Promise<void>;
+    /**
+     * settle_account_deletion(): 'abandoned' when this attempt deleted nothing
+     * (the marker is cleared), 'failed' when it stopped part-way (kept, with the
+     * code). Best effort: a marker that cannot be cleared only keeps refusing
+     * new scores until the person retries.
+     */
+    settleDeletion: (userId: string, outcome: 'abandoned' | 'failed', code: DeletionFailureCode) => Promise<void>;
     billingCustomers: (userId: string) => Promise<StripeCustomerRef[]>;
     storedSubscriptions: (userId: string) => Promise<StoredSubscriptionRef[]>;
     /** Null when no usable key is configured for that account. */
@@ -191,6 +215,7 @@ export interface DeletionSummary {
 
 export type DeletionFailureCode =
     | 'managed_student'
+    | 'deletion_unavailable'
     | 'billing_unavailable'
     | 'billing_cancel_failed'
     | 'student_delete_failed'
@@ -442,13 +467,12 @@ export const purgeManagedStudents = async (
 };
 
 /**
- * How many times steps 3 and 4 run. The second pass is a sweep for anything
- * created while the first was running — a score uploaded, or a student
- * provisioned, from another tab with a still-valid token. Without it that row
- * would go with the auth user's cascade but leave its Storage objects, or its
- * student account, behind with nothing pointing at them.
+ * The most times steps 3 and 4 run. They repeat until a pass finds nothing:
+ * with the pending marker refusing new scores and roster rows, the first pass
+ * takes everything and the second confirms it. The bound is only a backstop
+ * against a fake or a bug that keeps producing rows; reaching it is logged.
  */
-const SWEEP_PASSES = 2;
+export const MAX_SWEEP_PASSES = 4;
 
 /**
  * A share-link guest: steps 4 to 6 only. No billing (stripe-checkout refuses
@@ -518,26 +542,53 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
         );
     }
 
+    try {
+        await ports.beginDeletion(caller.userId);
+    } catch (err) {
+        return fail(
+            502,
+            'deletion_unavailable',
+            'We could not start deleting your account, so nothing has been deleted. Please try again.',
+            err,
+        );
+    }
+
+    // From here every failure settles the marker: cleared when nothing was
+    // deleted, kept (with its code) when the deletion stopped part-way.
+    const settle = async (outcome: 'abandoned' | 'failed', failure: DeletionFailure): Promise<DeletionFailure> => {
+        try {
+            await ports.settleDeletion(caller.userId, outcome, failure.code);
+        } catch (err) {
+            ports.log(`could not settle the deletion marker of ${caller.userId} (${outcome}): ${String(err)}`);
+        }
+        return failure;
+    };
+
     const billing = await cancelBilling(caller.userId, ports);
     if (!billing.ok) {
-        return billing;
+        return settle('abandoned', billing);
     }
 
     let studentsDeleted = 0;
     let documentsDeleted = 0;
     let storageObjectsRemoved = 0;
     let storageCleanupsCleared = 0;
-    for (let pass = 0; pass < SWEEP_PASSES; pass += 1) {
+    for (let pass = 1; ; pass += 1) {
+        let found = 0;
         try {
             const students = await purgeManagedStudents(caller.userId, ports);
             studentsDeleted += students.students;
             storageObjectsRemoved += students.objects;
+            found += students.students;
         } catch (err) {
-            return fail(
-                502,
-                'student_delete_failed',
-                'We could not remove the student accounts on your roster. Your subscription is cancelled; please try again to finish deleting your account.',
-                err,
+            return settle(
+                'failed',
+                fail(
+                    502,
+                    'student_delete_failed',
+                    'We could not remove the student accounts on your roster. Your subscription is cancelled; please try again to finish deleting your account.',
+                    err,
+                ),
             );
         }
 
@@ -546,24 +597,39 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
             documentsDeleted += purged.documents;
             storageObjectsRemoved += purged.objects;
             storageCleanupsCleared += purged.cleanups;
+            found += purged.documents + purged.cleanups;
         } catch (err) {
-            return fail(
-                502,
-                'document_delete_failed',
-                'We could not delete all of your scores. Your subscription is cancelled; please try again to finish deleting your account.',
-                err,
+            return settle(
+                'failed',
+                fail(
+                    502,
+                    'document_delete_failed',
+                    'We could not delete all of your scores. Your subscription is cancelled; please try again to finish deleting your account.',
+                    err,
+                ),
             );
+        }
+
+        if (found === 0) {
+            break;
+        }
+        if (pass >= MAX_SWEEP_PASSES) {
+            ports.log(`${caller.userId}: still finding rows after ${pass} sweeps; closing the account anyway`);
+            break;
         }
     }
 
     try {
         await ports.deleteStudiosAndMemberships(caller.userId);
     } catch (err) {
-        return fail(
-            502,
-            'membership_delete_failed',
-            'We could not remove you from shared scores. Your scores are deleted; please try again to finish deleting your account.',
-            err,
+        return settle(
+            'failed',
+            fail(
+                502,
+                'membership_delete_failed',
+                'We could not remove you from shared scores. Your scores are deleted; please try again to finish deleting your account.',
+                err,
+            ),
         );
     }
 
@@ -571,11 +637,14 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
     try {
         authUser = await closeAuthUser(caller.userId, ports);
     } catch (err) {
-        return fail(
-            502,
-            'auth_delete_failed',
-            'Your data is deleted but we could not close the account itself. Please try again to finish.',
-            err,
+        return settle(
+            'failed',
+            fail(
+                502,
+                'auth_delete_failed',
+                'Your data is deleted but we could not close the account itself. Please try again to finish.',
+                err,
+            ),
         );
     }
 

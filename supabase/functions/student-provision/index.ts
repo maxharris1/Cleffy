@@ -299,6 +299,20 @@ const isEmailInUse = (error: { code?: string; message?: string }): boolean =>
     error.code === 'user_already_exists' ||
     /already (been )?registered|already exists/i.test(error.message ?? '');
 
+/**
+ * The teacher's own account is being deleted (20261022110100_account_deletion_pending.sql):
+ * the database refuses a new roster row for it, and a student created now would
+ * outlive their teacher with nobody to manage them.
+ */
+const DELETION_PENDING = {
+    error: 'This account is being deleted, so no new students can be added.',
+    code: 'account_deletion_pending',
+} as const;
+
+/** Whether an insert was refused by the deletion-pending trigger. */
+const isDeletionPending = (error: { code?: string; message?: string } | null): boolean =>
+    error?.code === '55000' && /account_deletion_pending/.test(error.message ?? '');
+
 /** Deletes an account create just made; its roster row, if any, goes with it by cascade. */
 const undoCreatedStudent = async (admin: SupabaseClient, studentUserId: string): Promise<void> => {
     const { error } = await admin.auth.admin.deleteUser(studentUserId);
@@ -361,7 +375,9 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         if (cleanupError) {
             logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: created.user.id });
         }
-        return jsonResponse({ error: 'Could not create the student roster row' }, 502);
+        return isDeletionPending(insertError)
+            ? jsonResponse(DELETION_PENDING, 409)
+            : jsonResponse({ error: 'Could not create the student roster row' }, 502);
     }
 
     // A student whose attestation went unrecorded is undone like a missing
@@ -448,7 +464,9 @@ const createEmailStudent = async (
         if (cleanupError) {
             logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: invited.user.id });
         }
-        return jsonResponse({ error: 'Could not create the student roster row' }, 502);
+        return isDeletionPending(insertError)
+            ? jsonResponse(DELETION_PENDING, 409)
+            : jsonResponse({ error: 'Could not create the student roster row' }, 502);
     }
 
     if (!(await recordAttestation(admin, userId, rosterId, 'create', attestation))) {
@@ -467,6 +485,22 @@ const createEmailStudent = async (
 };
 
 const createStudent = async (admin: SupabaseClient, userId: string, body: ProvisionBody): Promise<Response> => {
+    // Before any account is created: a deletion in progress would refuse the
+    // roster row anyway (and the account would be undone), so say so up front.
+    // The trigger stays the authority for a deletion that starts after this.
+    const { data: pending, error: pendingError } = await admin
+        .from('account_deletions')
+        .select('user_id')
+        .eq('user_id', userId)
+        .maybeSingle();
+    if (pendingError) {
+        console.error(`could not check for a pending deletion of ${userId}: ${pendingError.message}`);
+        return jsonResponse({ error: 'Could not create the student account' }, 502);
+    }
+    if (pending) {
+        return jsonResponse(DELETION_PENDING, 409);
+    }
+
     // EXPLICIT, and defaulted rather than required so existing callers keep
     // working: reading the method off the presence of `studentEmail` would let a
     // stray field flip a child onto the email path, which is the one decision in
