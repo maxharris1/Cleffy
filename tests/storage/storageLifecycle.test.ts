@@ -20,7 +20,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
  *   * three cover uploads at once into one score: two land, one is refused
  *     (thumbnail_limit);
  *   * a publish whose thumb_rev update failed does not block the next one,
- *     and a claimed cover cannot be published.
+ *     and a claimed cover cannot be published;
+ *   * a cover removed under a claim, written again and re-published under the
+ *     same name, survives a second device's late removal of that name, while
+ *     the service key (delete-account) still empties the folder
+ *     (20261022101000).
  *
  * Needs the local stack (`npm run cloud:up`), so the root `npm run test` skips
  * it unless the three settings are there. CI's supabase-local job runs it with
@@ -69,6 +73,14 @@ describe.skipIf(!REQUIRED && (!URL || !ANON_KEY || !SERVICE_KEY))('Storage accou
         return Number(data);
     };
     const createScore = async (contentRev = 0) => {
+        // A free account keeps 3 live scores: earlier tests' scores are
+        // archived first (their files still count against the quota).
+        const { error: archiveError } = await admin
+            .from('documents')
+            .update({ archived_at: new Date().toISOString() })
+            .eq('owner_id', userId)
+            .is('archived_at', null);
+        expect(archiveError).toBeNull();
         const id = randomUUID();
         const { error } = await user.from('documents').insert({
             id,
@@ -241,5 +253,42 @@ describe.skipIf(!REQUIRED && (!URL || !ANON_KEY || !SERVICE_KEY))('Storage accou
         const late = await user.from('documents').update({ thumb_rev: 3 }).eq('id', id);
         expect(late.error?.message).toMatch(/thumbnail_claimed/);
         expect(await thumbRev(id)).toBe(2);
+    });
+
+    it('never lets a late removal take a cover re-published under a reused name', async () => {
+        const id = await createScore(5);
+        await expect(publishThumbnail(id, 0, jpeg())).resolves.toBe(true);
+        await settle();
+        const upload1 = () =>
+            user.storage.from('thumbnails').upload(`${id}/1.jpg`, jpeg(), { contentType: 'image/jpeg', upsert: true });
+        expect((await upload1()).error).toBeNull();
+
+        // Two devices, each about to write 2, are both told to remove 1.
+        for (let device = 0; device < 2; device += 1) {
+            const claim = await user.rpc('claim_superseded_thumbnails', { p_document_ids: [id], p_writing_rev: 2 });
+            expect(claim).toMatchObject({ data: [`${id}/1.jpg`], error: null });
+        }
+        const first = await user.storage.from('thumbnails').remove([`${id}/1.jpg`]);
+        expect(first.error).toBeNull();
+        expect(first.data).toHaveLength(1);
+
+        // A third device writes 1 again and publishes it.
+        expect((await upload1()).error).toBeNull();
+        expect((await user.from('documents').update({ thumb_rev: 1 }).eq('id', id)).error).toBeNull();
+
+        // The second device's removal arrives late: the published 1 stays.
+        const late = await user.storage.from('thumbnails').remove([`${id}/1.jpg`]);
+        expect(late.error).toBeNull();
+        expect(late.data).toHaveLength(0);
+        expect(await covers(id)).toContain('1.jpg');
+        expect(await thumbRev(id)).toBe(1);
+        const { data: cover } = await user.storage.from('thumbnails').download(`${id}/1.jpg`);
+        expect(cover).not.toBeNull();
+
+        // delete-account (the service key) still empties a live score's folder.
+        const purged = await admin.storage.from('thumbnails').remove([`${id}/0.jpg`, `${id}/1.jpg`]);
+        expect(purged.error).toBeNull();
+        expect(purged.data).toHaveLength(2);
+        expect(await covers(id)).toEqual([]);
     });
 });

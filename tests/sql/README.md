@@ -652,6 +652,39 @@ and an upload into its folder, in both orders (`storage_folder_gone`). 18
 checks. `tests/storage/storageLifecycle.test.ts` covers the same through the
 Storage API itself.
 
+`storage_quota_lock_and_cover_reuse.sql` proves
+`20261022101000_storage_quota_lock_and_cover_reuse.sql` (Codex round 3 on
+#69; decision 57): the quota trigger locks a write's predecessor FOR UPDATE,
+then takes the owner lock, and reads it FOR UPDATE again before the no-growth
+exemption; every write takes the owner lock, a non-growing one too; a row
+actually inserted is charged in full after conflict resolution
+(`storage_objects_charge_insert`), even with the BEFORE check dropped; a name
+this transaction deleted is charged as new when written again. A signed-in
+owner's removal never takes a live score's published cover (a reused,
+re-published name included, after its claim row is gone), while other covers,
+a deleted score's covers and the service role's removals go. The folder lock
+takes a lower score id after a higher one only if it is free
+(`thumbnail_folder_busy`, 55P03, otherwise). A folder already over the
+two-object cap is trimmed by a sweep (all but the published cover and the
+newest other) and by the next publish. 45 checks.
+
+`storage_quota_lock_concurrency.sql` proves the same migration under real
+concurrency, through `dblink` backends that commit (the same harness, rules
+and caveats as `storage_thumbnail_concurrency.sql`). A delete of X, an upsert
+of X and another upload: the upsert waits on X's row, finds it gone, and is
+charged as a new object, so the owner never ends over the cap (three sessions,
+as in the review; and two, with the delete and the other upload in one
+transaction); with the delete rolled back, the upsert is still a non-growing
+replacement, allowed at the cap. A cover name reused after two devices' claims
+survives the second, late removal. A removal and a publish of the same
+object, both orders (`thumbnail_gone`; the removal leaves a cover published
+while it waited). Opposite lock orders across two scores: the out-of-order
+publish is refused at once (`thumbnail_folder_busy`), not by a deadlock, and
+the claim completes; in order, the claim only waits. 26 checks. With
+`20261022100900`'s functions instead, the owner ends 100 bytes over the cap,
+the late removal deletes the re-published cover, and the opposite-order case
+ends in `deadlock detected`.
+
 Each `\ir`s its migrations to rerun them, so it is psql only.
 
 ## In CI
