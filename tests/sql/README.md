@@ -963,6 +963,23 @@ against the local stack on 2026-10-22: all 8 checks passed; with a row in the
 step 00f48a65 added, the same replay stopped at 20261021120800 ("check
 constraint district_retention_log_step_check ... is violated by some row").
 
+## Launchfix follow-ups
+
+`district_retention_overlapping_restores.sql` proves
+`supabase/migrations/20261022140000_district_retention_restore_hand_on.sql`
+(decision 47's residual, kept a follow-up by 66(1)): a student whom one
+district's soft delete archived and a human then moved to a second district
+whose purge lists them too keeps their restore when the first purge ends. The
+first district's cancel (retrying a carried restore that the second purge
+blocks), its hard delete (its carried restores, and a student it skips who was
+moved the raw way) hand the restore on to the second district, logged as
+`attribution_changed` with `counts.event = 'restore_handed_on'`, and the second
+district's renewal then un-archives all three students. The two helpers are
+nobody's to call but the run's. Same harness as the reattribution proof; ends
+with `failures | total`. Proven against the local stack on 2026-10-22: all 13
+checks passed; with 20261022130400's run restored, 4 of the 13 failed (the
+hand-ons, and the three students left archived after the renewal).
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and
