@@ -2269,18 +2269,23 @@ while that request is still live. There is no other provisioning marker
 (`code_reset_worker` belongs to the code reset). Without proof (A), nothing is
 deleted.
 
-Resolve each row:
+Resolve each row first, then finish each intent (below) only once **every**
+row it shows on is resolved. An intent shows on one row per email candidate
+(and on one row when there is none), and the cases below are decided per row,
+so one intent can have a row in case 2 and another in case 5: the open row
+keeps the whole intent open. When `recorded_user_id` is set, the intent is
+decided by its recorded account alone; each of its email-candidate rows is not
+this provisioning's and is resolved with no action (leave the account alone).
 
 1. **No account to resolve:** `recorded_user_id` and `email_candidate_id` are
    both null (no account was created), or `recorded_user_id` is set and
    `recorded_account_exists` is false (the account this provisioning made is
-   already deleted; leave any email candidate on that row alone, it is not
-   this provisioning's). Run
-   `select public.finish_student_provision('<roster_id>');`.
+   already deleted). The row is resolved; delete nothing.
 2. **Valid roster row confirmed:** the recorded account (or, when nothing was
-   recorded, the email candidate) has `has_roster_row` true. It is a rostered
-   student, not an orphan; delete nothing. Run
-   `select public.finish_student_provision('<roster_id>');`.
+   recorded, this row's email candidate) has `has_roster_row` true. It is a
+   rostered student, not an orphan; delete nothing. The row is resolved. On an
+   unrecorded intent this resolves only this row: another email candidate of
+   the same intent can still be case 5.
 3. **Proven (A), flagged as this teacher's student, no roster row:** the
    account belongs to nobody. Delete it, its Storage first, as account deletion
    does (`supabase/functions/_shared/accountDeletion.ts`, `purgeOwnedDocuments`):
@@ -2328,7 +2333,7 @@ Resolve each row:
           and not exists (select 1 from public.documents d where d.id = c.document_id);
         ```
 
-    6. Only now run `select public.finish_student_provision('<roster_id>');`.
+    6. The row is resolved.
 4. **Proven (A), not flagged** (`user_type` and `flagged_teacher` null): an
    email invite whose student flag never landed. It is an ordinary account at
    a real address. Proof (A) shows provisioning made it; the sign-in fields
@@ -2338,27 +2343,33 @@ Resolve each row:
     - If the person has signed in, they now hold an ordinary (non-student)
       account. Contact the address, or the teacher if `teacher_exists` is
       true, before deleting anything. If they agree to its deletion, delete it
-      as in case 3. If they keep it, finish the intent and leave the account.
+      as in case 3. If they keep it, leave the account: the row is resolved.
 5. **No proof:** any other account with no roster row: every email candidate
    on an unrecorded intent (flagged as this teacher's student or not, inside
    the window or not), a recorded account created outside the window, or one
    flagged for another teacher. It may be a separate person's signup or
-   another provisioning intent's account that is still live. Delete nothing
-   and do not finish the intent: it stays open. Resolve it by hand and
-   escalate to Max with the row and the account's details.
+   another provisioning intent's account that is still live. Delete nothing.
+   The row stays unresolved, and so its intent stays open, whatever its other
+   rows say. Resolve it by hand and escalate to Max with the row and the
+   account's details.
 6. **`teacher_exists` is false** (the teacher's account was deleted while this
    provisioning was live or unflagged): handle it as in cases 1 to 5. The
    intent outlives the teacher on purpose (it has no foreign key), so that
    this case stays findable.
 
-An intent is unresolved until there is no account to resolve (case 1), its
-account is confirmed on a valid roster row (case 2), its account and Storage
-are deleted (cases 3 and 4), or the person has agreed to keep the ordinary
-account (case 4). Never clear an unresolved intent, by
-`finish_student_provision` or by deleting its `student_provision_intents` row
-by hand; a case 5 intent stays open until Max resolves it. Once resolved,
-`finish_student_provision` is the last step, including in cases 2 and 4 where
-the account stays. Later, a scheduled sweep could take over cases 1 to 3
+**Finishing an intent.** A row is resolved when there is no account to resolve
+(case 1), its account is confirmed on a valid roster row (case 2), its account
+and Storage are deleted (cases 3 and 4), the person has agreed to keep the
+ordinary account (case 4), or it is an email candidate of an intent with a
+recorded account (above). An intent is resolved only when every row it shows
+on is resolved; run the query again first and check every row of the intent
+(a recorded account deleted in case 3 or 4 now reads as case 1; a deleted
+email candidate's row is gone). Then, and only then, run
+`select public.finish_student_provision('<roster_id>');` once for the intent,
+including when its accounts stay (cases 2 and 4). Never clear an intent with an
+unresolved row, by `finish_student_provision` or by deleting its
+`student_provision_intents` row by hand; an intent with a case 5 row stays open
+until Max resolves that row. Later, a scheduled sweep could take over cases 1 to 3
 (decision 49(6) follow-up). Cases 4 and 5 stay manual.
 
 **Half-deleted accounts** (a deletion's destructive cleanup started and never
