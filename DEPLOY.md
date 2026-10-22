@@ -19,8 +19,8 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe functions redeployed at v2 with the self-configuring catalogue  | ✅ verified live                                                                                                      |
 | Stripe sandbox catalogue (3 products, 7 prices)                        | ✅ created                                                                                                            |
 | Stripe **live** catalogue (3 products, 7 prices)                       | ✅ created                                                                                                            |
-| Stripe webhook endpoint → `stripe-webhook` (sandbox)                   | ✅ enabled, 5 events                                                                                                  |
-| Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                                                                                  |
+| Stripe webhook endpoint → `stripe-webhook` (sandbox)                   | ⚠️ enabled with 5 events; needs all 9 the webhook handles (_Go-live 2026-10_, _Stripe webhook events_)                |
+| Stripe webhook endpoint → `stripe-webhook` (live)                      | ⚠️ enabled with 5 events; needs all 9 the webhook handles (_Go-live 2026-10_, _Stripe webhook events_)                |
 | Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                                                                                  |
 | Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`; plan switching **not verified** (§1)                                                  |
 | Stripe Customer portal configuration (live)                            | ✅ `bpc_1U9juu4eZ6RX0W0gPrUkrH6S`, default + active, plan switching on                                                |
@@ -43,10 +43,687 @@ the steps that need a human because no API exposes them — each one says why.
 | QA round 3 migrations `20261010120200` … `20261010120302`              | ✅ dev branch project (latest `20261010120302`); ⏳ production has none of the 2026-10 migrations (release checklist) |
 | QA round 4 migrations `20261011120100`, `20261011120101`               | ⏳ not applied on either project (release checklist)                                                                  |
 | Recovery path (history replay, corpus tables, logical restore)         | ⚠️ four known gaps, none blocking the push (_Recovery and disaster recovery_)                                         |
+| Production go-live: wipe, then a fresh replay of every migration       | ⏳ not started (_Go-live 2026-10: fresh production_)                                                                  |
+
+---
+
+## Go-live 2026-10: fresh production (wipe first)
+
+This is the path for the 2026-10 launch: production (`jibgwgosihadbjgxdsfe`)
+is **wiped**, and then every migration replays onto it from the start when
+PR #54 (`dev` → `main`) merges. It replaces the _Release checklist — launch
+fixes (20261007\*)_ below, which was written for pushing pending migrations
+onto production's existing data.
+
+**Counts, from the repository at `dev` 47e9b38f:** 96 migrations
+(`ls supabase/migrations | wc -l`) and 23 Edge Functions (the directories under
+`supabase/functions/` other than `_shared`). `main` has 26 migrations and 13
+functions. So the merge applies 70 migrations on top of a reset to `main`, and
+deploys 23 functions. Count again on the final #54 head, because P1, P3, P4 and
+P5 add migrations.
+
+Steps are in order. Steps 3 to 6 are one sitting: from the wipe in step 3 until
+Vercel finishes the build in step 6, cleffy.io serves the old bundle against an
+empty database. Do them outside lesson hours. Names that the launchfix packets
+P1 to P5 add were not on any branch when this was written (no
+`mh/launchfix-p1…p5` branch existed at 47e9b38f). They are marked
+"(confirm after P<N>)". Replace each one with the real name before you start.
+
+### 1. Land P1 to P6, CI green
+
+- Merge P1 to P5 into `dev`, then this PR (P6) last. CI must be green on the
+  `dev` head that #54 will carry: `checks`, `supabase-drift`, `omr-service`
+  and Vercel.
+- Regenerate `scripts/apply-migrations.sql` with `npm run migrations:mirror`
+  after each merge. Never hand-merge it.
+- Update #54's body. The draft is in this PR's report. The current body still
+  says 48 migrations and 15 functions.
+
+### 2. Max's prerequisites (nothing technical is blocked on these, but launch is)
+
+- **Legal.** Cleffy LLC formed, and counsel's final text published. Replace the
+  placeholder blocks, drop `-draft` from `LEGAL_VERSIONS` and set
+  `LEGAL_DOCUMENTS_ARE_DRAFTS = false` (PR #63). Settle the open items in
+  `docs/LEGAL_REVIEW.md`. Register the DMCA designated agent and put its number
+  in `/copyright`.
+- **Tax registrations.** New York sales tax, EU OSS and UK VAT, as your
+  accountant advises. Confirm the proposed product tax codes in
+  `scripts/stripe/configure-tax.mjs`.
+- **Stripe Tax**, sandbox first and then live. Dashboard → Tax: set the origin
+  address, turn Stripe Tax on, and add the registrations above. Then run the
+  catalogue script and read each dry run before you apply it:
+
+    ```bash
+    STRIPE_SECRET_KEY=sk_test_… node --experimental-strip-types scripts/stripe/configure-tax.mjs          # dry run
+    STRIPE_SECRET_KEY=sk_test_… node --experimental-strip-types scripts/stripe/configure-tax.mjs --apply
+    STRIPE_SECRET_KEY=sk_live_… node --experimental-strip-types scripts/stripe/configure-tax.mjs --live      # dry run
+    STRIPE_SECRET_KEY=sk_live_… node --experimental-strip-types scripts/stripe/configure-tax.mjs --live --apply
+    ```
+
+    `stripe-checkout` sends `automatic_tax` and a `currency`. Stripe refuses the
+    session until Stripe Tax is on and every price has a `tax_behavior` and
+    EUR/GBP `currency_options`.
+
+- **Customer portal, both modes** (§1). Switch plans on, with the six plan
+  prices and without Founding. Under Cancellations, choose "Cancel at end of
+  billing period" (that is what `/cancel` does too).
+- **Stripe webhook events, both endpoints.** Subscribe `we_1U9V8T4eZ6RX0W0glk3BZIOi`
+  (live) and `we_1U9fnx9EqxUjgZtnXnAvtJH3` (sandbox) to all nine events in
+  _Stripe webhook events_ below. As of the status table they carry five.
+- **Live subscriptions in the old production database.** Before the wipe, list
+  every running live subscription (step 3). The wipe removes the account, but
+  Stripe keeps billing the card. Cancel and refund each one, or tell the
+  customer first.
+- **DNS for cleffy.io mail.** Check SPF, DKIM and DMARC for the sending domains
+  (`cleffy.io` for `noreply@`, and `send.cleffy.io` for support forwards). Look
+  them up with `dig TXT`. In Resend, every domain must show **Verified**. Never
+  call `POST /domains/{id}/verify` on a working domain (§7).
+- **Resend plan quota.** Check it against the mail budget in
+  `supabase/functions/_shared/mailBudget.ts`. `DEFAULT_MAIL_BUDGET` assumes
+  100/hour and 500/day. Of that, `AUTH_MAIL_RESERVE` keeps 40/200 for GoTrue's
+  resets and confirmations. `LAUNCH_MAIL_SPLIT` gives our own senders 60/hour
+  and **300/day** in total. If the plan allows less than 500/day, set
+  `MAIL_BUDGET_PER_HOUR` / `MAIL_BUDGET_PER_DAY` on production (step 4), so
+  the caps shrink and the auth reserve stays whole.
+
+### 3. Logical dump of production, then the wipe
+
+**Max confirms in writing before anything in this step runs.** Everything below
+the dump is irreversible. `pitr_enabled: false` means there is nothing finer
+than last night's physical backup (_PITR_ below).
+
+**What is lost from production.** Every row is lost: accounts, scores,
+annotations, share links, subscriptions rows, `support_messages`, `stripe_events`.
+Every Storage object is lost too. Some of it no migration recreates, so the dump
+is the only production copy:
+
+- `pd_pdf_store` (2,402 rows on 2026-10-12);
+- `playalong_corpus_seed` (8,215), `playalong_corpus` (0) and
+  `playalong_corpus_control` (1);
+- their three functions, `playalong_corpus_get_by_hash()`,
+  `playalong_corpus_put()` and `playalong_corpus_get_by_layout()`;
+- the `pd-pdfs` bucket.
+
+None of these is in any migration on `dev` (R2; PR #52 still open). A fresh
+replay does not create them. Checked on the local stack at 47e9b38f:
+`to_regclass` is null for all four tables. The `dev` branch project still holds
+its own copy. The IMSLP works catalogue is **not** lost: the catalog-data
+migrations reload it.
+
+1. **Record what is there**, read-only, in production's SQL editor:
+
+    ```sql
+    select (select count(*) from auth.users) as users,
+           (select count(*) from public.documents) as documents,
+           (select count(*) from public.annotations) as annotations,
+           (select count(*) from public.support_messages) as support_messages,
+           (select count(*) from public.pd_pdf_store) as pd_pdf_store,
+           (select count(*) from public.playalong_corpus_seed) as corpus_seed;
+    select bucket_id, count(*), sum((metadata ->> 'size')::bigint) as bytes
+    from storage.objects group by 1 order by 1;
+    select user_id, mode, status, stripe_subscription_id, current_period_end
+    from public.subscriptions
+    where mode = 'live' and status in ('active', 'trialing', 'past_due');
+    ```
+
+    Every row of the last query is a live customer. Deal with each one (step 2)
+    before you continue.
+
+2. **Dump** with the CLI, linked to production. You need the database password,
+   not the Management API.
+
+    ```bash
+    supabase link --project-ref jibgwgosihadbjgxdsfe
+    supabase db dump --linked --role-only -f prod-20261022-roles.sql
+    supabase db dump --linked -f prod-20261022-schema.sql
+    supabase db dump --linked --data-only --use-copy -f prod-20261022-data.sql
+    supabase db dump --linked --data-only --schema supabase_migrations -f prod-20261022-history.sql
+    ```
+
+    Then download every bucket from the counts above: `scores`, `thumbnails` and
+    `pd-pdfs`, plus any other bucket the query lists. Use the Storage API with
+    the service key, or the CLI's
+    `supabase storage cp -r ss:///<bucket> ./<bucket> --experimental`.
+    Check the file count against `storage.objects` for each bucket. The dump holds personal data, so store it encrypted and
+    off any shared drive. It is also the only record of `support_messages`,
+    which the Privacy Policy keeps for 24 months.
+
+3. **Prove the dump restores** into a scratch local stack before you wipe
+   anything. Run `npm run local:up`, then load the schema and then the data
+   with `psql`, with `session_replication_role = replica`. Count the same
+   tables as in 3.1. **`omr_jobs` (R3):** `id` is
+   `generated always as identity`. The CLI's `COPY` dump carries the ids and the sequence position.
+   A hand-written `insert … select` copy is refused unless it uses
+   `overriding system value`, and then the sequence must be moved with R3's
+   `setval`. Run that `setval` after any restore, then check
+   `select max(id), (select last_value from public.omr_jobs_id_seq) from public.omr_jobs`.
+
+4. **Empty Storage.** `db reset` does not touch Storage. For each bucket, use
+   the Storage API, because `supabase storage rm` silently does nothing (see
+   _Resetting a remote database — two traps_):
+
+    ```bash
+    curl -X DELETE "https://jibgwgosihadbjgxdsfe.supabase.co/storage/v1/object/<bucket>" \
+      -H "Authorization: Bearer $SERVICE_KEY" -H 'Content-Type: application/json' \
+      -d '{"prefixes":["<path>", "…"]}'
+    ```
+
+    Repeat until `select count(*) from storage.objects` is 0.
+
+5. **Reset the database to `main`.** From a clean checkout of `origin/main` at
+   the commit production runs:
+    1. Drop the leftover sequences (trap 1 in _Resetting a remote database_).
+    2. Run `supabase db reset --linked --no-seed`. Pass `--no-seed`: `seed.sql`
+       creates the local test accounts.
+
+    This replays `main`'s 26 migrations through the same path `db push` uses.
+    So the history carries every body, and R1's NULL row is gone. The merge in
+    step 6 applies the remaining 70.
+
+    Then check:
+    - `supabase_migrations.schema_migrations` lists exactly `main`'s 26
+      versions;
+    - `auth.users` is 0;
+    - `storage.objects` is 0;
+    - `select name from vault.secrets` (note which remain for step 8);
+    - `select jobname from cron.job` shows only `main`'s `omr-sweep`.
+
+    (The exact wipe mechanism comes from re-audit §8, which was not available
+    when this was written. Confirm that §8 means a reset to `main`, and not an
+    empty history replayed in full at the merge. The steps below hold either
+    way.)
+
+### 4. Production Edge secrets
+
+`supabase secrets list --project-ref jibgwgosihadbjgxdsfe` shows names and
+SHA-256 digests, never values. Secrets live outside the database, so the wipe
+keeps them. Check every **required** one is present.
+
+| Secret                                                 | Required?                                            | Used by                                                     |
+| ------------------------------------------------------ | ---------------------------------------------------- | ----------------------------------------------------------- |
+| `STRIPE_SECRET_KEY_LIVE`                               | **required**                                         | checkout, portal, webhook read-back, delete-account, cancel |
+| `STRIPE_WEBHOOK_SECRET_LIVE`                           | **required**                                         | `stripe-webhook`                                            |
+| `STRIPE_MODES` = `live`                                | **required**                                         | every Stripe function (_STRIPE_MODES_ below)                |
+| `APP_URL` = `https://cleffy.io`                        | **required**                                         | checkout/portal return, billing mail links                  |
+| `RESEND_API_KEY`                                       | **required**                                         | guest codes, billing mail, notices, `resend-inbound`        |
+| `RESEND_WEBHOOK_SECRET`                                | **required** (inbound support is live, §7)           | `resend-inbound` (500 without it)                           |
+| `SUPPORT_FORWARD_TO`                                   | **required** for forwarding (§7)                     | `resend-inbound`                                            |
+| `IMSLP_SYNC_SECRET`                                    | **required**, equal to Vault `imslp_sync_secret`     | `imslp-sync`                                                |
+| `BILLING_OUTBOX_SECRET`                                | **required**, equal to Vault `billing_outbox_secret` | `billing-mail-outbox`                                       |
+| `CONTENT_NOTICE_SECRET`                                | **required**, equal to Vault `content_notice_secret` | `content-notices`                                           |
+| `DISTRICT_NOTICE_SECRET`                               | when district retention starts                       | `district-retention-notices`                                |
+| P3's inbound-retry secret (confirm after P3)           | (confirm after P3)                                   | (confirm after P3)                                          |
+| `LOGIN_THROTTLE_SECRET`                                | optional, recommended (§9)                           | student sign-in limiter                                     |
+| `GUEST_EMAIL_SECRET`, `GUEST_EMAIL_FROM`               | optional                                             | guest email codes                                           |
+| `BILLING_EMAIL_FROM`, `BILLING_CANCEL_SECRET`          | optional                                             | billing mail, `/cancel` limiter                             |
+| `CONTENT_NOTICE_FROM`, `CONTENT_REPORT_SECRET`         | optional                                             | content reports and notices                                 |
+| `DISTRICT_NOTICE_FROM`                                 | optional                                             | district notices                                            |
+| `SUPPORT_FORWARD_FROM`                                 | optional (default `support@send.cleffy.io`)          | `resend-inbound`                                            |
+| `MAIL_BUDGET_PER_HOUR`, `MAIL_BUDGET_PER_DAY`          | optional, set if the Resend plan is smaller          | every sender we control                                     |
+| `TURNSTILE_SECRET_KEY`                                 | optional (inert until the site key ships)            | guest email, content report                                 |
+| `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`   | optional (§2)                                        | edge error reports                                          |
+| `IMSLP_DOWNLOAD_GLOBAL_MAX`, `…_SPACING_MS`            | optional tuning                                      | `imslp-download`                                            |
+| `STRIPE_LIVE_ORIGINS`, `STRIPE_TEST_ORIGINS`           | optional; leave unset                                | origin → mode                                               |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` (sandbox) | not used while `STRIPE_MODES=live`                   | —                                                           |
+| `ANTHROPIC_API_KEY`, `ANALYZE_NOTES_MODEL`, `OMR_*`    | not for this launch (smart import, play-along off)   | AI and OMR functions                                        |
+
+`SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` are
+provided by the platform.
+
+(Re-audit §4 item 8 has the authoritative required/optional split. This table
+is built from every `Deno.env.get` in `supabase/functions` at 47e9b38f.)
+
+### 5. Auth settings — everything except the hook
+
+Set these with a Management API token (`PATCH
+https://api.supabase.com/v1/projects/jibgwgosihadbjgxdsfe/config/auth`). `GET`
+the same path before and after. Leave **Before User Created OFF** until step 10.
+An old bundle sends no `age_gate`, so with the hook on, every sign-up from that
+bundle is refused.
+
+```bash
+curl -sS -X PATCH "https://api.supabase.com/v1/projects/jibgwgosihadbjgxdsfe/config/auth" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{
+    "mailer_autoconfirm": false,
+    "password_min_length": 8,
+    "password_required_characters": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:0123456789",
+    "site_url": "https://cleffy.io",
+    "uri_allow_list": "https://cleffy.io/**,https://www.cleffy.io/**",
+    "disable_signup": true
+  }'
+```
+
+- **Confirm email ON** (`mailer_autoconfirm: false`). The app already handles
+  it: `RegisterPage` shows "check your email", and `/auth/callback` finishes it.
+  See QA round 3's _Owner decision_ in the old checklist for why.
+- **Password policy**: 8+ characters, letters and digits (§8).
+- **Redirect URLs**: `https://cleffy.io/**` **and** `https://www.cleffy.io/**`.
+  The wildcard covers `/auth/callback`, `/update-password` and
+  `/student/welcome`. If the `GET` shows other entries, keep them. Check that
+  anonymous sign-ins (`external_anonymous_users_enabled`) are still `true`:
+  share-link guests need them.
+- **Sign-ups closed** (`disable_signup: true`) until step 10. This closes the
+  window between the merge and the hook, in which a sign-up would not be
+  age-checked. It also blocks anonymous sign-ins (share-link guests). The
+  admin API, and so `student-provision`, still works. (This setting is
+  recommended here and is not taken from the re-audit. Confirm it; drop it if
+  §8 keeps sign-ups open.)
+- **SMTP.** The `GET` must show Resend's SMTP host, sender `noreply@cleffy.io`,
+  and `rate_limit_email_sent` (100/hour on production) within the Resend plan.
+  Send yourself a password reset from the dashboard (Authentication → Users →
+  your user → Send password recovery). The test account can be made in step 9,
+  so do this check after step 9 if no user exists yet.
+
+### 6. Merge #54 outside lesson hours
+
+Max merges `dev` → `main`. The Supabase GitHub integration applies the 70
+pending migrations in filename order, then deploys all 23 functions. Vercel
+builds the bundle in parallel. Wait for the Supabase check on the merge commit
+to go green before you go on.
+
+- Expect minutes: the two IMSLP catalog-data migrations are ~48 MB.
+- **R4.** Migration `20260902120000` schedules `imslp-sync`, and later
+  migrations redefine its tick. If Vault still holds `imslp_sync_url` /
+  `imslp_sync_secret` after the reset (step 3.5), pause the job right after
+  `20260902120000` commits and resume it after `20260910160001`. Use
+  `select cron.alter_job(jobid, active := false) from cron.job where jobname = 'imslp-sync'`
+  (then `active := true`). On the local stack, `postgres` cannot
+  `update cron.job` directly: that is refused with `permission denied for table job`.
+  Without those Vault secrets the tick only logs "missing — skip", and there
+  is nothing to pause.
+- If the function deploy fails, redeploy it before anything else (the old
+  checklist's step 8 explains the bundle/function race).
+
+### 7. Immediately after the merge
+
+Run each check in production's SQL editor. Each must come back exactly as
+stated.
+
+1. **`STRIPE_MODES=live`.** Compare the digest from
+   `supabase secrets list --project-ref jibgwgosihadbjgxdsfe` with
+   `printf %s live | sha256sum`, which is
+   `247610f4dedd4ab7247d07dbda19c81ca9817f85820742cad49d407ffae9e4ed`. The
+   behavioural check is in _STRIPE_MODES_ below; it needs a signed-in user, so
+   run it in step 11.
+2. **The live-only config row (P1), then verify it.** A fresh replay leaves
+   `entitling_billing_modes()` at the shipped `{live,test}`. That was checked
+   on the local stack at 47e9b38f. It means test-mode subscriptions entitle on
+   production, which is R1's landmine. P1 adds `deployment_config` so the
+   narrowing lives in data, not in a hand edit.
+
+    ```sql
+    -- (confirm after P1: P1's exact insert / function call)
+    insert into public.deployment_config (…) values (…);
+
+    select public.entitling_billing_modes();
+    -- must be {live}
+    ```
+
+3. **Grants.** Zero rows is a pass. It was run on the local stack at 47e9b38f,
+   where it returned 0 rows. With
+   `grant select on public.content_moderators to anon` and RLS turned off on `stripe_events` inside a rolled-back
+   transaction, it reported exactly those two.
+
+    ```sql
+    with tables as (
+        select c.oid, c.relname, c.relrowsecurity
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relkind in ('r', 'p')
+    ),
+    server_only (t) as (values
+        ('annotation_sync_floors'), ('billing_cancel_token_tombstones'), ('billing_cancel_tokens'),
+        ('billing_mail_outbox'), ('billing_notices'), ('checkout_consents'), ('content_moderators'),
+        ('content_notice_log'), ('content_notice_outbox'), ('content_reports'), ('content_strikes'),
+        ('content_takedowns'), ('district_billing'), ('district_billing_log'), ('district_retention'),
+        ('district_retention_log'), ('district_retention_notices'), ('district_retention_students'),
+        ('district_student_evidence'), ('document_member_role_locks'), ('document_realtime_epochs'),
+        ('edge_login_attempts'), ('edge_rate_buckets'), ('guest_email_verifications'), ('imslp_works'),
+        ('imslp_works_building'), ('managed_students'), ('pdf_export_claims'), ('seat_read_only_since'),
+        ('share_link_redemptions'), ('stripe_events'), ('studio_seat_override_log'),
+        ('studio_seat_overrides'), ('studio_seat_tenures'), ('support_messages')
+    ),
+    client_read (t) as (values
+        ('documents'), ('annotations'), ('document_members'), ('share_links'), ('subscriptions'),
+        ('billing_customers'), ('studios'), ('studio_members'), ('assignments'), ('practice_notes'),
+        ('usage_counters'), ('teacher_attestations')
+    )
+    select relname as object, 'RLS is off' as problem from tables where not relrowsecurity
+    union all
+    select relname, 'service_role cannot select' from tables
+    where not has_table_privilege('service_role', oid, 'select')
+    union all
+    select s.t, r || ' has ' || p from server_only s
+    cross join unnest(array['anon', 'authenticated']) r
+    cross join unnest(array['select', 'insert', 'update', 'delete']) p
+    where has_table_privilege(r, ('public.' || s.t)::regclass, p)
+    union all
+    select t, 'authenticated cannot select' from client_read
+    where not has_table_privilege('authenticated', ('public.' || t)::regclass, 'select')
+    order by 1, 2;
+    ```
+
+    `server_only` is every public table that a migration explicitly revokes
+    from `anon` / `authenticated`. Add any table P1 to P5 create the same way
+    (confirm after P1 to P5). An "undefined table" error means a listed table
+    is missing, which is itself a failure.
+
+4. **`cron.job`.** Zero rows is a pass. Ten jobs are expected, all active, and
+   `retention-district` must be **absent**: it is scheduled only by hand, after
+   the note below. Checked on the local stack: 0 rows. With
+   `retention-district` scheduled and `imslp-sync` paused inside a rolled-back
+   transaction, it reported both.
+
+    ```sql
+    with expected (jobname) as (values
+        ('billing-mail-outbox'), ('content-notice-retry'), ('district-seat-reconcile'), ('imslp-sync'),
+        ('omr-sweep'), ('retention-archived-students'), ('retention-compact-tombstones'),
+        ('retention-rate-limits'), ('retention-stale-guests'), ('retention-support-messages')
+        -- (confirm after P3: add P3's inbound retry job)
+    )
+    select coalesce(e.jobname, j.jobname) as jobname,
+           case when j.jobname is null then 'missing'
+                when e.jobname is null then 'not expected'
+                else 'inactive' end as problem
+    from expected e
+    full join cron.job j on j.jobname = e.jobname
+    where j.jobname is null or e.jobname is null or not j.active;
+    ```
+
+    `retention-archived-students` and `retention-stale-guests` delete for good
+    at 03:17 and 03:27 UTC. On an empty database there is nothing for them to
+    take.
+
+5. **Functions and `verify_jwt`.** All 23 must be `ACTIVE`, with `verify_jwt`
+   as declared in `supabase/config.toml`.
+
+    ```bash
+    curl -sS "https://api.supabase.com/v1/projects/jibgwgosihadbjgxdsfe/functions" \
+      -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+      | jq -r '.[] | "\(.slug) \(.verify_jwt) \(.status)"' | sort
+    ```
+
+    `verify_jwt = false` (10): `billing-cancel`, `billing-mail-outbox`,
+    `content-notices`, `content-report`, `district-retention-notices`,
+    `imslp-sync`, `resend-inbound`, `stripe-webhook`, `student-claim`,
+    `student-login`. `verify_jwt = true` (13): `analyze-annotations`,
+    `analyze-notes`, `content-moderation`, `delete-account`,
+    `guest-email-confirm`, `guest-email-start`, `imslp-download`,
+    `imslp-search`, `imslp-work`, `score-analyze`, `stripe-checkout`,
+    `stripe-portal`, `student-provision`. A `false` function that shows `true`
+    refuses its caller: Stripe, Resend, pg_cron or a signed-out visitor. A
+    `true` function that shows `false` is open to anyone. As a quick probe, an
+    unsigned POST to `stripe-webhook` must answer
+    `400 {"code":"missing_header"}` (§2).
+
+6. `list_migrations` (or `schema_migrations`) ends at the newest file in
+   `supabase/migrations/`. Run the security advisor: only `peek_share_link` is
+   anon-executable on purpose (old checklist, step 11).
+
+### 8. Vault secrets
+
+These go in production's SQL editor. Each `…_secret` must equal the matching
+Edge secret from step 4. If the reset left a name in place (step 3.5), update it
+with `select vault.update_secret(id, '<value>') from vault.secrets where name = '<name>'`.
+Do not create it a second time.
+
+```sql
+select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/imslp-sync', 'imslp_sync_url');
+select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
+select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/billing-mail-outbox', 'billing_outbox_url');
+select vault.create_secret('<same value as BILLING_OUTBOX_SECRET>', 'billing_outbox_secret');
+select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/content-notices', 'content_notice_url');
+select vault.create_secret('<same value as CONTENT_NOTICE_SECRET>', 'content_notice_secret');
+select vault.create_secret('https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/district-retention-notices', 'district_notice_url');
+select vault.create_secret('<same value as DISTRICT_NOTICE_SECRET>', 'district_notice_secret');
+-- (confirm after P3: P3's inbound retry URL and secret names)
+```
+
+`omr_service_url` / `omr_service_secret` are not needed, because play-along is
+off for this launch. Without them `omr-sweep` skips its poke and only purges the
+cache.
+
+Check the names with `select name from vault.secrets order by 1`.
+
+Within two minutes, `imslp-sync` should start walking categories:
+`select category, state from imslp_category_sync order by updated_at desc limit 5`.
+
+### 9. `content_moderators` row for Max
+
+Max needs an auth user first. Sign-ups are closed, so create the account in the
+dashboard (Authentication → Users → Add user, with Auto Confirm). The hook is
+still off, so no `age_gate` is needed. Then:
+
+```sql
+insert into public.content_moderators (user_id, note)
+select id, 'Max' from auth.users where email = '<max's address>';
+```
+
+Check it: as Max, `/admin/reports` opens (it calls `is_content_moderator`).
+
+### 10. Before User Created hook ON, then one sign-up and one share-link join
+
+1. Dashboard → Authentication → Hooks → **Before User Created** → Postgres →
+   `public.hook_before_user_created`. Do this only once the new bundle is live
+   on cleffy.io: `/register` must ask for country and birth month and year
+   first.
+2. Open sign-ups (`"disable_signup": false`, same PATCH as step 5). From now
+   on the hook age-checks every sign-up and every share-link guest.
+   `student-provision` checks the teacher's attestation itself (PR #64).
+3. Sign up as a throwaway teacher on cleffy.io. Confirm the email from the
+   inbox; it arrives from `noreply@cleffy.io`. The account's `user_metadata`
+   carries `age_gate`.
+4. Join a score by share link in a private window, as a guest. The age screen
+   comes first, then the name. Under-age answers are refused with no account
+   created: `auth.users` does not grow.
+5. If you are not ready to open, close sign-ups again (`disable_signup: true`)
+   until step 12.
+
+### 11. Smoke tests
+
+These cover re-audit T-3 to T-7 and T-11 (confirm the mapping against the
+re-audit). Use throwaway accounts only, and run this smoke plus the old
+checklist's steps 12 and 13 where they still apply.
+
+- **CSP and headers.** `npm run build && node scripts/csp-smoke.mjs` gives
+  zero violations. cleffy.io with the console open shows no CSP errors.
+- **Sharing and sync.** Share a score, change a member's role live, revoke a
+  link with removal, then leave. Draw offline and come back online.
+- **Roster.** Add a code student with the attestation, sign in as them, then
+  archive them: the open score signs them out. Then use Delete student.
+- **Export and IMSLP.** On a free account, export a PDF twice: the second is
+  refused. Import from IMSLP and open its Source dialog.
+- **Moderation.** Report a throwaway score at `/report` signed out. The
+  acknowledgment arrives with a `CR-…` reference. Take it down from
+  `/admin/reports`, then lift it.
+- **`STRIPE_MODES` behaviour** (_STRIPE_MODES_ below). With a teacher's JWT,
+  `stripe-checkout` with `Origin: https://dev.cleffy.io` answers
+  `400 unknown_origin`.
+- **One real low-price purchase.** Use Personal monthly ($7, or €8 / £7 VAT
+  included) with a real card on cleffy.io.
+    - Checkout shows no test-mode banner, and tax is shown.
+    - The webhook writes `subscriptions` with `mode = 'live'`, and a
+      `checkout_consents` row exists.
+    - The confirmation email arrives with the model withdrawal form.
+    - The Account page shows Personal.
+    - Then **refund and cancel** it, exactly as in _Refunds_ below. The
+      account goes back to free, and the cancellation email arrives.
+    - Also try `/cancel` signed out with that address: the link mail arrives,
+      and it reports nothing left to cancel.
+- **Delete the throwaway accounts** from the Account page (`delete-account`,
+  which needs the live key). Each is gone from Auth and from both buckets, and
+  its Stripe subscriptions are cancelled. Its `checkout_consents` rows stay with
+  `user_id` null, because they are kept 3 years (PR #62). Delete the guest from
+  the join page ("Delete my guest profile").
+
+### 12. Open sign-ups, then watch for 48 hours
+
+- Set `"disable_signup": false` if you closed it again in step 10.
+- Then watch:
+    - function logs, for 5xx on `stripe-webhook`, `guest-email-start` and
+      `student-login`;
+    - Stripe → Webhooks, for failed deliveries;
+    - Resend, for bounces and the daily count against the plan;
+    - the `cron.job_run_details` failures;
+    - Realtime usage (§10);
+    - `select count(*) from auth.users` against the sign-ups you expect.
+
+### Before scheduling `retention-district`
+
+It stays unscheduled at launch. Schedule it only when all of these hold:
+
+1. **P5 is merged** and deployed (confirm after P5: P5's change to the district
+   purge).
+2. `district-retention-notices` is deployed with `DISTRICT_NOTICE_SECRET`, and
+   the Vault pair `district_notice_url` / `district_notice_secret` exists
+   (step 8).
+3. **The dry-run counts are read and expected**:
+   `select public.retention_district_dry_run();` on production. On a fresh
+   production it is empty until a district has a `contract_ends_at`.
+4. **The hourly notice-sender cron** from decision 11 is scheduled (confirm
+   after P5: its job name and schedule). Without it, a notice deferred by the
+   mail budget (`20261021120900`) waits for the next daily purge run, and
+   nothing is purged before its notice is sent.
+
+Then schedule it:
+`select cron.schedule('retention-district', '57 3 * * *', $$select public.retention_district_run()$$);`
+After that, add `retention-district` to the expected list in step 7.4.
+
+### Stripe webhook events
+
+`stripe-webhook` handles nine event types
+(`dispatchStripeEvent` in `supabase/functions/_shared/stripeEvents.ts`).
+**Subscribe both endpoints to all nine**, the live one
+(`we_1U9V8T4eZ6RX0W0glk3BZIOi`, production) and the sandbox one
+(`we_1U9fnx9EqxUjgZtnXnAvtJH3`, `dev` branch):
+
+- `checkout.session.completed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+- `customer.subscription.paused`
+- `customer.subscription.resumed`
+- `invoice.paid`
+- `invoice.payment_succeeded`
+- `invoice.payment_failed`
+
+Each missing event has a cost:
+
+- Without `paused` / `resumed`, a paused subscription keeps entitling.
+- Without `invoice.paid` / `invoice.payment_succeeded`, a renewal leaves the
+  old period end in place. The teacher then drops to free limits until some
+  other event arrives (QA round 4, D6).
+
+Anything else is acknowledged and ignored. There is **no `charge.refunded`
+handler**, so a refund changes nothing in Cleffy (_Refunds_).
+
+### Refunds — a manual step
+
+The Refund Policy (`/refunds`, `src/features/legal/refundPolicy.ts`) promises a
+full refund on request within 14 days of the first purchase of a paid plan.
+After the refund, the subscription is cancelled and the account returns to free.
+Requests arrive at support@. The `/cancel` page's "request my 14-day refund"
+emails support@ with Reply-To set to the buyer.
+
+Nothing in Cleffy reacts to a refund, because no `charge.refunded` handler
+exists. A refund alone leaves the subscription **active, entitled and renewing**.
+So every refund is two Stripe actions plus a log line:
+
+1. **Check eligibility.** It must be the customer's first paid subscription,
+   and the request must come within 14 days of it. Check the subscription's
+   `created` date in Stripe, or `checkout_consents.created_at` for the user.
+   Counsel still has to settle a re-subscription, a plan change within the 14
+   days, and Academy (placeholder in the policy).
+2. **Refund the full amount**, tax included. Stripe → Payments → the charge →
+   Refund → full amount.
+3. **Cancel the subscription immediately**, not at period end. Stripe →
+   Subscriptions → Cancel → Immediately. Stripe's cancel dialog can also refund
+   the last payment. Either order works, as long as both are done.
+   `customer.subscription.deleted` then sets the row `canceled`, and the
+   account drops to free limits. Its scores past those limits become read-only;
+   nothing is deleted.
+4. **Verify.** In Stripe the charge shows Refunded and the subscription shows
+   Canceled. In the database:
+   `select status from public.subscriptions where stripe_subscription_id = '<sub_…>'`
+   returns `canceled`.
+5. **Log it.** Write a line in the refunds log:
+    - date;
+    - customer email;
+    - the Stripe customer, charge and subscription ids;
+    - amount and currency, tax included;
+    - the request date;
+    - "within 14 days: yes";
+    - who did it.
+
+    Keep the log where the support records are kept (confirm where with Max).
+
+6. Reply to the customer, within 14 days of the request.
+
+### PITR
+
+`GET /v1/projects/jibgwgosihadbjgxdsfe/database/backups` reported
+`walg_enabled: true` and **`pitr_enabled: false`** as of 2026-10-12. That means
+seven daily physical backups and nothing finer (_Recovery and disaster
+recovery_). Whether to buy PITR (a paid add-on on the Pro plan) is **Max's
+decision before launch**.
+
+**Until PITR is on, take a logical dump before every release** that runs
+migrations against production. Use the commands in step 3.2, and keep it until
+the next release is known good. Restore it with **R3**'s `omr_jobs` note:
+`id` is `generated always as identity`. A copy written as `insert … select`
+needs `overriding system value` and then the `setval`. The CLI's `COPY` dump
+carries both, but run the `setval` check after any restore anyway.
+
+### STRIPE_MODES
+
+**What it does.** `servedModes()` in `supabase/functions/_shared/stripeMode.ts`
+reads `STRIPE_MODES` and returns which Stripe accounts this backend will serve.
+`live`, `test` or `live,test`; unset means both.
+
+- Checkout, the portal and `/cancel` first map the request's Origin to a mode
+  (§0). A mode the backend does not serve is answered `400 unknown_origin`.
+  Production therefore never writes a test-mode row.
+- `stripe-webhook` (`supabase/functions/stripe-webhook/index.ts`, the
+  `servedModes()` loop before signature verification) tries only the served
+  modes' signing secrets. A sandbox event that reaches production verifies
+  against nothing and is refused. With no served secret set, it answers
+  `500 Server misconfigured`.
+- It is the backstop for a wrong build or a wrong DNS entry (§0, §5).
+  `entitling_billing_modes()` (P1's config row) is the database-side half.
+
+**Value per project.**
+
+| Project                                 | `STRIPE_MODES` |
+| --------------------------------------- | -------------- |
+| production `jibgwgosihadbjgxdsfe`       | `live`         |
+| `dev` branch `qdbnlrgylelelvwbkvnm`     | `test`         |
+| local stack (`supabase/functions/.env`) | unset (both)   |
+
+**How to verify.**
+
+1. **Digest.** `supabase secrets list --project-ref <ref>` shows the SHA-256 of
+   each value. Compare it with `printf %s live | sha256sum` (`247610f4…e9e4ed`)
+   or `printf %s test | sha256sum` (`9f86d081…f00a08`).
+2. **Behaviour.** With a signed-in teacher's JWT, POST to production's
+   `stripe-checkout` with `Origin: https://dev.cleffy.io`. It must answer
+   `400 {"code":"unknown_origin"}`. The same request with
+   `Origin: https://cleffy.io` returns a live `checkout.stripe.com` URL (§0,
+   _Verifying_). Mirror both on the `dev` branch: there, `https://cleffy.io` is
+   refused.
+3. **Database.** `select public.entitling_billing_modes();` returns `{live}`
+   on production (step 7.2).
 
 ---
 
 ## Release checklist — launch fixes (20261007\*)
+
+> **Superseded for the fresh-production path.** The 2026-10 go-live wipes
+> production and replays every migration (_Go-live 2026-10: fresh production_,
+> above). This checklist assumed pending migrations pushed onto production's
+> existing data. Its reference detail still holds, and the go-live links to
+> it: the per-migration order constraints, the QA-round smoke steps, and the
+> bundle/function race at the merge. Its data-preserving steps do not apply:
+> step 1's history repairs and the rehearsal against production's data.
 
 One ordered list for the integrated `fix/*` branches (integrity, sharing, sync,
 billing, library, security, compliance, scope-imslp), the pre-launch QA
@@ -1635,6 +2312,21 @@ should grant explicitly for the same reason.
 ---
 
 ## Recovery and disaster recovery — four things that do not work today
+
+> **Historical once production is rebuilt** by _Go-live 2026-10_. The reset
+> and the replay write every migration's body, which retires **R1**'s NULL
+> row. Its landmine is then closed by P1's live-only config row, not by
+> production's hand-applied narrowing.
+>
+> **R2**'s tables are dropped from production by the wipe. The go-live dump
+> and the `dev` branch project then hold the only copies, until PR #52 lands
+> their migrations.
+>
+> **R3**'s two statements stay correct for any logical restore (_PITR_ in the
+> go-live). **R4** applies only during the go-live merge itself.
+>
+> The findings below are as measured on 2026-10-12, against the old
+> production.
 
 The 2026-10-12 rehearsal replayed all 30 pending migrations against a copy of
 production's data and **passed**: 30/30 clean, no table rewrite, no dropped
