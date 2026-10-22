@@ -156,6 +156,13 @@ export interface ProvisionIntent {
      * also fits another intent's account or a separate signup.
      */
     proven: boolean;
+    /**
+     * studentUserId is null, but an account with no roster row sits at the
+     * intent's address all the same (outside the window, or another intent's):
+     * 'unproven_match' (20261022140400). Not "nothing was created": DEPLOY.md's
+     * case 5, so the intent is kept for the runbook.
+     */
+    unprovenMatch: boolean;
 }
 
 export interface StripeSubscriptionRef {
@@ -531,6 +538,15 @@ export const purgeManagedStudents = async (
     // create and the roster insert, or whose undo failed. The same check
     // before anything irreversible: only a student of THIS teacher goes.
     for (const intent of await ports.provisionIntents(teacherId)) {
+        if (!intent.studentUserId && intent.unprovenMatch) {
+            // Nothing named, but an account at the address may be what it
+            // made: kept, with its intent, for a person (case 5).
+            ports.log(
+                `provisioning ${intent.rosterId} of ${teacherId} names no account, but an account at its address ` +
+                    'has no roster row (unproven_match); leaving its intent for review',
+            );
+            continue;
+        }
         if (!intent.studentUserId) {
             // Nothing was created. A provisioning still running keeps its
             // intent: its roster insert is refused by the marker, and it undoes

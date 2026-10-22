@@ -187,6 +187,7 @@ const ports = (admin: SupabaseClient): DeletionPorts => ({
                 student_user_id: string | null;
                 live: boolean;
                 proven?: boolean;
+                status?: string;
             }>
         ).map((row) => ({
             rosterId: row.roster_id,
@@ -194,6 +195,7 @@ const ports = (admin: SupabaseClient): DeletionPorts => ({
             live: row.live === true,
             // student_provision_intents_proven (20261022140400): only proof (A).
             proven: row.proven === true,
+            unprovenMatch: row.status === 'unproven_match',
         }));
     },
     clearProvisionIntent: async (rosterId) => {

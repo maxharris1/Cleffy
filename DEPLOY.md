@@ -2272,7 +2272,12 @@ The two account columns are kept apart on purpose:
   account (`20261022140300`), and it deletes an account only when
   `student_provision_intents_proven()` says `proven`, proof (A) below
   (`20261022140400`). An account named by address alone is left, with its
-  intent, for this runbook.
+  intent, for this runbook. So is an intent that names nothing while an
+  account with no roster row sits at its address (outside the window, or
+  another intent's): its `status` reads `unproven_match` (case 5), and the
+  deletion logs it rather than read it as "nothing was created" and clear it.
+  It clears an expired intent that names nothing only when its `status` is
+  `none` (case 1, or only rostered accounts at the address).
 - The window runs from one minute before the intent's `created_at` (the
   fallback's own allowance) to its `expires_at`, after which the request that
   wrote the intent can no longer be running.

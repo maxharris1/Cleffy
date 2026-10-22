@@ -1020,9 +1020,14 @@ address are not; a recorded account is named as before. It also proves
 the only thing account deletion's automatic cleanup deletes on, true only for
 DEPLOY.md's proof (A), a recorded account made inside the window; never for an
 address match, a recorded account made outside the window, or one already
-deleted. Ends with `failures | total`. Proven against the local stack on
-2026-10-22: all 14 checks passed; the first 8 with 20261022140300 alone, of
-which 3 failed with 20261022110600's function.
+deleted. Its `status` (PR #72 fix 3) is `unproven_match` for an intent that
+names nothing while an unrostered account sits at its address (outside the
+window, or another intent's), which the cleanup keeps (DEPLOY.md's case 5),
+and `none` only with no such account (none at all, or only a rostered one),
+which it clears. Ends with `failures | total`. Proven against the local stack
+on 2026-10-22: all 17 checks passed; the first 8 with 20261022140300 alone, of
+which 3 failed with 20261022110600's function; the 3 status checks fail with
+the first version of 20261022140400.
 
 `superseded_studio_rotation.sql` proves, with Realtime running, that
 superseding a studio (`20261022100300`, P1) rotates every score it takes from a

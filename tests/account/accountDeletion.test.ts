@@ -119,6 +119,8 @@ class FakeWorld {
         studentUserId: string | null;
         live: boolean;
         proven?: boolean;
+        /** Nothing named, but an unrostered account sits at the intent's address (student_provision_intents_proven's 'unproven_match'). */
+        unprovenMatch?: boolean;
     }> = [];
     stored: Array<StoredSubscriptionRef & { userId: string }> = [];
     stripe: Record<StripeMode, FakeStripe | null> = { live: new FakeStripe(this.log), test: new FakeStripe(this.log) };
@@ -257,11 +259,12 @@ class FakeWorld {
             provisionIntents: async (teacherId) =>
                 this.intents
                     .filter((intent) => intent.teacherId === teacherId)
-                    .map(({ rosterId, studentUserId, live, proven }) => ({
+                    .map(({ rosterId, studentUserId, live, proven, unprovenMatch }) => ({
                         rosterId,
                         studentUserId,
                         live,
                         proven: proven ?? studentUserId !== null,
+                        unprovenMatch: unprovenMatch ?? false,
                     })),
             clearProvisionIntent: async (rosterId) => {
                 this.log.push(`intent-cleared:${rosterId}`);
@@ -1156,6 +1159,26 @@ describe('the barrier beyond scores and roster rows (20261022110600)', () => {
         expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
         expect(world.users.has('old-account')).toBe(true);
         expect(world.intents).toHaveLength(1);
+    });
+
+    it('keeps an expired intent that names nothing while an account sits at its address outside the window, for review (PR #72 fix 3)', async () => {
+        const world = new FakeWorld();
+        // A separate signup at the address after the window, or an account
+        // from before it: not named, and not proof that nothing was created.
+        world.users.set('outside-window', { userType: 'student', teacherId: TEACHER });
+        world.intents.push(
+            { rosterId: 'unproven', teacherId: TEACHER, studentUserId: null, live: false, unprovenMatch: true },
+            { rosterId: 'nothing-made', teacherId: TEACHER, studentUserId: null, live: false },
+        );
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 0 } });
+        expect(world.users.has('outside-window')).toBe(true);
+        // DEPLOY.md case 5: the intent stays open, and the log says why; the
+        // one with no account at its address at all (case 1) is cleared.
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['unproven']);
+        expect(world.log.filter((entry) => entry.includes('unproven'))).toEqual([
+            expect.stringContaining('names no account, but an account at its address'),
+        ]);
     });
 
     it('clears an intent whose account is already gone', async () => {

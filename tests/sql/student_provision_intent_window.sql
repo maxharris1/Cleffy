@@ -24,11 +24,19 @@
 --   w6  recorded: its own account is named
 --   w7/w8  accounts at expires_at exactly (named) and a second later (not)
 --   w9  recorded, but the account was made a year before the intent
+--   wa  nothing made, and no account at the address at all
+--   wb  nothing made; the only account at the address, from before the
+--       window, is on a roster
 --
 -- And 20261022140400: student_provision_intents_proven()'s `proven`
 -- (DEPLOY.md's proof (A), the only thing the automatic cleanup in
 -- delete-account deletes on) is true only for a recorded account made inside
 -- the window: never for an address match. It names the same accounts.
+--
+-- And its status (PR #72 fix 3): an intent that names nothing while an
+-- unrostered account sits at its address (w2, w3, w4, w8) is
+-- 'unproven_match', DEPLOY.md's case 5, which the cleanup keeps; only one
+-- with no such account (wa, wb) is 'none', which it clears.
 
 begin;
 
@@ -98,7 +106,7 @@ values (pg_temp.u ('a1'), 'authenticated', 'authenticated', 'iw-teacher@example.
 set local role service_role;
 
 select public.begin_student_provision (pg_temp.u ('a1'), pg_temp.r (p), pg_temp.addr (case when p = 'b4' then 'b5' else p end))
-from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9']) as p;
+from unnest(array['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'ba', 'bb']) as p;
 
 reset role;
 
@@ -129,6 +137,12 @@ select pg_temp.account ('c8', pg_temp.addr ('b8'), now() - interval '50 minutes'
 -- w9: an old account the intent recorded all the same.
 select pg_temp.account ('c9', pg_temp.addr ('b9'), now() - interval '1 year');
 
+-- wb: an account from a year before, on T's roster.
+select pg_temp.account ('cb', pg_temp.addr ('bb'), now() - interval '1 year');
+
+insert into public.managed_students (id, teacher_id, student_user_id, display_name, login_code_hash, auth_method)
+values (pg_temp.u ('db'), pg_temp.u ('a1'), pg_temp.u ('cb'), 'Rostered', 'hash-iw-bb', 'code');
+
 set local role service_role;
 
 select public.attach_student_provision (pg_temp.r ('b5'), pg_temp.u ('c5'));
@@ -142,7 +156,7 @@ select public.attach_student_provision (pg_temp.r ('b9'), pg_temp.u ('c9'));
 -- ===========================================================================
 select pg_temp.holds (
     'control: every intent is listed, none live (their requests ended 50 minutes ago)',
-    $q$select count(*) = 9 and bool_and(not live) from public.student_provision_intents_for (pg_temp.u ('a1'))$q$
+    $q$select count(*) = 11 and bool_and(not live) from public.student_provision_intents_for (pg_temp.u ('a1'))$q$
 );
 
 select pg_temp.holds (
@@ -201,6 +215,32 @@ select pg_temp.holds (
        where i.roster_id in (pg_temp.r ('b2'), pg_temp.r ('b3'), pg_temp.r ('b4'), pg_temp.r ('b8'))$q$
 );
 
+-- plpgsql, so a function without the column fails these checks rather than the proof.
+create function pg_temp.status (p_intent text) returns text language plpgsql as $$
+begin
+    return (select i.status from public.student_provision_intents_proven (pg_temp.u ('a1')) i
+            where i.roster_id = pg_temp.r (p_intent));
+end;
+$$;
+
+select pg_temp.holds (
+    'status: an intent naming nothing while an unrostered account sits at its address (w2, w3, w8 outside the window, w4 another intent''s) is unproven_match, not "nothing was created"',
+    $q$select pg_temp.status ('b2') = 'unproven_match' and pg_temp.status ('b3') = 'unproven_match'
+          and pg_temp.status ('b8') = 'unproven_match' and pg_temp.status ('b4') = 'unproven_match'
+          and pg_temp.named ('b2') is null and pg_temp.named ('b4') is null$q$
+);
+
+select pg_temp.holds (
+    'status: none only when no unrostered account is at the address (wa: none at all; wb: only a rostered one)',
+    $q$select pg_temp.status ('ba') = 'none' and pg_temp.status ('bb') = 'none'$q$
+);
+
+select pg_temp.holds (
+    'status: proven for proof (A) (w5, w6); unproven for an account named without it (w1, w7, w9)',
+    $q$select pg_temp.status ('b5') = 'proven' and pg_temp.status ('b6') = 'proven'
+          and pg_temp.status ('b1') = 'unproven' and pg_temp.status ('b7') = 'unproven' and pg_temp.status ('b9') = 'unproven'$q$
+);
+
 reset role;
 
 delete from auth.users where id = pg_temp.u ('c6');
@@ -220,7 +260,7 @@ select pg_temp.holds (
            (select roster_id, student_user_id, live from public.student_provision_intents_for (pg_temp.u ('a1')))
            except
            (select roster_id, student_user_id, live from public.student_provision_intents_proven (pg_temp.u ('a1'))))
-       and (select count(*) from public.student_provision_intents_proven (pg_temp.u ('a1'))) = 9$q$
+       and (select count(*) from public.student_provision_intents_proven (pg_temp.u ('a1'))) = 11$q$
 );
 
 select pg_temp.holds (
