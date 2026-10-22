@@ -27,6 +27,12 @@ export interface ExportMarks {
      * its own to read here.
      */
     signedOut?: { unsaved: number } | null;
+    /**
+     * Set when the score was lost to this device (removed from it, deleted by
+     * someone else, access taken back) and this tab still holds unsaved marks
+     * of it (inkRecovery.closeDocInk): the export has only those.
+     */
+    lostAccess?: { unsaved: number } | null;
 }
 
 /**
@@ -55,14 +61,27 @@ export const loadExportMarks = async (
     docId: string,
     userId: string | null,
     pageIndex?: number,
+    /** Export the ink this tab kept of a score lost to this device (inkRecovery.closeDocInk). */
+    { lostAccess = false }: { lostAccess?: boolean } = {},
 ): Promise<ExportMarks> => {
     const wanted = (a: Annotation) => !a.deletedAt && (pageIndex === undefined || a.page === pageIndex);
     const inkAuthor = isCloudDocId(docId) ? userId : null;
-    const ink = heldInkForExport(inkAuthor, docId);
+    const ink = heldInkForExport(inkAuthor, docId, lostAccess);
     const kept = ink.conflicts.map(asConflict).filter(wanted);
     const erasedConflicts = ink.conflicts.filter(
         (a) => a.deletedAt && (pageIndex === undefined || a.page === pageIndex),
     ).length;
+    if (lostAccess) {
+        // Purged here: only the unsaved marks this tab kept are left to export.
+        const held = ink.held.filter(wanted);
+        return {
+            annotations: [...held, ...kept],
+            incomplete: null,
+            conflicts: kept.length,
+            erasedConflicts,
+            lostAccess: { unsaved: held.length + kept.length },
+        };
+    }
     if (ink.signedOut) {
         // Signed out: only its own unsaved marks are its to export here.
         const held = ink.held.filter(wanted);
@@ -122,7 +141,8 @@ export const loadExportAnnotations = async (
     docId: string,
     userId: string | null,
     pageIndex?: number,
-): Promise<Annotation[]> => (await loadExportMarks(docId, userId, pageIndex)).annotations;
+    options?: { lostAccess?: boolean },
+): Promise<Annotation[]> => (await loadExportMarks(docId, userId, pageIndex, options)).annotations;
 
 /** An overtaken mark's unsaved version, baked in beside the newer one under an id of its own. */
 const asConflict = (held: Annotation): Annotation => ({ ...held, id: `${held.id}:unsaved` });
@@ -139,11 +159,17 @@ export const exportNotice = ({
     conflicts,
     erasedConflicts = 0,
     signedOut = null,
-}: Pick<ExportMarks, 'incomplete' | 'conflicts' | 'erasedConflicts' | 'signedOut'>): string | null => {
+    lostAccess = null,
+}: Pick<ExportMarks, 'incomplete' | 'conflicts' | 'erasedConflicts' | 'signedOut' | 'lostAccess'>): string | null => {
     const parts: string[] = [];
     if (signedOut) {
         parts.push(
             `You’re signed out, so this export has only the ${signedOut.unsaved} unsaved ${marksWord(signedOut.unsaved)} this tab still holds, not the score’s saved marks.`,
+        );
+    }
+    if (lostAccess) {
+        parts.push(
+            `You no longer have this score, so this export has only the ${lostAccess.unsaved} unsaved ${marksWord(lostAccess.unsaved)} still on this device, not the score’s saved marks.`,
         );
     }
     if (incomplete) {
@@ -162,7 +188,7 @@ export const exportNotice = ({
         // Signed out, the export has only the unsaved marks (the PDF still
         // builds: a signed-out export claims nothing), so the newer version
         // that overtook an erase is not in it and the copy must not say so.
-        if (signedOut) {
+        if (signedOut || lostAccess) {
             parts.push(
                 erasedConflicts === 1
                     ? 'One of your unsaved erases was overtaken by a newer version made elsewhere. That version is a saved mark, so it isn’t in this export.'

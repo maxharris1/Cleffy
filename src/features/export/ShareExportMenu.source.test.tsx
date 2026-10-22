@@ -111,6 +111,7 @@ describe('ShareExportMenu', () => {
             expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata', {
                 userId: 'teacher-1',
                 onNotice: expect.any(Function),
+                lostAccess: false,
             }),
         );
         expect(loadDocumentBytes).toHaveBeenCalledWith(row(), expect.objectContaining({ userId: 'teacher-1' }));
@@ -188,6 +189,7 @@ describe('ShareExportMenu', () => {
             expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata', {
                 userId: 'teacher-1',
                 onNotice: expect.any(Function),
+                lostAccess: false,
             }),
         );
         expect(fetchDocument).toHaveBeenCalledWith(DOC_ID);
@@ -203,6 +205,7 @@ describe('ShareExportMenu', () => {
             expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata', {
                 userId: 'teacher-1',
                 onNotice: expect.any(Function),
+                lostAccess: false,
             }),
         );
         expect(fetchDocument).not.toHaveBeenCalled();

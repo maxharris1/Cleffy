@@ -65,6 +65,11 @@ interface ShareExportMenuProps {
      * unsaved marks (EndedSignInInkPrompt).
      */
     userId?: string | null;
+    /**
+     * Export the unsaved ink this tab kept of a score lost to this device
+     * (inkRecovery.closeDocInk; SignedOutInkNotice), not the score's marks.
+     */
+    lostAccess?: boolean;
 }
 
 /** A failure the teacher can act on, worded for them rather than for a log. */
@@ -102,6 +107,7 @@ export const ShareExportMenu = ({
     localOnly = false,
     openSignal = 0,
     userId: exportingFor,
+    lostAccess = false,
 }: ShareExportMenuProps) => {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
@@ -287,8 +293,8 @@ export const ShareExportMenu = ({
                 noteMarks(notice);
             };
             const file = await (page === null
-                ? buildAnnotatedPdf(docId, source, title, { userId, onNotice })
-                : buildAnnotatedPdf(docId, source, title, { userId, pageIndex: page, onNotice }));
+                ? buildAnnotatedPdf(docId, source, title, { userId, onNotice, lostAccess })
+                : buildAnnotatedPdf(docId, source, title, { userId, pageIndex: page, onNotice, lostAccess }));
             const claim = await claimPdfExport(session, localOnly ? null : docId, attempt);
             if (!claim.ok) {
                 if ('limit' in claim) {
@@ -384,6 +390,7 @@ export const ShareExportMenu = ({
                                         title,
                                         markOwner,
                                         onNotice,
+                                        lostAccess,
                                     ),
                                 )
                             }

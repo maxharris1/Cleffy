@@ -40,6 +40,13 @@ import type { Annotation } from '@/types/models';
  * only on that Discard, when the tab closes (the unload guard asks first),
  * or when another account signs in here (accountSignedIn); the same
  * account signing in again gets it back.
+ *
+ * Losing a score never destroys its held ink either (decision 65(1)):
+ * removed from a share, the score deleted by someone else, access taken
+ * back (closeDocInk). The ink is closed — out of every viewer and of Retry,
+ * as signed-out ink is — and kept for the same Export or Discard
+ * (lostAccessInk, SignedOutInkNotice). Only the user deleting the score
+ * themselves lets it go at once (forgetDocInk): that is their choice.
  */
 
 export type CommitOp =
@@ -99,6 +106,12 @@ interface RecoveryEntry {
     conflictNoticeHidden: boolean;
     /** Writes of this entry's ops run one at a time, so a held op is never in two writes at once. */
     chain: Promise<void>;
+    /**
+     * The score was lost to this device (closeDocInk): kept under a key of its
+     * own (closedKeyOf), so no viewer, Retry or new edit finds it — Export or
+     * Discard only.
+     */
+    closed: boolean;
 }
 
 /** Ops per mirror + outbox transaction: one per row is too slow, one per 30k-op import starves readers. */
@@ -150,6 +163,10 @@ const epochs = new Map<string | null, number>();
 let inFlight = 0;
 
 const keyOf = (userId: string | null, docId: string): string => JSON.stringify([userId, docId]);
+/** Where a closed entry is kept (see RecoveryEntry.closed): never a key a viewer or a write looks up. */
+const closedKeyOf = (userId: string | null, docId: string): string => JSON.stringify(['closed', userId, docId]);
+const entryKey = (entry: RecoveryEntry): string =>
+    entry.closed ? closedKeyOf(entry.userId, entry.docId) : keyOf(entry.userId, entry.docId);
 
 const isRetired = (userId: string | null): boolean => userId !== null && retired.has(userId);
 
@@ -220,6 +237,7 @@ const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string): Rec
             refused: 0,
             conflictNoticeHidden: false,
             chain: Promise.resolve(),
+            closed: false,
         };
         entries.set(key, entry);
     }
@@ -230,8 +248,8 @@ const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string): Rec
 /** Drop an entry with nothing left to hold or say. */
 const pruneEntry = (entry: RecoveryEntry): void => {
     if (entry.ops.length === 0 && entry.conflicts.size === 0 && !entry.startingPoint && entry.refused === 0) {
-        if (entries.get(keyOf(entry.userId, entry.docId)) === entry) {
-            entries.delete(keyOf(entry.userId, entry.docId));
+        if (entries.get(entryKey(entry)) === entry) {
+            entries.delete(entryKey(entry));
             pruneSource(entry.docId);
         }
     }
@@ -258,13 +276,18 @@ const dropEntries = (drop: (entry: RecoveryEntry) => boolean): boolean => {
     return any;
 };
 
-/** Whether a signed-out account's ink is held here (the shell's SignedOutInkNotice). */
-const holdsSignedOutInk = (): boolean =>
-    [...entries.values()].some((entry) => isRetired(entry.userId) && entry.ops.length + entry.conflicts.size > 0);
+/**
+ * Whether ink no viewer can draw is held here — a signed-out account's, or a
+ * lost score's (closeDocInk) — for the shell's SignedOutInkNotice.
+ */
+const holdsInkForTheNotice = (): boolean =>
+    [...entries.values()].some(
+        (entry) => (entry.closed || isRetired(entry.userId)) && entry.ops.length + entry.conflicts.size > 0,
+    );
 
 const changed = (): void => {
     syncUnloadGuard();
-    setSignedOutInk(holdsSignedOutInk());
+    setSignedOutInk(holdsInkForTheNotice());
     for (const listener of listeners) {
         listener();
     }
@@ -385,7 +408,12 @@ const chainsOf = (ops: readonly AuthoredOp[]): Map<string, { base: Annotation | 
 export const unsavedMarkCount = (userId?: string | null): number => {
     let count = 0;
     for (const entry of entries.values()) {
-        if (entry.userId !== null && !isRetired(entry.userId) && (userId === undefined || entry.userId === userId)) {
+        if (
+            entry.userId !== null &&
+            !entry.closed &&
+            !isRetired(entry.userId) &&
+            (userId === undefined || entry.userId === userId)
+        ) {
             count += entry.marks.size + entry.conflicts.size;
         }
     }
@@ -395,7 +423,13 @@ export const unsavedMarkCount = (userId?: string | null): number => {
 /** Scores of this account's with held ink (or held conflicts), for the ended-sign-in prompt. */
 export const heldDocIds = (userId: string): string[] =>
     [...entries.values()]
-        .filter((entry) => entry.userId === userId && !isRetired(userId) && entry.marks.size + entry.conflicts.size > 0)
+        .filter(
+            (entry) =>
+                entry.userId === userId &&
+                !entry.closed &&
+                !isRetired(userId) &&
+                entry.marks.size + entry.conflicts.size > 0,
+        )
         .map((entry) => entry.docId);
 
 /**
@@ -1017,7 +1051,9 @@ const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: Ret
  * way — what it had not written stays held, signed out.
  */
 export const retryAccountInk = async (userId: string): Promise<void> => {
-    const docs = [...entries.values()].filter((entry) => entry.userId === userId).map((entry) => entry.docId);
+    const docs = [...entries.values()]
+        .filter((entry) => entry.userId === userId && !entry.closed)
+        .map((entry) => entry.docId);
     for (const docId of docs) {
         await retryHeld(userId, docId).catch(() => undefined);
     }
@@ -1126,15 +1162,8 @@ export const signedOutInk = (): Array<{ userId: string; reason: SignedOutReason;
     const out: Array<{ userId: string; reason: SignedOutReason; scores: SignedOutScore[] }> = [];
     for (const [userId, reason] of retired) {
         const scores = [...entries.values()]
-            .filter((entry) => entry.userId === userId && entry.marks.size + entry.conflicts.size > 0)
-            .map((entry): SignedOutScore => {
-                const source = sources.get(entry.docId);
-                return {
-                    docId: entry.docId,
-                    marks: entry.marks.size + entry.conflicts.size,
-                    ...(source ? { title: source.title, ...(source.bytes ? { bytes: source.bytes } : {}) } : {}),
-                };
-            });
+            .filter((entry) => entry.userId === userId && !entry.closed && entry.marks.size + entry.conflicts.size > 0)
+            .map(heldScoreOf);
         if (scores.length > 0) {
             out.push({ userId, reason, scores });
         }
@@ -1148,8 +1177,84 @@ export const signedOutInk = (): Array<{ userId: string; reason: SignedOutReason;
  * account's when `userId` is undefined).
  */
 export const discardSignedOutInk = (userId?: string): void => {
-    const any = dropEntries((entry) => isRetired(entry.userId) && (userId === undefined || entry.userId === userId));
+    const any = dropEntries(
+        (entry) => !entry.closed && isRetired(entry.userId) && (userId === undefined || entry.userId === userId),
+    );
     if (any) {
+        changed();
+    }
+};
+
+/** A held entry as the notice lists it: the score, its mark count, and the PDF and title its viewer left. */
+const heldScoreOf = (entry: RecoveryEntry): SignedOutScore => {
+    const source = sources.get(entry.docId);
+    return {
+        docId: entry.docId,
+        marks: entry.marks.size + entry.conflicts.size,
+        ...(source ? { title: source.title, ...(source.bytes ? { bytes: source.bytes } : {}) } : {}),
+    };
+};
+
+/**
+ * The score is lost to this device — the account was removed from it, it
+ * was deleted by someone else, access was taken back — and purged here
+ * (documentsService.purgeLocalDocument). Its held ink is NOT dropped
+ * (decision 65(1)): memory is its only copy. Each account's is closed, out
+ * of every viewer and of Retry, and kept for Export or an explicit Discard
+ * (lostAccessInk, SignedOutInkNotice) until the tab closes or another
+ * account signs in here, as signed-out ink is. An entry with nothing to keep
+ * (only a refused edit, or an owed starting point) just goes.
+ */
+export const closeDocInk = (docId: string): void => {
+    let any = false;
+    for (const key of [...overflowNotes.keys()]) {
+        if ((JSON.parse(key) as [string | null, string])[1] === docId) {
+            any = overflowNotes.delete(key) || any;
+        }
+    }
+    for (const [key, entry] of [...entries]) {
+        if (entry.docId !== docId || entry.closed) {
+            continue;
+        }
+        entries.delete(key);
+        any = true;
+        if (entry.ops.length + entry.conflicts.size === 0) {
+            continue;
+        }
+        entry.startingPoint = null;
+        entry.refused = 0;
+        entry.closed = true;
+        const earlier = entries.get(entryKey(entry));
+        if (earlier) {
+            // Lost before and held again since: one closed entry, oldest ops first.
+            for (const held of entry.ops) {
+                appendHeld(earlier, held);
+            }
+            for (const [id, mark] of entry.conflicts) {
+                earlier.conflicts.set(id, mark);
+            }
+        } else {
+            entries.set(entryKey(entry), entry);
+        }
+    }
+    pruneSource(docId);
+    if (any) {
+        changed();
+    }
+};
+
+/** Ink of scores lost to this device (closeDocInk), by account and score, for Export or Discard. */
+export const lostAccessInk = (): Array<SignedOutScore & { userId: string | null }> =>
+    [...entries.values()]
+        .filter((entry) => entry.closed && entry.marks.size + entry.conflicts.size > 0)
+        .map((entry) => ({ ...heldScoreOf(entry), userId: entry.userId }));
+
+/**
+ * The notice's Discard for lost scores, once the user has confirmed it with
+ * Export offered first: their held ink goes for good.
+ */
+export const discardLostAccessInk = (): void => {
+    if (dropEntries((entry) => entry.closed)) {
         changed();
     }
 };
@@ -1164,13 +1269,15 @@ export const discardSignedOutInk = (userId?: string): void => {
 export const heldInkForExport = (
     userId: string | null,
     docId: string,
+    /** The score was lost to this device: its closed ink (closeDocInk). */
+    lost = false,
 ): {
     held: Annotation[];
     conflicts: Annotation[];
     chains: Map<string, { base: Annotation | null; latest: Annotation }>;
     signedOut: boolean;
 } => {
-    const entry = entries.get(keyOf(userId, docId));
+    const entry = entries.get(lost ? closedKeyOf(userId, docId) : keyOf(userId, docId));
     const latest = new Map<string, Annotation>();
     for (const { op } of entry?.ops ?? []) {
         latest.set(op.annotation.id, op.annotation);
@@ -1184,9 +1291,9 @@ export const heldInkForExport = (
 };
 
 /**
- * The score is closed for good on this device (deleted, left, access taken
- * back): its held ink goes (requester answer (a): "document close" is the
- * purge, not every viewer unmount).
+ * The user deleted the score themselves: its held ink, closed or not, goes
+ * with it (decision 65(1): their explicit choice). Every other way of
+ * losing a score keeps it for Export or Discard (closeDocInk).
  */
 export const forgetDocInk = (docId: string): void => {
     for (const key of [...overflowNotes.keys()]) {

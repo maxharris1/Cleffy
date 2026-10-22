@@ -13,7 +13,7 @@ import { readCachedEntitlements } from '@/features/billing/entitlementsService';
 import { parsePostgrestLimitError, type LimitReachedError } from '@/features/billing/limitErrors';
 import { leaveDocument } from '@/features/share/shareService';
 import { getDb } from '@/sync/db';
-import { forgetDocInk } from '@/sync/inkRecovery';
+import { closeDocInk, forgetDocInk } from '@/sync/inkRecovery';
 import {
     cancelBackgroundPdfCache,
     finishPdfCacheInBackground,
@@ -650,7 +650,8 @@ export const deleteDocument = async (doc: DocumentRow): Promise<DeleteDocumentRe
     noteLibraryMutationCommitted();
     // Every local copy — best effort: the server delete already happened, and
     // a refused IndexedDB must not report the delete as failed.
-    await purgeLocalDocument(doc.id).catch((err: unknown) => {
+    // Their own delete: its unsaved ink goes with it (decision 65(1)).
+    await purgeLocalDocument(doc.id, { heldInk: 'discard' }).catch((err: unknown) => {
         console.warn('Could not clear the deleted score from this device', err);
     });
     const storageCleanup = purgeDocumentStorage({
@@ -672,13 +673,25 @@ export const deleteDocument = async (doc: DocumentRow): Promise<DeleteDocumentRe
  * Callers stop anything still syncing the score first (unmount the viewer):
  * a stopped SyncEngine re-checks after every await and writes nothing more,
  * but a running one would put rows and a watermark straight back.
+ *
+ * Marks a viewer could not store, held in this tab's memory, are kept for
+ * Export or Discard by default (decision 65(1)): lost access is not the
+ * user's choice to throw them away. `heldInk: 'discard'` is for the user's
+ * own delete of the score, which is.
  */
-export const purgeLocalDocument = async (docId: string): Promise<void> => {
+export const purgeLocalDocument = async (
+    docId: string,
+    { heldInk = 'keep' }: { heldInk?: 'keep' | 'discard' } = {},
+): Promise<void> => {
     // A first open's download still finishing would put the PDF back.
     cancelBackgroundPdfCache(docId);
-    // Marks a viewer could not store, held in this tab's memory: the score
-    // is closed for good here, so nothing may draw, export or retry them.
-    forgetDocInk(docId);
+    // The score is closed for good here, so nothing may draw or retry its
+    // held ink: closed for the notice's Export or Discard, or gone with it.
+    if (heldInk === 'discard') {
+        forgetDocInk(docId);
+    } else {
+        closeDocInk(docId);
+    }
     const db = getDb();
     await Promise.all([
         db.pdfCache.delete(docId),

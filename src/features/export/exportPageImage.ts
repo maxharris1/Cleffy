@@ -20,8 +20,9 @@ export const exportAnnotatedPageImage = async (
     title: string,
     userId: string | null,
     onNotice?: (notice: string) => void,
+    lostAccess = false,
 ): Promise<void> => {
-    const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title, userId, onNotice);
+    const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title, userId, onNotice, lostAccess);
     await shareOrDownloadFile(file, file.name);
 };
 
@@ -34,8 +35,10 @@ export const buildAnnotatedPagePng = async (
     userId: string | null,
     /** Told what the user must know about the marks baked in (exportNotice). */
     onNotice?: (notice: string) => void,
+    /** The ink this tab kept of a score lost to this device (loadExportMarks). */
+    lostAccess = false,
 ): Promise<File> => {
-    const marks = await loadExportMarks(docId, userId, pageIndex);
+    const marks = await loadExportMarks(docId, userId, pageIndex, { lostAccess });
     const { annotations } = marks;
     const notice = exportNotice(marks);
     if (notice) {
