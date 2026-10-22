@@ -9,8 +9,10 @@ import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements 
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { supabaseQuotaBackend } from '../_shared/quota.ts';
-import { loginThrottleSecret } from '../_shared/rateLimit.ts';
+import { mailLimit } from '../_shared/mailBudget.ts';
+import { loginThrottleSecret, refundRateLimit } from '../_shared/rateLimit.ts';
 import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
+import { reserveStudentAccountMail, studentMailRefusal } from '../_shared/studentAccountMail.ts';
 import { endStudentSessions } from '../_shared/studentSessions.ts';
 import {
     formatLoginCode,
@@ -84,7 +86,10 @@ import {
  * goes, and its cascades take the roster row, assignments and practice notes.
  *
  * Nothing in this file consumes a metered budget. Students are never billed, and
- * a teacher's roster is paid for by occupancy rather than by activity.
+ * a teacher's roster is paid for by occupancy rather than by activity. The one
+ * thing counted is MAIL: an invitation or a reset link reserves its place in
+ * the studentAccountMail share, per teacher and per address
+ * (../_shared/studentAccountMail.ts), before GoTrue is asked to send it.
  */
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -325,6 +330,24 @@ const RESET_INCOMPLETE_MESSAGE =
 const isDeletionPending = (error: { code?: string; message?: string } | null): boolean =>
     error?.code === '55000' && /account_deletion_pending/.test(error.message ?? '');
 
+/**
+ * One invitation or reset link's place in the student-mail budget
+ * (_shared/studentAccountMail.ts), reserved before GoTrue is asked to send it.
+ */
+const reserveStudentMail = (teacherId: string, recipient: string) =>
+    reserveStudentAccountMail(
+        {
+            checkRateLimit,
+            refundRateLimit,
+            projectLimits: {
+                hour: mailLimit('studentAccountMail', 'hour', (name) => Deno.env.get(name)),
+                day: mailLimit('studentAccountMail', 'day', (name) => Deno.env.get(name)),
+            },
+        },
+        teacherId,
+        recipient,
+    );
+
 /** Deletes an account create just made; its roster row, if any, goes with it by cascade. */
 const undoCreatedStudent = async (admin: SupabaseClient, studentUserId: string): Promise<void> => {
     const { error } = await admin.auth.admin.deleteUser(studentUserId);
@@ -420,6 +443,12 @@ const createEmailStudent = async (
 ): Promise<Response> => {
     const { rosterId, displayName, parentEmail, studentEmail, redirectTo, attestation, districtStudioId } = spec;
 
+    // The invitation's place in the mail budget, before GoTrue sends it.
+    const mail = await reserveStudentMail(userId, studentEmail);
+    if (!mail.ok) {
+        return jsonResponse(studentMailRefusal(mail), 429);
+    }
+
     // The invite DOES pass through the before_user_created hook, which refuses
     // a user without a passing age_gate — the teacher's, here.
     const { data: invited, error: inviteError } = await admin.auth.admin.inviteUserByEmail(studentEmail, {
@@ -431,6 +460,8 @@ const createEmailStudent = async (
         // student who already has a Cleffy account, and both are fixed in the
         // form rather than by retrying.
         if (inviteError && isEmailInUse(inviteError)) {
+            // GoTrue refused before sending anything: the place goes back.
+            await mail.release();
             return jsonResponse(
                 { error: 'That email address already has a Cleffy account', code: 'email_in_use' },
                 409,
@@ -606,11 +637,21 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
             return jsonResponse({ error: 'redirectTo is required to reset an invited student' }, 400);
         }
 
+        // The link's place in the mail budget, BEFORE anything is revoked: a
+        // spent budget must not leave the student locked out and waiting for a
+        // link that never goes.
+        const mail = await reserveStudentMail(userId, row.student_email);
+        if (!mail.ok) {
+            return jsonResponse(studentMailRefusal(mail), 429);
+        }
+
         const { error: scrambleError } = await admin.auth.admin.updateUserById(row.student_user_id, {
             password: generateProvisionPassword(),
         });
         if (scrambleError) {
             console.error(`could not revoke the password for student ${row.id}: ${scrambleError.message}`);
+            // Nothing was sent: the link's place goes back.
+            await mail.release();
             return jsonResponse({ error: 'Could not reset the student' }, 502);
         }
 
@@ -619,6 +660,7 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
         const ended = await endStudentSessions(admin, row.student_user_id);
         if (!ended.ok) {
             console.error(`could not end the sessions of student ${row.id}: ${ended.message}`);
+            await mail.release();
             return jsonResponse({ error: 'Could not reset the student' }, 502);
         }
 
@@ -628,6 +670,7 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
         const supabaseUrl = Deno.env.get('SUPABASE_URL');
         const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
         if (!supabaseUrl || !anonKey) {
+            await mail.release();
             return jsonResponse({ error: 'Server misconfigured' }, 500);
         }
         const anonClient = createClient(supabaseUrl, anonKey, {
