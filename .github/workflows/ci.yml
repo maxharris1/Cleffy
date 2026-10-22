@@ -81,7 +81,8 @@ jobs:
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
                   for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock \
-                      20261022100000_explicit_service_role_grants 20261022100100_billing_lock_tables_client_revoke 20261022100200_deployment_config 20261022100300_one_studio_per_owner 20261022100400_storage_object_names 20261022100500_storage_bucket_limits; do
+                      20261022100000_explicit_service_role_grants 20261022100100_billing_lock_tables_client_revoke 20261022100200_deployment_config 20261022100300_one_studio_per_owner 20261022100400_storage_object_names 20261022100500_storage_bucket_limits \
+                      20261022100600_superseded_studio_followups; do
                       psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "supabase/migrations/${migration}.sql"
                   done
             - name: Cancel-link store test (billingCancelStore.ts against the local stack)

@@ -590,6 +590,16 @@ studio grants no seat, active or read-only, and takes no invite. 30 checks.
 `thumbnails/{id}/{rev}.jpg` (insert, upsert, move), a client cannot create an
 archived score, and both buckets carry their size and type limits. 32 checks.
 
+`superseded_studio_members.sql` proves
+`20261022100600_superseded_studio_followups.sql` (Codex round 1 on #69, MAJOR 1
+and 2): after the backfill a member who drops to free is archived past the
+free cap as `plan_lapse`, deleting nothing, while members still entitled
+(their own plan, a seat in another owner's live studio, a seat in the kept
+studio) are skipped; a rerun changes nothing; a studio superseded later is
+followed by the trigger and one brought back restores; and in the last minutes
+of the owner's grace a member of the retired studio only is no longer refused
+live ink, while a member of the live studio still is. 20 checks.
+
 Each `\ir`s its migrations to rerun them, so it is psql only.
 
 ## In CI
@@ -597,7 +607,8 @@ Each `\ir`s its migrations to rerun them, so it is psql only.
 The `supabase-local` job runs every `tests/sql/*.sql` and
 `supabase/sql-tests/sharing_access_control.sql` through
 `scripts/ci/sql-proof.sh`, which reads both result shapes above. A new proof
-runs there by being added. `.github/workflows/ci.yml` keeps the exceptions, each
-with its reason: whole proofs skipped (none) and checks known to fail by number
-(`district_read_only_seats` 49, 59, 60, 62 and `student_access_revocation` 22,
-24, both failing on dev 47e9b38f before launchfix P1).
+runs there by being added. Any failing check fails the job: there is no list of
+tolerated failures, and the only exception `.github/workflows/ci.yml` can hold is
+a whole proof skipped with its reason (none). The job also fails, by name, unless
+Realtime is running and has created today's `realtime.messages` partition, which
+the broadcast checks write.
