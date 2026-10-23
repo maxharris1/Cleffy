@@ -1226,7 +1226,8 @@ describe('billing-cancel: while the account is being deleted', () => {
         const mails = toSupport(h);
         expect(mails).toHaveLength(1);
         expect(mails[0]?.text).toContain('sub_1');
-        expect(mails[0]?.text).toContain('This account is being deleted.');
+        // The same email as any other cancel's (Codex r1 finding 1 on #73).
+        expect(mails[0]?.text).not.toContain('Requested: 2026');
         expect(mails[0]?.idempotencyKey).toBe(`billing-refund-request-${await sha256Hex(h.token)}`);
         // Unspent: the link still opens.
         expect((await handleCancel(post({ action: 'peek', token: h.token }), h.deps)).status).toBe(200);
@@ -1305,6 +1306,79 @@ describe('billing-cancel: while the account is being deleted', () => {
         const asked = vi.mocked(h.deps.accountDeletionPending).mock.invocationCallOrder[0] ?? Infinity;
         const spent = vi.mocked(h.deps.consumeToken).mock.invocationCallOrder[0] ?? -Infinity;
         expect(asked).toBeLessThan(spent);
+    });
+});
+
+/**
+ * Codex r1 finding 1 on #73: the refund request is keyed by the link's hash,
+ * and Resend answers a repeat of a key with the first answer only when the
+ * payload is the same -- a changed one is a 409, which reads as a failed send
+ * and tells a buyer whose request support already has to write in. So the
+ * email is the same on every send for one link: no clock in it, and nothing
+ * that depends on whether the account was being deleted when it went.
+ */
+describe('billing-cancel: the refund request is one email per link, whenever it is sent again', () => {
+    const viaResend = async (options: Parameters<typeof harness>[0] = {}) => {
+        const resend = new FakeResend();
+        const h = harness({ ...options, resend });
+        await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+        await h.flush();
+        const link = resend.delivered[0];
+        if (!link) {
+            throw new Error('no cancel link went out');
+        }
+        const token = tokenFrom((JSON.parse(link.body) as { text: string }).text);
+        const toSupport = () => resend.delivered.filter((mail) => mail.to.includes('support@cleffy.io'));
+        return { ...h, resend, token, toSupport };
+    };
+    const refund = (token: string) => post({ action: 'cancel', token, requestRefund: true });
+
+    it('FakeResend, like Resend, refuses a reused key with a different payload', async () => {
+        const resend = new FakeResend();
+        const send = (text: string) =>
+            sendViaResend({
+                apiKey: 're_test_key',
+                idempotencyKey: 'billing-refund-request-same',
+                email: { from: 'a@cleffy.io', to: ['support@cleffy.io'], subject: 's', text, html: text },
+                fetch: resend.fetch,
+            });
+        expect((await send('one')).outcome).toBe('sent');
+        expect((await send('one')).outcome).toBe('sent');
+        expect(await send('two')).toMatchObject({ outcome: 'unknown' });
+        expect(resend.delivered).toHaveLength(1);
+    });
+
+    it('a second press a minute later, while the account is being deleted, is the same email', async () => {
+        const h = await viaResend({ deletion: 'pending' });
+        expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        h.later(60_000);
+        expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+            deletionPending: true,
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(h.toSupport()).toHaveLength(1);
+        expect(h.errors).not.toContain('refund_request_not_sent');
+    });
+
+    it('deletion abandoned: the retry that cancels sends the same email, answered as sent', async () => {
+        const h = await viaResend({ deletion: 'pending' });
+        await handleCancel(refund(h.token), h.deps);
+        h.later(5 * 60_000);
+        h.account.deletion = 'clear';
+        expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+            cancelled: true,
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(h.deps.cancelAtPeriodEnd).toHaveBeenCalledWith('sub_1', 'live');
+        expect(h.toSupport()).toHaveLength(1);
+        // Every request under the link's key carried the one payload.
+        const bodies = new Set(h.resend.requests.filter((r) => r.key.startsWith('billing-refund')).map((r) => r.body));
+        expect(bodies.size).toBe(1);
     });
 });
 

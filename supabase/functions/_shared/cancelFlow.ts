@@ -621,7 +621,7 @@ const deletionPendingCancel = async (
     resolved: Resolved,
     mirrored: CancellableSubscription,
 ): Promise<Response> => {
-    const refund = await requestRefund(deps, body, resolved, mirrored, true);
+    const refund = await requestRefund(deps, body, resolved, mirrored);
     return deps.json({ cancelled: false, deletionPending: true, ...refund });
 };
 
@@ -733,21 +733,21 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     }
 
     const cancelledAt = new Date(deps.now()).toISOString();
-    const refund = await requestRefund(deps, body, resolved, subscription, false);
+    const refund = await requestRefund(deps, body, resolved, subscription);
     return deps.json({ cancelled: true, cancelledAt, endsAt, ...refund });
 };
 
 /**
  * The refund request to support, when the buyer asked for it inside the 14
- * days. The same for a cancel and for an account being deleted (launch-fix
- * item 16), which says so in the request.
+ * days. The same email for a cancel and for an account being deleted
+ * (launch-fix item 16), so that a link sent again after the deletion was
+ * abandoned is answered as the request support already has.
  */
 const requestRefund = async (
     deps: CancelDeps,
     body: Record<string, unknown>,
     resolved: Resolved,
     subscription: CancellableSubscription,
-    accountDeletionPending: boolean,
 ): Promise<{ refundRequested: boolean; refundRequestFailed: boolean }> => {
     const wantsRefund = body.requestRefund === true;
     const refundEligible = deps.terms.withinRefundWindow(resolved.firstPurchaseAt, deps.now());
@@ -762,13 +762,14 @@ const requestRefund = async (
                 planName: deps.planNameForPrice(subscription.priceId),
                 mode: resolved.row.mode,
                 firstPurchaseAtMs: resolved.firstPurchaseAt,
-                requestedAtMs: deps.now(),
-                accountDeletionPending,
             }),
             // Keyed by this link's hash: one request per link, never the
             // address. Resend answers a repeat under it without mailing
             // support again -- also a second press while the account is
-            // being deleted, which leaves the link unspent.
+            // being deleted, which leaves the link unspent -- as long as it
+            // is byte for byte the same email, which is why nothing above
+            // depends on the clock or on the deletion (Codex r1 finding 1 on
+            // #73).
             {
                 replyTo: resolved.email,
                 tag: 'refund_request',

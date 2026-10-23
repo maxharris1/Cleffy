@@ -510,15 +510,20 @@ export interface RefundRequestInput {
     planName: string | null;
     mode: string;
     firstPurchaseAtMs: number | null;
-    requestedAtMs: number;
-    /**
-     * The account is being deleted (launch-fix item 16): the cancel page left
-     * the subscription alone, because the deletion cancels it.
-     */
-    accountDeletionPending?: boolean;
 }
 
-/** To support@: a buyer asked for the 14-day refund while cancelling. Reply-To is the buyer. */
+/**
+ * To support@: a buyer asked for the 14-day refund while cancelling. Reply-To is the buyer.
+ *
+ * Sent under one Resend key per cancel link, and the same for every send of
+ * that link (Codex r1 finding 1 on #73): Resend answers a repeated key with the
+ * first answer only when the payload matches, and a changed one is refused --
+ * which the page reads as a failed send. So nothing in it moves between sends:
+ * no clock (the email's own date is when it was asked for, and a repeat is
+ * never mailed again) and no line that depends on whether the account was being
+ * deleted at that moment (launch-fix item 16) -- which is why it tells support
+ * to look at the subscription in Stripe instead.
+ */
 export const refundRequestEmail = (input: RefundRequestInput): BillingEmail => {
     const paragraphs = [
         `A customer asked for the ${REFUND_WINDOW_DAYS}-day full refund while cancelling.`,
@@ -528,13 +533,9 @@ export const refundRequestEmail = (input: RefundRequestInput): BillingEmail => {
             `Subscription: ${input.subscriptionId} (${input.mode})`,
             `Plan: ${input.planName ?? 'unknown'}`,
             `First purchase: ${input.firstPurchaseAtMs !== null ? formatUtc(input.firstPurchaseAtMs) : 'unknown'}`,
-            `Requested: ${formatUtc(input.requestedAtMs)}`,
+            'Requested: when this email was sent (asking again with the same link never sends a second one).',
         ].join('\n'),
-        ...(input.accountDeletionPending
-            ? [
-                  'This account is being deleted. The cancel page did not change the subscription, because the deletion cancels it.',
-              ]
-            : []),
+        'The subscription may be set to end at its period end, or already cancelled -- for example by the account being deleted, which cancels it at once. Check it in Stripe before refunding.',
         'Refund the payment(s) in the Stripe dashboard and reply to the customer (Reply-To is set to them).',
     ];
     return {
