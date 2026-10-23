@@ -1,11 +1,16 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
     cancelBilling,
     deleteAccount,
     MAX_SWEEP_PASSES,
+    provisionIntentFromRow,
     type DeletionCaller,
     type DeletionPorts,
+    type ProvisionIntentRow,
     type StoredSubscriptionRef,
     type StripeCustomerRef,
     type StripeMode,
@@ -1186,5 +1191,73 @@ describe('the barrier beyond scores and roster rows (20261022110600)', () => {
         world.intents.push({ rosterId: 'undone', teacherId: TEACHER, studentUserId: 'already-deleted', live: false });
         expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
         expect(world.intents).toEqual([]);
+    });
+});
+
+describe('the student_provision_intents_proven() row mapper (PR #72 fix round 2, 2)', () => {
+    const row = (over: Partial<ProvisionIntentRow>): ProvisionIntentRow => ({
+        roster_id: 'roster-1',
+        student_user_id: null,
+        live: false,
+        ...over,
+    });
+
+    it('maps each status the RPC returns', () => {
+        expect(
+            provisionIntentFromRow(row({ student_user_id: 'made', live: true, proven: true, status: 'proven' })),
+        ).toEqual({ rosterId: 'roster-1', studentUserId: 'made', live: true, proven: true, unprovenMatch: false });
+        expect(provisionIntentFromRow(row({ student_user_id: 'named', proven: false, status: 'unproven' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: 'named',
+            live: false,
+            proven: false,
+            unprovenMatch: false,
+        });
+        // DEPLOY.md case 5: nothing named, but an account at the address.
+        expect(provisionIntentFromRow(row({ proven: false, status: 'unproven_match' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: null,
+            live: false,
+            proven: false,
+            unprovenMatch: true,
+        });
+        // Cases 1–2: nothing to resolve.
+        expect(provisionIntentFromRow(row({ proven: false, status: 'none' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: null,
+            live: false,
+            proven: false,
+            unprovenMatch: false,
+        });
+    });
+
+    it('never reads a missing or unknown column as proof, nor as a match', () => {
+        expect(provisionIntentFromRow(row({ student_user_id: 'named' }))).toMatchObject({
+            proven: false,
+            unprovenMatch: false,
+        });
+        expect(
+            provisionIntentFromRow({
+                ...row({ status: 'UNPROVEN_MATCH' }),
+                proven: 'true' as unknown as boolean,
+                live: 1 as unknown as boolean,
+            }),
+        ).toMatchObject({ live: false, proven: false, unprovenMatch: false });
+    });
+
+    it('an unproven_match row, mapped, keeps its intent through the deletion', async () => {
+        const world = new FakeWorld();
+        world.users.set('outside-window', { userType: 'student', teacherId: TEACHER });
+        const mapped = provisionIntentFromRow(row({ roster_id: 'unproven', proven: false, status: 'unproven_match' }));
+        world.intents.push({ ...mapped, teacherId: TEACHER });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['unproven']);
+    });
+
+    it('is what delete-account maps the RPC rows with', () => {
+        const adapter = readFileSync(resolve(process.cwd(), 'supabase/functions/delete-account/index.ts'), 'utf8');
+        const port = adapter.match(/provisionIntents: async [\s\S]*?\n {4}},\n/)?.[0] ?? '';
+        expect(port).toContain(`rpc('student_provision_intents_proven'`);
+        expect(port).toContain('.map(provisionIntentFromRow)');
     });
 });

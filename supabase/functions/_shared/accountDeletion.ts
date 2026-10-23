@@ -165,6 +165,29 @@ export interface ProvisionIntent {
     unprovenMatch: boolean;
 }
 
+/** One row of student_provision_intents_proven() (20261022140400), as the RPC returns it. */
+export interface ProvisionIntentRow {
+    roster_id: string;
+    student_user_id: string | null;
+    live: boolean;
+    proven?: boolean;
+    status?: string;
+}
+
+/**
+ * A student_provision_intents_proven() row as the deletion reads it. Only
+ * proof (A) is `proven`, and only 'unproven_match' is `unprovenMatch`: a
+ * missing or unknown column reads as neither, so an older or garbled row is
+ * never taken as proof, nor as "nothing was created" past a match.
+ */
+export const provisionIntentFromRow = (row: ProvisionIntentRow): ProvisionIntent => ({
+    rosterId: row.roster_id,
+    studentUserId: row.student_user_id,
+    live: row.live === true,
+    proven: row.proven === true,
+    unprovenMatch: row.status === 'unproven_match',
+});
+
 export interface StripeSubscriptionRef {
     id: string;
     status: string;
