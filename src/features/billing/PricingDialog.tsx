@@ -183,10 +183,12 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                                     </h3>
                                     {price ? (
                                         <p className="shrink-0 text-right">
-                                            <span className="font-display text-xl font-semibold text-stone-900">
+                                            <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
                                                 {price.amount}
                                             </span>
-                                            <span className="block text-xs text-stone-500">{price.caption}</span>
+                                            <span className="block text-xs tabular-nums text-stone-500">
+                                                {price.caption}
+                                            </span>
                                         </p>
                                     ) : null}
                                 </div>
@@ -256,7 +258,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                                     </Badge>
                                 </h3>
                                 <p className="shrink-0 text-right">
-                                    <span className="font-display text-xl font-semibold text-stone-900">
+                                    <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
                                         {founding.amount}
                                     </span>
                                     <span className="block text-xs text-stone-500">{founding.caption}</span>

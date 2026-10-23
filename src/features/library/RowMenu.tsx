@@ -186,7 +186,7 @@ const MenuItem = ({ label, danger = false, onClick }: { label: string; danger?: 
         type="button"
         role="menuitem"
         onClick={onClick}
-        className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-ink/5 ${
+        className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-ink/5 pointer-coarse:min-h-11 ${
             danger ? 'text-danger' : 'text-stone-800'
         }`}
     >

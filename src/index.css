@@ -150,6 +150,40 @@ body {
     }
 }
 
+/*
+ * Touch hit areas. On a coarse pointer (pointer-coarse:hit-44) an invisible
+ * ::after centred on the control grows its target to at least 44×44px without
+ * moving a pixel of layout. hit-44-y grows the height only, for controls that
+ * sit edge to edge in a row. Rows of hit-44 controls space themselves on touch
+ * (pointer-coarse:gap-*) so neighbouring areas never overlap.
+ */
+@utility hit-44 {
+    position: relative;
+
+    &::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: max(100%, 44px);
+        height: max(100%, 44px);
+        translate: -50% -50%;
+    }
+}
+
+@utility hit-44-y {
+    position: relative;
+
+    &::after {
+        content: '';
+        position: absolute;
+        inset-inline: 0;
+        top: 50%;
+        height: max(100%, 44px);
+        translate: 0 -50%;
+    }
+}
+
 /* Annotation surfaces manage their own gestures. */
 .ink-surface {
     touch-action: none;

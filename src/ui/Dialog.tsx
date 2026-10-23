@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 
-import { CloseIcon } from '@/ui/icons';
+import { CloseButton } from '@/ui/CloseButton';
 
 const FOCUSABLE_SELECTOR =
     'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -127,17 +127,8 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
                         <h2 className="min-w-0 text-lg font-semibold text-stone-800 [overflow-wrap:anywhere]">
                             {label}
                         </h2>
-                        {/* 44px hit area on touch; the negative margin keeps the icon where it sits on desktop.
-                            Sized explicitly rather than by padding: a dialog rendered inside a toolbar
-                            (ViewerHeader's [&_button]:px-*) would otherwise inherit its button padding. */}
-                        <button
-                            type="button"
-                            aria-label="Close"
-                            onClick={onClose}
-                            className="inline-flex size-7.5 shrink-0 items-center justify-center rounded-lg text-stone-500 transition-colors hover:bg-stone-100 pointer-coarse:-m-[7px] pointer-coarse:size-11"
-                        >
-                            <CloseIcon size={18} className="shrink-0" />
-                        </button>
+                        {/* 44px hit area on touch (CloseButton's hit-44), the icon where it sits on desktop. */}
+                        <CloseButton onClick={onClose} />
                     </div>
                 ) : null}
                 {children}

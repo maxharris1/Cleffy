@@ -19,7 +19,7 @@ import { StepHearBar } from '@/features/fingering/StepHearBar';
 import { SuggestOptionToggle } from '@/features/fingering/SuggestOptionToggle';
 import { useAuditionChord } from '@/features/fingering/useAuditionChord';
 import { buttonClassName } from '@/ui/classNames';
-import { CloseIcon } from '@/ui/icons';
+import { CloseButton } from '@/ui/CloseButton';
 
 export type FingeringSource = 'annotated' | 'suggested';
 
@@ -172,14 +172,12 @@ export const FingeringDiagramPanel = ({
                         <button type="button" onClick={onEditNotes} className={buttonClassName('ghost', 'sm')}>
                             Edit notes
                         </button>
-                        <button
-                            type="button"
-                            aria-label="Close fingering diagram"
+                        <CloseButton
+                            label="Close fingering diagram"
+                            iconSize={16}
                             onClick={onClose}
-                            className="rounded-lg p-1.5 text-stone-500 transition-colors hover:bg-stone-100"
-                        >
-                            <CloseIcon size={16} />
-                        </button>
+                            className="size-7 text-stone-500 hover:bg-stone-100"
+                        />
                     </div>
                 </div>
 

@@ -362,7 +362,7 @@ export const ShareExportMenu = ({
                     setMarksNotice(null);
                     setOpen((v) => !v);
                 }}
-                className={buttonClassName('ghost', 'sm')}
+                className={buttonClassName('ghost', 'sm', 'tabular-nums')}
             >
                 {busy && download && download.total > 0
                     ? `${busy} ${Math.round((download.loaded / download.total) * 100)}%`

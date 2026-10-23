@@ -1034,7 +1034,7 @@ export const LibraryPage = () => {
                                 className={fieldClassName('sm', 'sm:max-w-xs')}
                             />
                             <div className="flex items-center gap-3">
-                                <p className="text-xs text-stone-600" aria-live="polite">
+                                <p className="text-xs tabular-nums text-stone-600" aria-live="polite">
                                     {countLabel}
                                 </p>
                                 <ViewToggle view={view} onChange={changeView} />
@@ -1085,7 +1085,7 @@ export const LibraryPage = () => {
                                             aria-label="Filter by tag"
                                             value={activeTagId ?? ''}
                                             onChange={(e) => setActiveTagId(e.target.value || null)}
-                                            className={fieldClassName('sm', 'h-8 w-auto max-w-[10rem] py-0 text-xs')}
+                                            className={fieldClassName('xs', 'h-8 w-auto max-w-[10rem]')}
                                         >
                                             <option value="">All tags</option>
                                             {tags.map((tag) => (

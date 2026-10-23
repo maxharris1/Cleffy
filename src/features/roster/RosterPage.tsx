@@ -844,7 +844,9 @@ const StudentRow = ({
                         {student.claimed_at === null && !archived ? <Badge tone="warn">Invited</Badge> : null}
                         {archived ? <Badge>Archived</Badge> : null}
                     </button>
-                    <span className={`shrink-0 px-2 text-xs text-stone-500 ${archived ? 'opacity-60' : ''}`}>
+                    <span
+                        className={`shrink-0 px-2 text-xs tabular-nums text-stone-500 ${archived ? 'opacity-60' : ''}`}
+                    >
                         {count === 0 ? 'No scores' : `${count} ${count === 1 ? 'score' : 'scores'}`}
                     </span>
                     <RosterRowMenu

@@ -2,8 +2,8 @@
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
-        <!-- Zoomable (WCAG 1.4.4). The score viewer locks page zoom while it is
-             mounted, because it pinch-zooms the score itself: src/lib/viewportZoom.ts. -->
+        <!-- Zoomable everywhere (WCAG 1.4.4). The score keeps pinch for itself with
+             touch-action, not the viewport: src/lib/viewportZoom.ts. -->
         <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
         <!-- Keep in sync with --color-accent in src/index.css @theme and the PWA manifest in vite.config.ts -->
         <meta name="theme-color" content="#4338ca" />

@@ -26,11 +26,22 @@ const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
 export const buttonClassName = (variant: ButtonVariant, size: ButtonSize = 'md', extra = ''): string =>
     `${BUTTON_BASE} ${BUTTON_SIZE_CLASSES[size]} ${BUTTON_VARIANT_CLASSES[variant]}${extra ? ` ${extra}` : ''}`;
 
-export type FieldSize = 'md' | 'sm';
+/**
+ * md: forms. sm: compact rows. xs: the 32px filter-row selects. inline: a
+ * number set into a control row (the tempo); the caller gives it a width.
+ */
+export type FieldSize = 'md' | 'sm' | 'xs' | 'inline';
 
+/*
+ * Text is 16px wherever the pointer is coarse: iOS zooms the whole page into
+ * any field set smaller, and leaves it zoomed. The compact sizes come back
+ * only under a fine pointer.
+ */
 const FIELD_SIZE_CLASSES: Record<FieldSize, string> = {
-    md: 'rounded-xl px-3.5 py-3',
-    sm: 'rounded-lg px-3 py-2 text-sm',
+    md: 'w-full rounded-xl px-3.5 py-3',
+    sm: 'w-full rounded-lg px-3 py-2 text-base pointer-fine:text-sm',
+    xs: 'w-full rounded-lg px-3 py-0 text-base pointer-fine:text-xs',
+    inline: 'rounded-md px-1 py-0.5 text-center text-base tabular-nums pointer-fine:text-sm',
 };
 
 /**
@@ -38,7 +49,7 @@ const FIELD_SIZE_CLASSES: Record<FieldSize, string> = {
  * in index.css (accent border + soft ring), which replaces the default outline.
  */
 export const fieldClassName = (size: FieldSize = 'md', extra = ''): string =>
-    `landing-input w-full border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition-colors placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
+    `landing-input border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition-colors placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
 
 /**
  * Filter/facet chip — pill toggle matching the transport bar's pill language.
