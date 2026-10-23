@@ -1,87 +1,88 @@
 import { requireUser, rejectAnonymous, rejectStudent } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { accountDeletionPending } from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
+import { handlePortal } from '../_shared/portalFlow.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
-import { appOrigin, modeForRequest, stripeClient } from '../_shared/stripe.ts';
+import { appOrigin, modeForRequest, stripeClient, type StripeMode } from '../_shared/stripe.ts';
 
 /**
- * Opens a Stripe Customer Portal session. Plan changes, card updates and
- * cancellations all happen there rather than in Cleffy — the webhook is what
- * brings the result back into `subscriptions`.
- *
- * What the portal actually offers is not decided here: it comes from the
- * account's default portal configuration, per mode, and this function only
- * hands Stripe a customer. So "plan changes happen there" is true only while
- * `subscription_update` is enabled on that configuration with the switchable
- * products listed — a dashboard setting, invisible from this file and from the
- * API (no version this account accepts serialises
- * `features.subscription_update.products`). DEPLOY.md §1 records the intended
- * shape; if plan switching ever silently stops working, that configuration is
- * the first thing to look at, not this code.
+ * Opens a Stripe Customer Portal session. Every decision -- who may open one,
+ * against which Stripe account, and not while the account is being deleted
+ * (launch-fix item 16, decision 71(6)) -- lives in _shared/portalFlow.ts, with
+ * what the portal offers and why; this file is only what it runs against.
  */
-Deno.serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return optionsResponse();
-    }
-    if (req.method !== 'POST') {
-        return jsonResponse({ error: 'Method not allowed' }, 405);
-    }
 
-    const rate = await checkRateLimit(`portal:${clientKey(req)}`, 10, 60_000);
-    if (!rate.ok) {
-        return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
-    }
-
-    const auth = await requireUser(req);
-    if (!auth.ok) {
-        return auth.response;
-    }
-    const anonymous = rejectAnonymous(auth.caller);
-    if (anonymous) {
-        return anonymous;
-    }
-    // A provisioned student has no billing relationship at all: no customer, no
-    // subscription, nothing to manage in the portal.
-    const student = rejectStudent(auth.caller);
-    if (student) {
-        return student;
-    }
-
-    // The portal opens against the account the caller's site sells on, so a
-    // dev.cleffy.io tester manages their sandbox subscription and never sees a
-    // real customer's billing.
-    const mode = modeForRequest(req);
-    if (!mode) {
-        return jsonResponse({ error: 'Unrecognised origin', code: 'unknown_origin' }, 400);
-    }
-
+/**
+ * The two clients the customer lookup and the session need. `billingConfigured`
+ * has already answered a 500 for a mode we cannot serve, so a throw here means
+ * the configuration changed underneath the request; the flow answers it 502.
+ */
+const billing = (mode: StripeMode) => {
     const stripe = stripeClient(mode);
     const admin = serviceClient();
     if (!stripe || !admin) {
-        return jsonResponse({ error: 'Billing is not configured' }, 500);
+        throw new Error('Billing is not configured');
     }
+    return { stripe, admin };
+};
 
-    try {
-        const { data: customer } = await admin
-            .from('billing_customers')
-            .select('stripe_customer_id')
-            .eq('user_id', auth.caller.userId)
-            .eq('mode', mode)
-            .maybeSingle();
-
-        if (!customer?.stripe_customer_id) {
-            // Never subscribed — there is nothing to manage yet.
-            return jsonResponse({ error: 'No billing account yet', code: 'no_customer' }, 404);
-        }
-
-        const session = await stripe.billingPortal.sessions.create({
-            customer: customer.stripe_customer_id,
-            return_url: `${appOrigin(req)}/settings`,
-        });
-
-        return jsonResponse({ url: session.url });
-    } catch (err) {
-        logError('stripe-portal', err, { code: 'portal_failed' });
-        return jsonResponse({ error: err instanceof Error ? err.message : 'Portal session failed' }, 502);
-    }
-});
+Deno.serve((req) =>
+    handlePortal(req, {
+        json: jsonResponse,
+        options: optionsResponse,
+        clientKey,
+        checkRateLimit,
+        authenticate: async (request) => {
+            const auth = await requireUser(request);
+            if (!auth.ok) {
+                return auth.response;
+            }
+            const anonymous = rejectAnonymous(auth.caller);
+            if (anonymous) {
+                return anonymous;
+            }
+            // A provisioned student has no billing relationship at all: no
+            // customer, no subscription, nothing to manage in the portal.
+            const student = rejectStudent(auth.caller);
+            if (student) {
+                return student;
+            }
+            return { userId: auth.caller.userId };
+        },
+        modeForRequest,
+        billingConfigured: (mode) => Boolean(stripeClient(mode) && serviceClient()),
+        // The one predicate (../_shared/deletionPending.ts); a failed check is
+        // `unknown`, answered with a 503.
+        accountDeletionPending: async (userId) => {
+            const admin = serviceClient();
+            if (!admin) {
+                return 'unknown';
+            }
+            const pending = await accountDeletionPending(admin, userId);
+            if (!pending.ok) {
+                console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+                return 'unknown';
+            }
+            return pending.pending ? 'pending' : 'clear';
+        },
+        customerFor: async (userId, mode) => {
+            const { data: customer } = await billing(mode)
+                .admin.from('billing_customers')
+                .select('stripe_customer_id')
+                .eq('user_id', userId)
+                .eq('mode', mode)
+                .maybeSingle();
+            return customer?.stripe_customer_id ?? null;
+        },
+        createSession: async (customerId, mode, returnUrl) => {
+            const session = await billing(mode).stripe.billingPortal.sessions.create({
+                customer: customerId,
+                return_url: returnUrl,
+            });
+            return session.url;
+        },
+        appOrigin,
+        logError: (code, err) => logError('stripe-portal', err, { code }),
+    }),
+);

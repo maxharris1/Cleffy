@@ -16,7 +16,8 @@ import { describe, expect, it } from 'vitest';
  *    lead to the refund request), district retention notices, inbound support
  *    mail. These never ask.
  *  * refuse -- user-originated writes nothing requires: guest email
- *    verification (both halves). These ask account_deletion_pending() first.
+ *    verification (both halves), and a new Customer Portal session
+ *    (stripe-portal, decision 71(6)). These ask account_deletion_pending() first.
  *  * unchanged -- caches that are not user data (IMSLP, the OMR score cache)
  *    and user-keyed quota and rate counters, which cascade with the account.
  *    These never ask.
@@ -84,6 +85,18 @@ describe('deletion-pending policy per writer (launch-fix item 16, decision 70(1)
         for (const fn of ['guest-email-start', 'guest-email-confirm']) {
             expect(read(`supabase/functions/${fn}/index.ts`)).toContain('...common,');
         }
+    });
+
+    it('stripe-portal refuses a new portal session (409, or 503 for a check it could not make) before anything else (decision 71(6))', () => {
+        const flow = read('supabase/functions/_shared/portalFlow.ts');
+        const handler = flow.slice(flow.indexOf('export const handlePortal = async'));
+        const ask = handler.indexOf('await deps.accountDeletionPending(caller.userId)');
+        expect(ask).toBeGreaterThan(-1);
+        expect(handler.indexOf('await deps.customerFor(')).toBeGreaterThan(ask);
+        expect(handler.indexOf('await deps.createSession(')).toBeGreaterThan(ask);
+        expect(handler).toContain('deps.json(PORTAL_DELETION_PENDING, 409)');
+        expect(handler).toContain('deps.json(PORTAL_DELETION_CHECK_UNAVAILABLE, 503)');
+        expect(asks(read('supabase/functions/stripe-portal/index.ts'))).toBe(true);
     });
 
     it('stripe-webhook refuses (503, claim released) and billing-cancel leaves Stripe alone but sends the refund request', () => {
