@@ -1181,6 +1181,18 @@ guard's setting compared without `coalesce`, check 02c (the never-set setting
 reads NULL and let the un-spend through) and the four that follow from it
 failed.
 
+Its section 4 (Codex r2 finding 2 on #73) proves
+`keep_cancel_link_refund_request()`: a saved link starts with no refund
+request, the first one asked is kept and every later call answers with it,
+the guard refuses changing or clearing a kept one (the service role's direct
+UPDATE included), keeping it neither spends the link nor moves its expiry,
+`not_found` for an unknown hash, `22023` for a request that is not a JSON
+object, and it is the service role's alone, SECURITY DEFINER with its
+search_path pinned. Proven against the local stack on 2026-10-23: all 40
+checks passed; against the migration as it stood at e91a7089 (no such
+function, no `refund_request` column) psql stopped at check 41 with "function
+public.keep_cancel_link_refund_request(text, jsonb) does not exist".
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

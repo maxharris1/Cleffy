@@ -19,6 +19,7 @@ import {
     type CancelLinkRequest,
     type CancellableSubscription,
     type LiveSubscription,
+    type RefundRequestMail,
 } from '../../supabase/functions/_shared/cancelFlow';
 import { resendIdempotencyKey, sendViaResend } from '../../supabase/functions/_shared/resendDelivery';
 import { liveSubscriptionOf } from '../../supabase/functions/_shared/stripeEvents';
@@ -56,6 +57,8 @@ interface StoredToken {
     mode: StripeMode;
     expiresAt: string;
     usedAt: string | null;
+    /** The refund request kept for the link the first time it was sent (keep_cancel_link_refund_request). */
+    refundRequest?: RefundRequestMail;
 }
 
 const harness = (
@@ -280,6 +283,16 @@ const harness = (
             }
             row.usedAt = null;
             return 'released' as const;
+        }),
+        // keep_cancel_link_refund_request, modelled: the first request kept
+        // for a link is the one every later call answers with.
+        keepRefundRequest: vi.fn(async (hash: string, request: RefundRequestMail) => {
+            const row = tokens.get(hash);
+            if (!row) {
+                return null;
+            }
+            row.refundRequest ??= request;
+            return row.refundRequest;
         }),
         now: edgeNow,
         logError: (code) => errors.push(code),
@@ -1401,6 +1414,93 @@ describe('billing-cancel: the refund request is one email per link, whenever it 
         const bodies = new Set(h.resend.requests.filter((r) => r.key.startsWith('billing-refund')).map((r) => r.body));
         expect(bodies.size).toBe(1);
     });
+
+    // Codex r2 finding 2 on #73: every press reloads the account's email and
+    // its subscription, which can change while the link is still good. The
+    // email is the one kept for the link the first time it went, so a retry
+    // after an abandoned deletion is the request support already has.
+    describe('the account changed between the first send and the retry', () => {
+        const refundBodies = (h: Awaited<ReturnType<typeof viaResend>>) =>
+            new Set(h.resend.requests.filter((r) => r.key.startsWith('billing-refund')).map((r) => r.body));
+
+        it('a new email address: the retry is the same email, Reply-To included, answered as sent', async () => {
+            const h = await viaResend({ deletion: 'pending' });
+            await handleCancel(refund(h.token), h.deps);
+            h.later(5 * 60_000);
+            h.account.deletion = 'clear';
+            h.deps.emailOfUser = async () => 'ada.lovelace@example.org';
+            expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+                cancelled: true,
+                refundRequested: true,
+                refundRequestFailed: false,
+            });
+            expect(h.toSupport()).toHaveLength(1);
+            expect(refundBodies(h).size).toBe(1);
+            const kept = JSON.parse(h.toSupport()[0]?.body ?? '{}') as { reply_to: string; subject: string };
+            expect(kept.reply_to).toBe(EMAIL);
+            expect(kept.subject).toContain(EMAIL);
+            expect(h.errors).not.toContain('refund_request_not_sent');
+        });
+
+        it('a new plan: the retry is the same email, answered as sent', async () => {
+            const h = await viaResend({ deletion: 'pending' });
+            await handleCancel(refund(h.token), h.deps);
+            h.later(5 * 60_000);
+            h.account.deletion = 'clear';
+            h.deps.cancellableSubscription = async () => ({
+                subscriptionId: 'sub_2',
+                priceId: 'price_studio_annual',
+                status: 'active',
+                periodEnd: '2027-10-20T20:00:00.000Z',
+                cancelAtPeriodEnd: false,
+            });
+            expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+                cancelled: true,
+                refundRequested: true,
+                refundRequestFailed: false,
+            });
+            expect(h.toSupport()).toHaveLength(1);
+            expect(refundBodies(h).size).toBe(1);
+            expect(h.toSupport()[0]?.body).toContain('Plan: Teacher');
+            expect(h.toSupport()[0]?.body).toContain('sub_1');
+            expect(h.errors).not.toContain('refund_request_not_sent');
+        });
+
+        it('both, with the deletion still pending on the second press: the same email', async () => {
+            const h = await viaResend({ deletion: 'pending' });
+            await handleCancel(refund(h.token), h.deps);
+            h.later(60_000);
+            h.deps.emailOfUser = async () => 'ada.lovelace@example.org';
+            h.deps.cancellableSubscription = async () => ({
+                subscriptionId: 'sub_1',
+                priceId: 'price_studio_annual',
+                status: 'active',
+                periodEnd: '2027-10-20T20:00:00.000Z',
+                cancelAtPeriodEnd: false,
+            });
+            expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+                deletionPending: true,
+                refundRequested: true,
+                refundRequestFailed: false,
+            });
+            expect(h.toSupport()).toHaveLength(1);
+            expect(refundBodies(h).size).toBe(1);
+        });
+
+        it('a request that could not be kept is not sent, and the buyer is told to write in', async () => {
+            const h = await viaResend({ deletion: 'pending' });
+            h.deps.keepRefundRequest = async () => {
+                throw new Error('connection reset');
+            };
+            expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+                deletionPending: true,
+                refundRequested: false,
+                refundRequestFailed: true,
+            });
+            expect(h.toSupport()).toHaveLength(0);
+            expect(h.errors).toContain('refund_request_keep_failed');
+        });
+    });
 });
 
 /**
@@ -1560,6 +1660,12 @@ describe('billing-cancel/index.ts is wiring only', () => {
         expect(source).toContain('releaseTokenIfDeletionPending,');
         const store = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingCancelStore.ts'), 'utf8');
         expect(store).toContain("admin().rpc('release_cancel_link_token_for_deletion', { p_hash: hash })");
+    });
+
+    it('binds the kept refund request to keep_cancel_link_refund_request (Codex r2 finding 2 on #73)', () => {
+        expect(source).toContain('keepRefundRequest,');
+        const store = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingCancelStore.ts'), 'utf8');
+        expect(store).toContain("admin().rpc('keep_cancel_link_refund_request', {");
     });
 
     it('cancels at the period end, as the Customer Portal does', () => {

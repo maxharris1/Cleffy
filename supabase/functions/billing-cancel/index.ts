@@ -1,6 +1,7 @@
 import {
     cancellableSubscription,
     consumeToken,
+    keepRefundRequest,
     releaseTokenIfDeletionPending,
     sha256Hex,
 } from '../_shared/billingCancelStore.ts';
@@ -143,6 +144,11 @@ Deno.serve((req) =>
         // deletion's lock (release_cancel_link_token_for_deletion, migration
         // 20261022160000).
         releaseTokenIfDeletionPending,
+        // The refund request kept with the link the first time it goes, so a
+        // later press sends the same email whatever the account's email or plan
+        // has become (keep_cancel_link_refund_request, migration 20261022160000;
+        // Codex r2 finding 2 on #73).
+        keepRefundRequest,
         now: () => Date.now(),
         logError: (code, err) => logError('billing-cancel', err, { code }),
     }),

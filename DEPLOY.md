@@ -1373,15 +1373,20 @@ it paused.
     **Launch-fix item 16 (deletion-pending policy per writer, decision 70(1)),
     when merged.** One migration,
     `20261022160000_cancel_link_release_for_deletion` (decision 72(1)): the
-    cancel-link guard's one exception and
-    `release_cancel_link_token_for_deletion()`, service role only, re-runnable.
+    cancel-link guard's one exception,
+    `release_cancel_link_token_for_deletion()`, and the link's kept refund
+    request (`billing_cancel_tokens.refund_request` and
+    `keep_cancel_link_refund_request()`, Codex r2 finding 2 on #73), service
+    role only, re-runnable.
     Redeploy `stripe-webhook`, `billing-cancel`, `stripe-portal`,
     `guest-email-start` and `guest-email-confirm`, and the frontend (the cancel
     page's "account is being deleted" and "already ended" answers). Each asks
     `account_deletion_pending()` (`20261022110400`, P3), already in place. The
     order: the migration before `billing-cancel` (which calls the new function
     once a link is spent; a `billing-cancel` without it logs
-    `cancel_token_release_failed` and cancels as before), and the frontend with
+    `cancel_token_release_failed` and cancels as before -- but it cannot keep
+    a refund request either, so it logs `refund_request_keep_failed`, sends
+    support nothing and tells the buyer to email support), and the frontend with
     or before `billing-cancel`, since an older cancel page shows the new answer
     for an account being deleted as an ordinary cancellation, and an
     already-ended subscription's refund outcome not at all. `stripe-portal`

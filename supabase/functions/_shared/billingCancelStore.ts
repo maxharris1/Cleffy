@@ -178,3 +178,37 @@ export const releaseTokenIfDeletionPending: CancelDeps['releaseTokenIfDeletionPe
     }
     return answer;
 };
+
+/**
+ * The refund request kept with a link, through keep_cancel_link_refund_request
+ * (migration 20261022160000): the first call saves `request` on the link, and
+ * every call -- that one included -- answers with what is saved. So every send
+ * under the link's one Resend key is the email that went first, whatever the
+ * account's email or plan has become since (Codex r2 finding 2 on #73). null:
+ * no such link.
+ */
+export const keepRefundRequest: CancelDeps['keepRefundRequest'] = async (hash, request) => {
+    const { data, error } = await admin().rpc('keep_cancel_link_refund_request', {
+        p_hash: hash,
+        p_request: request,
+    });
+    if (error) {
+        throw new Error(`could not keep the refund request with the cancel link: ${error.message}`);
+    }
+    const answer = (data as { answer?: unknown } | null)?.answer;
+    if (answer === 'not_found') {
+        return null;
+    }
+    const kept = (data as { request?: unknown } | null)?.request as Record<string, unknown> | null | undefined;
+    if (
+        answer !== 'kept' ||
+        !kept ||
+        typeof kept.subject !== 'string' ||
+        typeof kept.text !== 'string' ||
+        typeof kept.html !== 'string' ||
+        typeof kept.replyTo !== 'string'
+    ) {
+        throw new Error(`keep_cancel_link_refund_request answered ${JSON.stringify(data)}`);
+    }
+    return { subject: kept.subject, text: kept.text, html: kept.html, replyTo: kept.replyTo };
+};

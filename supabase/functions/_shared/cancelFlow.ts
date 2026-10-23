@@ -239,6 +239,19 @@ export interface CancelLinkDeps {
     logError: (code: string, err: unknown) => void;
 }
 
+/**
+ * A link's refund request to support as it is sent: the email and the buyer's
+ * address it replies to. Kept with the link the first time (keepRefundRequest),
+ * so every later send under the link's one idempotency key is this, byte for
+ * byte.
+ */
+export interface RefundRequestMail {
+    subject: string;
+    text: string;
+    html: string;
+    replyTo: string;
+}
+
 export interface CancelDeps {
     json: (body: unknown, status?: number) => Response;
     /**
@@ -295,6 +308,13 @@ export interface CancelDeps {
      * (decision 72(1)). Throws when it cannot be asked.
      */
     releaseTokenIfDeletionPending: (hash: string) => Promise<ReleaseTokenAnswer>;
+    /**
+     * Keeps this link's refund request the first time it is sent, and answers
+     * with the one kept: what support is mailed for this link on every send,
+     * whatever the account's email or plan has become since (Codex r2 finding
+     * 2 on #73). null: no such link any more. Throws when it cannot be asked.
+     */
+    keepRefundRequest: (hash: string, request: RefundRequestMail) => Promise<RefundRequestMail | null>;
     now: () => number;
     logError: (code: string, err: unknown) => void;
 }
@@ -805,7 +825,8 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
 /**
  * The refund request to support, when the buyer asked for it inside the 14
  * days. The same email for a cancel and for an account being deleted
- * (launch-fix item 16), so that a link sent again after the deletion was
+ * (launch-fix item 16), and the one kept with the link the first time it went
+ * (keepRefundRequest), so that a link sent again after the deletion was
  * abandoned is answered as the request support already has.
  */
 const requestRefund = async (
@@ -818,25 +839,40 @@ const requestRefund = async (
     const refundEligible = deps.terms.withinRefundWindow(resolved.firstPurchaseAt, deps.now());
     let refundRequested = false;
     if (wantsRefund && refundEligible && resolved.email) {
+        // Keyed by this link's hash: one request per link, never the address.
+        // Resend answers a repeat under it without mailing support again --
+        // also a second press while the account is being deleted, which
+        // leaves the link unspent -- only when it is byte for byte the same
+        // email. Nothing in it depends on the clock or on the deletion (Codex
+        // r1 finding 1 on #73), and the email, the plan and the subscription
+        // it names are the ones kept with the link the first time: the
+        // account can change between a press while it is being deleted and
+        // one after the deletion was abandoned (Codex r2 finding 2).
+        const built = deps.terms.refundRequestEmail({
+            userId: resolved.row.userId,
+            email: resolved.email,
+            subscriptionId: subscription.subscriptionId,
+            planName: deps.planNameForPrice(subscription.priceId),
+            mode: resolved.row.mode,
+            firstPurchaseAtMs: resolved.firstPurchaseAt,
+        });
+        let kept: RefundRequestMail | null;
+        try {
+            kept = await deps.keepRefundRequest(resolved.hash, { ...built, replyTo: resolved.email });
+        } catch (err) {
+            // Nothing is sent that might not be the email kept for the link:
+            // the buyer is told to write in instead.
+            deps.logError('refund_request_keep_failed', err);
+            return { refundRequested: false, refundRequestFailed: true };
+        }
+        // null: the link is gone (its account deleted since it was read), so
+        // no later press can send under its key again.
+        const mail = kept ?? { ...built, replyTo: resolved.email };
         const sent = await deps.sendEmail(
             deps.terms.TRADER.supportEmail,
-            deps.terms.refundRequestEmail({
-                userId: resolved.row.userId,
-                email: resolved.email,
-                subscriptionId: subscription.subscriptionId,
-                planName: deps.planNameForPrice(subscription.priceId),
-                mode: resolved.row.mode,
-                firstPurchaseAtMs: resolved.firstPurchaseAt,
-            }),
-            // Keyed by this link's hash: one request per link, never the
-            // address. Resend answers a repeat under it without mailing
-            // support again -- also a second press while the account is
-            // being deleted, which leaves the link unspent -- as long as it
-            // is byte for byte the same email, which is why nothing above
-            // depends on the clock or on the deletion (Codex r1 finding 1 on
-            // #73).
+            { subject: mail.subject, text: mail.text, html: mail.html },
             {
-                replyTo: resolved.email,
+                replyTo: mail.replyTo,
                 tag: 'refund_request',
                 idempotencyKey: deps.idempotencyKey(REFUND_REQUEST_KEY, resolved.hash),
             },
