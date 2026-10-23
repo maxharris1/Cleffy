@@ -221,10 +221,13 @@ const harness = (
         cancellableSubscription,
         firstPurchaseAt: async () => (options.firstPurchaseAt === undefined ? NOW - 3 * DAY : options.firstPurchaseAt),
         // read_cancel_link_token, modelled: the database answers only for a
-        // link that is unused and unexpired on ITS clock.
+        // link that is unused and unexpired on ITS clock, with the refund
+        // request kept for it as it stood at that read.
         readToken: async (hash) => {
             const row = tokens.get(hash);
-            return row && row.usedAt === null && Date.parse(row.expiresAt) > dbNow() ? row : null;
+            return row && row.usedAt === null && Date.parse(row.expiresAt) > dbNow()
+                ? { userId: row.userId, mode: row.mode, refundRequest: row.refundRequest ?? null }
+                : null;
         },
         // consume_cancel_link_token, modelled: one statement that spends the
         // link only while it is unused and unexpired on the DATABASE's clock,
@@ -1500,6 +1503,82 @@ describe('billing-cancel: the refund request is one email per link, whenever it 
             expect(h.toSupport()).toHaveLength(0);
             expect(h.errors).toContain('refund_request_keep_failed');
         });
+
+        // Codex r3 on #73: the deletion removes the link after a press has
+        // read it and before its request is kept, so keep_cancel_link_refund_request
+        // answers not_found. The request read with the link is still the one
+        // support has, and the one sent again under its key.
+        describe('the link removed by the deletion between the read and the keep', () => {
+            const removedAfterRead = async (h: Awaited<ReturnType<typeof viaResend>>) => {
+                const hash = await sha256Hex(h.token);
+                const pending = h.deps.accountDeletionPending;
+                h.deps.accountDeletionPending = async (userId) => {
+                    const answer = await pending(userId);
+                    h.tokens.delete(hash);
+                    return answer;
+                };
+                return hash;
+            };
+
+            it('a retry with a new email address, deletion still pending: the kept email, answered as sent', async () => {
+                const h = await viaResend({ deletion: 'pending' });
+                await handleCancel(refund(h.token), h.deps);
+                h.later(60_000);
+                h.deps.emailOfUser = async () => 'ada.lovelace@example.org';
+                const hash = await removedAfterRead(h);
+                expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+                    deletionPending: true,
+                    refundRequested: true,
+                    refundRequestFailed: false,
+                });
+                expect(h.tokens.has(hash)).toBe(false);
+                expect(h.toSupport()).toHaveLength(1);
+                expect(refundBodies(h).size).toBe(1);
+                expect(JSON.parse(h.toSupport()[0]?.body ?? '{}')).toMatchObject({ reply_to: EMAIL });
+                expect(h.errors).not.toContain('refund_request_not_sent');
+            });
+
+            it('a retry with a new plan after the deletion was abandoned: the kept email, answered as sent', async () => {
+                const h = await viaResend({ deletion: 'pending' });
+                await handleCancel(refund(h.token), h.deps);
+                h.later(5 * 60_000);
+                h.account.deletion = 'clear';
+                h.deps.cancellableSubscription = async () => ({
+                    subscriptionId: 'sub_1',
+                    priceId: 'price_studio_annual',
+                    status: 'active',
+                    periodEnd: '2027-10-20T20:00:00.000Z',
+                    cancelAtPeriodEnd: false,
+                });
+                const hash = await sha256Hex(h.token);
+                // A second deletion begins, and completes, while Stripe is updated.
+                const cancel = h.deps.cancelAtPeriodEnd;
+                h.deps.cancelAtPeriodEnd = async (subscriptionId, mode) => {
+                    const updated = await cancel(subscriptionId, mode);
+                    h.tokens.delete(hash);
+                    return updated;
+                };
+                expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+                    cancelled: true,
+                    refundRequested: true,
+                    refundRequestFailed: false,
+                });
+                expect(h.toSupport()).toHaveLength(1);
+                expect(refundBodies(h).size).toBe(1);
+                expect(h.toSupport()[0]?.body).toContain('Plan: Teacher');
+            });
+
+            it('a first press, with nothing kept yet, still mails support the request it built', async () => {
+                const h = await viaResend({ deletion: 'pending' });
+                await removedAfterRead(h);
+                expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+                    deletionPending: true,
+                    refundRequested: true,
+                    refundRequestFailed: false,
+                });
+                expect(h.toSupport()).toHaveLength(1);
+            });
+        });
     });
 });
 
@@ -1666,6 +1745,18 @@ describe('billing-cancel/index.ts is wiring only', () => {
         expect(source).toContain('keepRefundRequest,');
         const store = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingCancelStore.ts'), 'utf8');
         expect(store).toContain("admin().rpc('keep_cancel_link_refund_request', {");
+    });
+
+    it('reads the kept refund request with the link, through the same clock-checked read (Codex r3 on #73)', () => {
+        expect(source).toContain('refund_request: kept');
+        expect(source).toContain('return { userId, mode, refundRequest };');
+        const migration = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20261022160000_cancel_link_release_for_deletion.sql'),
+            'utf8',
+        );
+        expect(migration).toMatch(
+            /function public\.read_cancel_link_token[\s\S]*?'refund_request', t\.refund_request[\s\S]*?t\.used_at is null\s+and t\.expires_at > pg_catalog\.clock_timestamp\(\)/,
+        );
     });
 
     it('cancels at the period end, as the Customer Portal does', () => {

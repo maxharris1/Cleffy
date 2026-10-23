@@ -2,6 +2,7 @@ import {
     cancellableSubscription,
     consumeToken,
     keepRefundRequest,
+    refundRequestOf,
     releaseTokenIfDeletionPending,
     sha256Hex,
 } from '../_shared/billingCancelStore.ts';
@@ -81,7 +82,8 @@ Deno.serve((req) =>
         },
         // Used or expired is the database's answer, on its own clock
         // (read_cancel_link_token, migration 20261020160600): it answers only
-        // for a link that is neither.
+        // for a link that is neither. With the refund request kept for it, if
+        // one is (migration 20261022160000; Codex r3 on #73).
         readToken: async (hash) => {
             const { data, error } = await admin().rpc('read_cancel_link_token', { p_hash: hash });
             if (error) {
@@ -90,11 +92,20 @@ Deno.serve((req) =>
             if (data === null) {
                 return null;
             }
-            const { user_id: userId, mode } = data as { user_id?: unknown; mode?: unknown };
-            if (typeof userId !== 'string' || (mode !== 'live' && mode !== 'test')) {
+            const {
+                user_id: userId,
+                mode,
+                refund_request: kept,
+            } = data as { user_id?: unknown; mode?: unknown; refund_request?: unknown };
+            const refundRequest = kept == null ? null : refundRequestOf(kept);
+            if (
+                typeof userId !== 'string' ||
+                (mode !== 'live' && mode !== 'test') ||
+                (kept != null && !refundRequest)
+            ) {
                 throw new Error(`read_cancel_link_token answered ${JSON.stringify(data)}`);
             }
-            return { userId, mode };
+            return { userId, mode, refundRequest };
         },
         // Spent only while unused and unexpired on the database's clock, in one
         // statement (consume_cancel_link_token, migration 20261020160700), and

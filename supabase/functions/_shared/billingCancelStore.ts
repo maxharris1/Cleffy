@@ -1,5 +1,5 @@
 import type { ConfirmationDeps } from './billingOutbox.ts';
-import type { CancelDeps, CancellableSubscription, CancelLinkDeps } from './cancelFlow.ts';
+import type { CancelDeps, CancellableSubscription, CancelLinkDeps, RefundRequestMail } from './cancelFlow.ts';
 import { CANCELLABLE_STATUSES } from './cancelFlow.ts';
 import { mailLimit } from './mailBudget.ts';
 import { serviceClient } from './rateLimit.ts';
@@ -199,16 +199,25 @@ export const keepRefundRequest: CancelDeps['keepRefundRequest'] = async (hash, r
     if (answer === 'not_found') {
         return null;
     }
-    const kept = (data as { request?: unknown } | null)?.request as Record<string, unknown> | null | undefined;
+    const kept = answer === 'kept' ? refundRequestOf((data as { request?: unknown }).request) : null;
+    if (!kept) {
+        throw new Error(`keep_cancel_link_refund_request answered ${JSON.stringify(data)}`);
+    }
+    return kept;
+};
+
+/** A kept refund request as the database holds it, or null if it is not one. */
+export const refundRequestOf = (value: unknown): RefundRequestMail | null => {
+    const kept = value as Record<string, unknown> | null | undefined;
     if (
-        answer !== 'kept' ||
         !kept ||
+        typeof kept !== 'object' ||
         typeof kept.subject !== 'string' ||
         typeof kept.text !== 'string' ||
         typeof kept.html !== 'string' ||
         typeof kept.replyTo !== 'string'
     ) {
-        throw new Error(`keep_cancel_link_refund_request answered ${JSON.stringify(data)}`);
+        return null;
     }
     return { subject: kept.subject, text: kept.text, html: kept.html, replyTo: kept.replyTo };
 };
