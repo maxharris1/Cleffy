@@ -114,7 +114,11 @@ const harness = (
     let rows = 0;
     let claims = 0;
     const clock = { now: NOW, edgeAheadMs: options.edgeAheadMs ?? 0 };
-    const account = { deletion: options.deletion ?? ('clear' as 'clear' | 'pending' | 'unknown') };
+    const account = {
+        deletion: options.deletion ?? ('clear' as 'clear' | 'pending' | 'unknown'),
+        /** release_cancel_link_token_for_deletion cannot be reached. */
+        releaseFails: false,
+    };
     const edgeNow = () => clock.now + clock.edgeAheadMs;
     const dbNow = () => clock.now + (options.dbAheadMs ?? 0);
     const deliveries: Delivery[] = [];
@@ -260,6 +264,23 @@ const harness = (
         terms: billingTerms,
         planNameForPrice: (priceId) => (priceId === 'price_teacher_monthly' ? 'Teacher' : null),
         accountDeletionPending: vi.fn(async () => account.deletion),
+        // release_cancel_link_token_for_deletion, modelled: under the
+        // deletion's lock, a link whose account is being deleted is left
+        // unspent (decision 72(1)); for any other it does nothing.
+        releaseTokenIfDeletionPending: vi.fn(async (hash: string) => {
+            if (account.releaseFails) {
+                throw new Error('connection reset');
+            }
+            const row = tokens.get(hash);
+            if (!row) {
+                return 'not_found' as const;
+            }
+            if (account.deletion !== 'pending') {
+                return 'clear' as const;
+            }
+            row.usedAt = null;
+            return 'released' as const;
+        }),
         now: edgeNow,
         logError: (code) => errors.push(code),
     };
@@ -1382,6 +1403,144 @@ describe('billing-cancel: the refund request is one email per link, whenever it 
     });
 });
 
+/**
+ * Codex r1 finding 3 on #73, decision 72(1): the deletion check before the link
+ * is spent is a moment, not a lock. A deletion that begins after it can cancel
+ * the subscription before the link reaches Stripe. The link is then spent and
+ * Stripe says there is nothing to cancel -- which must neither drop the refund
+ * request the buyer asked for, nor leave the link spent for a deletion that is
+ * later abandoned.
+ */
+describe('billing-cancel: a deletion that begins after the check', () => {
+    const viaResend = async (options: Parameters<typeof harness>[0] = {}) => {
+        const resend = new FakeResend();
+        const h = harness({ ...options, resend });
+        await handleCancel(post({ action: 'start', email: EMAIL }), h.deps);
+        await h.flush();
+        const token = tokenFrom((JSON.parse(resend.delivered[0]?.body ?? '{}') as { text: string }).text);
+        const toSupport = () => resend.delivered.filter((mail) => mail.to.includes('support@cleffy.io'));
+        const usedAt = async () => h.tokens.get(await sha256Hex(token))?.usedAt;
+        return { ...h, resend, token, toSupport, usedAt };
+    };
+    const refund = (token: string) => post({ action: 'cancel', token, requestRefund: true });
+    const ENDED: LiveSubscription = { status: 'canceled', cancelling: false, endsAt: null };
+
+    it('cancelled the subscription before the link reached Stripe: the refund goes, and the link is not left spent', async () => {
+        const h = await viaResend();
+        // Clear when asked; by Stripe's read the deletion has begun and cancelled it.
+        h.deps.liveSubscription = vi.fn(async () => {
+            if (vi.mocked(h.deps.liveSubscription).mock.calls.length === 1) {
+                h.account.deletion = 'pending';
+            }
+            return ENDED;
+        });
+        const response = await handleCancel(refund(h.token), h.deps);
+        expect(response.status).toBe(200);
+        expect(await body(response)).toEqual({
+            cancelled: false,
+            deletionPending: true,
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+        expect(h.toSupport()).toHaveLength(1);
+        expect(await h.usedAt()).toBeNull();
+
+        // Abandoned: the link still opens, and pressing it again finds the
+        // subscription ended -- the refund request is the one support has.
+        h.account.deletion = 'clear';
+        h.later(60_000);
+        const again = await handleCancel(refund(h.token), h.deps);
+        expect(again.status).toBe(404);
+        expect(await body(again)).toMatchObject({
+            code: 'nothing_to_cancel',
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(h.toSupport()).toHaveLength(1);
+    });
+
+    it('began but has not cancelled it yet: Stripe is left alone, the refund goes, the link stays good', async () => {
+        const h = await viaResend();
+        const read = h.deps.liveSubscription;
+        h.deps.liveSubscription = vi.fn(async (id: string, mode: StripeMode) => {
+            h.account.deletion = 'pending';
+            return read(id, mode);
+        });
+        expect(await body(await handleCancel(refund(h.token), h.deps))).toEqual({
+            cancelled: false,
+            deletionPending: true,
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+        expect(await h.usedAt()).toBeNull();
+
+        // Abandoned: the same link cancels at Stripe as usual, and support still hears once.
+        h.account.deletion = 'clear';
+        h.deps.liveSubscription = read;
+        expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+            cancelled: true,
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(h.deps.cancelAtPeriodEnd).toHaveBeenCalledWith('sub_1', 'live');
+        expect(h.toSupport()).toHaveLength(1);
+        expect(await h.usedAt()).not.toBeNull();
+    });
+
+    it('began between the re-check and the update, which Stripe refuses: the refund goes, the link stays good', async () => {
+        const h = await viaResend();
+        h.deps.cancelAtPeriodEnd = vi.fn(async () => {
+            h.account.deletion = 'pending';
+            throw new Error('This subscription has been canceled');
+        });
+        expect(await body(await handleCancel(refund(h.token), h.deps))).toEqual({
+            cancelled: false,
+            deletionPending: true,
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(await h.usedAt()).toBeNull();
+        expect(h.errors).toContain('cancel_stripe_failed');
+    });
+
+    it('a subscription Stripe had already ended, with no deletion: still the refund request, and nothing to cancel', async () => {
+        const h = await viaResend({ live: ENDED });
+        const response = await handleCancel(refund(h.token), h.deps);
+        expect(response.status).toBe(404);
+        expect(await body(response)).toMatchObject({
+            code: 'nothing_to_cancel',
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        expect(h.toSupport()).toHaveLength(1);
+        expect(h.toSupport()[0]?.body).toContain('sub_1');
+        // No deletion to wait for: the link is spent, as for any other press.
+        expect(await h.usedAt()).not.toBeNull();
+        expect(h.deps.cancelAtPeriodEnd).not.toHaveBeenCalled();
+    });
+
+    it('asks again after the Stripe read and before the update', async () => {
+        const h = await viaResend();
+        expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({ cancelled: true });
+        const order = (fn: unknown) => vi.mocked(fn as () => void).mock.invocationCallOrder[0] ?? NaN;
+        expect(order(h.deps.consumeToken)).toBeLessThan(order(h.deps.liveSubscription));
+        expect(order(h.deps.liveSubscription)).toBeLessThan(order(h.deps.releaseTokenIfDeletionPending));
+        expect(order(h.deps.releaseTokenIfDeletionPending)).toBeLessThan(order(h.deps.cancelAtPeriodEnd));
+    });
+
+    it('a re-check that cannot be answered goes on as before: the cancel the check before the spend allowed', async () => {
+        const h = await viaResend();
+        h.account.releaseFails = true;
+        expect(await body(await handleCancel(refund(h.token), h.deps))).toMatchObject({
+            cancelled: true,
+            refundRequested: true,
+        });
+        expect(h.errors).toContain('cancel_token_release_failed');
+    });
+});
+
 describe('billing-cancel/index.ts is wiring only', () => {
     const source = readFileSync(resolve(process.cwd(), 'supabase/functions/billing-cancel/index.ts'), 'utf8');
     const config = readFileSync(resolve(process.cwd(), 'supabase/config.toml'), 'utf8');
@@ -1395,6 +1554,12 @@ describe('billing-cancel/index.ts is wiring only', () => {
         expect(port.slice(0, 500)).toContain('await accountDeletionPending(admin(), userId)');
         expect(port.slice(0, 500)).toMatch(/if \(!pending\.ok\) \{[\s\S]{0,200}?return 'unknown';/);
         expect(port.slice(0, 500)).toContain("return pending.pending ? 'pending' : 'clear';");
+    });
+
+    it('binds the post-spend re-check to release_cancel_link_token_for_deletion (decision 72(1))', () => {
+        expect(source).toContain('releaseTokenIfDeletionPending,');
+        const store = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/billingCancelStore.ts'), 'utf8');
+        expect(store).toContain("admin().rpc('release_cancel_link_token_for_deletion', { p_hash: hash })");
     });
 
     it('cancels at the period end, as the Customer Portal does', () => {

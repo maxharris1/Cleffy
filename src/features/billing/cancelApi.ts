@@ -7,15 +7,28 @@ import { requireSupabaseConfig } from '@/lib/supabase';
  * session, and the emailed token -- not a session -- is the credential.
  */
 
+/** What became of a refund request the buyer asked for, as an answer reports it. */
+export interface RefundOutcome {
+    refundRequested: boolean;
+    refundRequestFailed: boolean;
+}
+
 export class CancelError extends Error {
     constructor(
         message: string,
         public readonly code: string,
+        /** Set when the refusal still reports a refund request (a subscription already ended). */
+        public readonly refund?: RefundOutcome,
     ) {
         super(message);
         this.name = 'CancelError';
     }
 }
+
+const refundOutcomeOf = (body: Record<string, unknown>): RefundOutcome | undefined =>
+    body.refundRequested === true || body.refundRequestFailed === true
+        ? { refundRequested: body.refundRequested === true, refundRequestFailed: body.refundRequestFailed === true }
+        : undefined;
 
 const NETWORK_FAILURE = 'Could not reach Cleffy. Check your connection and try again.';
 
@@ -41,6 +54,7 @@ const call = async <T>(payload: object): Promise<T> => {
         throw new CancelError(
             typeof body.error === 'string' ? body.error : `Request failed (${response.status})`,
             typeof body.code === 'string' ? body.code : 'unknown',
+            refundOutcomeOf(body),
         );
     }
     return body as T;
@@ -80,7 +94,27 @@ export type CancelResult =
           deletionPending: true;
           refundRequested: boolean;
           refundRequestFailed: boolean;
+      }
+    | {
+          /**
+           * Stripe had already ended the subscription, so there was nothing to
+           * cancel -- but the refund request asked for went to support all the
+           * same (decision 72(1)). The answer is billing-cancel's 404
+           * `nothing_to_cancel`, carrying what became of the request.
+           */
+          cancelled: false;
+          alreadyEnded: true;
+          refundRequested: boolean;
+          refundRequestFailed: boolean;
       };
 
-export const confirmCancel = (token: string, requestRefund: boolean): Promise<CancelResult> =>
-    call({ action: 'cancel', token, requestRefund });
+export const confirmCancel = async (token: string, requestRefund: boolean): Promise<CancelResult> => {
+    try {
+        return await call<CancelResult>({ action: 'cancel', token, requestRefund });
+    } catch (err) {
+        if (err instanceof CancelError && err.code === 'nothing_to_cancel' && err.refund) {
+            return { cancelled: false, alreadyEnded: true, ...err.refund };
+        }
+        throw err;
+    }
+};

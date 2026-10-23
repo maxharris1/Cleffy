@@ -158,3 +158,23 @@ export const consumeToken: CancelDeps['consumeToken'] = async (hash) => {
     }
     return answer;
 };
+
+/**
+ * After a link is spent: if its account's deletion is pending now, puts it back
+ * unspent, through release_cancel_link_token_for_deletion (migration
+ * 20261022160000) -- under the deletion's lock, so the answer and the link
+ * agree (Codex r1 finding 3 on #73, decision 72(1)). `clear` changes nothing.
+ * cancelFlow.ts deletionBeganSince asks it after Stripe's read, and after a
+ * Stripe failure.
+ */
+export const releaseTokenIfDeletionPending: CancelDeps['releaseTokenIfDeletionPending'] = async (hash) => {
+    const { data, error } = await admin().rpc('release_cancel_link_token_for_deletion', { p_hash: hash });
+    if (error) {
+        throw new Error(`could not ask whether the cancel link's account is being deleted: ${error.message}`);
+    }
+    const answer = (data as { answer?: unknown } | null)?.answer;
+    if (answer !== 'released' && answer !== 'clear' && answer !== 'not_found') {
+        throw new Error(`release_cancel_link_token_for_deletion answered ${JSON.stringify(data)}`);
+    }
+    return answer;
+};

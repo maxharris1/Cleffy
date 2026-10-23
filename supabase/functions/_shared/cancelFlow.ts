@@ -136,6 +136,18 @@ export type ConsumeTokenAnswer =
     /** No such link. */
     | 'not_found';
 
+/**
+ * What release_cancel_link_token_for_deletion answered (migration
+ * 20261022160000), under the account's deletion lock.
+ */
+export type ReleaseTokenAnswer =
+    /** The account is being deleted: the link is unspent again. */
+    | 'released'
+    /** The account is not being deleted: nothing changed. */
+    | 'clear'
+    /** No such link (its account may be gone). */
+    | 'not_found';
+
 type Gate = { ok: true } | { ok: false; retryAfterSec: number };
 
 export interface MailWindow {
@@ -277,6 +289,12 @@ export interface CancelDeps {
      * launch-fix item 16. `unknown` is a check that could not be answered.
      */
     accountDeletionPending: (userId: string) => Promise<'clear' | 'pending' | 'unknown'>;
+    /**
+     * After the link is spent: if the account's deletion is pending NOW, puts
+     * the link back unspent, in one statement under the deletion's lock
+     * (decision 72(1)). Throws when it cannot be asked.
+     */
+    releaseTokenIfDeletionPending: (hash: string) => Promise<ReleaseTokenAnswer>;
     now: () => number;
     logError: (code: string, err: unknown) => void;
 }
@@ -625,6 +643,33 @@ const deletionPendingCancel = async (
     return deps.json({ cancelled: false, deletionPending: true, ...refund });
 };
 
+/**
+ * After the link is spent: has the account's deletion begun since the check
+ * before the spend (Codex r1 finding 3 on #73, decision 72(1))? Asked with
+ * release_cancel_link_token_for_deletion, which answers under the deletion's
+ * own lock and, if it has, puts the link back unspent in the same statement --
+ * so an abandoned deletion leaves a link that still cancels, as when the
+ * deletion was pending from the start. The answer is then that one's: Stripe
+ * left alone, the refund request sent. Null is "go on": the account is clear,
+ * or the question could not be answered -- the check before the spend said
+ * clear, and the cancel the buyer asked for is still the right thing to do.
+ */
+const deletionBeganSince = async (
+    deps: CancelDeps,
+    body: Record<string, unknown>,
+    resolved: Resolved,
+    mirrored: CancellableSubscription,
+): Promise<Response | null> => {
+    let answer: ReleaseTokenAnswer;
+    try {
+        answer = await deps.releaseTokenIfDeletionPending(resolved.hash);
+    } catch (err) {
+        deps.logError('cancel_token_release_failed', err);
+        return null;
+    }
+    return answer === 'released' ? deletionPendingCancel(deps, body, resolved, mirrored) : null;
+};
+
 /** What the deletion check answered, or the 503 for one it could not make. */
 const deletionCheck = async (deps: CancelDeps, resolved: Resolved): Promise<'clear' | 'pending' | Response> => {
     const answer = await deps.accountDeletionPending(resolved.row.userId);
@@ -667,16 +712,19 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     if (resolved instanceof Response) {
         return resolved;
     }
-    if (!resolved.mirrored) {
+    const mirrored = resolved.mirrored;
+    if (!mirrored) {
         return deps.json(CANCEL_ERRORS.nothingToCancel, 404);
     }
-    // Before the link is spent or Stripe is read (decision 70(1)).
+    // Before the link is spent or Stripe is read (decision 70(1)). A moment,
+    // not a lock: a deletion can begin right after it, which is what
+    // deletionBeganSince asks after the spend.
     const deletion = await deletionCheck(deps, resolved);
     if (deletion instanceof Response) {
         return deletion;
     }
     if (deletion === 'pending') {
-        return deletionPendingCancel(deps, body, resolved, resolved.mirrored);
+        return deletionPendingCancel(deps, body, resolved, mirrored);
     }
 
     // The link first, before any Stripe call or the refund request (Codex
@@ -686,7 +734,8 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     // spends it, and only `consumed` goes on. It also decides which of two
     // racing clicks goes on, so support hears about a refund once. A Stripe
     // failure after it leaves the link spent: the buyer asks for a new one
-    // (decision 27). This function's clock decides nothing here.
+    // (decision 27) -- unless a deletion began meanwhile (deletionBeganSince).
+    // This function's clock decides nothing here.
     let spent: ConsumeTokenAnswer;
     try {
         spent = await deps.consumeToken(resolved.hash);
@@ -703,15 +752,29 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     // Stripe's answer to the update SAYS cancelling: a buyer told "cancelled"
     // while Stripe is still going to renew is the one outcome this page must
     // never produce.
+    const notCancelled = async () =>
+        (await deletionBeganSince(deps, body, resolved, mirrored)) ?? deps.json(CANCEL_ERRORS.notCancelled, 502);
     let subscription: CancellableSubscription | null;
     try {
         subscription = await liveCopy(deps, resolved);
     } catch (err) {
         deps.logError('cancel_lookup_failed', err);
-        return deps.json(CANCEL_ERRORS.notCancelled, 502);
+        return notCancelled();
+    }
+    // Asked again now that Stripe has been read, and before it is written
+    // (decision 72(1)).
+    const began = await deletionBeganSince(deps, body, resolved, mirrored);
+    if (began) {
+        return began;
     }
     if (!subscription) {
-        return deps.json(CANCEL_ERRORS.nothingToCancel, 404);
+        // Already ended at Stripe -- by the portal, or by a deletion that has
+        // since completed or been abandoned. Nothing to cancel, but a refund
+        // asked for inside the 14 days still goes to support (decisions 71(2)
+        // and 72(1)): the same email, under the link's one key, as any other
+        // press of this link would send.
+        const refund = await requestRefund(deps, body, resolved, mirrored);
+        return deps.json({ ...CANCEL_ERRORS.nothingToCancel, ...refund }, 404);
     }
     let endsAt: string | null = subscription.periodEnd;
     if (!subscription.cancelAtPeriodEnd) {
@@ -719,15 +782,17 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
         try {
             updated = await deps.cancelAtPeriodEnd(subscription.subscriptionId, resolved.row.mode);
         } catch (err) {
+            // Also how a deletion that began after the question above shows
+            // up: it cancelled the subscription, and Stripe refuses the update.
             deps.logError('cancel_stripe_failed', err);
-            return deps.json(CANCEL_ERRORS.notCancelled, 502);
+            return notCancelled();
         }
         if (!updated.cancelling) {
             deps.logError(
                 'cancel_not_confirmed',
                 new Error(`Stripe did not confirm the cancellation of ${subscription.subscriptionId}`),
             );
-            return deps.json(CANCEL_ERRORS.notCancelled, 502);
+            return notCancelled();
         }
         endsAt = updated.endsAt ?? endsAt;
     }
