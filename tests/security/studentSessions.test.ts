@@ -98,13 +98,11 @@ const handlerBody = (name: string): string => {
 
 describe('student-provision ends sessions where it revokes', () => {
     it('reset: on both paths, after the scramble and before anything is handed out', () => {
-        // The email path, inline.
+        // The email path runs the same worker (20261022140800), with the code
+        // ports' scramble and fenced session end, before the link is mailed.
         const body = handlerBody('resetStudentAccess');
-        const scramble = body.indexOf('password: generateProvisionPassword()');
-        const ends = body.indexOf('endStudentSessions(admin, row.student_user_id)');
-        expect(scramble).toBeGreaterThan(-1);
-        expect(ends).toBeGreaterThan(scramble);
-        expect(ends).toBeLessThan(body.indexOf('signInWithOtp'));
+        expect(body.indexOf('runCodeReset(emailResetPorts(admin, userId)')).toBeGreaterThan(-1);
+        expect(body.indexOf('runCodeReset(emailResetPorts(admin, userId)')).toBeLessThan(body.indexOf('signInWithOtp'));
         // The code path runs in ../_shared/studentCodeReset.ts (since P3 fix
         // round 2): its ports bind the scramble and endStudentSessions, and the
         // worker ends the sessions after the scramble and before a code is minted.

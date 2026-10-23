@@ -24,6 +24,7 @@ import { loginThrottleSecret, refundRateLimit } from '../_shared/rateLimit.ts';
 import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 import { reserveStudentAccountMail, studentMailRefusal } from '../_shared/studentAccountMail.ts';
 import {
+    type CodeResetOutcome,
     type CodeResetPorts,
     definiteRefusal,
     MARKER_KEY,
@@ -353,6 +354,16 @@ const RESET_INCOMPLETE_MESSAGE =
  */
 const RESET_UNCONFIRMED_MESSAGE =
     'The reset did not finish, and we could not confirm whether the student’s password was changed. Their current card is held for up to 10 minutes. Try the reset again in a few minutes.';
+
+/**
+ * The same two for an email-method student (20261022140800), who has no card.
+ * The roster UI shows these words when the answer says `method: 'email'`.
+ */
+const EMAIL_RESET_INCOMPLETE_MESSAGE =
+    'The reset did not finish and no new link was sent. The student’s account is held for up to 10 minutes, so another reset cannot start meanwhile. Try the reset again.';
+
+const EMAIL_RESET_UNCONFIRMED_MESSAGE =
+    'The reset did not finish, and we could not confirm whether the student’s password was changed. No new link was sent. Try the reset again in a few minutes.';
 
 /**
  * account_deletion_pending() for the teacher, as the dispatcher asks it: null
@@ -821,6 +832,93 @@ const codeResetPorts = (admin: SupabaseClient, userId: string): CodeResetPorts =
 });
 
 /**
+ * The email path's ports: a code reset's, except that there is no card to
+ * mint and the end is complete_student_email_reset() (20261022140800).
+ */
+const emailResetPorts = (admin: SupabaseClient, userId: string): CodeResetPorts => ({
+    ...codeResetPorts(admin, userId),
+    mintCode: async () => ({ code: '', hash: '' }),
+    complete: async (studentId, lease) => {
+        const { data, error } = await admin.rpc('complete_student_email_reset', {
+            p_student: studentId,
+            p_reservation: lease.reservation,
+            p_worker: lease.worker,
+            p_epoch: lease.epoch,
+        });
+        if (error) {
+            throw new Error(error.message);
+        }
+        return data === 'reset' ? 'reset' : 'lost';
+    },
+});
+
+/** What the teacher is told when a reset (either method) stopped short. */
+const resetOutcomeResponse = (
+    outcome: Exclude<CodeResetOutcome, { kind: 'reset' }>,
+    method: 'code' | 'email' = 'code',
+): Response => {
+    const email = method === 'email' ? { method: 'email' as const } : {};
+    switch (outcome.kind) {
+        case 'not_found':
+            return jsonResponse({ error: 'Student not found' }, 404);
+        case 'unavailable':
+            return jsonResponse({ error: 'Could not reset the login code' }, 502);
+        case 'busy':
+            return outcome.holder === 'reset'
+                ? jsonResponse(
+                      {
+                          error: 'Another reset of this student is still finishing. Try again in a few minutes.',
+                          code: 'reset_in_progress',
+                      },
+                      409,
+                  )
+                : jsonResponse(
+                      {
+                          error: 'This student is setting up their account with their current card right now. Try again in a few minutes.',
+                          code: 'claim_in_progress',
+                      },
+                      409,
+                  );
+        case 'incomplete':
+            // The hold stays (up to 10 minutes); the token lets this teacher's
+            // retry resume it at once.
+            return jsonResponse(
+                {
+                    error: method === 'email' ? EMAIL_RESET_INCOMPLETE_MESSAGE : RESET_INCOMPLETE_MESSAGE,
+                    code: 'reset_incomplete',
+                    resetToken: outcome.resetToken,
+                    ...email,
+                },
+                502,
+            );
+        case 'unconfirmed':
+            // Quarantined (20261022110800): the password write may still land,
+            // so the hold stays and a retry waits until it is confirmed or the
+            // hold runs out. The token is what lets that retry confirm it.
+            return jsonResponse(
+                {
+                    error: method === 'email' ? EMAIL_RESET_UNCONFIRMED_MESSAGE : RESET_UNCONFIRMED_MESSAGE,
+                    code: 'reset_unconfirmed',
+                    resetToken: outcome.resetToken,
+                    ...email,
+                },
+                502,
+            );
+        case 'deletion_pending':
+            return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
+        case 'deletion_unknown':
+            return jsonResponse({ ...DELETION_CHECK_UNAVAILABLE, resetToken: outcome.resetToken }, 503);
+        case 'lost':
+            // A newer try of this reset, or the student's claim, stands; this
+            // one stopped before touching anything it no longer owned.
+            return jsonResponse(
+                { error: 'This reset was overtaken by a newer one. Try the reset again.', code: 'reset_lost' },
+                409,
+            );
+    }
+};
+
+/**
  * The one recovery path, for a forgotten password on either method — and the
  * only way back to Invited, since nothing else in this file writes claimed_at.
  *
@@ -853,31 +951,24 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
             return jsonResponse(studentMailRefusal(mail), 429);
         }
 
-        // Asked again right before the scramble; nothing was sent, so the
-        // link's place goes back on a refusal.
-        const refused = await deletionRefusal(admin, userId);
-        if (refused) {
-            await mail.release();
-            return refused;
-        }
-
-        const { error: scrambleError } = await admin.auth.admin.updateUserById(row.student_user_id, {
-            password: generateProvisionPassword(),
+        // The same reservation, worker lease and fences as a code reset
+        // (20261022140800): two resets of one student never interleave their
+        // Auth writes, and a delayed scramble or session revocation from an
+        // earlier attempt touches nothing once a newer one owns the student. The
+        // deletion check runs inside, right before the scramble. Only the end
+        // differs: no card, so complete_student_email_reset() drops the
+        // reservation and sends the student back to Invited (claimed_at).
+        const resumeToken =
+            typeof body.resetToken === 'string' && uuidRe.test(body.resetToken) ? body.resetToken : null;
+        const outcome = await runCodeReset(emailResetPorts(admin, userId), {
+            studentId: row.id,
+            studentUserId: row.student_user_id,
+            resumeToken,
         });
-        if (scrambleError) {
-            console.error(`could not revoke the password for student ${row.id}: ${scrambleError.message}`);
+        if (outcome.kind !== 'reset') {
             // Nothing was sent: the link's place goes back.
             await mail.release();
-            return jsonResponse({ error: 'Could not reset the student' }, 502);
-        }
-
-        // Part of the revocation, so before anything is sent: the old password
-        // is dead, and so is every device still signed in with it.
-        const ended = await endStudentSessions(admin, row.student_user_id);
-        if (!ended.ok) {
-            console.error(`could not end the sessions of student ${row.id}: ${ended.message}`);
-            await mail.release();
-            return jsonResponse({ error: 'Could not reset the student' }, 502);
+            return resetOutcomeResponse(outcome, 'email');
         }
 
         // The ANON client, not the service role: this is the same magic link a
@@ -904,18 +995,6 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
             // restore first, then reset.)
             console.error(`could not send the reset link for student ${row.id}: ${otpError.message}`);
             return jsonResponse({ error: 'Could not send the invitation' }, 502);
-        }
-
-        const { error: updateError } = await admin
-            .from('managed_students')
-            .update({ claimed_at: null })
-            .eq('id', row.id);
-        if (updateError) {
-            // Cosmetic drift only — claimed_at is a setup-complete flag on this
-            // path, not a gate — but reported rather than swallowed, and a rerun
-            // repairs it.
-            console.error(`claimed_at out of step for student ${row.id}: ${updateError.message}`);
-            return jsonResponse({ error: 'Could not reset the student' }, 502);
         }
 
         return jsonResponse({ invited: true, studentEmail: row.student_email });
@@ -947,53 +1026,8 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
         studentUserId: row.student_user_id,
         resumeToken,
     });
-    switch (outcome.kind) {
-        case 'not_found':
-            return jsonResponse({ error: 'Student not found' }, 404);
-        case 'unavailable':
-            return jsonResponse({ error: 'Could not reset the login code' }, 502);
-        case 'busy':
-            return outcome.holder === 'reset'
-                ? jsonResponse(
-                      {
-                          error: 'Another reset of this student is still finishing. Try again in a few minutes.',
-                          code: 'reset_in_progress',
-                      },
-                      409,
-                  )
-                : jsonResponse(
-                      {
-                          error: 'This student is setting up their account with their current card right now. Try again in a few minutes.',
-                          code: 'claim_in_progress',
-                      },
-                      409,
-                  );
-        case 'incomplete':
-            // The hold stays (up to 10 minutes); the token lets this teacher's
-            // retry resume it at once.
-            return jsonResponse(
-                { error: RESET_INCOMPLETE_MESSAGE, code: 'reset_incomplete', resetToken: outcome.resetToken },
-                502,
-            );
-        case 'unconfirmed':
-            // Quarantined (20261022110800): the password write may still land,
-            // so the hold stays and a retry waits until it is confirmed or the
-            // hold runs out. The token is what lets that retry confirm it.
-            return jsonResponse(
-                { error: RESET_UNCONFIRMED_MESSAGE, code: 'reset_unconfirmed', resetToken: outcome.resetToken },
-                502,
-            );
-        case 'deletion_pending':
-            return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
-        case 'deletion_unknown':
-            return jsonResponse({ ...DELETION_CHECK_UNAVAILABLE, resetToken: outcome.resetToken }, 503);
-        case 'lost':
-            // A newer try of this reset, or the student's claim, stands; this
-            // one stopped before touching anything it no longer owned.
-            return jsonResponse(
-                { error: 'This reset was overtaken by a newer one. Try the reset again.', code: 'reset_lost' },
-                409,
-            );
+    if (outcome.kind !== 'reset') {
+        return resetOutcomeResponse(outcome);
     }
     const code = outcome.code;
 

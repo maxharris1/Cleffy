@@ -239,8 +239,10 @@ select pg_temp.chk('36 the guard is a BEFORE DELETE row trigger that takes the f
                    and t.tgtype = 11) -- ROW | BEFORE | DELETE
        and pg_get_functiondef('public.thumbnails_keep_published_cover()'::regprocedure)
            ~ 'thumbnail_folder_lock[\s\S]*thumb_rev[\s\S]*return null'
+       -- The publish's order since 20261022140500: the folder lock, then its
+       -- object's row without waiting (it was the row, then the folder).
        and pg_get_functiondef('public.documents_thumbnail_published()'::regprocedure)
-           ~ 'for key share[\s\S]*thumbnail_folder_lock[\s\S]*claimed_at is not null'$q$);
+           ~ 'thumbnail_folder_lock \(new\.id\)[\s\S]*for key share nowait[\s\S]*claimed_at is not null'$q$);
 
 -- ===========================================================================
 -- 3. The folder lock, in document-id order

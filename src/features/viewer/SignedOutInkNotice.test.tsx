@@ -3,8 +3,18 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/features/export/ShareExportMenu', () => ({
-    ShareExportMenu: ({ docId, title, userId }: { docId: string; title: string; userId?: string | null }) => (
-        <button type="button" data-doc={docId} data-user={userId ?? ''}>
+    ShareExportMenu: ({
+        docId,
+        title,
+        userId,
+        lostAccess,
+    }: {
+        docId: string;
+        title: string;
+        userId?: string | null;
+        lostAccess?: boolean;
+    }) => (
+        <button type="button" data-doc={docId} data-user={userId ?? ''} data-lost={String(Boolean(lostAccess))}>
             {`Export ${title}`}
         </button>
     ),
@@ -13,7 +23,9 @@ vi.mock('@/features/export/ShareExportMenu', () => ({
 import { SignedOutInkGate } from '@/app/SignedOutInkGate';
 import { ScribblerDb } from '@/sync/db';
 import {
+    closeDocInk,
     heldInkForExport,
+    heldMarkIds,
     holdOps,
     rememberScoreSource,
     resetInkRecoveryForTests,
@@ -67,7 +79,7 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
 
         const notice = await screen.findByRole('status');
         expect(notice).toHaveTextContent(
-            'You were signed out in another tab. You have unsaved ink here that couldn’t be saved: export a copy to keep it.',
+            'You were signed out in another tab. Your unsaved ink couldn’t be saved and is still on this device: export a copy to keep it.',
         );
         expect(within(notice).getByRole('button', { name: 'Export' })).toBeInTheDocument();
         expect(within(notice).getByRole('button', { name: 'Discard' })).toBeInTheDocument();
@@ -85,6 +97,7 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
         const menu = within(dialog).getByRole('button', { name: 'Export Clair de lune' });
         expect(menu).toHaveAttribute('data-doc', DOC);
         expect(menu).toHaveAttribute('data-user', USER);
+        expect(menu).toHaveAttribute('data-lost', 'false');
     });
 
     it('Discard asks first and offers Export; only its confirm discards', async () => {
@@ -118,6 +131,42 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
         );
 
         expect(heldInkForExport(USER, DOC).held).toEqual([]);
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+});
+
+describe('held ink of a score lost to this device (decision 65(1))', () => {
+    it('access lost: the same notice, saying the marks are still on this device, with Export and Discard', async () => {
+        holdTwo();
+        render(<SignedOutInkGate />);
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+        // Removed from the share, or the score deleted by someone else: purged here.
+        closeDocInk(DOC);
+
+        const notice = await screen.findByRole('status');
+        expect(notice).toHaveTextContent(
+            'You no longer have access to a score you had unsaved ink on. Those marks couldn’t be saved and are still on this device: export a copy to keep them.',
+        );
+        // Out of every viewer: nothing draws it or retries it now.
+        expect(heldMarkIds(USER, DOC).size).toBe(0);
+        expect(heldInkForExport(USER, DOC, true).held).toHaveLength(2);
+
+        await userEvent.click(within(notice).getByRole('button', { name: 'Export' }));
+        const dialog = screen.getByRole('dialog', { name: 'Export your unsaved ink' });
+        expect(dialog).toHaveTextContent('Clair de lune (2 marks)');
+        const menu = within(dialog).getByRole('button', { name: 'Export Clair de lune' });
+        expect(menu).toHaveAttribute('data-user', USER);
+        expect(menu).toHaveAttribute('data-lost', 'true');
+        await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+        await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
+        await userEvent.click(
+            within(screen.getByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
+                name: 'Discard',
+            }),
+        );
+        expect(heldInkForExport(USER, DOC, true).held).toEqual([]);
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 });

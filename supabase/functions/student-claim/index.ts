@@ -65,22 +65,31 @@ const backend = (): StudentClaimBackend | null => {
             return { email: user.email ?? null, userType: user.app_metadata?.user_type };
         },
 
+        // A throw (a dropped connection, a body that is not JSON) is 'unknown'
+        // like an error answer: the handler releases the card and answers 503.
         teacherDeletionPending: async (studentId) => {
-            const { data, error } = await admin
-                .from('managed_students')
-                .select('teacher_id')
-                .eq('id', studentId)
-                .maybeSingle();
-            if (error || !data) {
-                console.error(`could not read the teacher of roster row ${studentId}: ${error?.message ?? 'no row'}`);
+            try {
+                const { data, error } = await admin
+                    .from('managed_students')
+                    .select('teacher_id')
+                    .eq('id', studentId)
+                    .maybeSingle();
+                if (error || !data) {
+                    console.error(
+                        `could not read the teacher of roster row ${studentId}: ${error?.message ?? 'no row'}`,
+                    );
+                    return 'unknown';
+                }
+                const pending = await accountDeletionPending(admin, data.teacher_id as string);
+                if (!pending.ok) {
+                    console.error(`could not check whether ${data.teacher_id} is being deleted: ${pending.message}`);
+                    return 'unknown';
+                }
+                return pending.pending ? 'pending' : 'clear';
+            } catch (err) {
+                console.error(`could not check the teacher of roster row ${studentId}:`, err);
                 return 'unknown';
             }
-            const pending = await accountDeletionPending(admin, data.teacher_id as string);
-            if (!pending.ok) {
-                console.error(`could not check whether ${data.teacher_id} is being deleted: ${pending.message}`);
-                return 'unknown';
-            }
-            return pending.pending ? 'pending' : 'clear';
         },
 
         usernameTakenByOther: async (username, studentId) => {

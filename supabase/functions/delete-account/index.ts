@@ -4,7 +4,9 @@ import type Stripe from 'npm:stripe@18';
 import {
     DELETE_CONFIRMATION,
     deleteAccount,
+    provisionIntentFromRow,
     type DeletionPorts,
+    type ProvisionIntentRow,
     type StripeMode,
     type StripePort,
 } from '../_shared/accountDeletion.ts';
@@ -177,13 +179,12 @@ const ports = (admin: SupabaseClient): DeletionPorts => ({
         return data === true;
     },
     provisionIntents: async (teacherId) => {
-        const { data, error } = await admin.rpc('student_provision_intents_for', { p_teacher: teacherId });
+        const { data, error } = await admin.rpc('student_provision_intents_proven', { p_teacher: teacherId });
         if (error) {
             throw new Error(`could not read provisioning intents: ${error.message}`);
         }
-        return ((data ?? []) as Array<{ roster_id: string; student_user_id: string | null; live: boolean }>).map(
-            (row) => ({ rosterId: row.roster_id, studentUserId: row.student_user_id, live: row.live === true }),
-        );
+        // student_provision_intents_proven (20261022140400): only proof (A) is proven.
+        return ((data ?? []) as ProvisionIntentRow[]).map(provisionIntentFromRow);
     },
     clearProvisionIntent: async (rosterId) => {
         const { error } = await admin.rpc('finish_student_provision', { p_roster_id: rosterId });

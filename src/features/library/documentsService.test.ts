@@ -2,12 +2,29 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getDb } from '@/sync/db';
 import type { CachedPdf } from '@/sync/db';
+import type * as InkRecovery from '@/sync/inkRecovery';
 import type { DocumentRow } from '@/types/database';
 
 vi.mock('@/lib/supabase', () => ({
     getSupabase: vi.fn(),
     isSupabaseConfigured: () => true,
 }));
+// Pass-through spies: which of the two the purge asks for (decision 65(1)).
+const heldInk = vi.hoisted(() => ({ close: vi.fn(), forget: vi.fn() }));
+vi.mock('@/sync/inkRecovery', async (importOriginal) => {
+    const actual = await importOriginal<typeof InkRecovery>();
+    return {
+        ...actual,
+        closeDocInk: (docId: string) => {
+            heldInk.close(docId);
+            actual.closeDocInk(docId);
+        },
+        forgetDocInk: (docId: string) => {
+            heldInk.forget(docId);
+            actual.forgetDocInk(docId);
+        },
+    };
+});
 vi.mock('@/lib/storageUpload', () => ({
     uploadPdfToStorage: vi.fn(async () => undefined),
 }));
@@ -846,6 +863,26 @@ describe('replaceDocumentPdf', () => {
 });
 
 describe('deleteDocument', () => {
+    it('lets the score’s held ink go: the user’s own delete is their choice (decision 65(1))', async () => {
+        makeStub({ listNames: ['original.pdf'] });
+        heldInk.close.mockClear();
+        heldInk.forget.mockClear();
+        const d = doc();
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
+        expect(heldInk.forget).toHaveBeenCalledWith(d.id);
+        expect(heldInk.close).not.toHaveBeenCalled();
+    });
+
+    it('a purge for lost access keeps the held ink for Export or Discard (decision 65(1))', async () => {
+        heldInk.close.mockClear();
+        heldInk.forget.mockClear();
+        await purgeLocalDocument('lost-doc');
+        expect(heldInk.close).toHaveBeenCalledWith('lost-doc');
+        expect(heldInk.forget).not.toHaveBeenCalled();
+    });
+
     it('removes every object in the folder (import backups included)', async () => {
         const calls = makeStub({ listNames: ['original.pdf', 'pre-import-original.pdf'] });
         const d = doc();

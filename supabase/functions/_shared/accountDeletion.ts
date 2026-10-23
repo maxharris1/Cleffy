@@ -142,11 +142,51 @@ export interface StudentAccountRef {
 
 export interface ProvisionIntent {
     rosterId: string;
-    /** The Auth account the provisioning created; null when none was found. */
+    /**
+     * The Auth account the intent points at: the one it recorded, or one at its
+     * address made inside its window. Null when there is none.
+     */
     studentUserId: string | null;
     /** True while the request that registered it may still be running. */
     live: boolean;
+    /**
+     * True only when studentUserId is the account the intent recorded and it
+     * was made inside the intent's window (DEPLOY.md's proof (A),
+     * 20261022140400). Nothing else permits deleting it: an address match
+     * also fits another intent's account or a separate signup.
+     */
+    proven: boolean;
+    /**
+     * studentUserId is null, but an account with no roster row sits at the
+     * intent's address all the same (outside the window, or another intent's):
+     * 'unproven_match' (20261022140400). Not "nothing was created": DEPLOY.md's
+     * case 5, so the intent is kept for the runbook.
+     */
+    unprovenMatch: boolean;
 }
+
+/** One row of student_provision_intents_proven() (20261022140400), as the RPC returns it. */
+export interface ProvisionIntentRow {
+    roster_id: string;
+    student_user_id: string | null;
+    live: boolean;
+    proven?: boolean;
+    status?: string;
+}
+
+/**
+ * A student_provision_intents_proven() row as the deletion reads it. Only
+ * proof (A) is `proven`, and only 'unproven_match' is `unprovenMatch`: a
+ * missing or unknown column reads as neither, so an older or garbled row is
+ * never taken as proof, nor as "nothing was created" past a match.
+ */
+export const provisionIntentFromRow = (row: ProvisionIntentRow): ProvisionIntent => ({
+    rosterId: row.roster_id,
+    studentUserId: row.student_user_id,
+    live: row.live === true,
+    proven: row.proven === true,
+    unprovenMatch: row.status === 'unproven_match',
+});
 
 export interface StripeSubscriptionRef {
     id: string;
@@ -213,7 +253,7 @@ export interface DeletionPorts {
     /** student_user_id of every roster row this teacher owns, archived or not. */
     managedStudents: (teacherId: string) => Promise<string[]>;
     /**
-     * student_provision_intents_for(): provisionings of this teacher that have
+     * student_provision_intents_proven(): provisionings of this teacher that have
      * no roster row (yet), with the Auth account each made, if any, and whether
      * the request that wrote it can still be running.
      */
@@ -521,6 +561,15 @@ export const purgeManagedStudents = async (
     // create and the roster insert, or whose undo failed. The same check
     // before anything irreversible: only a student of THIS teacher goes.
     for (const intent of await ports.provisionIntents(teacherId)) {
+        if (!intent.studentUserId && intent.unprovenMatch) {
+            // Nothing named, but an account at the address may be what it
+            // made: kept, with its intent, for a person (case 5).
+            ports.log(
+                `provisioning ${intent.rosterId} of ${teacherId} names no account, but an account at its address ` +
+                    'has no roster row (unproven_match); leaving its intent for review',
+            );
+            continue;
+        }
         if (!intent.studentUserId) {
             // Nothing was created. A provisioning still running keeps its
             // intent: its roster insert is refused by the marker, and it undoes
@@ -533,6 +582,17 @@ export const purgeManagedStudents = async (
         const account = await ports.studentAccount(intent.studentUserId);
         if (!account) {
             await ports.clearProvisionIntent(intent.rosterId);
+            continue;
+        }
+        if (!intent.proven) {
+            // Named by address only, or recorded but made outside the window:
+            // it may be another intent's account or a separate signup at the
+            // same address. Never deleted here, whatever its flag says; left,
+            // with its intent, for a person (the orphaned-provisioning runbook).
+            ports.log(
+                `provisioning ${intent.rosterId} of ${teacherId} names ${intent.studentUserId} without proof that it ` +
+                    'made it; leaving it, and its intent, for review',
+            );
             continue;
         }
         if (account.userType !== 'student' || account.teacherId !== teacherId) {

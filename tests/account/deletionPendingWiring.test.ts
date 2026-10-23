@@ -78,7 +78,8 @@ describe('deletion-pending wiring', () => {
     it('delete-account binds the barrier ports: checkout in flight, provisioning intents', () => {
         const source = read('supabase/functions/delete-account/index.ts');
         expect(source).toContain("admin.rpc('checkout_attempt_in_flight', { p_user: userId })");
-        expect(source).toContain("admin.rpc('student_provision_intents_for', { p_teacher: teacherId })");
+        // The variant with proof (A), 20261022140400: nothing else is deleted on.
+        expect(source).toContain("admin.rpc('student_provision_intents_proven', { p_teacher: teacherId })");
         expect(source).toContain("admin.rpc('finish_student_provision', { p_roster_id: rosterId })");
     });
 
@@ -242,7 +243,12 @@ describe('the deletion check is asked again right before the later Auth writes (
             source.indexOf('const resetStudentAccess = async'),
             source.indexOf('const archiveStudent'),
         );
-        before(reset, 'await deletionRefusal(admin, userId)', 'admin.auth.admin.updateUserById(row.student_user_id, {');
+        // Both paths run the worker now (the email one since 20261022140800),
+        // which asks right before its scramble (below); the email ports are the
+        // code ports' with their deletion check.
+        expect(reset).toContain('runCodeReset(emailResetPorts(admin, userId)');
+        expect(source).toContain('...codeResetPorts(admin, userId),');
+        expect(reset).not.toContain('admin.auth.admin.updateUserById(row.student_user_id, {');
         const restore = source.slice(source.indexOf('const restoreStudent = async'));
         before(restore, 'await deletionRefusal(admin, userId)', "ban_duration: 'none'");
         // The code path: the worker's port, asked after the reservation and before the first fence.

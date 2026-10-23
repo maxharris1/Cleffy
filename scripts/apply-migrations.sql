@@ -25355,3 +25355,1678 @@ from public, anon, authenticated, service_role;
 -- DEPLOY: apply right after 20261022130300, before deploying student-provision
 -- (decision 68(4)'s order, inside the freeze). No edge function changes.
 -- retention_district_run() stays unscheduled (20261021120700's DEPLOY note).
+
+-- ===== supabase/migrations/20261022140000_district_retention_restore_hand_on.sql =====
+-- District retention: overlapping purges hand a carried restore on instead
+-- of deleting it (decision 47's residual, kept a follow-up by 66(1)).
+--
+-- A student whom district A's soft delete archived (was_archived false) and a
+-- human then moved to district B gets a restore record under A
+-- (district_retention_restores, 20261022130000) when it could not be
+-- restored at once: the teacher's plan had no room, or B's purge already
+-- lists them ('on_another_purge'). B's own list entry says was_archived true
+-- (A had archived them), so B's cancel does not un-archive them either. The
+-- record under A was the only trace that the archive was a purge's, and A's
+-- end deleted it:
+--
+--   * A's cancel retried it, got 'on_another_purge' (B lists them) and
+--     deleted it with A's other records;
+--   * A's hard delete deleted A's records without looking;
+--   * A's hard delete skipping a student moved to B the raw way (the list
+--     entry left behind) computed 'on_another_purge' and carried nothing.
+--
+-- Then B's renewal (its cancel) left the student archived for good. Now each
+-- of the three hands the restore on (district_retention_hand_on_restore()):
+-- a restore record under every other district whose purge lists the student
+-- (still archived, same account), logged there as attribution_changed with
+-- counts.event 'restore_handed_on'. That district's cancel retries it under
+-- the same check (district_reattributed_restore(): plan room, no other purge),
+-- and its hard delete deletes the student, who is that district's now.
+--
+-- The lock order stays the run's (20261022130400): billing rows, then roster
+-- rows, then the lists. Before a cancel or a hard delete touches a roster
+-- row, district_retention_lock_overlaps() takes the billing row of every
+-- other district whose list shares a student with this district's list or
+-- restores, FOR KEY SHARE NOWAIT in studio order. KEY SHARE conflicts only
+-- with a run's FOR UPDATE (which SKIP LOCKED passes over, never waits for)
+-- and with the studio's delete. If another run holds one, this district is
+-- passed over until the next run (decision 69(3): a day's delay, no
+-- permanent miss), with nothing written for it. Under those locks the other
+-- district's purge cannot cancel or hard delete while the restore is handed
+-- to it. A district that lists the student only after the lock was taken (a
+-- concurrent run's soft delete of the district the student moved to) is not
+-- handed anything: the earlier behaviour, the narrowest remaining window.
+--
+-- No new table, column or step value (step values: see 20261022130000's
+-- note). Rerunnable: functions replaced with the same signatures, privileges
+-- reset to the same end state.
+
+-- ---------------------------------------------------------------------------
+-- The other purges' locks, before any roster row
+-- ---------------------------------------------------------------------------
+-- True once the billing rows of every other district whose purge list shares
+-- a student with p_studio's list or restores are held FOR KEY SHARE; false if
+-- one is held by another run (taken NOWAIT, so nothing waits on a run), in
+-- which case nothing is held and the caller passes p_studio over. The caller
+-- holds p_studio's own billing row FOR UPDATE.
+create or replace function public.district_retention_lock_overlaps (p_studio uuid) returns boolean
+language plpgsql security definer
+set search_path = public as $$
+begin
+    perform 1 from public.district_billing b
+    where b.studio_id in (
+        select other.studio_id
+        from public.district_retention_students other
+        where other.studio_id is distinct from p_studio
+          and other.managed_student_id in (
+              select s.managed_student_id from public.district_retention_students s where s.studio_id = p_studio
+              union
+              select r.managed_student_id from public.district_retention_restores r where r.studio_id = p_studio
+          )
+    )
+    order by b.studio_id
+    for key share of b nowait;
+    return true;
+exception
+    when lock_not_available then
+        return false;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Hand a restore on to the purges that list the student now
+-- ---------------------------------------------------------------------------
+-- p_from_studio's purge archived the student (was_archived false) and is
+-- ending, or let the student go, without restoring them because another
+-- district's purge lists them. Each such district gets the restore record, if
+-- the student is still archived and still the account listed; returns how
+-- many did. The caller holds those districts' locks
+-- (district_retention_lock_overlaps()) and the roster row's or needs none of
+-- it: nothing here locks a billing or roster row.
+create or replace function public.district_retention_hand_on_restore (
+    p_managed_student uuid,
+    p_student_user uuid,
+    p_from_studio uuid
+) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_to uuid;
+    v_n int := 0;
+begin
+    for v_to in
+        insert into public.district_retention_restores (studio_id, managed_student_id, student_user_id)
+        select other.studio_id, p_managed_student, p_student_user
+        from public.district_retention_students other
+        join public.managed_students ms on ms.id = other.managed_student_id
+        where other.managed_student_id = p_managed_student
+          and other.studio_id is distinct from p_from_studio
+          and ms.archived_at is not null
+          and ms.student_user_id = p_student_user
+        order by other.studio_id
+        on conflict do nothing
+        returning studio_id
+    loop
+        v_n := v_n + 1;
+        insert into public.district_retention_log (studio_id, step, counts)
+        values (v_to, 'attribution_changed',
+                jsonb_build_object('event', 'restore_handed_on', 'managed_student_id', p_managed_student,
+                                   'student_user_id', p_student_user, 'from', p_from_studio));
+    end loop;
+    return v_n;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- The run: the cancel and the hard delete hand restores on
+-- ---------------------------------------------------------------------------
+-- 20261022130400's definition. Changed: the overlap locks before a cancel or a
+-- hard delete; the cancel hands on a carried restore that another purge
+-- blocks; the hard delete hands on its skipped students' and its carried
+-- restores that another purge lists, before its own records go. Both log
+-- restores_handed_on in their counts when they handed any on (the counts are
+-- otherwise as before).
+create or replace function public.retention_district_run (p_now timestamptz default now(), p_batch int default 20)
+returns jsonb language plpgsql security definer
+set search_path = public, extensions, vault as $$
+declare
+    candidate record;
+    v_billing public.district_billing;
+    v_state public.district_retention;
+    v_step text;
+    v_owner uuid;
+    v_email text;
+    v_name text;
+    v_student record;
+    v_roster record;
+    v_n int;
+    v_late int;
+    v_locked uuid[];
+    v_restored int;
+    v_restore text;
+    v_carried record;
+    v_skipped jsonb;
+    v_members int;
+    v_url text;
+    v_secret text;
+    v_held boolean;
+    v_handed int;
+    v_done jsonb := '{"notice":0,"soft_delete":0,"hard_delete":0,"cancel":0,"students_archived":0,"students_deleted":0,"students_restored":0,"students_skipped_reattributed":0,"students_late_listed":0}';
+begin
+    for candidate in
+        select c.studio_id from public.retention_district_candidates (p_now) c
+        order by c.contract_ends_at nulls first
+        limit greatest(p_batch, 0)
+    loop
+        v_billing := null;
+        select b.* into v_billing from public.district_billing b where b.studio_id = candidate.studio_id
+        for update skip locked;
+        if not found and exists (select 1 from public.district_billing b where b.studio_id = candidate.studio_id) then
+            continue; -- locked by someone else: tomorrow
+        end if;
+
+        v_state := null;
+        select r.* into v_state from public.district_retention r where r.studio_id = candidate.studio_id for update;
+
+        v_step := public.retention_district_next_step (v_billing.contract_ends_at, v_state, p_now);
+
+        -- A cancel or hard delete can hand a carried restore on to another
+        -- district's purge (20261022140000): that district's lock first,
+        -- before any roster row, or the district waits for the next run.
+        if v_step in ('cancel', 'hard_delete') then
+            v_held := public.district_retention_lock_overlaps (candidate.studio_id);
+            if not v_held then
+                continue; -- another district it shares students with is busy: tomorrow
+            end if;
+        end if;
+        v_handed := 0;
+
+        if v_step = 'cancel' then
+            update public.managed_students ms
+            set archived_at = null
+            from public.district_retention_students s
+            where s.studio_id = candidate.studio_id
+              and s.managed_student_id = ms.id
+              and not s.was_archived
+              and ms.archived_at is not null;
+            get diagnostics v_n = row_count;
+            -- And the ones re-attributed away while the purge was pending, whom
+            -- the correction could not restore then: the same check again.
+            v_restored := 0;
+            for v_carried in
+                select r.managed_student_id, r.student_user_id from public.district_retention_restores r
+                where r.studio_id = candidate.studio_id
+                order by r.managed_student_id
+            loop
+                v_restore := public.district_reattributed_restore (v_carried.managed_student_id, candidate.studio_id);
+                if v_restore = 'restored' then
+                    v_restored := v_restored + 1;
+                elsif v_restore = 'on_another_purge' then
+                    -- Another district's purge lists them now: its cancel
+                    -- retries the restore, so it is not lost with this one.
+                    v_handed := v_handed + public.district_retention_hand_on_restore (
+                        v_carried.managed_student_id, v_carried.student_user_id, candidate.studio_id);
+                end if;
+            end loop;
+            delete from public.district_retention_restores where studio_id = candidate.studio_id;
+            delete from public.district_retention_students where studio_id = candidate.studio_id;
+            delete from public.district_retention_notices
+            where studio_id = candidate.studio_id and sent_at is null;
+            delete from public.district_retention where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'cancelled', v_state.contract_ends_at,
+                    jsonb_build_object('students_restored', v_n + v_restored, 'reattributed_restored', v_restored,
+                                       'new_contract_ends_at', v_billing.contract_ends_at)
+                    || case when v_handed > 0 then jsonb_build_object('restores_handed_on', v_handed)
+                            else '{}'::jsonb end);
+            v_done := v_done || jsonb_build_object(
+                'cancel', (v_done ->> 'cancel')::int + 1,
+                'students_restored', (v_done ->> 'students_restored')::int + v_n + v_restored);
+
+        elsif v_step = 'notice' then
+            select st.owner_id, st.name, u.email into v_owner, v_name, v_email
+            from public.studios st
+            left join auth.users u on u.id = st.owner_id
+            where st.id = candidate.studio_id;
+            if v_email is null then
+                -- Nobody to tell, so nothing will be purged: the next stage
+                -- waits for a SENT notice. Logged loudly for a human.
+                raise warning 'district retention: studio % has no owner address; not purging', candidate.studio_id;
+                continue;
+            end if;
+            insert into public.district_retention (studio_id, owner_id, contract_ends_at, notice_queued_at)
+            values (candidate.studio_id, v_owner, v_billing.contract_ends_at, p_now);
+            insert into public.district_retention_notices
+                (studio_id, owner_id, to_email, studio_name, contract_ends_at, purge_not_before)
+            values (candidate.studio_id, v_owner, v_email, v_name, v_billing.contract_ends_at,
+                    greatest(v_billing.contract_ends_at + interval '30 days', p_now + interval '14 days'))
+            -- A cycle cancelled and begun again for the same date mails again:
+            -- the owner may have been told the purge was off.
+            on conflict (studio_id, contract_ends_at) do update
+            set to_email = excluded.to_email,
+                studio_name = excluded.studio_name,
+                purge_not_before = excluded.purge_not_before,
+                created_at = now(),
+                attempts = 0,
+                lease_until = null,
+                last_error = null,
+                sent_at = null;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'notice_queued', v_billing.contract_ends_at,
+                    jsonb_build_object('students', (select count(*) from public.retention_district_students (candidate.studio_id)),
+                                       'members', (select count(*) from public.studio_members sm
+                                                   where sm.studio_id = candidate.studio_id)));
+            v_done := v_done || jsonb_build_object('notice', (v_done ->> 'notice')::int + 1);
+
+        elsif v_step = 'soft_delete' then
+            -- The district's roster rows locked first, in roster order, then
+            -- listed as they are under the locks (20261022130400, as
+            -- district_retention_list_late() does): a student moved out while
+            -- the soft delete waited for their row is not listed, archived or
+            -- signed out.
+            select coalesce(array_agg(l.id), '{}') into v_locked
+            from (
+                select ms.id from public.managed_students ms
+                where ms.id in (select ds.id from public.retention_district_students (candidate.studio_id) ds)
+                order by ms.id
+                for update of ms
+            ) l;
+            insert into public.district_retention_students (studio_id, managed_student_id, student_user_id, was_archived)
+            select candidate.studio_id, ds.id, ds.student_user_id, ds.archived_at is not null
+            from public.retention_district_students (candidate.studio_id) ds
+            where ds.id = any (v_locked)
+            on conflict do nothing;
+
+            -- Archived and every token refused (student_access_revoked), under
+            -- the roster row's lock that student writes share (20261021120400).
+            update public.managed_students ms
+            set archived_at = coalesce(ms.archived_at, p_now),
+                access_revoked_at = clock_timestamp()
+            from public.district_retention_students s
+            where s.studio_id = candidate.studio_id and s.managed_student_id = ms.id;
+            get diagnostics v_n = row_count;
+
+            delete from auth.refresh_tokens
+            where user_id in (select s.student_user_id::text from public.district_retention_students s
+                              where s.studio_id = candidate.studio_id);
+            delete from auth.sessions
+            where user_id in (select s.student_user_id from public.district_retention_students s
+                              where s.studio_id = candidate.studio_id);
+
+            update public.district_retention set soft_deleted_at = p_now where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'soft_deleted', v_state.contract_ends_at,
+                    jsonb_build_object('students_archived', v_n,
+                                       'members', (select count(*) from public.studio_members sm
+                                                   where sm.studio_id = candidate.studio_id)));
+            v_done := v_done || jsonb_build_object(
+                'soft_delete', (v_done ->> 'soft_delete')::int + 1,
+                'students_archived', (v_done ->> 'students_archived')::int + v_n);
+
+        elsif v_step = 'hard_delete' then
+            -- Everyone attributed to the district now, under its lock (held
+            -- since the top of this iteration; a provision takes it too), so
+            -- the loop below works from the whole district (20261022130300).
+            v_late := public.district_retention_list_late (candidate.studio_id, p_now, 'hard_delete');
+            v_done := v_done || jsonb_build_object(
+                'students_late_listed', (v_done ->> 'students_late_listed')::int + v_late);
+
+            v_n := 0;
+            v_skipped := '[]'::jsonb;
+            for v_student in
+                select s.managed_student_id, s.student_user_id, s.was_archived
+                from public.district_retention_students s
+                where s.studio_id = candidate.studio_id
+            loop
+                -- The roster row's lock, as before (20261021120500's re-check),
+                -- and under it the row as it is now: an admin's correction
+                -- waits for it, or has committed and is read here.
+                select m.district_studio_id, m.student_user_id, m.archived_at into v_roster
+                from public.managed_students m
+                where m.id = v_student.managed_student_id
+                for update of m;
+                if not found then
+                    continue;
+                end if;
+
+                -- Still in the purge's scope (retention_district_students():
+                -- the district this row names) and still the account that was
+                -- listed. Otherwise a human re-attributed the student after
+                -- the soft delete: skipped, and off the list. A student moved
+                -- to another district or roster gets back what this purge took,
+                -- as the correction would have done; a row whose account is not
+                -- the one listed is left as it is, for a human.
+                if v_roster.district_studio_id is distinct from candidate.studio_id
+                   or v_roster.student_user_id is distinct from v_student.student_user_id then
+                    delete from public.district_retention_students
+                    where studio_id = candidate.studio_id and managed_student_id = v_student.managed_student_id;
+                    v_restore := case
+                        when v_roster.student_user_id is distinct from v_student.student_user_id then 'other_account'
+                        when v_student.was_archived then 'was_archived'
+                        else public.district_reattributed_restore (v_student.managed_student_id, candidate.studio_id) end;
+                    if v_restore = 'on_another_purge' then
+                        -- Moved into a district whose purge lists them too:
+                        -- that purge's cancel restores them (20261022140000).
+                        v_handed := v_handed + public.district_retention_hand_on_restore (
+                            v_student.managed_student_id, v_student.student_user_id, candidate.studio_id);
+                    end if;
+                    v_skipped := v_skipped || jsonb_build_array(jsonb_build_object(
+                        'managed_student_id', v_student.managed_student_id,
+                        'student_user_id', v_student.student_user_id,
+                        'was_archived', v_student.was_archived,
+                        'now_district_studio_id', v_roster.district_studio_id,
+                        'restore', v_restore));
+                    continue;
+                end if;
+
+                -- Still archived (a teacher's restore since the soft delete
+                -- wins) and still a provisioned student.
+                if v_roster.archived_at is not null and exists (
+                    select 1 from auth.users u
+                    where u.id = v_student.student_user_id
+                      and u.raw_app_meta_data ->> 'user_type' = 'student'
+                ) then
+                    perform public.scrub_student_markings (v_student.student_user_id);
+                    delete from auth.users where id = v_student.student_user_id;
+                    v_n := v_n + 1;
+                end if;
+            end loop;
+
+            if jsonb_array_length(v_skipped) > 0 then
+                insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+                values (candidate.studio_id, 'attribution_changed', v_state.contract_ends_at,
+                        jsonb_build_object('event', 'skipped_reattributed',
+                                           'students_skipped', jsonb_array_length(v_skipped),
+                                           'students', v_skipped, 'by', 'retention_district_run'));
+            end if;
+
+            -- The restores carried over to this district that another
+            -- district's purge now lists are handed on to it before this
+            -- district's go (20261022140000); the rest go with it, as before.
+            for v_carried in
+                select r.managed_student_id, r.student_user_id from public.district_retention_restores r
+                where r.studio_id = candidate.studio_id
+                order by r.managed_student_id
+            loop
+                v_handed := v_handed + public.district_retention_hand_on_restore (
+                    v_carried.managed_student_id, v_carried.student_user_id, candidate.studio_id);
+            end loop;
+
+            select count(*) into v_members from public.studio_members sm where sm.studio_id = candidate.studio_id;
+            -- Takes the seats, the override and the billing record with it.
+            delete from public.studios where id = candidate.studio_id;
+            delete from public.district_retention_students where studio_id = candidate.studio_id;
+            delete from public.district_retention_restores where studio_id = candidate.studio_id;
+            update public.district_retention set hard_deleted_at = p_now where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'hard_deleted', v_state.contract_ends_at,
+                    jsonb_build_object('students_deleted', v_n, 'members_removed', v_members, 'studios', 1)
+                    || case when v_handed > 0 then jsonb_build_object('restores_handed_on', v_handed)
+                            else '{}'::jsonb end);
+            v_done := v_done || jsonb_build_object(
+                'hard_delete', (v_done ->> 'hard_delete')::int + 1,
+                'students_deleted', (v_done ->> 'students_deleted')::int + v_n,
+                'students_skipped_reattributed',
+                (v_done ->> 'students_skipped_reattributed')::int + jsonb_array_length(v_skipped));
+        end if;
+    end loop;
+
+    -- The sweep (20261022130300): every soft-deleted district not yet hard
+    -- deleted lists anyone attributed to it since its list was taken. Locked
+    -- as above, SKIP LOCKED included (a provision in flight: tomorrow). A
+    -- district whose next step is its cancel is left to it; one whose billing
+    -- record is gone has nobody left to provision into it, and its cycle is
+    -- the cancel's too.
+    for candidate in
+        select r.studio_id from public.district_retention r
+        where r.soft_deleted_at is not null and r.hard_deleted_at is null
+        order by r.studio_id
+    loop
+        select b.* into v_billing from public.district_billing b where b.studio_id = candidate.studio_id
+        for update skip locked;
+        if not found then
+            continue;
+        end if;
+        select r.* into v_state from public.district_retention r where r.studio_id = candidate.studio_id for update;
+        if not found or v_state.soft_deleted_at is null or v_state.hard_deleted_at is not null
+           or public.retention_district_next_step (v_billing.contract_ends_at, v_state, p_now) = 'cancel' then
+            continue;
+        end if;
+        v_late := public.district_retention_list_late (candidate.studio_id, p_now, 'sweep');
+        v_done := v_done || jsonb_build_object(
+            'students_late_listed', (v_done ->> 'students_late_listed')::int + v_late);
+    end loop;
+
+    -- Wake the sender when there is mail to send. No-op without its secrets.
+    if exists (select 1 from public.district_retention_notices where sent_at is null) then
+        begin
+            select decrypted_secret into v_url from vault.decrypted_secrets where name = 'district_notice_url' limit 1;
+            select decrypted_secret into v_secret from vault.decrypted_secrets
+            where name = 'district_notice_secret' limit 1;
+            if v_url is not null and v_secret is not null then
+                perform net.http_post(
+                    url := v_url,
+                    headers := jsonb_build_object('Content-Type', 'application/json', 'x-district-notice-secret', v_secret),
+                    body := '{}'::jsonb,
+                    timeout_milliseconds := 5000
+                );
+            end if;
+        exception
+            when others then
+                raise warning 'district retention: could not wake the notice sender: %', sqlerrm;
+        end;
+    end if;
+
+    return v_done;
+end;
+$$;
+
+do $$
+declare
+    fn text;
+begin
+    foreach fn in array array[
+        'public.retention_district_run (timestamptz, int)'
+    ]
+    loop
+        execute format('revoke all on function %s from public, anon, authenticated', fn);
+        execute format('grant execute on function %s to service_role', fn);
+    end loop;
+end;
+$$;
+
+-- Internal, like district_retention_list_late(): only the run calls them,
+-- under the districts' locks. Not even the service role calls them directly.
+revoke all on function public.district_retention_lock_overlaps (uuid) from public, anon, authenticated, service_role;
+
+revoke all on function public.district_retention_hand_on_restore (uuid, uuid, uuid)
+from public, anon, authenticated, service_role;
+
+-- DEPLOY: no order constraint beyond following 20261022130400; no edge
+-- function changes. retention_district_run() stays unscheduled
+-- (20261021120700's DEPLOY note).
+
+-- ===== supabase/migrations/20261022140100_district_retention_detach_kept.sql =====
+-- District retention: the hard delete detaches the students it keeps
+-- (decision 68(2)).
+--
+-- A teacher's restore during the purge week wins (20261021120700: the hard
+-- delete deletes only listed students still archived). Such a student kept a
+-- district_studio_id naming the district the hard delete then removed: no
+-- foreign key holds it, so it dangled, and the district's id stayed on a row
+-- the district no longer covers. Now the hard delete clears it for every
+-- listed student it keeps in the district (restored by their teacher, or an
+-- account that is not a provisioned student): district_studio_id set to null
+-- under the roster row's lock, with the admin attribution setting the roster
+-- trigger requires. Nothing is deleted; district_attribution keeps how the
+-- original decision was made. Logged under the district as
+-- attribution_changed with counts.event 'detached_kept' and the students, and
+-- counted as students_detached in the run's result. The hard_deleted row's
+-- counts keep their shape.
+--
+-- Students the hard delete skips because a human moved them elsewhere are not
+-- the district's and are unchanged (20261022130000).
+--
+-- Lock order unchanged (20261022130400): the district's billing row (this
+-- run's FOR UPDATE), the roster row (locked by the loop), then the update;
+-- the trigger's NOWAIT lock on the district left finds it held by this
+-- transaction, and a move to null joins no district.
+--
+-- Rerunnable: the function is replaced with the same signature and its
+-- privileges reset to the same end state. No table, column or step value.
+
+-- 20261022140000's definition; only the hard delete's loop (the else branch)
+-- and its counts change.
+create or replace function public.retention_district_run (p_now timestamptz default now(), p_batch int default 20)
+returns jsonb language plpgsql security definer
+set search_path = public, extensions, vault as $$
+declare
+    candidate record;
+    v_billing public.district_billing;
+    v_state public.district_retention;
+    v_step text;
+    v_owner uuid;
+    v_email text;
+    v_name text;
+    v_student record;
+    v_roster record;
+    v_n int;
+    v_late int;
+    v_locked uuid[];
+    v_restored int;
+    v_restore text;
+    v_carried record;
+    v_skipped jsonb;
+    v_members int;
+    v_url text;
+    v_secret text;
+    v_held boolean;
+    v_handed int;
+    v_detached jsonb;
+    v_done jsonb := '{"notice":0,"soft_delete":0,"hard_delete":0,"cancel":0,"students_archived":0,"students_deleted":0,"students_restored":0,"students_skipped_reattributed":0,"students_late_listed":0}';
+begin
+    for candidate in
+        select c.studio_id from public.retention_district_candidates (p_now) c
+        order by c.contract_ends_at nulls first
+        limit greatest(p_batch, 0)
+    loop
+        v_billing := null;
+        select b.* into v_billing from public.district_billing b where b.studio_id = candidate.studio_id
+        for update skip locked;
+        if not found and exists (select 1 from public.district_billing b where b.studio_id = candidate.studio_id) then
+            continue; -- locked by someone else: tomorrow
+        end if;
+
+        v_state := null;
+        select r.* into v_state from public.district_retention r where r.studio_id = candidate.studio_id for update;
+
+        v_step := public.retention_district_next_step (v_billing.contract_ends_at, v_state, p_now);
+
+        -- A cancel or hard delete can hand a carried restore on to another
+        -- district's purge (20261022140000): that district's lock first,
+        -- before any roster row, or the district waits for the next run.
+        if v_step in ('cancel', 'hard_delete') then
+            v_held := public.district_retention_lock_overlaps (candidate.studio_id);
+            if not v_held then
+                continue; -- another district it shares students with is busy: tomorrow
+            end if;
+        end if;
+        v_handed := 0;
+
+        if v_step = 'cancel' then
+            update public.managed_students ms
+            set archived_at = null
+            from public.district_retention_students s
+            where s.studio_id = candidate.studio_id
+              and s.managed_student_id = ms.id
+              and not s.was_archived
+              and ms.archived_at is not null;
+            get diagnostics v_n = row_count;
+            -- And the ones re-attributed away while the purge was pending, whom
+            -- the correction could not restore then: the same check again.
+            v_restored := 0;
+            for v_carried in
+                select r.managed_student_id, r.student_user_id from public.district_retention_restores r
+                where r.studio_id = candidate.studio_id
+                order by r.managed_student_id
+            loop
+                v_restore := public.district_reattributed_restore (v_carried.managed_student_id, candidate.studio_id);
+                if v_restore = 'restored' then
+                    v_restored := v_restored + 1;
+                elsif v_restore = 'on_another_purge' then
+                    -- Another district's purge lists them now: its cancel
+                    -- retries the restore, so it is not lost with this one.
+                    v_handed := v_handed + public.district_retention_hand_on_restore (
+                        v_carried.managed_student_id, v_carried.student_user_id, candidate.studio_id);
+                end if;
+            end loop;
+            delete from public.district_retention_restores where studio_id = candidate.studio_id;
+            delete from public.district_retention_students where studio_id = candidate.studio_id;
+            delete from public.district_retention_notices
+            where studio_id = candidate.studio_id and sent_at is null;
+            delete from public.district_retention where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'cancelled', v_state.contract_ends_at,
+                    jsonb_build_object('students_restored', v_n + v_restored, 'reattributed_restored', v_restored,
+                                       'new_contract_ends_at', v_billing.contract_ends_at)
+                    || case when v_handed > 0 then jsonb_build_object('restores_handed_on', v_handed)
+                            else '{}'::jsonb end);
+            v_done := v_done || jsonb_build_object(
+                'cancel', (v_done ->> 'cancel')::int + 1,
+                'students_restored', (v_done ->> 'students_restored')::int + v_n + v_restored);
+
+        elsif v_step = 'notice' then
+            select st.owner_id, st.name, u.email into v_owner, v_name, v_email
+            from public.studios st
+            left join auth.users u on u.id = st.owner_id
+            where st.id = candidate.studio_id;
+            if v_email is null then
+                -- Nobody to tell, so nothing will be purged: the next stage
+                -- waits for a SENT notice. Logged loudly for a human.
+                raise warning 'district retention: studio % has no owner address; not purging', candidate.studio_id;
+                continue;
+            end if;
+            insert into public.district_retention (studio_id, owner_id, contract_ends_at, notice_queued_at)
+            values (candidate.studio_id, v_owner, v_billing.contract_ends_at, p_now);
+            insert into public.district_retention_notices
+                (studio_id, owner_id, to_email, studio_name, contract_ends_at, purge_not_before)
+            values (candidate.studio_id, v_owner, v_email, v_name, v_billing.contract_ends_at,
+                    greatest(v_billing.contract_ends_at + interval '30 days', p_now + interval '14 days'))
+            -- A cycle cancelled and begun again for the same date mails again:
+            -- the owner may have been told the purge was off.
+            on conflict (studio_id, contract_ends_at) do update
+            set to_email = excluded.to_email,
+                studio_name = excluded.studio_name,
+                purge_not_before = excluded.purge_not_before,
+                created_at = now(),
+                attempts = 0,
+                lease_until = null,
+                last_error = null,
+                sent_at = null;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'notice_queued', v_billing.contract_ends_at,
+                    jsonb_build_object('students', (select count(*) from public.retention_district_students (candidate.studio_id)),
+                                       'members', (select count(*) from public.studio_members sm
+                                                   where sm.studio_id = candidate.studio_id)));
+            v_done := v_done || jsonb_build_object('notice', (v_done ->> 'notice')::int + 1);
+
+        elsif v_step = 'soft_delete' then
+            -- The district's roster rows locked first, in roster order, then
+            -- listed as they are under the locks (20261022130400, as
+            -- district_retention_list_late() does): a student moved out while
+            -- the soft delete waited for their row is not listed, archived or
+            -- signed out.
+            select coalesce(array_agg(l.id), '{}') into v_locked
+            from (
+                select ms.id from public.managed_students ms
+                where ms.id in (select ds.id from public.retention_district_students (candidate.studio_id) ds)
+                order by ms.id
+                for update of ms
+            ) l;
+            insert into public.district_retention_students (studio_id, managed_student_id, student_user_id, was_archived)
+            select candidate.studio_id, ds.id, ds.student_user_id, ds.archived_at is not null
+            from public.retention_district_students (candidate.studio_id) ds
+            where ds.id = any (v_locked)
+            on conflict do nothing;
+
+            -- Archived and every token refused (student_access_revoked), under
+            -- the roster row's lock that student writes share (20261021120400).
+            update public.managed_students ms
+            set archived_at = coalesce(ms.archived_at, p_now),
+                access_revoked_at = clock_timestamp()
+            from public.district_retention_students s
+            where s.studio_id = candidate.studio_id and s.managed_student_id = ms.id;
+            get diagnostics v_n = row_count;
+
+            delete from auth.refresh_tokens
+            where user_id in (select s.student_user_id::text from public.district_retention_students s
+                              where s.studio_id = candidate.studio_id);
+            delete from auth.sessions
+            where user_id in (select s.student_user_id from public.district_retention_students s
+                              where s.studio_id = candidate.studio_id);
+
+            update public.district_retention set soft_deleted_at = p_now where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'soft_deleted', v_state.contract_ends_at,
+                    jsonb_build_object('students_archived', v_n,
+                                       'members', (select count(*) from public.studio_members sm
+                                                   where sm.studio_id = candidate.studio_id)));
+            v_done := v_done || jsonb_build_object(
+                'soft_delete', (v_done ->> 'soft_delete')::int + 1,
+                'students_archived', (v_done ->> 'students_archived')::int + v_n);
+
+        elsif v_step = 'hard_delete' then
+            -- Everyone attributed to the district now, under its lock (held
+            -- since the top of this iteration; a provision takes it too), so
+            -- the loop below works from the whole district (20261022130300).
+            v_late := public.district_retention_list_late (candidate.studio_id, p_now, 'hard_delete');
+            v_done := v_done || jsonb_build_object(
+                'students_late_listed', (v_done ->> 'students_late_listed')::int + v_late);
+
+            v_n := 0;
+            v_skipped := '[]'::jsonb;
+            v_detached := '[]'::jsonb;
+            for v_student in
+                select s.managed_student_id, s.student_user_id, s.was_archived
+                from public.district_retention_students s
+                where s.studio_id = candidate.studio_id
+            loop
+                -- The roster row's lock, as before (20261021120500's re-check),
+                -- and under it the row as it is now: an admin's correction
+                -- waits for it, or has committed and is read here.
+                select m.district_studio_id, m.student_user_id, m.archived_at into v_roster
+                from public.managed_students m
+                where m.id = v_student.managed_student_id
+                for update of m;
+                if not found then
+                    continue;
+                end if;
+
+                -- Still in the purge's scope (retention_district_students():
+                -- the district this row names) and still the account that was
+                -- listed. Otherwise a human re-attributed the student after
+                -- the soft delete: skipped, and off the list. A student moved
+                -- to another district or roster gets back what this purge took,
+                -- as the correction would have done; a row whose account is not
+                -- the one listed is left as it is, for a human.
+                if v_roster.district_studio_id is distinct from candidate.studio_id
+                   or v_roster.student_user_id is distinct from v_student.student_user_id then
+                    delete from public.district_retention_students
+                    where studio_id = candidate.studio_id and managed_student_id = v_student.managed_student_id;
+                    v_restore := case
+                        when v_roster.student_user_id is distinct from v_student.student_user_id then 'other_account'
+                        when v_student.was_archived then 'was_archived'
+                        else public.district_reattributed_restore (v_student.managed_student_id, candidate.studio_id) end;
+                    if v_restore = 'on_another_purge' then
+                        -- Moved into a district whose purge lists them too:
+                        -- that purge's cancel restores them (20261022140000).
+                        v_handed := v_handed + public.district_retention_hand_on_restore (
+                            v_student.managed_student_id, v_student.student_user_id, candidate.studio_id);
+                    end if;
+                    v_skipped := v_skipped || jsonb_build_array(jsonb_build_object(
+                        'managed_student_id', v_student.managed_student_id,
+                        'student_user_id', v_student.student_user_id,
+                        'was_archived', v_student.was_archived,
+                        'now_district_studio_id', v_roster.district_studio_id,
+                        'restore', v_restore));
+                    continue;
+                end if;
+
+                -- Still archived (a teacher's restore since the soft delete
+                -- wins) and still a provisioned student.
+                if v_roster.archived_at is not null and exists (
+                    select 1 from auth.users u
+                    where u.id = v_student.student_user_id
+                      and u.raw_app_meta_data ->> 'user_type' = 'student'
+                ) then
+                    perform public.scrub_student_markings (v_student.student_user_id);
+                    delete from auth.users where id = v_student.student_user_id;
+                    v_n := v_n + 1;
+                else
+                    -- Kept: their teacher restored them since the soft delete
+                    -- (that restore wins, 20261021120700), or the account is
+                    -- not a provisioned student. Detached from the district
+                    -- about to go, so nothing names it afterwards (decision
+                    -- 68(2)): district_studio_id cleared, nothing deleted.
+                    -- The roster row is locked above and the district's
+                    -- billing row is this run's, so the trigger's NOWAIT lock
+                    -- finds it held by this transaction.
+                    perform set_config('cleffy.district_attribution', 'admin', true);
+                    update public.managed_students set district_studio_id = null
+                    where id = v_student.managed_student_id;
+                    perform set_config('cleffy.district_attribution', '', true);
+                    v_detached := v_detached || jsonb_build_array(jsonb_build_object(
+                        'managed_student_id', v_student.managed_student_id,
+                        'student_user_id', v_student.student_user_id,
+                        'restored', v_roster.archived_at is null));
+                end if;
+            end loop;
+
+            if jsonb_array_length(v_detached) > 0 then
+                insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+                values (candidate.studio_id, 'attribution_changed', v_state.contract_ends_at,
+                        jsonb_build_object('event', 'detached_kept', 'from', candidate.studio_id, 'to', null,
+                                           'students_detached', jsonb_array_length(v_detached),
+                                           'students', v_detached, 'by', 'retention_district_run'));
+            end if;
+
+            if jsonb_array_length(v_skipped) > 0 then
+                insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+                values (candidate.studio_id, 'attribution_changed', v_state.contract_ends_at,
+                        jsonb_build_object('event', 'skipped_reattributed',
+                                           'students_skipped', jsonb_array_length(v_skipped),
+                                           'students', v_skipped, 'by', 'retention_district_run'));
+            end if;
+
+            -- The restores carried over to this district that another
+            -- district's purge now lists are handed on to it before this
+            -- district's go (20261022140000); the rest go with it, as before.
+            for v_carried in
+                select r.managed_student_id, r.student_user_id from public.district_retention_restores r
+                where r.studio_id = candidate.studio_id
+                order by r.managed_student_id
+            loop
+                v_handed := v_handed + public.district_retention_hand_on_restore (
+                    v_carried.managed_student_id, v_carried.student_user_id, candidate.studio_id);
+            end loop;
+
+            select count(*) into v_members from public.studio_members sm where sm.studio_id = candidate.studio_id;
+            -- Takes the seats, the override and the billing record with it.
+            delete from public.studios where id = candidate.studio_id;
+            delete from public.district_retention_students where studio_id = candidate.studio_id;
+            delete from public.district_retention_restores where studio_id = candidate.studio_id;
+            update public.district_retention set hard_deleted_at = p_now where studio_id = candidate.studio_id;
+            insert into public.district_retention_log (studio_id, step, contract_ends_at, counts)
+            values (candidate.studio_id, 'hard_deleted', v_state.contract_ends_at,
+                    jsonb_build_object('students_deleted', v_n, 'members_removed', v_members, 'studios', 1)
+                    || case when v_handed > 0 then jsonb_build_object('restores_handed_on', v_handed)
+                            else '{}'::jsonb end
+);
+            v_done := v_done || jsonb_build_object(
+                'hard_delete', (v_done ->> 'hard_delete')::int + 1,
+                'students_deleted', (v_done ->> 'students_deleted')::int + v_n,
+                'students_detached', coalesce((v_done ->> 'students_detached')::int, 0) + jsonb_array_length(v_detached),
+                'students_skipped_reattributed',
+                (v_done ->> 'students_skipped_reattributed')::int + jsonb_array_length(v_skipped));
+        end if;
+    end loop;
+
+    -- The sweep (20261022130300): every soft-deleted district not yet hard
+    -- deleted lists anyone attributed to it since its list was taken. Locked
+    -- as above, SKIP LOCKED included (a provision in flight: tomorrow). A
+    -- district whose next step is its cancel is left to it; one whose billing
+    -- record is gone has nobody left to provision into it, and its cycle is
+    -- the cancel's too.
+    for candidate in
+        select r.studio_id from public.district_retention r
+        where r.soft_deleted_at is not null and r.hard_deleted_at is null
+        order by r.studio_id
+    loop
+        select b.* into v_billing from public.district_billing b where b.studio_id = candidate.studio_id
+        for update skip locked;
+        if not found then
+            continue;
+        end if;
+        select r.* into v_state from public.district_retention r where r.studio_id = candidate.studio_id for update;
+        if not found or v_state.soft_deleted_at is null or v_state.hard_deleted_at is not null
+           or public.retention_district_next_step (v_billing.contract_ends_at, v_state, p_now) = 'cancel' then
+            continue;
+        end if;
+        v_late := public.district_retention_list_late (candidate.studio_id, p_now, 'sweep');
+        v_done := v_done || jsonb_build_object(
+            'students_late_listed', (v_done ->> 'students_late_listed')::int + v_late);
+    end loop;
+
+    -- Wake the sender when there is mail to send. No-op without its secrets.
+    if exists (select 1 from public.district_retention_notices where sent_at is null) then
+        begin
+            select decrypted_secret into v_url from vault.decrypted_secrets where name = 'district_notice_url' limit 1;
+            select decrypted_secret into v_secret from vault.decrypted_secrets
+            where name = 'district_notice_secret' limit 1;
+            if v_url is not null and v_secret is not null then
+                perform net.http_post(
+                    url := v_url,
+                    headers := jsonb_build_object('Content-Type', 'application/json', 'x-district-notice-secret', v_secret),
+                    body := '{}'::jsonb,
+                    timeout_milliseconds := 5000
+                );
+            end if;
+        exception
+            when others then
+                raise warning 'district retention: could not wake the notice sender: %', sqlerrm;
+        end;
+    end if;
+
+    return v_done;
+end;
+$$;
+
+revoke all on function public.retention_district_run (timestamptz, int) from public, anon, authenticated;
+
+grant execute on function public.retention_district_run (timestamptz, int) to service_role;
+
+-- DEPLOY: after 20261022140000; no edge function changes. retention_district_run()
+-- stays unscheduled (20261021120700's DEPLOY note).
+
+-- ===== supabase/migrations/20261022140200_district_barrier_lifts_on_renewal.sql =====
+-- District retention: a renewal lifts the provisioning barrier at once
+-- (decision 68(3)'s follow-up).
+--
+-- The barrier (20261022130300, decision 67(a)) holds from a district's soft
+-- delete until its cycle is cancelled. A renewal (the contract end moved, or
+-- cleared) is what cancels it, but only when the next daily run reaches the
+-- district and deletes its district_retention row: until then the renewed
+-- district still refused every provision with district_deletion_pending.
+-- Decision 68(3) accepted the wait for launch; this removes it.
+--
+-- district_deletion_pending() now answers no for a soft-deleted cycle whose
+-- billing record no longer names the contract end the cycle began for: the
+-- same condition under which retention_district_next_step() answers
+-- 'cancel', so the barrier and the run agree on what a renewal is. A hard
+-- deleted district stays closed for good, and so does a soft-deleted one
+-- whose billing record is gone (the studio deleted another way: its cycle is
+-- the cancel's, and nobody can provision into a missing district anyway).
+--
+-- Nothing the purge decides changes:
+--   * until the run's cancel, the district's listed students stay archived,
+--     and the cancel un-archives them as before;
+--   * a student provisioned between the renewal and the cancel is not on the
+--     list, so the cancel leaves them alone;
+--   * the sweep and the hard delete already pass a district whose next step
+--     is its cancel over, so nobody provisioned meanwhile is listed;
+--   * a renewal undone before the run (the contract end set back) closes the
+--     barrier again, and the next run's sweep lists whoever was provisioned
+--     meanwhile, exactly as for a student attributed late (20261022130300).
+--
+-- The lock is unchanged: a provision takes the district's billing row FOR KEY
+-- SHARE before reading its state; the billing writers (district_billing_
+-- rederive(), admin_set_district_contract_end()) take FOR NO KEY UPDATE,
+-- which does not conflict with it, so a provision racing the renewal reads
+-- either side of it and a refused one succeeds on retry.
+--
+-- Rerunnable: the function is replaced with the same signature and its
+-- privileges reset to the same end state.
+
+-- 20261022130300's definition, plus the renewal.
+create or replace function public.district_deletion_pending (p_studio uuid) returns boolean
+language sql stable security definer
+set search_path = public as $$
+    select exists (
+        select 1 from public.district_retention r
+        where r.studio_id = p_studio
+          and (
+              r.hard_deleted_at is not null
+              or (
+                  r.soft_deleted_at is not null
+                  -- Renewed: the billing record names another contract end
+                  -- (or none) than the one this cycle began for. The run's
+                  -- next step for it is its cancel.
+                  and not exists (
+                      select 1 from public.district_billing b
+                      where b.studio_id = r.studio_id
+                        and b.contract_ends_at is distinct from r.contract_ends_at
+                  )
+              )
+          )
+    );
+$$;
+
+revoke all on function public.district_deletion_pending (uuid) from public, anon, authenticated;
+
+grant execute on function public.district_deletion_pending (uuid) to service_role;
+
+-- DEPLOY: after 20261022130300; no edge function changes (student-provision
+-- already asks district_provision_refusal(), which asks this).
+
+-- ===== supabase/migrations/20261022140300_student_provision_intent_window.sql =====
+-- Provisioning intents: the email fallback is bounded to the intent's window.
+--
+-- student_provision_intents_for() (20261022110600) names, for each intent of a
+-- teacher being deleted, the Auth account the provisioning made: the one
+-- attach_student_provision() recorded, or, when the request crashed between
+-- the Auth create and the attach, an account found by the intent's address.
+-- That fallback took the earliest account at the address created from one
+-- minute before the intent on, with no upper bound: a separate signup made at
+-- the same address days later, or the account another intent for the same
+-- address created and recorded, could be named as this provisioning's.
+--
+-- Now the fallback only finds an account created inside the intent's window,
+-- from one minute before its created_at (the allowance it always had) to its
+-- expires_at, after which the request that wrote it can no longer be running
+-- (DEPLOY.md's orphaned-provisioning runbook uses the same window), and never
+-- one that another intent recorded as its own. The recorded account is
+-- returned as before. Same signature and columns; the deletion's own rule for
+-- what it may delete is 20261022140400's.
+--
+-- Rerunnable: the function is replaced with the same signature, and its
+-- privileges reset to the same end state.
+
+-- 20261022110600's definition, with the fallback bounded.
+create or replace function public.student_provision_intents_for (p_teacher uuid)
+returns table (roster_id uuid, student_user_id uuid, live boolean)
+language sql stable security definer
+set search_path = public as $$
+    select i.roster_id,
+           coalesce(
+               i.student_user_id,
+               (select u.id from auth.users u
+                where lower(u.email) = i.auth_email
+                  and u.created_at >= i.created_at - interval '1 minute'
+                  and u.created_at <= i.expires_at
+                  and not exists (
+                      select 1 from public.student_provision_intents other
+                      where other.roster_id <> i.roster_id and other.student_user_id = u.id
+                  )
+                order by u.created_at limit 1)
+           ),
+           i.expires_at > now()
+    from public.student_provision_intents i
+    where i.teacher_id = p_teacher
+    order by i.created_at;
+$$;
+
+revoke all on function public.student_provision_intents_for (uuid) from public, anon, authenticated;
+
+grant execute on function public.student_provision_intents_for (uuid) to service_role;
+
+-- DEPLOY: no order constraint; delete-account reads the same columns.
+
+-- ===== supabase/migrations/20261022140400_student_provision_intent_proven.sql =====
+-- Provisioning intents: automatic cleanup deletes only a proven account.
+--
+-- Account deletion (delete-account, _shared/accountDeletion.ts) deletes the
+-- Auth account each of the teacher's provisioning intents names
+-- (student_provision_intents_for()) once it is flagged as the teacher's
+-- student. When nothing was recorded the account is found by the intent's
+-- address (bounded to the intent's window since 20261022140300), and an
+-- address match is never proof that this provisioning made the account: a
+-- later request for the same teacher and address creates, attaches and flags
+-- its own account before its roster insert, so that account sits unrostered
+-- inside this intent's window while its request runs; a separate signup made
+-- inside the window fits too. DEPLOY.md's orphaned-provisioning runbook has
+-- one proof that permits deleting, (A): the account is the one the intent
+-- recorded (attach_student_provision()) and it was created inside the window.
+--
+-- student_provision_intents_proven() says so: the same rows and columns as
+-- student_provision_intents_for() (20261022140300), plus proven, true only
+-- for (A). The automatic cleanup deletes only a proven account; one named by
+-- address alone, or recorded but made outside the window, is left, with its
+-- intent, for a person (the runbook). student_user_id still names whichever
+-- account the intent points at, for the log and the runbook.
+--
+-- status tells the automatic cleanup which of DEPLOY.md's cases an intent is
+-- (PR #72 fix 3): 'proven' (A); 'unproven', an account named without proof;
+-- 'unproven_match', nothing recorded and nothing named, but an account with
+-- no roster row sits at the intent's address (outside the window, or another
+-- intent's): case 5, so the intent is kept and logged for the runbook rather
+-- than read as "nothing was created" and cleared; 'none', no account to
+-- resolve (case 1), or only rostered ones at the address (case 2).
+--
+-- A new function rather than more columns on the old one: changing a
+-- function's result type needs a DROP, and an ordered replay of the earlier
+-- migrations over this database (CI's re-apply step, a recovery) would then
+-- stop at 20261022110600's CREATE OR REPLACE of the old shape. This one is
+-- dropped and created again for the same reason (its status column came
+-- after its first version, which no hosted project ever applied); nothing
+-- else depends on it.
+-- student_provision_intents_for() stays as 20261022140300 left it, for an
+-- older delete-account. delete-account calls the new one: deploy it after
+-- this migration (an older database has no such function, and the deletion
+-- then stops with deletion_unavailable rather than delete on an address).
+--
+-- Rerunnable: dropped and created with the same signature and privileges.
+
+drop function if exists public.student_provision_intents_proven (uuid);
+
+-- 20261022140300's student_provision_intents_for(), plus proven and status.
+create function public.student_provision_intents_proven (p_teacher uuid)
+returns table (roster_id uuid, student_user_id uuid, live boolean, proven boolean, status text)
+language sql stable security definer
+set search_path = public as $$
+    select n.roster_id, n.student_user_id, n.live, n.proven,
+           case
+               when n.proven then 'proven'
+               when n.student_user_id is not null then 'unproven'
+               -- Nothing recorded (student_user_id would name it) and nothing
+               -- found inside the window: any unrostered account at the address
+               -- is DEPLOY.md's case 5, never "nothing was created".
+               when exists (
+                   select 1 from auth.users u
+                   where lower(u.email) = n.auth_email
+                     and not exists (select 1 from public.managed_students m where m.student_user_id = u.id)
+               ) then 'unproven_match'
+               else 'none'
+           end
+    from (
+        select i.roster_id, i.auth_email, i.created_at,
+               coalesce(
+                   i.student_user_id,
+                   (select u.id from auth.users u
+                    where lower(u.email) = i.auth_email
+                      and u.created_at >= i.created_at - interval '1 minute'
+                      and u.created_at <= i.expires_at
+                      and not exists (
+                          select 1 from public.student_provision_intents other
+                          where other.roster_id <> i.roster_id and other.student_user_id = u.id
+                      )
+                    order by u.created_at limit 1)
+               ) as student_user_id,
+               i.expires_at > now() as live,
+               -- DEPLOY.md's proof (A): recorded, and created inside the window.
+               i.student_user_id is not null and exists (
+                   select 1 from auth.users r
+                   where r.id = i.student_user_id
+                     and r.created_at >= i.created_at - interval '1 minute'
+                     and r.created_at <= i.expires_at
+               ) as proven
+        from public.student_provision_intents i
+        where i.teacher_id = p_teacher
+    ) n
+    order by n.created_at;
+$$;
+
+revoke all on function public.student_provision_intents_proven (uuid) from public, anon, authenticated;
+
+grant execute on function public.student_provision_intents_proven (uuid) to service_role;
+
+-- DEPLOY: apply before deploying delete-account (it calls this; see above).
+
+-- ===== supabase/migrations/20261022140500_thumbnail_publish_lock_order.sql =====
+-- Thumbnails: a publish and a multi-object removal take their locks in one
+-- order (P1 follow-up).
+--
+-- 20261022101000's order is "a score's documents row, then a Storage object
+-- row, then the owner's quota lock, then the score's folder lock". A removal
+-- of several covers in one statement (removeClaimedThumbnails' remove([...]),
+-- one DELETE ... WHERE name IN (...)) does not keep it: the executor locks
+-- each row as it reaches it, and thumbnails_keep_published_cover takes the
+-- folder lock in between, so it holds object A1 and the folder, then waits
+-- for object A2. A publish of A2 took A2's row FOR KEY SHARE first and then
+-- waited for the folder lock. Each waited for the other: PostgreSQL's
+-- deadlock detector aborted one after deadlock_timeout.
+--
+-- Now the publish reads whether its object is stored (no lock), takes the
+-- score's folder lock, holding no object row of the score, and only then its
+-- object's row, FOR KEY SHARE NOWAIT: it
+-- never waits for a row while it holds the folder, so no cycle can form with
+-- a removal, an upload (its predecessor's row, then the owner lock, then the
+-- folder) or a claim. What a publish now sees:
+--   * a removal of its object that already holds the folder (single or
+--     multi-object): the publish waits for the folder, then finds the object
+--     gone and is refused `thumbnail_gone`, as before;
+--   * a removal or upload holding its object's row but not yet the folder: the
+--     publish is refused at once with `thumbnail_folder_busy` (55P03, safe to
+--     retry; thumbnailRemote.publishThumbnail returns false and a later
+--     session publishes again), where it used to wait;
+--   * a removal that starts after the publish took the folder waits for it
+--     and then leaves the now-published cover (thumbnails_keep_published_cover
+--     re-reads documents.thumb_rev under the folder lock), as before.
+-- A bulk publish's out-of-order folder request is still refused at once by
+-- thumbnail_folder_lock (20261022101000, item 3).
+--
+-- Lock order, everywhere, from here: a score's documents row, then (a writer
+-- of objects) a Storage object row, then the owner's quota lock, then the
+-- score's folder lock (ascending), then the cleanup ledger; a publish, which
+-- holds the documents row, takes the folder lock and then its object's row
+-- without waiting.
+--
+-- Rerunnable: the function is replaced with the same signature; the trigger
+-- (documents_thumbnail_published, 20261022100800) is unchanged.
+
+-- 20261022101000's definition; the folder lock moves ahead of the object's
+-- row lock, which no longer waits.
+create or replace function public.documents_thumbnail_published () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_name text;
+    v_stored boolean;
+begin
+    if new.thumb_rev is null or new.thumb_rev is not distinct from old.thumb_rev then
+        return new;
+    end if;
+    v_name := new.id::text || '/' || new.thumb_rev::text || '.jpg';
+
+    -- Whether the revision's object is stored, read before any wait: a
+    -- revision whose object was never stored may still be named (the
+    -- client's republish repairs a missing cover); one that a removal takes
+    -- while this publish waits is refused (`thumbnail_gone`).
+    v_stored := exists (
+        select 1 from storage.objects o
+        where o.bucket_id = 'thumbnails' and o.name collate "C" = v_name collate "C"
+    );
+
+    -- The folder next, holding no object row of this score: a removal or a
+    -- claim that holds it finishes before this goes on.
+    perform public.thumbnail_folder_lock (new.id);
+
+    -- Then the object's row, without waiting: whoever holds it may be waiting
+    -- for the folder this transaction now holds.
+    if v_stored then
+        begin
+            perform 1 from storage.objects o
+            where o.bucket_id = 'thumbnails' and o.name collate "C" = v_name collate "C"
+            for key share nowait;
+        exception
+            when lock_not_available then
+                raise exception 'thumbnail_folder_busy'
+                    using errcode = '55P03',
+                          detail = json_build_object('code', 'thumbnail_folder_busy', 'document_id', new.id)::text,
+                          hint = 'Another change to this score''s cover is under way; try again.';
+        end;
+        if not found then
+            raise exception 'thumbnail_gone'
+                using errcode = '55000',
+                      detail = json_build_object('code', 'thumbnail_gone', 'object', v_name)::text,
+                      hint = 'That cover was removed while it was being published; upload it again.';
+        end if;
+    end if;
+
+    if exists (
+        select 1 from public.thumbnail_storage_cleanup c
+        where c.object_name = v_name and c.claimed_at is not null
+    ) then
+        raise exception 'thumbnail_claimed'
+            using errcode = '55000',
+                  detail = json_build_object('code', 'thumbnail_claimed', 'object', v_name)::text,
+                  hint = 'That cover is being removed; upload it again before publishing it.';
+    end if;
+
+    delete from public.thumbnail_storage_cleanup c where c.object_name = v_name;
+    insert into public.thumbnail_storage_cleanup (object_name, document_id, owner_id)
+    select o.name, new.id, new.owner_id
+    from storage.objects o
+    where o.bucket_id = 'thumbnails'
+      and o.name collate "C" >= (new.id::text || '/') collate "C"
+      and o.name collate "C" < (new.id::text || '0') collate "C"
+      and o.name <> v_name
+    on conflict (object_name) do nothing;
+    return new;
+end;
+$$;
+
+revoke all on function public.documents_thumbnail_published () from public, anon, authenticated;
+
+-- DEPLOY: no order constraint, no edge function or client change.
+
+-- ===== supabase/migrations/20261022140600_my_storage_usage.sql =====
+-- Storage: the signed-in owner can read their own usage and cap (decision
+-- 50(3), P1 follow-up: the storage-full message shows usage and the cap).
+--
+-- An upload past the quota is refused by storage_objects_enforce_quota()
+-- (20261022101000) with `storage_quota_exceeded`, and the error's detail
+-- carries limit_bytes and used_bytes. The Storage API hands the app only the
+-- message, not the detail, so the app said "your storage is full" with no
+-- numbers. my_storage_usage() answers the caller's own figures, from the same
+-- two functions the quota uses: storage_owner_bytes() (everything stored in
+-- both buckets under the caller's scores, archived ones and deleted ones still
+-- awaiting cleanup included) and storage_quota_bytes() for the caller's
+-- resolved tier.
+--
+-- It reads only the caller's own account (auth.uid()); no argument names
+-- anyone else. Without a signed-in caller it refuses (42501). Read-only,
+-- takes no lock.
+--
+-- Rerunnable: the function is replaced with the same signature and its
+-- privileges reset to the same end state.
+
+create or replace function public.my_storage_usage () returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_user uuid := auth.uid ();
+begin
+    if v_user is null then
+        raise exception 'sign in to read your storage use' using errcode = '42501';
+    end if;
+    return jsonb_build_object(
+        'used_bytes', public.storage_owner_bytes (v_user),
+        'limit_bytes', public.storage_quota_bytes (public.resolve_entitlements (v_user) ->> 'tier')
+    );
+end;
+$$;
+
+revoke all on function public.my_storage_usage () from public, anon;
+
+grant execute on function public.my_storage_usage () to authenticated, service_role;
+
+-- DEPLOY: apply before (or with) the frontend that calls it; without it the
+-- storage-full message falls back to the old wording (no numbers).
+
+-- ===== supabase/migrations/20261022140700_clear_stale_code_reset_markers.sql =====
+-- Student code resets: a safe, idempotent way to clear stale
+-- app_metadata.code_reset_worker markers (decision 64(1)'s follow-up).
+--
+-- A code reset's password scramble writes app_metadata.code_reset_worker =
+-- <its worker id> in the same Auth update (20261022110800), so the worker, or
+-- a retry presenting the reset's token, can tell that a write whose answer was
+-- lost has landed. The marker matters only while that reset holds the student:
+-- a live student_claim_reservations row (reserved_until in the future). Once
+-- the reset completed (its reservation goes), was taken over, or its hold ran
+-- out (600 s, longer than an Edge Function can run, so nothing of it is still
+-- in flight), nothing reads it again: a new reset writes its own marker, and
+-- reserve_student_code_reset() answers 'busy' (the only answer the marker
+-- confirms) only under a live hold. Decision 64 left these markers for now as
+-- harmless; this clears them.
+--
+-- clear_stale_code_reset_markers() removes the key, and nothing else of
+-- app_metadata, from each account that carries one, only when no live
+-- reservation holds its roster row:
+--   * under the roster row's lock, then the reservation's (FOR UPDATE), the
+--     order every reset and claim function takes (20261022110000), so a reset
+--     starting meanwhile waits for this and writes its marker afterwards, and
+--     one already holding the student is never touched;
+--   * the roster row is taken SKIP LOCKED: a row someone is working on is
+--     passed over until the next call;
+--   * the account's own auth.users row is taken last, FOR UPDATE NOWAIT, and
+--     never waited for: an Auth account deletion holds that row and then
+--     waits, through managed_students' ON DELETE CASCADE, for the roster row
+--     this holds, the inverse order (PR #72 fix 2). Busy, the candidate is
+--     passed over until the next call, and the locks taken for it (roster
+--     row, reservation) are let go at once with its subtransaction, so the
+--     deletion goes straight on rather than deadlocking with this;
+--   * the marker is removed only if it still names the worker read under those
+--     locks, so a call never removes a marker newer than the one it judged;
+--   * an account with a marker and no roster row (the student was deleted, or
+--     never rostered) has no reset to hold it: cleared.
+-- Idempotent: a second call finds nothing to clear. Returns how many it
+-- cleared. At most p_limit accounts per call (default 500), in user id order.
+--
+-- Not scheduled here (as the other cleanups are first run by hand): run
+-- `select public.clear_stale_code_reset_markers();` as the service role or
+-- postgres, any time, as often as wanted. A JWT issued before the call keeps
+-- the old claim until it is refreshed; nothing reads it there.
+--
+-- Rerunnable: the function is replaced with the same signature and its
+-- privileges reset to the same end state.
+
+create or replace function public.clear_stale_code_reset_markers (p_limit integer default 500) returns integer
+language plpgsql security definer
+set search_path = public, auth as $$
+declare
+    v_user record;
+    v_roster uuid;
+    v_marker text;
+    v_live boolean;
+    v_cleared integer := 0;
+begin
+    for v_user in
+        select u.id
+        from auth.users u
+        where u.raw_app_meta_data ? 'code_reset_worker'
+        order by u.id
+        limit greatest(coalesce(p_limit, 500), 0)
+    loop
+        -- One subtransaction per candidate: leaving it by lock_not_available
+        -- lets go of every lock taken for this candidate.
+        begin
+            v_roster := null;
+            select ms.id into v_roster
+            from public.managed_students ms
+            where ms.student_user_id = v_user.id
+            for update skip locked;
+            if not found and exists (select 1 from public.managed_students ms where ms.student_user_id = v_user.id) then
+                continue; -- someone is working on this student: the next call
+            end if;
+
+            v_live := false;
+            if v_roster is not null then
+                select r.reserved_until > now() into v_live
+                from public.student_claim_reservations r
+                where r.student_id = v_roster
+                for update;
+                v_live := coalesce(v_live, false);
+            end if;
+            if v_live then
+                continue; -- a reset or claim holds the student: its marker may still be read
+            end if;
+
+            -- Never waited for (see above): busy raises lock_not_available.
+            v_marker := null;
+            select u.raw_app_meta_data ->> 'code_reset_worker' into v_marker
+            from auth.users u
+            where u.id = v_user.id
+            for update nowait;
+            update auth.users u
+            set raw_app_meta_data = u.raw_app_meta_data - 'code_reset_worker'
+            where u.id = v_user.id
+              and u.raw_app_meta_data ->> 'code_reset_worker' is not distinct from v_marker
+              and v_marker is not null;
+            if found then
+                v_cleared := v_cleared + 1;
+            end if;
+        exception when lock_not_available then
+            null; -- the account is busy (an Auth deletion or update): the next call
+        end;
+    end loop;
+    return v_cleared;
+end;
+$$;
+
+revoke all on function public.clear_stale_code_reset_markers (integer) from public, anon, authenticated;
+
+grant execute on function public.clear_stale_code_reset_markers (integer) to service_role;
+
+-- DEPLOY: no order constraint, no edge function change. Run it by hand when
+-- wanted (DEPLOY.md, P3 runbooks); nothing schedules it.
+
+-- ===== supabase/migrations/20261022140800_student_email_reset_fence.sql =====
+-- Student resets: the email path is fenced like the code path (P3 follow-up:
+-- "the email reset path is unfenced").
+--
+-- A teacher's reset of an email-method student scrambled the password, ended
+-- the sessions and mailed a sign-in link with nothing serializing it: two
+-- resets at once (a double click, two tabs, a retry after a timeout) could
+-- interleave their Auth writes, and a delayed scramble or session revocation
+-- from an earlier attempt could land after the student had already used the
+-- newer link -- overwriting the password they set, or ending their fresh
+-- session. The code path has had a reservation, a worker lease and fences
+-- since 20261022110000 .. 20261022110800 (_shared/studentCodeReset.ts).
+--
+-- Now student-provision runs the email reset through the same machinery:
+-- reserve_student_code_reset() (a second reset meanwhile is told it is still
+-- finishing, 409), the fence before the password write and again before the
+-- session revocation, end_student_sessions_fenced(), the quarantine of a
+-- password write whose outcome is unknown, and the resume token. The one step
+-- that differs is the end: there is no card, so instead of
+-- complete_student_code_reset() it calls complete_student_email_reset(), which
+-- checks the same lease, drops the reservation and sends the student back to
+-- Invited (claimed_at cleared), as the email path did. The sign-in link is
+-- mailed after that, as before; a link that fails to send leaves the safe
+-- half-state it always did (the old password is dead) and a rerun sends it.
+--
+-- Rerunnable: the function is created or replaced with its privileges reset.
+
+-- 'reset' when this lease still owns the reset of an email-method student: the
+-- reservation goes and claimed_at is cleared. 'lost' otherwise; nothing is
+-- written then. Refuses a code-method row (22023): dropping its reservation
+-- without a new card would make the old card claimable again.
+create or replace function public.complete_student_email_reset (
+    p_student uuid,
+    p_reservation uuid,
+    p_worker uuid,
+    p_epoch bigint
+) returns text language plpgsql security definer
+set search_path = public as $$
+declare
+    v_row public.managed_students;
+    v_held public.student_claim_reservations;
+begin
+    -- The roster row first, then the reservation: the order every function on
+    -- these rows takes (20261022110000).
+    select * into v_row from public.managed_students where id = p_student for update;
+    if not found then
+        return 'lost';
+    end if;
+    if v_row.auth_method is distinct from 'email' then
+        raise exception 'complete_student_email_reset is for email-method students only' using errcode = '22023';
+    end if;
+    select * into v_held from public.student_claim_reservations where student_id = p_student for update;
+    if not found or not public.student_code_reset_owned (v_row, v_held, p_reservation, p_worker, p_epoch) then
+        return 'lost';
+    end if;
+    delete from public.student_claim_reservations where student_id = p_student;
+    update public.managed_students set claimed_at = null where id = p_student;
+    return 'reset';
+end;
+$$;
+
+revoke all on function public.complete_student_email_reset (uuid, uuid, uuid, bigint) from public, anon, authenticated;
+
+grant execute on function public.complete_student_email_reset (uuid, uuid, uuid, bigint) to service_role;
+
+-- DEPLOY: apply before deploying student-provision (it calls this on the email
+-- path). An older student-provision never calls it.
+
+-- ===== supabase/migrations/20261022140900_end_student_sessions_lock_order.sql =====
+-- end_student_sessions() takes the roster row before the student's tokens and
+-- sessions (launch-fix follow-up 17).
+--
+-- 20261020150100's definition deleted auth.refresh_tokens and auth.sessions
+-- first and updated the roster row (access_revoked_at) last. The retention
+-- run's soft delete, and district_retention_list_late() (20261021120700,
+-- 20261022130400), lock the students' roster rows first and then delete their
+-- tokens and sessions: the reverse. A student archived or reset by their
+-- teacher (student-provision, through end_student_sessions) while a district
+-- soft delete reached them could leave each transaction holding what the other
+-- wanted next, and PostgreSQL aborted one with `deadlock detected`. Now the
+-- function locks the roster row (FOR UPDATE) before it touches anything else,
+-- so both wait for each other's commit instead.
+--
+-- Nothing else changes: the tokens and sessions are deleted, then
+-- access_revoked_at is stamped on the clock after the deletes, then the
+-- membership hints go out, exactly as before. end_student_sessions_fenced
+-- (20261022110800) already holds the row when it calls this. GoTrue's own
+-- writes take tokens and sessions and never a roster row, so no new order is
+-- introduced.
+--
+-- Rerunnable: the function is replaced with the same signature and its
+-- privileges reset to the same end state.
+
+-- 20261020150100's definition, the roster row locked first.
+create or replace function public.end_student_sessions (p_student uuid) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_ended int;
+    v_doc uuid;
+begin
+    if coalesce(auth.jwt () ->> 'role', '') <> 'service_role' then
+        raise exception 'service role only' using errcode = '42501';
+    end if;
+
+    -- The roster row first (20261022140900): the order the retention run
+    -- takes (roster rows, then the student's tokens and sessions), and the
+    -- reset and claim functions (roster row, then the reservation). Taking the
+    -- tokens first and the row last deadlocked with a soft delete of the same
+    -- student, each holding what the other wanted next.
+    perform 1
+    from public.managed_students ms
+    where ms.student_user_id = p_student
+    for update;
+    if not found then
+        raise exception 'not a roster student' using errcode = 'P0002';
+    end if;
+
+    -- Then the tokens, by user: GoTrue's would cascade from their session, but one
+    -- from before sessions existed has none, and clearing them first does not
+    -- lean on the cascade at all.
+    delete from auth.refresh_tokens
+    where user_id = p_student::text;
+
+    delete from auth.sessions
+    where user_id = p_student;
+
+    get diagnostics v_ended = row_count;
+
+    -- The revocation itself: every access token issued before this moment is
+    -- refused from the next request on (student_access_revoked). The clock,
+    -- not now(), and after the deletes: a refresh that committed while they
+    -- waited on its token's lock minted an access token before this, not
+    -- after the transaction began.
+    update public.managed_students
+    set access_revoked_at = clock_timestamp()
+    where student_user_id = p_student;
+
+    -- The same hint document_members_broadcast sends when a membership ends,
+    -- and read the same way: the viewer re-reads its role over PostgREST, where
+    -- document_role() now answers null. `role` null because, for this caller,
+    -- the membership is as good as gone.
+    for v_doc in
+        select dm.document_id
+        from public.document_members dm
+        where dm.user_id = p_student
+    loop
+        perform realtime.send(
+            jsonb_build_object(
+                'table', 'document_members',
+                'document_id', v_doc,
+                'user_id', p_student,
+                'role', null
+            ),
+            'membership', -- event
+            public.document_live_topic (v_doc), -- topic
+            true -- private
+        );
+    end loop;
+
+    return v_ended;
+end;
+$$;
+
+revoke all on function public.end_student_sessions (uuid) from public, anon, authenticated;
+
+grant execute on function public.end_student_sessions (uuid) to service_role;
+
+-- DEPLOY: no order constraint, no edge function change.
+
+-- ===== supabase/migrations/20261022141000_sweep_stale_account_deletions.sql =====
+-- Account deletion: a sweep for stale account_deletions rows (decision 49(6):
+-- "Runbook for stale account_deletions rows in P6 now; cron sweep is a
+-- follow-up").
+--
+-- An attempt that dies without settling (the Edge Function killed, the network
+-- gone) leaves its account_deletion_attempts row open, and its account_deletions
+-- marker in place. account_deletion_pending() (20261022110400) already ignores
+-- an attempt whose 600 s lease ran out, so such a marker restricts nothing --
+-- unless destructive cleanup had begun, in which case the account stays
+-- restricted until a deletion completes (the half-deleted case, DEPLOY.md's P3
+-- runbook). Nothing ever removed the harmless rows.
+--
+-- sweep_stale_account_deletions() does, for each account with a marker, under
+-- the account's deletion lock (account_deletion_lock_key, the lock
+-- begin/mark/settle take, so it never runs beside an attempt's own steps):
+--   * closes every attempt whose lease ran out and that never ended, as
+--     'abandoned' with error 'lease_expired' (the attempt cannot still be
+--     running: the lease is longer than an Edge Function can run);
+--   * then deletes the marker when no cleanup ever began and no attempt is
+--     live -- exactly the rule settle_account_deletion_attempt() applies when
+--     an attempt settles -- and its attempts with it (ON DELETE CASCADE);
+--   * never touches a half-deleted marker (destructive_started_at set): it is
+--     counted and named for a person, as the runbook says, since only a
+--     completed deletion may clear it.
+-- Idempotent: a second run changes nothing. At most p_limit markers per run
+-- (default 500), oldest first, counting only markers with something to do: an
+-- attempt to close, or a marker to delete (PR #72 fix 4). A half-deleted
+-- marker whose attempts are all closed, or a marker an attempt still holds, is
+-- passed over before the limit, so old ones never fill every run and starve
+-- newer abandoned markers; the half-deleted are still counted below. Returns
+--   {"attempts_closed": n, "markers_cleared": n, "half_deleted": n,
+--    "oldest_half_deleted": <user_id or null>}.
+--
+-- NOT scheduled here, like retention_district_run(): DEPLOY.md gives the
+-- cron line for Max. Safe to run by hand at any time.
+--
+-- Rerunnable: the function is replaced with the same signature and its
+-- privileges reset to the same end state.
+
+create or replace function public.sweep_stale_account_deletions (p_limit integer default 500) returns jsonb
+language plpgsql security definer
+set search_path = public as $$
+declare
+    v_user uuid;
+    v_closed integer := 0;
+    v_n integer;
+    v_cleared integer := 0;
+begin
+    for v_user in
+        -- What the loop below would do, read without the lock (and checked
+        -- again under it): close an attempt, or delete the marker.
+        select d.user_id from public.account_deletions d
+        where exists (
+                  select 1 from public.account_deletion_attempts a
+                  where a.user_id = d.user_id and a.ended_at is null and a.lease_until <= now()
+              )
+           or (d.destructive_started_at is null
+               and not exists (
+                   select 1 from public.account_deletion_attempts a
+                   where a.user_id = d.user_id and a.ended_at is null and a.lease_until > now()
+               ))
+        order by d.started_at, d.user_id
+        limit greatest(coalesce(p_limit, 500), 0)
+    loop
+        perform pg_advisory_xact_lock (public.account_deletion_lock_key (v_user));
+
+        update public.account_deletion_attempts a
+        set ended_at = now(), outcome = 'abandoned', error = 'lease_expired'
+        where a.user_id = v_user and a.ended_at is null and a.lease_until <= now();
+        get diagnostics v_n = row_count;
+        v_closed := v_closed + v_n;
+
+        delete from public.account_deletions d
+        where d.user_id = v_user
+          and d.destructive_started_at is null
+          and not exists (
+              select 1 from public.account_deletion_attempts a
+              where a.user_id = d.user_id and a.ended_at is null and a.lease_until > now()
+          );
+        get diagnostics v_n = row_count;
+        v_cleared := v_cleared + v_n;
+    end loop;
+
+    return jsonb_build_object(
+        'attempts_closed', v_closed,
+        'markers_cleared', v_cleared,
+        'half_deleted', (
+            select count(*) from public.account_deletions d
+            where d.destructive_started_at is not null
+              and not exists (select 1 from public.account_deletion_attempts a
+                              where a.user_id = d.user_id and a.ended_at is null and a.lease_until > now())
+        ),
+        'oldest_half_deleted', (
+            select d.user_id from public.account_deletions d
+            where d.destructive_started_at is not null
+              and not exists (select 1 from public.account_deletion_attempts a
+                              where a.user_id = d.user_id and a.ended_at is null and a.lease_until > now())
+            order by d.destructive_started_at
+            limit 1
+        )
+    );
+end;
+$$;
+
+revoke all on function public.sweep_stale_account_deletions (integer) from public, anon, authenticated;
+
+grant execute on function public.sweep_stale_account_deletions (integer) to service_role;
+
+-- DEPLOY (Max, when wanted; nothing schedules it):
+--   select cron.schedule ('account-deletions-sweep', '41 4 * * *',
+--       $$select public.sweep_stale_account_deletions ()$$);
+-- A non-zero half_deleted in its result is the P3 runbook's "Half-deleted
+-- accounts" case.

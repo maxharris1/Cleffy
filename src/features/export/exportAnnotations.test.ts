@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as DbModule from '@/sync/db';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
-import { resetInkRecoveryForTests, retireAccountInk } from '@/sync/inkRecovery';
+import { closeDocInk, forgetDocInk, resetInkRecoveryForTests, retireAccountInk, retryHeld } from '@/sync/inkRecovery';
 import type { Annotation } from '@/types/models';
 
 let db: ScribblerDb;
@@ -272,6 +272,32 @@ describe('loadExportAnnotations and marks this device could not store (SF-1)', (
         );
     });
 
+    it('signed out with an overtaken erase held: the copy does not promise the newer version, which is not in the export', async () => {
+        await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });
+        const store = new AnnotationStore(db, DOC);
+        store.setAuthor(USER);
+        await store.load();
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.delete('a1').catch(() => undefined);
+        full.mockRestore();
+        await db.annotations.put({ ...stroke('a1'), seq: 9, color: '#0000ff', pending: 0 });
+        await store.retryFailedPersist();
+        const fullAgain = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(stroke('unsaved')).catch(() => undefined);
+        fullAgain.mockRestore();
+
+        retireAccountInk(USER, 'other-tab');
+        const marks = await loadExportMarks(DOC, USER);
+
+        // Only the unsaved stroke: the newer a1 is a saved mark, not this export's.
+        expect(marks.annotations.map((a) => a.id)).toEqual(['unsaved']);
+        expect(marks.erasedConflicts).toBe(1);
+        expect(exportNotice(marks)).toBe(
+            'You’re signed out, so this export has only the 1 unsaved mark this tab still holds, not the score’s saved marks. One of your unsaved erases was overtaken by a newer version made elsewhere. That version is a saved mark, so it isn’t in this export.',
+        );
+        expect(exportNotice(marks)).not.toMatch(/the export shows/);
+    });
+
     it('signed out with ink still held here: the export has only that account’s unsaved marks, and says so (round 3, item 2)', async () => {
         await drawAs(OTHER, stroke('theirs'));
         await drawAs(USER, stroke('saved'));
@@ -291,5 +317,44 @@ describe('loadExportAnnotations and marks this device could not store (SF-1)', (
         );
         // Never another account's.
         expect((await loadExportMarks(DOC, OTHER)).annotations.map((a) => a.id)).not.toContain('unsaved');
+    });
+});
+
+describe('held ink of a score lost to this device (decision 65(1))', () => {
+    const holdUnsaved = async () => {
+        await drawAs(USER, stroke('saved'));
+        const store = new AnnotationStore(db, DOC);
+        store.setAuthor(USER);
+        await store.load();
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(stroke('unsaved')).catch(() => undefined);
+        full.mockRestore();
+        return store;
+    };
+
+    it('access lost: the export has only the unsaved marks kept on this device, and says so', async () => {
+        await holdUnsaved();
+
+        closeDocInk(DOC);
+        const marks = await loadExportMarks(DOC, USER, undefined, { lostAccess: true });
+
+        expect(marks.annotations.map((a) => a.id)).toEqual(['unsaved']);
+        expect(exportNotice(marks)).toBe(
+            'You no longer have this score, so this export has only the 1 unsaved mark still on this device, not the score’s saved marks.',
+        );
+        // Out of the viewer's export and of Retry: nothing writes it now.
+        expect((await loadExportMarks(DOC, USER)).annotations.map((a) => a.id)).toEqual(['saved']);
+        expect(await retryHeld(USER, DOC)).toEqual({ ok: true, wrote: [], overtaken: [] });
+        expect((await db.ops.where('docId').equals(DOC).toArray()).map((op) => op.annotationId)).toEqual(['saved']);
+        expect((await loadExportMarks(DOC, USER, undefined, { lostAccess: true })).annotations).toHaveLength(1);
+    });
+
+    it('the user deleting the score themselves lets its held ink go, closed or not', async () => {
+        await holdUnsaved();
+        closeDocInk(DOC);
+
+        forgetDocInk(DOC);
+
+        expect((await loadExportMarks(DOC, USER, undefined, { lostAccess: true })).annotations).toEqual([]);
     });
 });

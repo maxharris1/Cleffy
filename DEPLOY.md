@@ -1345,6 +1345,31 @@ it paused.
     any function** (step 12). Fix forward as in _Abort and recovery_, and run
     the check again. There is no `20261022130200` (top of this section).
 
+    **The launch-fix follow-ups (PR #72), when merged before the sitting.**
+    Batch 3 pushes them too (they sort after P5). Check them the same way:
+
+    ```sql
+    select version, name from supabase_migrations.schema_migrations
+    where version between '20261022140000' and '20261022141000'
+    order by 1;
+    -- exactly 11 rows: 140000 district_retention_restore_hand_on,
+    -- 140100 district_retention_detach_kept, 140200 district_barrier_lifts_on_renewal,
+    -- 140300 student_provision_intent_window, 140400 student_provision_intent_proven,
+    -- 140500 thumbnail_publish_lock_order, 140600 my_storage_usage,
+    -- 140700 clear_stale_code_reset_markers, 140800 student_email_reset_fence,
+    -- 140900 end_student_sessions_lock_order, 141000 sweep_stale_account_deletions
+    ```
+
+    Their deploy order: `20261022140800` before the new `student-provision`
+    (its email reset calls `complete_student_email_reset`), `20261022140400`
+    before the new `delete-account` (it calls the new
+    `student_provision_intents_proven()`; an older `delete-account` keeps
+    calling `student_provision_intents_for()`), and `20261022140600` with or before
+    the new frontend (the storage-full message calls `my_storage_usage`;
+    without it the message has no numbers). Step 12's order (migrations
+    first, `student-provision` first among the functions) already gives all
+    three. Nothing in them is scheduled.
+
     **P3's code reset: `20261022110700` / `20261022110800` and the
     `student-provision` deploy go back to back, inside the freeze** (decision
     64). `20261022110700_student_code_reset_worker` **drops** the old
@@ -2127,6 +2152,20 @@ counts (item 3). Schedule it only when all of these hold:
       `district_busy`, and a correction that raced another is refused with
       `40001`. Both are retried, and roster corrections go through
       `admin_set_student_district()` (step 11.3, decision 69).
+
+    And the launch-fix follow-ups' three, after them, in order:
+    - `20261022140000_district_retention_restore_hand_on` (decision 47's
+      residual): when one district's purge ends while another district's
+      purge lists a student it archived, the restore is handed on to that
+      purge (logged as `restore_handed_on`) instead of being lost.
+    - `20261022140100_district_retention_detach_kept` (decision 68(2)): the
+      hard delete clears `district_studio_id` on the students it keeps (a
+      teacher's restore during the purge week), logged as `detached_kept`.
+      Nothing is deleted.
+    - `20261022140200_district_barrier_lifts_on_renewal` (decision 68(3)): a
+      renewal lifts the provisioning barrier at once; the run's cancel is
+      unchanged.
+
 2. `district-retention-notices` is deployed with `DISTRICT_NOTICE_SECRET`, and
    the Vault pair `district_notice_url` / `district_notice_secret` exists
    (step 14).
@@ -2147,26 +2186,40 @@ Decisions 68 and 69 accept these, once it runs:
 
 - the barrier starts at the soft delete, not at the 14-day notice. During the
   notice the district is still live and may renew;
-- a teacher's restore during the purge still wins (`20261021120700`);
-- a renewal that lifts the barrier takes effect at the next daily run;
+- a teacher's restore during the purge still wins (`20261021120700`); the
+  hard delete then detaches that student from the district
+  (`20261022140100`);
+- a renewal lifts the barrier at once (`20261022140200`); the district's
+  students the purge archived stay archived until the next run's cancel;
 - a correction in flight can make that day's run pass the district over,
   even a soft or hard delete that is due. The next run picks it up.
 
-Follow-ups, not launch steps: the hard delete detaching restored students
-(clearing `district_studio_id`, without deleting them), and lifting the
-barrier at once on a renewal.
+Both follow-ups decision 68 named (the hard delete detaching restored
+students, and lifting the barrier at once on a renewal) are done by the
+launch-fix follow-ups' migrations above.
 
 ### Recovery runbooks: provisioning, deletion, inbound mail (P3)
 
 Step 20 watches these three. On a fresh production each query returns no
 rows. Run them in production's SQL editor, as `postgres`.
 
-**The `code_reset_worker` marker stays.** After a code student's reset,
+**Stale `code_reset_worker` markers.** After a code student's reset,
 `app_metadata.code_reset_worker` (an opaque UUID) stays in the student's
-`app_metadata`, and so in their JWT. Under decision 64 it is left there: it is
-harmless, admin-only, and fenced by the reset's epoch and quarantine
-(`20261022110700`, `20261022110800`). Clearing stale markers is a follow-up,
-not a launch step. Do not clear it by hand.
+`app_metadata`, and so in their JWT. It is harmless, admin-only, and fenced by
+the reset's epoch and quarantine (`20261022110700`, `20261022110800`), and it
+matters only while a reset holds the student. To clear the stale ones, run, as
+`postgres` or the service role, at any time and as often as wanted:
+
+```sql
+select public.clear_stale_code_reset_markers();
+```
+
+It removes the key (nothing else of `app_metadata`) only from accounts that no
+live reservation holds, under the reset's own locks, skips a student someone is
+working on (or whose account Auth is updating or deleting: never waited for, so
+it cannot deadlock with an account deletion), and returns how many it cleared; a second run clears nothing
+(`20261022140700`). Nothing schedules it. Never edit `app_metadata` by hand
+instead.
 
 **Orphaned student provisioning accounts.** When a teacher adds a student,
 `student-provision` first records an intent (`public.student_provision_intents`),
@@ -2209,14 +2262,22 @@ The two account columns are kept apart on purpose:
 
 - `recorded_user_id` is the account `student-provision` wrote on the intent
   (`attach_student_provision`) the moment it had created it.
-- `email_candidate_id` is any other account at the intent's address. Account
-  deletion's `student_provision_intents_for()` falls back to such an account
-  when nothing was recorded, with no upper time bound (`20261022110600`), so it
-  can be a separate signup made later at the same address, or the account of
-  another provisioning intent for the same address. It is shown for
-  information only and is never enough to delete anything, whatever its
-  window, flag or sign-in fields show. An intent shows on more than one row
-  when several accounts match.
+- `email_candidate_id` is any other account at the intent's address. It can be
+  a separate signup at the same address, or the account of another
+  provisioning intent for the same address. It is shown for information only
+  and is never enough to delete anything, whatever its window, flag or sign-in
+  fields show. An intent shows on more than one row when several accounts
+  match. Account deletion follows the same rule on its own: it names an address
+  match only inside the intent's window and never another intent's recorded
+  account (`20261022140300`), and it deletes an account only when
+  `student_provision_intents_proven()` says `proven`, proof (A) below
+  (`20261022140400`). An account named by address alone is left, with its
+  intent, for this runbook. So is an intent that names nothing while an
+  account with no roster row sits at its address (outside the window, or
+  another intent's): its `status` reads `unproven_match` (case 5), and the
+  deletion logs it rather than read it as "nothing was created" and clear it.
+  It clears an expired intent that names nothing only when its `status` is
+  `none` (case 1, or only rostered accounts at the address).
 - The window runs from one minute before the intent's `created_at` (the
   fallback's own allowance) to its `expires_at`, after which the request that
   wrote the intent can no longer be running.
@@ -2249,18 +2310,23 @@ while that request is still live. There is no other provisioning marker
 (`code_reset_worker` belongs to the code reset). Without proof (A), nothing is
 deleted.
 
-Resolve each row:
+Resolve each row first, then finish each intent (below) only once **every**
+row it shows on is resolved. An intent shows on one row per email candidate
+(and on one row when there is none), and the cases below are decided per row,
+so one intent can have a row in case 2 and another in case 5: the open row
+keeps the whole intent open. When `recorded_user_id` is set, the intent is
+decided by its recorded account alone; each of its email-candidate rows is not
+this provisioning's and is resolved with no action (leave the account alone).
 
 1. **No account to resolve:** `recorded_user_id` and `email_candidate_id` are
    both null (no account was created), or `recorded_user_id` is set and
    `recorded_account_exists` is false (the account this provisioning made is
-   already deleted; leave any email candidate on that row alone, it is not
-   this provisioning's). Run
-   `select public.finish_student_provision('<roster_id>');`.
+   already deleted). The row is resolved; delete nothing.
 2. **Valid roster row confirmed:** the recorded account (or, when nothing was
-   recorded, the email candidate) has `has_roster_row` true. It is a rostered
-   student, not an orphan; delete nothing. Run
-   `select public.finish_student_provision('<roster_id>');`.
+   recorded, this row's email candidate) has `has_roster_row` true. It is a
+   rostered student, not an orphan; delete nothing. The row is resolved. On an
+   unrecorded intent this resolves only this row: another email candidate of
+   the same intent can still be case 5.
 3. **Proven (A), flagged as this teacher's student, no roster row:** the
    account belongs to nobody. Delete it, its Storage first, as account deletion
    does (`supabase/functions/_shared/accountDeletion.ts`, `purgeOwnedDocuments`):
@@ -2308,7 +2374,7 @@ Resolve each row:
           and not exists (select 1 from public.documents d where d.id = c.document_id);
         ```
 
-    6. Only now run `select public.finish_student_provision('<roster_id>');`.
+    6. The row is resolved.
 4. **Proven (A), not flagged** (`user_type` and `flagged_teacher` null): an
    email invite whose student flag never landed. It is an ordinary account at
    a real address. Proof (A) shows provisioning made it; the sign-in fields
@@ -2318,27 +2384,33 @@ Resolve each row:
     - If the person has signed in, they now hold an ordinary (non-student)
       account. Contact the address, or the teacher if `teacher_exists` is
       true, before deleting anything. If they agree to its deletion, delete it
-      as in case 3. If they keep it, finish the intent and leave the account.
+      as in case 3. If they keep it, leave the account: the row is resolved.
 5. **No proof:** any other account with no roster row: every email candidate
    on an unrecorded intent (flagged as this teacher's student or not, inside
    the window or not), a recorded account created outside the window, or one
    flagged for another teacher. It may be a separate person's signup or
-   another provisioning intent's account that is still live. Delete nothing
-   and do not finish the intent: it stays open. Resolve it by hand and
-   escalate to Max with the row and the account's details.
+   another provisioning intent's account that is still live. Delete nothing.
+   The row stays unresolved, and so its intent stays open, whatever its other
+   rows say. Resolve it by hand and escalate to Max with the row and the
+   account's details.
 6. **`teacher_exists` is false** (the teacher's account was deleted while this
    provisioning was live or unflagged): handle it as in cases 1 to 5. The
    intent outlives the teacher on purpose (it has no foreign key), so that
    this case stays findable.
 
-An intent is unresolved until there is no account to resolve (case 1), its
-account is confirmed on a valid roster row (case 2), its account and Storage
-are deleted (cases 3 and 4), or the person has agreed to keep the ordinary
-account (case 4). Never clear an unresolved intent, by
-`finish_student_provision` or by deleting its `student_provision_intents` row
-by hand; a case 5 intent stays open until Max resolves it. Once resolved,
-`finish_student_provision` is the last step, including in cases 2 and 4 where
-the account stays. Later, a scheduled sweep could take over cases 1 to 3
+**Finishing an intent.** A row is resolved when there is no account to resolve
+(case 1), its account is confirmed on a valid roster row (case 2), its account
+and Storage are deleted (cases 3 and 4), the person has agreed to keep the
+ordinary account (case 4), or it is an email candidate of an intent with a
+recorded account (above). An intent is resolved only when every row it shows
+on is resolved; run the query again first and check every row of the intent
+(a recorded account deleted in case 3 or 4 now reads as case 1; a deleted
+email candidate's row is gone). Then, and only then, run
+`select public.finish_student_provision('<roster_id>');` once for the intent,
+including when its accounts stay (cases 2 and 4). Never clear an intent with an
+unresolved row, by `finish_student_provision` or by deleting its
+`student_provision_intents` row by hand; an intent with a case 5 row stays open
+until Max resolves that row. Later, a scheduled sweep could take over cases 1 to 3
 (decision 49(6) follow-up). Cases 4 and 5 stay manual.
 
 **Half-deleted accounts** (a deletion's destructive cleanup started and never
@@ -2358,8 +2430,17 @@ deletion completes. Check `last_error` (billing, storage, auth) and fix the
 cause. Then ask the person to retry Delete account (it needs their session and
 password). If they cannot be reached, escalate to Max for a service-role
 completion. Never clear the row by hand while data is half-deleted. Untouched
-markers (no `destructive_started_at`, no live attempt) restrict nothing and
-need no action.
+markers (no `destructive_started_at`, no live attempt) restrict nothing.
+`select public.sweep_stale_account_deletions();` (`20261022141000`, decision
+49(6)) removes them, closes attempts whose lease ran out, never touches a
+half-deleted row, and reports how many half-deleted rows wait for this runbook
+(`half_deleted`, `oldest_half_deleted`). Its limit (500 a run) counts only rows
+it has something to do for, so half-deleted rows waiting here never hold back
+newer abandoned ones. It is safe to run at any time; nothing
+schedules it. To run it daily:
+`select cron.schedule('account-deletions-sweep', '41 4 * * *', $$select public.sweep_stale_account_deletions()$$);`
+(then add `('account-deletions-sweep', true)` to the expected list in step
+13.4).
 
 **Inbound support mail marked `failed`.** Find it:
 

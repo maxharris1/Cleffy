@@ -1,11 +1,16 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
     cancelBilling,
     deleteAccount,
     MAX_SWEEP_PASSES,
+    provisionIntentFromRow,
     type DeletionCaller,
     type DeletionPorts,
+    type ProvisionIntentRow,
     type StoredSubscriptionRef,
     type StripeCustomerRef,
     type StripeMode,
@@ -112,7 +117,16 @@ class FakeWorld {
     checkoutLeaseLive = false;
     failCheckoutCheck = false;
     /** student_provision_intents: provisionings with no roster row (yet). */
-    intents: Array<{ rosterId: string; teacherId: string; studentUserId: string | null; live: boolean }> = [];
+    /** proven: the intent recorded the account, made inside its window; defaults to a recorded one. */
+    intents: Array<{
+        rosterId: string;
+        teacherId: string;
+        studentUserId: string | null;
+        live: boolean;
+        proven?: boolean;
+        /** Nothing named, but an unrostered account sits at the intent's address (student_provision_intents_proven's 'unproven_match'). */
+        unprovenMatch?: boolean;
+    }> = [];
     stored: Array<StoredSubscriptionRef & { userId: string }> = [];
     stripe: Record<StripeMode, FakeStripe | null> = { live: new FakeStripe(this.log), test: new FakeStripe(this.log) };
 
@@ -250,7 +264,13 @@ class FakeWorld {
             provisionIntents: async (teacherId) =>
                 this.intents
                     .filter((intent) => intent.teacherId === teacherId)
-                    .map(({ rosterId, studentUserId, live }) => ({ rosterId, studentUserId, live })),
+                    .map(({ rosterId, studentUserId, live, proven, unprovenMatch }) => ({
+                        rosterId,
+                        studentUserId,
+                        live,
+                        proven: proven ?? studentUserId !== null,
+                        unprovenMatch: unprovenMatch ?? false,
+                    })),
             clearProvisionIntent: async (rosterId) => {
                 this.log.push(`intent-cleared:${rosterId}`);
                 this.intents = this.intents.filter((intent) => intent.rosterId !== rosterId);
@@ -1114,10 +1134,130 @@ describe('the barrier beyond scores and roster rows (20261022110600)', () => {
         expect(world.log.some((entry) => entry.includes('not flagged as their student'))).toBe(true);
     });
 
+    it('never deletes an account an intent names by address only, even flagged as this teacher’s student (item 18)', async () => {
+        const world = new FakeWorld();
+        // Another intent's account at the same address, or a separate signup
+        // inside the window: flagged, unrostered, and not this intent's.
+        world.users.set('same-address', { userType: 'student', teacherId: TEACHER });
+        world.intents.push(
+            { rosterId: 'crashed', teacherId: TEACHER, studentUserId: 'same-address', live: false, proven: false },
+            { rosterId: 'crashed-live', teacherId: TEACHER, studentUserId: 'same-address', live: true, proven: false },
+        );
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 0 } });
+        expect(world.users.has('same-address')).toBe(true);
+        // Both intents stay on record for the runbook.
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['crashed', 'crashed-live']);
+        expect(world.log.filter((entry) => entry.includes('without proof that it made it'))).toHaveLength(2);
+    });
+
+    it('a recorded account made outside the intent’s window is not proof either: left for review', async () => {
+        const world = new FakeWorld();
+        world.users.set('old-account', { userType: 'student', teacherId: TEACHER });
+        world.intents.push({
+            rosterId: 'recorded-late',
+            teacherId: TEACHER,
+            studentUserId: 'old-account',
+            live: false,
+            proven: false,
+        });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.users.has('old-account')).toBe(true);
+        expect(world.intents).toHaveLength(1);
+    });
+
+    it('keeps an expired intent that names nothing while an account sits at its address outside the window, for review (PR #72 fix 3)', async () => {
+        const world = new FakeWorld();
+        // A separate signup at the address after the window, or an account
+        // from before it: not named, and not proof that nothing was created.
+        world.users.set('outside-window', { userType: 'student', teacherId: TEACHER });
+        world.intents.push(
+            { rosterId: 'unproven', teacherId: TEACHER, studentUserId: null, live: false, unprovenMatch: true },
+            { rosterId: 'nothing-made', teacherId: TEACHER, studentUserId: null, live: false },
+        );
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 0 } });
+        expect(world.users.has('outside-window')).toBe(true);
+        // DEPLOY.md case 5: the intent stays open, and the log says why; the
+        // one with no account at its address at all (case 1) is cleared.
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['unproven']);
+        expect(world.log.filter((entry) => entry.includes('unproven'))).toEqual([
+            expect.stringContaining('names no account, but an account at its address'),
+        ]);
+    });
+
     it('clears an intent whose account is already gone', async () => {
         const world = new FakeWorld();
         world.intents.push({ rosterId: 'undone', teacherId: TEACHER, studentUserId: 'already-deleted', live: false });
         expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
         expect(world.intents).toEqual([]);
+    });
+});
+
+describe('the student_provision_intents_proven() row mapper (PR #72 fix round 2, 2)', () => {
+    const row = (over: Partial<ProvisionIntentRow>): ProvisionIntentRow => ({
+        roster_id: 'roster-1',
+        student_user_id: null,
+        live: false,
+        ...over,
+    });
+
+    it('maps each status the RPC returns', () => {
+        expect(
+            provisionIntentFromRow(row({ student_user_id: 'made', live: true, proven: true, status: 'proven' })),
+        ).toEqual({ rosterId: 'roster-1', studentUserId: 'made', live: true, proven: true, unprovenMatch: false });
+        expect(provisionIntentFromRow(row({ student_user_id: 'named', proven: false, status: 'unproven' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: 'named',
+            live: false,
+            proven: false,
+            unprovenMatch: false,
+        });
+        // DEPLOY.md case 5: nothing named, but an account at the address.
+        expect(provisionIntentFromRow(row({ proven: false, status: 'unproven_match' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: null,
+            live: false,
+            proven: false,
+            unprovenMatch: true,
+        });
+        // Cases 1–2: nothing to resolve.
+        expect(provisionIntentFromRow(row({ proven: false, status: 'none' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: null,
+            live: false,
+            proven: false,
+            unprovenMatch: false,
+        });
+    });
+
+    it('never reads a missing or unknown column as proof, nor as a match', () => {
+        expect(provisionIntentFromRow(row({ student_user_id: 'named' }))).toMatchObject({
+            proven: false,
+            unprovenMatch: false,
+        });
+        expect(
+            provisionIntentFromRow({
+                ...row({ status: 'UNPROVEN_MATCH' }),
+                proven: 'true' as unknown as boolean,
+                live: 1 as unknown as boolean,
+            }),
+        ).toMatchObject({ live: false, proven: false, unprovenMatch: false });
+    });
+
+    it('an unproven_match row, mapped, keeps its intent through the deletion', async () => {
+        const world = new FakeWorld();
+        world.users.set('outside-window', { userType: 'student', teacherId: TEACHER });
+        const mapped = provisionIntentFromRow(row({ roster_id: 'unproven', proven: false, status: 'unproven_match' }));
+        world.intents.push({ ...mapped, teacherId: TEACHER });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['unproven']);
+    });
+
+    it('is what delete-account maps the RPC rows with', () => {
+        const adapter = readFileSync(resolve(process.cwd(), 'supabase/functions/delete-account/index.ts'), 'utf8');
+        const port = adapter.match(/provisionIntents: async [\s\S]*?\n {4}},\n/)?.[0] ?? '';
+        expect(port).toContain(`rpc('student_provision_intents_proven'`);
+        expect(port).toContain('.map(provisionIntentFromRow)');
     });
 });

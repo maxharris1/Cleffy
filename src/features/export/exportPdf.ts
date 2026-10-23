@@ -10,6 +10,8 @@ export interface ExportAnnotatedPdfOptions {
     pageIndex?: number;
     /** Told what the user must know about the marks baked in: missing ones, two versions (exportNotice). */
     onNotice?: (notice: string) => void;
+    /** The ink this tab kept of a score lost to this device (loadExportMarks). */
+    lostAccess?: boolean;
 }
 
 /**
@@ -24,7 +26,9 @@ export const buildAnnotatedPdf = async (
     title: string,
     options: ExportAnnotatedPdfOptions,
 ): Promise<File> => {
-    const marks = await loadExportMarks(docId, options.userId, options.pageIndex);
+    const marks = await loadExportMarks(docId, options.userId, options.pageIndex, {
+        lostAccess: options.lostAccess ?? false,
+    });
     const { annotations } = marks;
     const notice = exportNotice(marks);
     if (notice) {

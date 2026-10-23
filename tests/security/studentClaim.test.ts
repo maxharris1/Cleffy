@@ -888,8 +888,15 @@ describe('deletion checks right before the Auth writes (decision 61)', () => {
         expect(await unknown.json()).toEqual(CLAIM_CHECK_UNAVAILABLE);
         expect(CLAIM_CHECK_UNAVAILABLE.error).toMatch(/try again/i);
 
+        // A lookup that throws instead of answering (P3 deferred minor): the
+        // same 503, and the card is handed back.
+        backend.teacherDeletionPending.mockRejectedValueOnce(new Error('fetch failed'));
+        const thrown = await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps);
+        expect(thrown.status).toBe(503);
+        expect(await thrown.json()).toEqual(CLAIM_CHECK_UNAVAILABLE);
+
         expect(backend.setPassword).not.toHaveBeenCalled();
-        expect(backend.releaseClaim).toHaveBeenCalledTimes(2);
+        expect(backend.releaseClaim).toHaveBeenCalledTimes(3);
         expect(roster.held.size).toBe(0);
         const order = (fn: ReturnType<typeof vi.fn>) => fn.mock.invocationCallOrder.at(-1) ?? Infinity;
         expect((await handleStudentClaim(claim(CODE_A, 'ada_l', 'Correct1horse'), deps)).status).toBe(200);

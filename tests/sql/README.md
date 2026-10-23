@@ -963,6 +963,176 @@ against the local stack on 2026-10-22: all 8 checks passed; with a row in the
 step 00f48a65 added, the same replay stopped at 20261021120800 ("check
 constraint district_retention_log_step_check ... is violated by some row").
 
+## Launchfix follow-ups
+
+`district_retention_overlapping_restores.sql` proves
+`supabase/migrations/20261022140000_district_retention_restore_hand_on.sql`
+(decision 47's residual, kept a follow-up by 66(1)): a student whom one
+district's soft delete archived and a human then moved to a second district
+whose purge lists them too keeps their restore when the first purge ends. The
+first district's cancel (retrying a carried restore that the second purge
+blocks), its hard delete (its carried restores, and a student it skips who was
+moved the raw way) hand the restore on to the second district, logged as
+`attribution_changed` with `counts.event = 'restore_handed_on'`, and the second
+district's renewal then un-archives all three students. The two helpers are
+nobody's to call but the run's. Same harness as the reattribution proof; ends
+with `failures | total`. Proven against the local stack on 2026-10-22: all 13
+checks passed; with 20261022130400's run restored, 4 of the 13 failed (the
+hand-ons, and the three students left archived after the renewal).
+
+`district_retention_detach_kept.sql` proves
+`supabase/migrations/20261022140100_district_retention_detach_kept.sql`
+(decision 68(2)): the hard delete still deletes only listed students who are
+still archived (a teacher's restore during the purge week wins), and every
+listed student it keeps in the district (restored, or an account that is not a
+provisioned student) is detached: `district_studio_id` cleared, nothing deleted,
+attribution and teacher unchanged, logged as `attribution_changed` with
+`counts.event = 'detached_kept'` and counted as `students_detached` in the run's
+result (the `hard_deleted` row's counts keep their shape). A student a
+human moved to another district before the hard delete is untouched. Ends with
+`failures | total`. Proven against the local stack on 2026-10-22: all 10 checks
+passed; with 20261022140000's run, 4 of the 10 failed (both kept students still
+named the deleted district).
+
+`district_barrier_lifts_on_renewal.sql` proves
+`supabase/migrations/20261022140200_district_barrier_lifts_on_renewal.sql`
+(decision 68(3)'s follow-up): right after a soft-deleted district's renewal,
+with no run since, `district_deletion_pending()` answers no and the service
+role's roster insert goes through; the next run's cancel un-archives the
+purge's students as before and leaves the newly provisioned one alone; a
+district not renewed still refuses; a renewal undone before the run closes the
+barrier again, and the next run's sweep lists, archives and signs out the
+student who came in meanwhile; a hard-deleted district stays closed. Ends with
+`failures | total`. Proven against the local stack on 2026-10-22: all 12 checks
+passed; with 20261022130300's `district_deletion_pending()`, 6 of the 12
+failed.
+
+`student_provision_intent_window.sql` proves
+`supabase/migrations/20261022140300_student_provision_intent_window.sql`: the
+email fallback in `student_provision_intents_for()` names only an account
+created inside the intent's window (one minute before `created_at` to
+`expires_at`, inclusive) that no other intent recorded. A crash between the
+Auth create and the attach is still found; a separate signup after the window,
+an account from before it, and another intent's recorded account at the same
+address are not; a recorded account is named as before. It also proves
+`20261022140400_student_provision_intent_proven.sql` (launch-fix follow-up 18):
+`student_provision_intents_proven()` names the same accounts and adds `proven`,
+the only thing account deletion's automatic cleanup deletes on, true only for
+DEPLOY.md's proof (A), a recorded account made inside the window; never for an
+address match, a recorded account made outside the window, or one already
+deleted. Its `status` (PR #72 fix 3) is `unproven_match` for an intent that
+names nothing while an unrostered account sits at its address (outside the
+window, or another intent's), which the cleanup keeps (DEPLOY.md's case 5),
+and `none` only with no such account (none at all, or only a rostered one),
+which it clears. Ends with `failures | total`. Proven against the local stack
+on 2026-10-22: all 17 checks passed; the first 8 with 20261022140300 alone, of
+which 3 failed with 20261022110600's function; the 3 status checks fail with
+the first version of 20261022140400.
+
+`superseded_studio_rotation.sql` proves, with Realtime running, that
+superseding a studio (`20261022100300`, P1) rotates every score it takes from a
+member (P4's superseded-studio follow-up): `20261022100600` archives a member
+left on a capped plan past the cap, and the archive rotates each archived score
+once (`20261022120100`), telling both old topics, so it admits no join; the
+scores the member keeps, and a member under the cap, are not rotated. No
+migration was needed. Same harness as `superseded_studio_members.sql` with the
+rotation proof's `at_commit()`; ends with `failures | total`. Proven against the
+local stack on 2026-10-22: all 10 checks passed.
+
+`thumbnail_publish_lock_order.sql` proves
+`supabase/migrations/20261022140500_thumbnail_publish_lock_order.sql` with real
+concurrent backends (dblink, committed fixtures, removed at the end; same
+harness as `storage_quota_lock_concurrency.sql`): a removal that holds the
+score's folder lock (it reached the published cover first) and a publish of the
+next cover no longer deadlock. The publish waits for the folder holding no row,
+the removal takes the cover at once, and the publish is then refused
+`thumbnail_gone`; a removal of two covers in one statement waits for a publish
+under way and then leaves the newly published one; a publish whose object's row
+another writer holds is refused at once with `thumbnail_folder_busy`, and its
+retry publishes. `storage_quota_lock_and_cover_reuse.sql` check 36 now pins the
+new order (folder lock, then the object's row `FOR KEY SHARE NOWAIT`). Ends with
+`failures | total`. Proven against the local stack on 2026-10-22: all 11 checks
+passed; with 20261022101000's publish, the first interleaving ended in
+`deadlock detected` and the held-row publish waited until the row was freed.
+
+`my_storage_usage.sql` proves
+`supabase/migrations/20261022140600_my_storage_usage.sql` (decision 50(3)):
+`my_storage_usage()` answers the signed-in owner's own `used_bytes` (both
+buckets) and their plan's `limit_bytes`, the figures the quota uses, for the
+storage-full message; it takes no argument, refuses a caller without a user
+(42501) and is not anon's. The caps are read from the stack
+(`storage_quota_bytes()`), since CI's Storage API test changes the free one.
+Ends with `failures | total`. Proven against the local stack on 2026-10-22: all
+6 checks passed; without the function, 5 of the 6 failed.
+
+`content_strikes_grants.sql` (launch-fix follow-up 13) checks P1's grants on
+`content_strikes`: its ACL names only `postgres` and `service_role`; anon,
+authenticated and PUBLIC hold no table or column privilege, on every column
+(20261022130100's included); RLS is on with no policy; the strike functions are
+the service role's and the pepper and key helpers their owner's alone; a client
+read or write is refused. The audit found no gap, so no migration; the proof
+keeps it so. Ends with `failures | total`. Proven against the local stack on
+2026-10-22: all 11 checks passed.
+
+`clear_stale_code_reset_markers.sql` proves
+`supabase/migrations/20261022140700_clear_stale_code_reset_markers.sql`
+(decision 64(1)'s follow-up): `clear_stale_code_reset_markers()` removes
+`app_metadata.code_reset_worker`, and nothing else of `app_metadata`, from an
+account no live reservation holds (a completed reset, an expired hold, no
+roster row), keeps it under a live reset (worker inside its Auth call) or a
+live claim, is idempotent, honours its limit, clears a held marker once that
+reset is over, and is the service role's alone. Ends with `failures | total`.
+Proven against the local stack on 2026-10-22: all 11 checks passed; the proof
+does not run without the function.
+
+`clear_stale_code_reset_markers_race.sql` proves the same function against an
+Auth account deletion (PR #72 fix 2), through `dblink` backends that commit
+(the harness, rules and caveats of `end_student_sessions_lock_order.sql`). The
+deletion holds the student's `auth.users` row and then waits, through
+`managed_students`' ON DELETE CASCADE, for the roster row: the cleanup takes
+that auth row NOWAIT, passes the student over and lets go of its roster row at
+once, so the delete runs straight on; an account an Auth update holds is passed
+over without a wait (a third backend takes its roster row NOWAIT while the
+cleanup's transaction is open) and cleared by the next call; a deletion after
+the cleanup only waits for it. 11 checks. With the first version of the
+function, the deletion case ends in `deadlock detected` and 7 of the 11 fail.
+
+`student_email_reset_fence.sql` proves
+`supabase/migrations/20261022140800_student_email_reset_fence.sql` (P3's
+"the email reset path is unfenced"): on an email-method roster row, the code
+reset's reservation, worker lease, fences and fenced session revocation hold a
+second reset off (busy), fence out a stale worker after a retry takes a newer
+lease (its fence, session revocation and completion do nothing), and let the
+current worker complete through `complete_student_email_reset()`, which drops
+the reservation and clears `claimed_at`; a code row is refused (22023) with its
+card and reservation untouched; the function is the service role's alone. Ends
+with `failures | total`. Proven against the local stack on 2026-10-22: all 12
+checks passed; the proof does not run without the function.
+
+`end_student_sessions_lock_order.sql` proves
+`supabase/migrations/20261022140900_end_student_sessions_lock_order.sql` with
+real concurrent backends (dblink, committed fixtures, removed at the end):
+`end_student_sessions()` waits for a roster row a retention-style revocation
+holds before it touches a token, the revocation then deletes the tokens and
+sessions at once, and the function finishes after it, without a deadlock; the
+function text pins the order (roster row, tokens, sessions, then
+`access_revoked_at`). Ends with `failures | total`. Proven against the local
+stack on 2026-10-22: all 6 checks passed; with 20261020150100's function the
+same interleaving ended in `deadlock detected`.
+
+`sweep_stale_account_deletions.sql` proves
+`supabase/migrations/20261022141000_sweep_stale_account_deletions.sql`
+(decision 49(6)'s sweep): `sweep_stale_account_deletions()` closes attempts
+whose lease ran out (`abandoned`, `lease_expired`), deletes the markers no
+cleanup touched and no attempt holds (settle's own rule), keeps a live
+attempt's marker, keeps and reports a half-deleted marker (and does not report
+one a live attempt is finishing), is idempotent, and is the service role's
+alone. Its limit counts only markers with something to do (PR #72 fix 4):
+bounded runs (`p_limit` 1) reach a newer crashed marker past older
+reported-only half-deleted ones and a live one, which stay as they were. Ends
+with `failures | total`. Proven against the local stack on 2026-10-22: all 12
+checks passed; check 11 fails with the first version of the function.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

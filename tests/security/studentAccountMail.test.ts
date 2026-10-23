@@ -130,8 +130,11 @@ describe('student-provision spends it before GoTrue sends anything', () => {
         const reset = source.slice(source.indexOf('const resetStudentAccess = async'));
         const reserve = reset.indexOf('await reserveStudentMail(userId, row.student_email)');
         expect(reserve).toBeGreaterThan(-1);
-        expect(reserve).toBeLessThan(reset.indexOf('password: generateProvisionPassword()'));
-        expect(reset.indexOf('password: generateProvisionPassword()')).toBeLessThan(reset.indexOf('signInWithOtp('));
+        // The scramble runs inside the fenced reset (runCodeReset with the
+        // email ports, 20261022140800), after the reservation and before the link.
+        const run = reset.indexOf('runCodeReset(emailResetPorts(admin, userId)');
+        expect(reserve).toBeLessThan(run);
+        expect(run).toBeLessThan(reset.indexOf('signInWithOtp('));
         expect(source).toContain('jsonResponse(studentMailRefusal(mail), 429)');
     });
 });
