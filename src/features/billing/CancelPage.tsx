@@ -178,6 +178,18 @@ const ConfirmCancel = ({ token }: { token: string }) => {
         );
     }
 
+    if (result && !result.cancelled && 'alreadyEnded' in result) {
+        return (
+            <BrandShell
+                title="Your subscription has already ended"
+                subtitle="There was nothing left to cancel, so nothing was changed here."
+            >
+                <RefundOutcome result={result} />
+                <SupportLine />
+            </BrandShell>
+        );
+    }
+
     if (result && !result.cancelled) {
         return (
             <BrandShell

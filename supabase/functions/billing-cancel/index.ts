@@ -1,4 +1,9 @@
-import { cancellableSubscription, consumeToken, sha256Hex } from '../_shared/billingCancelStore.ts';
+import {
+    cancellableSubscription,
+    consumeToken,
+    releaseTokenIfDeletionPending,
+    sha256Hex,
+} from '../_shared/billingCancelStore.ts';
 import { emailOfUser, enqueueBillingMail } from '../_shared/billingMail.ts';
 import { drainInBackground, sendBillingEmailWithinBudget } from '../_shared/billingMailWorker.ts';
 import * as billingTerms from '../_shared/billingTerms.ts';
@@ -132,6 +137,12 @@ Deno.serve((req) =>
             }
             return pending.pending ? 'pending' : 'clear';
         },
+        // Asked once the link is spent, after Stripe's read and after a
+        // Stripe failure (decision 72(1)): a deletion that began since the
+        // check above gets the link back unspent, in one statement under the
+        // deletion's lock (release_cancel_link_token_for_deletion, migration
+        // 20261022160000).
+        releaseTokenIfDeletionPending,
         now: () => Date.now(),
         logError: (code, err) => logError('billing-cancel', err, { code }),
     }),

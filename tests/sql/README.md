@@ -1160,6 +1160,27 @@ checks passed; with the first revision's helpers, which matched the row's own
 current `claimed_at` and finished by status alone, checks 18, 19, 20 and 20c
 fail.
 
+`cancel_link_release_for_deletion.sql` proves
+`supabase/migrations/20261022160000_cancel_link_release_for_deletion.sql`
+(decision 72(1); Codex r1 finding 3 on #73): a cancel link spent just as its
+account's deletion began is put back unspent by
+`release_cancel_link_token_for_deletion()`, which answers `clear` and changes
+nothing for an account that is not being deleted (before the attempt, after it
+is abandoned, and for another account's link), `released` while an attempt is
+live -- the link reads as good again, keeps its expiry and can be spent again
+-- and `not_found` for an unknown hash; the token guard still refuses every
+other un-spend (the service role's direct UPDATE, also in a session that never
+set the release's setting, the table owner's, one under a setting naming
+another link), and the setting lets no other change through; it is the
+service role's alone, SECURITY DEFINER with its search_path pinned, and asks
+`account_deletion_pending()` before it takes the link's history locks. One
+transaction, rolled back; ends with `failures | total`. Proven against the
+local stack on 2026-10-23: all 28 checks passed; against the schema at
+57960f9f (no such function, 20261020160700's guard) 17 failed, and with the
+guard's setting compared without `coalesce`, check 02c (the never-set setting
+reads NULL and let the un-spend through) and the four that follow from it
+failed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

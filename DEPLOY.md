@@ -1371,13 +1371,20 @@ it paused.
     three. Nothing in them is scheduled.
 
     **Launch-fix item 16 (deletion-pending policy per writer, decision 70(1)),
-    when merged.** No migration. Redeploy `stripe-webhook`, `billing-cancel`,
+    when merged.** One migration,
+    `20261022160000_cancel_link_release_for_deletion` (decision 72(1)): the
+    cancel-link guard's one exception and
+    `release_cancel_link_token_for_deletion()`, service role only, re-runnable.
+    Redeploy `stripe-webhook`, `billing-cancel`,
     `guest-email-start` and `guest-email-confirm`, and the frontend (the cancel
-    page's "account is being deleted" answer). Each asks
-    `account_deletion_pending()` (`20261022110400`, P3), already in place. One
-    order: the frontend with or before `billing-cancel`, since an older cancel
-    page shows the new answer for an account being deleted as an ordinary
-    cancellation.
+    page's "account is being deleted" and "already ended" answers). Each asks
+    `account_deletion_pending()` (`20261022110400`, P3), already in place. The
+    order: the migration before `billing-cancel` (which calls the new function
+    once a link is spent; a `billing-cancel` without it logs
+    `cancel_token_release_failed` and cancels as before), and the frontend with
+    or before `billing-cancel`, since an older cancel page shows the new answer
+    for an account being deleted as an ordinary cancellation, and an
+    already-ended subscription's refund outcome not at all.
 
     **P3's code reset: `20261022110700` / `20261022110800` and the
     `student-provision` deploy go back to back, inside the freeze** (decision
