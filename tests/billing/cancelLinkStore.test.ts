@@ -74,6 +74,7 @@ interface Store {
     cancelLinkMailBudget: () => CancelLinkDeps['mailBudget'];
     consumeToken: CancelDeps['consumeToken'];
     releaseTokenIfDeletionPending: CancelDeps['releaseTokenIfDeletionPending'];
+    keepRefundRequest: CancelDeps['keepRefundRequest'];
 }
 const shared = (name: string) => `../../supabase/functions/_shared/${name}`;
 const store = (await import(/* @vite-ignore */ shared('billingCancelStore'))) as Store;
@@ -435,6 +436,37 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         expect(await store.releaseTokenIfDeletionPending(hash)).toBe('clear');
         expect((await tokenRow(hash))?.used_at).not.toBeNull();
         expect(await store.releaseTokenIfDeletionPending(sha256(randomUUID()))).toBe('not_found');
+    });
+
+    it('a link keeps the first refund request it sent, whatever is asked later (Codex r2 finding 2 on #73)', async () => {
+        const { rowId } = await subscriber();
+        await drainBillingMailNow();
+        const hash = await hashOf(rowId);
+        const first = {
+            subject: 'Refund — a@x.test',
+            text: 'Plan: Teacher',
+            html: '<p>Plan: Teacher</p>',
+            replyTo: 'a@x.test',
+        };
+        const later = {
+            subject: 'Refund — b@x.test',
+            text: 'Plan: Studio',
+            html: '<p>Plan: Studio</p>',
+            replyTo: 'b@x.test',
+        };
+        expect(await store.keepRefundRequest(hash, first)).toEqual(first);
+        expect(await store.keepRefundRequest(hash, later)).toEqual(first);
+        // Nothing changes it afterwards, the service role's direct UPDATE included.
+        const direct = await db
+            .from('billing_cancel_tokens')
+            .update({ refund_request: later })
+            .eq('token_hash', hash)
+            .select('token_hash');
+        expect(direct.error?.message).toContain('a cancel link keeps the refund request it first sent');
+        expect(await store.keepRefundRequest(hash, later)).toEqual(first);
+        // Keeping it neither spends the link nor moves its expiry.
+        expect(await linkWorks(hash)).toBe(true);
+        expect(await store.keepRefundRequest(sha256(randomUUID()), first)).toBeNull();
     });
 
     it('a link sent with its answer lost, used, then retried late and cleaned up, never works again', async () => {

@@ -27068,13 +27068,30 @@ grant execute on function public.sweep_stale_account_deletions (integer) to serv
 -- A released link keeps its expiry: it works for what is left of its hour,
 -- and after that the buyer asks for a new one, as for any link.
 --
+-- A link that is not spent -- or is put back -- can be pressed again, and
+-- each press may send support the refund request under the link's one Resend
+-- key, which Resend answers only for the same email byte for byte. The
+-- account's email and plan can change between presses (one while the
+-- deletion is pending, one after it was abandoned: Codex r2 finding 2 on #73),
+-- so the first request is kept with the link:
+--
+--   * billing_cancel_tokens.refund_request holds it, and the guard lets it be
+--     set once and never changed (a new link starts without one);
+--   * keep_cancel_link_refund_request (below) saves it if the link has none
+--     and answers with what the link holds, which is what billing-cancel
+--     sends (cancelFlow.ts requestRefund).
+--
 -- tests/sql/cancel_link_release_for_deletion.sql proves it, tests/billing/
 -- cancelLinkStore.test.ts runs the store against it, and tests/billing/
 -- cancelFlow.test.ts holds the flow.
 --
--- Safe to re-run: both functions are CREATE OR REPLACE (the trigger that
--- calls the guard is 20261020160300's, unchanged), and the grants and revokes
--- are idempotent.
+-- Safe to re-run: the column is ADD COLUMN IF NOT EXISTS, every function is
+-- CREATE OR REPLACE (the trigger that calls the guard is 20261020160300's,
+-- unchanged), and the grants and revokes are idempotent.
+
+-- The refund request kept with the link (keep_cancel_link_refund_request):
+-- {subject, text, html, replyTo}, as billing-cancel first sent it.
+alter table public.billing_cancel_tokens add column if not exists refund_request jsonb;
 
 -- ---------------------------------------------------------------------------
 -- The token table's guard: spent stays spent, but for one release
@@ -27104,6 +27121,8 @@ begin
                 using errcode = '55000';
         end if;
         new.expires_at := v_expires;
+        -- Kept only by keep_cancel_link_refund_request, after the link was sent.
+        new.refund_request := null;
         return new;
     end if;
 
@@ -27120,6 +27139,10 @@ begin
            and not (new.used_at is null
                     and coalesce(pg_catalog.current_setting('cleffy.cancel_link_release', true), '') = old.token_hash) then
             raise exception 'a spent cancel link stays spent'
+                using errcode = '55000';
+        end if;
+        if old.refund_request is not null and new.refund_request is distinct from old.refund_request then
+            raise exception 'a cancel link keeps the refund request it first sent'
                 using errcode = '55000';
         end if;
         if old.used_at is null and new.used_at is not null
@@ -27195,3 +27218,44 @@ $$;
 
 revoke all on function public.release_cancel_link_token_for_deletion (text) from public, anon, authenticated;
 grant execute on function public.release_cancel_link_token_for_deletion (text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- keep_cancel_link_refund_request: the first refund request, kept with the link
+-- ---------------------------------------------------------------------------
+-- Saves p_request on the link if it holds none yet, and answers with what it
+-- holds: {"answer": "kept", "request": ...}. Two presses at once: the second
+-- UPDATE waits on the first's row lock, finds the request set and writes
+-- nothing, and its SELECT reads the first's. {"answer": "not_found"}: no such
+-- link (never saved, or deleted with its account).
+create or replace function public.keep_cancel_link_refund_request (p_hash text, p_request jsonb)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+    v_kept jsonb;
+begin
+    if p_request is null or pg_catalog.jsonb_typeof(p_request) <> 'object' then
+        raise exception 'a refund request is a JSON object'
+            using errcode = '22023';
+    end if;
+
+    update public.billing_cancel_tokens t
+    set refund_request = p_request
+    where t.token_hash = p_hash
+      and t.refund_request is null;
+
+    select t.refund_request into v_kept
+    from public.billing_cancel_tokens t
+    where t.token_hash = p_hash;
+    if not found then
+        return jsonb_build_object('answer', 'not_found');
+    end if;
+    return jsonb_build_object('answer', 'kept', 'request', v_kept);
+end;
+$$;
+
+revoke all on function public.keep_cancel_link_refund_request (text, jsonb) from public, anon, authenticated;
+grant execute on function public.keep_cancel_link_refund_request (text, jsonb) to service_role;

@@ -18,7 +18,13 @@
 --      lets nothing else through (an expiry moved later is still refused);
 --   3. only the service role may call it; it is SECURITY DEFINER with its
 --      search_path pinned; it asks account_deletion_pending() before it takes
---      the link's history locks, and writes in one UPDATE.
+--      the link's history locks, and writes in one UPDATE;
+--   4. keep_cancel_link_refund_request (Codex r2 finding 2 on #73): a link
+--      starts with no refund request; the first one asked is kept and every
+--      later call answers with it, whatever it asks; nothing changes it once
+--      kept, the service role's direct UPDATE included; keeping it neither
+--      spends the link nor moves its expiry; only the service role may call
+--      it, SECURITY DEFINER with its search_path pinned.
 --
 -- One transaction, ROLLED BACK. Run it against the LOCAL stack
 -- (scripts/ci/sql-proof.sh does, in CI):
@@ -187,6 +193,55 @@ $q$select position('public.account_deletion_pending (v_user)' in s) between 1 an
       and position('public.billing_cancel_link_lock (v_outbox, p_hash)' in s) < position('update public.billing_cancel_tokens' in s)
       and (length(s) - length(replace(s, 'update public.billing_cancel_tokens', ''))) / length('update public.billing_cancel_tokens') = 1
    from (select prosrc s from pg_proc where oid = 'public.release_cancel_link_token_for_deletion(text)'::regprocedure) p$q$);
+
+-- ===========================================================================
+-- 4. The refund request kept with the link
+-- ===========================================================================
+create function pg_temp.keep(p_label text, p_request jsonb) returns jsonb language sql volatile as $f$
+    select public.keep_cancel_link_refund_request (pg_temp.h(p_label), p_request) $f$;
+grant execute on all functions in schema pg_temp to anon, authenticated, service_role;
+select pg_temp.as_role('service_role');
+select pg_temp.chk('40 a saved link starts with no refund request',
+$q$select bool_and(refund_request is null) from public.billing_cancel_tokens
+   where token_hash in (select hash from t_ids where hash is not null)$q$);
+select pg_temp.chk('41 the first request is kept, and answered',
+$q$select pg_temp.keep('unspent', '{"subject":"one","text":"Plan: Teacher","html":"<p>one</p>","replyTo":"a@x.test"}')
+      = jsonb_build_object('answer', 'kept', 'request',
+          '{"subject":"one","text":"Plan: Teacher","html":"<p>one</p>","replyTo":"a@x.test"}'::jsonb)$q$);
+select pg_temp.chk('42 a later call asking another one is answered with the first, and writes nothing',
+$q$select pg_temp.keep('unspent', '{"subject":"two","text":"Plan: Studio","html":"<p>two</p>","replyTo":"b@x.test"}')->'request'->>'replyTo' = 'a@x.test'
+      and (select refund_request->>'subject' from public.billing_cancel_tokens where token_hash = pg_temp.h('unspent')) = 'one'$q$);
+select pg_temp.refused('43 the service role''s direct UPDATE cannot change a kept request',
+$q$update public.billing_cancel_tokens set refund_request = '{"subject":"two"}' where token_hash = pg_temp.h('unspent')$q$,
+'55000', 'a cancel link keeps the refund request it first sent');
+select pg_temp.refused('44 ... nor clear it',
+$q$update public.billing_cancel_tokens set refund_request = null where token_hash = pg_temp.h('unspent')$q$,
+'55000', 'a cancel link keeps the refund request it first sent');
+select pg_temp.chk('45 keeping it neither spent the link nor moved its expiry',
+$q$select pg_temp.used('unspent') is null and public.read_cancel_link_token (pg_temp.h('unspent')) is not null$q$);
+select pg_temp.chk('46 a spent link keeps one too, and stays spent',
+$q$select pg_temp.keep('other', '{"subject":"o","text":"o","html":"o","replyTo":"o@x.test"}')->>'answer' = 'kept'
+      and pg_temp.used('other') is not null$q$);
+select pg_temp.chk('47 an unknown hash: not_found',
+$q$select public.keep_cancel_link_refund_request (repeat('0', 64), '{"subject":"x"}') = jsonb_build_object('answer', 'not_found')$q$);
+select pg_temp.refused('48 a request that is not a JSON object is refused',
+$q$select pg_temp.keep('spent', '"text"')$q$, '22023');
+reset role;
+select pg_temp.as_role('authenticated');
+select pg_temp.refused('49 a signed-in client cannot call it',
+$q$select public.keep_cancel_link_refund_request (repeat('a', 64), '{}')$q$, '42501');
+reset role;
+select pg_temp.as_role('anon');
+select pg_temp.refused('49b nor an anonymous one',
+$q$select public.keep_cancel_link_refund_request (repeat('a', 64), '{}')$q$, '42501');
+reset role;
+select pg_temp.chk('49c only the service role may; SECURITY DEFINER, with search_path pinned empty',
+$q$select has_function_privilege('service_role', p.oid, 'execute')
+      and not has_function_privilege('anon', p.oid, 'execute')
+      and not has_function_privilege('authenticated', p.oid, 'execute')
+      and not exists (select 1 from aclexplode(p.proacl) a where a.grantee = 0 and a.privilege_type = 'EXECUTE')
+      and p.prosecdef and p.proconfig @> array['search_path=""']
+   from pg_proc p where p.oid = 'public.keep_cancel_link_refund_request(text, jsonb)'::regprocedure$q$);
 
 \o
 select name, ok, detail from t_results order by name;
