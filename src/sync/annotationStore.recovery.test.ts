@@ -974,6 +974,47 @@ describe('an ordinary edit under way when the score is lost to this device (PR #
             expect(await db.ops.count()).toBe(0);
         });
 
+        it('fix round 4: the newer edit compacted over an older held update of its mark is not then replaced by an older edit kept late', async () => {
+            accountSignedIn(A);
+            const synced = [
+                { ...stroke('a1'), seq: 5, pending: 0 as const },
+                { ...stroke('a2'), seq: 6, pending: 0 as const },
+            ];
+            await db.annotations.bulkPut(synced);
+            const store = await storeAs(A);
+            // Held ink: a1 recoloured yellow, then a2 blue, both on a full disk.
+            await withFullDisk(() => store.update('a1', { color: '#ffff00' }));
+            await withFullDisk(() => store.update('a2', { color: '#0000ff' }));
+            let answer!: (rows: Annotation[]) => void;
+            const serverRows = vi.fn(() => new Promise<Annotation[]>((resolve) => (answer = resolve)));
+            const retry = retryHeld(A, DOC, { serverRows });
+            await vi.waitFor(() => expect(serverRows).toHaveBeenCalled());
+
+            // 1. An ordinary red edit of a1 queues behind the Retry.
+            const queued = nextWrite(store);
+            const red = store.update('a1', { color: '#ff0000' });
+            await queued;
+            // 2. The score closes, 3. reopens, and a newer green edit of a1 fails storage...
+            await purge();
+            expect(closedInk(A)).toEqual(['a1:#ffff00', 'a2:#0000ff']);
+            await db.annotations.bulkPut(synced);
+            const reopened = await storeAs(A);
+            await withFullDisk(() => reopened.update('a1', { color: '#00ff00' }));
+            // 4. ...and it closes again: green takes yellow's place as a1's held update.
+            await purge();
+            expect(closedInk(A)).toEqual(['a1:#00ff00', 'a2:#0000ff']);
+
+            // 5. The old Retry releases, and the red edit queued behind it is cut off.
+            answer([]);
+            await expect(retry).resolves.toMatchObject({ ok: false, wrote: [] });
+            await expect(red).rejects.toThrow(/closed/);
+
+            // Kept, but behind the newer green: Export has green.
+            expect(closedInk(A)).toEqual(['a1:#00ff00', 'a2:#0000ff']);
+            expect(lostAccessInk().map((score) => [score.userId, score.docId, score.marks])).toEqual([[A, DOC, 2]]);
+            expect(await db.ops.count()).toBe(0);
+        });
+
         it('a first create waiting on its day snapshot when access is lost keeps the PDF for its closed ink, so Export needs no server', async () => {
             accountSignedIn(A);
             const store = await storeAs(A);

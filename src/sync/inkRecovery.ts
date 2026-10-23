@@ -736,8 +736,9 @@ export const holdOps = (
  * newest held version of a mark is always its newest edit. A run of updates
  * to one mark keeps only the newest (each carries the whole mark), so
  * dragging a held text note does not grow the entry by an op per frame. The
- * replacement is a new object: a write already carrying the older one
- * releases that one, and this one stays held.
+ * replacement is a new object, put where its own edit falls (so the ops stay
+ * oldest first), and only ever of an older update: a write already carrying
+ * the older one releases that one, and this one stays held.
  */
 const appendHeld = (entry: RecoveryEntry, held: AuthoredOp): void => {
     const { id } = held.op.annotation;
@@ -751,8 +752,13 @@ const appendHeld = (entry: RecoveryEntry, held: AuthoredOp): void => {
             if (prior?.op.annotation.id !== id) {
                 continue;
             }
-            if (prior.op.type === 'update' && prior.author === held.author) {
-                entry.ops[i] = { ...held, op: { ...held.op, prev: prior.op.prev } };
+            if (isOlder(held.order, prior.order)) {
+                // A newer op of the mark the scan did not pass (one of unknown
+                // order lies between): this older one goes in before it.
+                at = i;
+            } else if (prior.op.type === 'update' && prior.author === held.author) {
+                entry.ops.splice(i, 1);
+                entry.ops.splice(at - 1, 0, { ...held, op: { ...held.op, prev: prior.op.prev } });
                 return;
             }
             break;
