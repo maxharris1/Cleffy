@@ -890,28 +890,39 @@ const finishPendingDuplicateUndo = async (
  * their portal now, and the runbook has them cancel any card plan first. A
  * customer already mapped to SOMEONE ELSE is left alone and logged, because a
  * mapping is never moved off another user on a subscription's say-so.
+ *
+ * The link is a write of its own, so the deletion check is asked again right
+ * before it (Codex r2 finding 1 on #73): a deletion that begins while the row
+ * is written gets no billing_customers link either. Pending: the refusal is
+ * returned for the caller to answer with (claim released, 503).
  */
 const linkDistrictCustomer = async (
     store: WebhookStore,
+    event: StripeEventLike,
     sub: StripeSubscriptionLike,
     userId: string,
-): Promise<void> => {
+): Promise<WebhookResult | null> => {
     const customerId = idOf(sub.customer);
     if (!customerId || !isDistrictSubscription(sub)) {
-        return;
+        return null;
     }
     const mapped = await store.userIdForCustomer(customerId);
     if (mapped === userId) {
-        return;
+        return null;
     }
     if (mapped !== null) {
         store.log(
             `district subscription ${sub.id}: customer ${customerId} is already linked to another user; ` +
                 `not relinking it to ${userId}`,
         );
-        return;
+        return null;
+    }
+    const beforeLink = await deletionRefusal(store, event, [userId]);
+    if (beforeLink) {
+        return beforeLink;
     }
     await store.linkCustomer(customerId, userId);
+    return null;
 };
 
 /**
@@ -941,8 +952,8 @@ const applySubscription = async (
     // Asked again right before each write (Codex r1 finding 3 on #73, decision
     // 72(2)): the check before the lock is a moment, and a deletion can begin
     // during the Stripe read every caller makes first, or between the row and
-    // the archive or restore below. Pending: nothing more is written, the
-    // claim is released, 503 (deletionRefusal).
+    // a district's customer link or the archive or restore below. Pending:
+    // nothing more is written, the claim is released, 503 (deletionRefusal).
     const beforeRow = await deletionRefusal(store, event, [userId]);
     if (beforeRow) {
         return beforeRow;
@@ -957,7 +968,10 @@ const applySubscription = async (
     if (written.outcome === 'lost_lock') {
         return await leaseLost(store, event, sub.id);
     }
-    await linkDistrictCustomer(store, sub, userId);
+    const beforeLink = await linkDistrictCustomer(store, event, sub, userId);
+    if (beforeLink) {
+        return beforeLink;
+    }
     const beforeScores = await deletionRefusal(store, event, [userId]);
     if (beforeScores) {
         return beforeScores;

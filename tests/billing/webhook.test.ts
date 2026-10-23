@@ -9,6 +9,7 @@ import {
     stopDeletedAccountSubscription,
 } from '../../supabase/functions/_shared/deletedAccountBilling';
 import {
+    DISTRICT_PLAN_METADATA,
     duplicateUndoStateOf,
     EDGE_FUNCTION_WALL_CLOCK_MS,
     handleStripeEvent,
@@ -2324,6 +2325,50 @@ describe('a deletion that begins while the event is being applied', () => {
         );
         refusedAndReleased(result, 'evt_race_archive');
         expect(store.archived).toEqual([]);
+    });
+
+    // Codex r2 finding 1 on #73: a district subscription links its customer to
+    // the owner after the row. A deletion that begins while the row is written
+    // must stop that link too, not only the scores after it.
+    it('a district subscription, between the row and its customer link: no billing_customers write', async () => {
+        const upsert = store.upsertSubscription;
+        store.upsertSubscription = async (row, holder) => {
+            const written = await upsert(row, holder);
+            store.deletion.set('teacher-1', 'pending');
+            return written;
+        };
+        const linked: string[] = [];
+        const link = store.linkCustomer;
+        store.linkCustomer = async (customerId, userId) => {
+            linked.push(`${customerId}:${userId}`);
+            await link(customerId, userId);
+        };
+        const result = await deliver(
+            store,
+            subscriptionEvent('evt_race_district', 'customer.subscription.updated', {
+                collection_method: 'send_invoice',
+                items: { data: [{ price: { id: 'price_district_custom' } }] },
+                metadata: { user_id: 'teacher-1', [DISTRICT_PLAN_METADATA.key]: DISTRICT_PLAN_METADATA.value },
+            }),
+        );
+        refusedAndReleased(result, 'evt_race_district');
+        expect(linked).toEqual([]);
+        expect(store.customers.size).toBe(0);
+        expect(store.restored).toEqual([]);
+    });
+
+    it('a district subscription on a clear account still links its customer', async () => {
+        const result = await deliver(
+            store,
+            subscriptionEvent('evt_district_ok', 'customer.subscription.updated', {
+                collection_method: 'send_invoice',
+                items: { data: [{ price: { id: 'price_district_custom' } }] },
+                metadata: { user_id: 'teacher-1', [DISTRICT_PLAN_METADATA.key]: DISTRICT_PLAN_METADATA.value },
+            }),
+        );
+        expect(result.status).toBe(200);
+        expect(store.customers.get('cus_1')).toBe('teacher-1');
+        expect(store.restored).toEqual(['teacher-1']);
     });
 
     it('deletion abandoned: the retried event is processed normally, once', async () => {
