@@ -25,6 +25,7 @@ import {
     PERSIST_CHUNK,
     persistOps,
     refusedEditCount,
+    rememberScoreSource,
     resetInkRecoveryForTests,
     retireAccountInk,
     retryHeld,
@@ -971,6 +972,69 @@ describe('an ordinary edit under way when the score is lost to this device (PR #
             expect(closedInk(A)).toEqual(['a1:#00ff00', 'a2:#0000ff']);
             expect(lostAccessInk().map((score) => [score.userId, score.docId, score.marks])).toEqual([[A, DOC, 2]]);
             expect(await db.ops.count()).toBe(0);
+        });
+
+        it('a first create waiting on its day snapshot when access is lost keeps the PDF for its closed ink, so Export needs no server', async () => {
+            accountSignedIn(A);
+            const store = await storeAs(A);
+            const bytes = new ArrayBuffer(8);
+            const closeViewer = rememberScoreSource(DOC, 'Sonata', bytes);
+            let release!: () => void;
+            const gate = new Promise<void>((resolve) => (release = resolve));
+            const ensure = snapshotService.ensureDayStartingSnapshot;
+            vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
+                await gate;
+                return ensure(...args);
+            });
+
+            const edit = store.create(stroke('a1'));
+            // Access lost: the viewer's state clears (its PDF let go), and the score is purged.
+            closeViewer();
+            await purge();
+            release();
+
+            await expect(edit).rejects.toThrow(/closed/);
+            expect(lostAccessInk()).toEqual([{ docId: DOC, userId: A, marks: 1, title: 'Sonata', bytes }]);
+            expect(closedInk(A)).toEqual(['a1:#111111']);
+        });
+
+        it('a first create waiting on storage when access is lost keeps the PDF for its closed ink, so Export needs no server', async () => {
+            accountSignedIn(A);
+            const store = await storeAs(A);
+            const bytes = new ArrayBuffer(8);
+            const closeViewer = rememberScoreSource(DOC, 'Sonata', bytes);
+            const queued = nextWrite(store);
+            const { release } = gateWrites();
+
+            const edit = store.create(stroke('a1'));
+            await queued;
+            closeViewer();
+            await purge();
+            release();
+
+            await expect(edit).rejects.toThrow(/closed/);
+            expect(await db.ops.count()).toBe(0);
+            expect(lostAccessInk()).toEqual([{ docId: DOC, userId: A, marks: 1, title: 'Sonata', bytes }]);
+            expect(closedInk(A)).toEqual(['a1:#111111']);
+        });
+
+        it('once the edit under way is saved, the PDF goes with its viewer', async () => {
+            accountSignedIn(A);
+            const store = await storeAs(A);
+            const closeViewer = rememberScoreSource(DOC, 'Sonata', new ArrayBuffer(8));
+            const queued = nextWrite(store);
+            const { release } = gateWrites();
+
+            const edit = store.create(stroke('a1'));
+            await queued;
+            closeViewer();
+            release();
+            await edit;
+
+            // Ink held for the score later, with no viewer open, has no PDF of it kept.
+            await withFullDisk(() => store.create(stroke('a2')));
+            closeDocInk(DOC);
+            expect(lostAccessInk()).toEqual([{ docId: DOC, userId: A, marks: 1 }]);
         });
     });
 });

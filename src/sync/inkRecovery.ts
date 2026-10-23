@@ -172,6 +172,8 @@ const docEpochs = new Map<string, number>();
 const forgottenAt = new Map<string, number>();
 /** Local edits applied in memory whose write has not finished (AnnotationStore.hasUnsavedEdit). */
 let inFlight = 0;
+/** The same, by score: while any is under way, its PDF stays (see pruneSource). */
+const inFlightByDoc = new Map<string, number>();
 /** The last InkWriteGuard.order handed out: edits are numbered in the order they began. */
 let lastEditOrder = 0;
 
@@ -310,10 +312,20 @@ const pruneEntry = (entry: RecoveryEntry): void => {
     }
 };
 
-/** Let a score's PDF go once no viewer has it open and no ink of it is held. */
+/**
+ * Let a score's PDF go once no viewer has it open, no ink of it is held, and
+ * no edit of it is under way: one cut off later (the score lost while it
+ * waits on its snapshot or storage) is kept as closed ink (keepCancelled),
+ * whose Export needs the PDF, by then gone from the device and the server.
+ */
 const pruneSource = (docId: string): void => {
     const source = sources.get(docId);
-    if (source && source.viewers === 0 && ![...entries.values()].some((entry) => entry.docId === docId)) {
+    if (
+        source &&
+        source.viewers === 0 &&
+        !inFlightByDoc.has(docId) &&
+        ![...entries.values()].some((entry) => entry.docId === docId)
+    ) {
         sources.delete(docId);
     }
 };
@@ -1611,9 +1623,19 @@ export const openMarksFor = (userId: string | null, docId: string): Annotation[]
     return null;
 };
 
-/** A local edit started (+1) or finished (-1) its write (see hasUnsavedInk). */
-export const noteEditsInFlight = (delta: number): void => {
+/**
+ * A local edit of this score started (+1) or finished (-1) its write (see
+ * hasUnsavedInk). Finished, it is written, held or let go, so the score's
+ * PDF goes now if nothing else keeps it (pruneSource).
+ */
+export const noteEditsInFlight = (delta: number, docId: string): void => {
     inFlight = Math.max(0, inFlight + delta);
+    const left = Math.max(0, (inFlightByDoc.get(docId) ?? 0) + delta);
+    if (left > 0) {
+        inFlightByDoc.set(docId, left);
+    } else if (inFlightByDoc.delete(docId)) {
+        pruneSource(docId);
+    }
     syncUnloadGuard();
 };
 
@@ -1663,6 +1685,7 @@ export const resetInkRecoveryForTests = (): void => {
     signedIn = null;
     resetCutOffWritesForTests();
     inFlight = 0;
+    inFlightByDoc.clear();
     changed();
 };
 

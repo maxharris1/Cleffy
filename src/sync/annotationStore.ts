@@ -1240,7 +1240,7 @@ export class AnnotationStore {
         // mark deciding in that yield would otherwise decide without it, and
         // could drop an Undo this edit builds on (QA C1).
         this.committing.set(annotation.id, (this.committing.get(annotation.id) ?? 0) + 1);
-        noteEditsInFlight(1);
+        noteEditsInFlight(1, this.docId);
         try {
             // Capture today's starting point before the first user edit of the day.
             if (options.recordUndo) {
@@ -1279,7 +1279,7 @@ export class AnnotationStore {
             } else {
                 this.committing.delete(annotation.id);
             }
-            noteEditsInFlight(-1);
+            noteEditsInFlight(-1, this.docId);
             this.releaseSavedWaiters(annotation.id);
         }
 
@@ -1378,7 +1378,7 @@ export class AnnotationStore {
     /** applyMemory for a local edit, which persistMany will write (and release). */
     private applyLocal(annotation: Annotation): void {
         this.unpersisted.set(annotation.id, (this.unpersisted.get(annotation.id) ?? 0) + 1);
-        noteEditsInFlight(1);
+        noteEditsInFlight(1, this.docId);
         this.applyMemory(annotation);
     }
 
@@ -1451,7 +1451,7 @@ export class AnnotationStore {
     private releaseUnpersisted(ops: CommitOp[]): void {
         for (const op of ops) {
             const { id } = op.annotation;
-            noteEditsInFlight(-1);
+            noteEditsInFlight(-1, this.docId);
             const left = (this.unpersisted.get(id) ?? 1) - 1;
             if (left > 0) {
                 this.unpersisted.set(id, left);
