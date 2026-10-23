@@ -28,7 +28,7 @@ export const ViewerHeader = ({ backTo, backLabel, title, children }: ViewerHeade
                     title={backLabel}
                     // Touch: a 44px hit area, pulled back by the negative margin so
                     // the arrow and the title do not move.
-                    className="inline-flex shrink-0 items-center justify-center rounded-lg p-1.5 text-stone-600 transition hover:bg-ink/5 pointer-coarse:-m-[7px] pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    className="inline-flex shrink-0 items-center justify-center rounded-lg p-1.5 text-stone-600 transition-colors hover:bg-ink/5 pointer-coarse:-m-[7px] pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                 >
                     <ArrowLeftIcon size={18} />
                 </Link>

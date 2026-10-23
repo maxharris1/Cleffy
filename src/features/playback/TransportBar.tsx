@@ -729,7 +729,7 @@ const isCompoundMeter = (score: ScoreData): boolean => {
 
 const pillButton = (active: boolean, attention = false): string =>
     [
-        'flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition',
+        'flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition-colors',
         active
             ? 'border-accent bg-accent-soft text-accent'
             : attention
@@ -739,7 +739,7 @@ const pillButton = (active: boolean, attention = false): string =>
 
 const squareButton = (active: boolean): string =>
     [
-        'flex h-8 w-8 items-center justify-center rounded-lg text-stone-600 transition',
+        'flex h-8 w-8 items-center justify-center rounded-lg text-stone-600 transition-colors',
         active ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5',
     ].join(' ');
 
@@ -750,10 +750,11 @@ const squareButton = (active: boolean): string =>
  */
 const roundButton = (primary: boolean): string =>
     [
-        'flex h-10 w-10 items-center justify-center rounded-full transition disabled:animate-pulse',
+        'flex h-10 w-10 items-center justify-center rounded-full transition-colors disabled:animate-pulse',
         primary
             ? 'bg-accent text-white shadow-sm hover:opacity-90'
             : 'border border-stone-200 text-stone-600 hover:bg-ink/5',
     ].join(' ');
 
-const stepperButton = 'flex h-6 w-6 items-center justify-center rounded-md text-stone-600 transition hover:bg-ink/10';
+const stepperButton =
+    'flex h-6 w-6 items-center justify-center rounded-md text-stone-600 transition-colors hover:bg-ink/10';

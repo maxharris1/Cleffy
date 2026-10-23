@@ -172,7 +172,7 @@ export const TextEditorOverlay = ({
             // The server's cap; a longer note would be refused and rolled back.
             maxLength={MAX_TEXT_NOTE_CHARS}
             rows={1}
-            className="absolute z-30 resize-none overflow-y-auto rounded border border-accent bg-white/95 p-1 shadow-md outline-none"
+            className="absolute z-30 resize-none overflow-y-auto overscroll-contain rounded border border-accent bg-white/95 p-1 shadow-md outline-none"
             style={{
                 left,
                 top,

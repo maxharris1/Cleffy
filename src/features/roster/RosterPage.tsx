@@ -710,7 +710,7 @@ const AddStudentForm = ({
                     {SIGN_IN_METHODS.map((option) => (
                         <label
                             key={option.value}
-                            className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition ${
+                            className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition-colors ${
                                 method === option.value
                                     ? 'border-accent/60 bg-accent-soft/50'
                                     : 'border-stone-300/90 bg-white/70 hover:border-stone-400/90'
@@ -816,7 +816,7 @@ const StudentRow = ({
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
             {/* Archived rows dim their content, not the wrapper: opacity on the
                 wrapper would also wash out the ⋮ menu popover inside it. */}
-            <div className="group border-b border-stone-300/50 transition hover:border-accent/40">
+            <div className="group border-b border-stone-300/50 transition-colors hover:border-accent/40">
                 <div className="flex items-center gap-0.5">
                     <button
                         type="button"
@@ -834,7 +834,7 @@ const StudentRow = ({
                             line instead of splitting one line with the name, which
                             left an emoji name as "🎹🎻 …" beside a full email. */}
                         <span className="flex min-w-0 flex-col sm:flex-row sm:items-center sm:gap-2">
-                            <span className="truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
+                            <span className="truncate font-medium text-stone-800 transition-colors group-hover:text-accent-hover">
                                 {student.display_name}
                             </span>
                             {/* What they type to get in, beside the name the teacher
@@ -889,7 +889,7 @@ const StudentRow = ({
                                         <Link
                                             to={`/doc/${assignment.document_id}`}
                                             title={documentTitle}
-                                            className="min-w-0 basis-full truncate text-sm font-medium text-stone-800 transition hover:text-accent-hover sm:basis-0 sm:flex-1"
+                                            className="min-w-0 basis-full truncate text-sm font-medium text-stone-800 transition-colors hover:text-accent-hover sm:basis-0 sm:flex-1"
                                         >
                                             {documentTitle}
                                         </Link>
@@ -947,7 +947,7 @@ const AccessToggle = ({
                 aria-pressed={value === option}
                 disabled={disabled}
                 onClick={() => onChange(option)}
-                className={`rounded-md px-2 py-1 text-xs transition disabled:cursor-default disabled:opacity-50 ${
+                className={`rounded-md px-2 py-1 text-xs transition-colors disabled:cursor-default disabled:opacity-50 ${
                     value === option ? 'bg-accent text-white' : 'text-stone-600 hover:bg-ink/5'
                 }`}
             >
@@ -1009,7 +1009,7 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
                                         <div className="flex flex-wrap items-center gap-2">
                                             <Link
                                                 to={`/doc/${note.document_id}`}
-                                                className="min-w-0 text-xs text-stone-500 transition [overflow-wrap:anywhere] hover:text-stone-700 hover:underline"
+                                                className="min-w-0 text-xs text-stone-500 transition-colors [overflow-wrap:anywhere] hover:text-stone-700 hover:underline"
                                             >
                                                 {documentTitle}
                                             </Link>
@@ -1088,7 +1088,7 @@ const RosterRowMenu = ({
                 aria-label="Student actions"
                 disabled={busy}
                 onClick={() => setOpen((v) => !v)}
-                className={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
+                className={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
                     archived ? 'opacity-60' : ''
                 }`}
             >
@@ -1119,7 +1119,7 @@ const MenuItem = ({ label, danger = false, onClick }: { label: string; danger?: 
         type="button"
         role="menuitem"
         onClick={onClick}
-        className={`w-full cursor-pointer px-3 py-2 text-left text-sm transition hover:bg-ink/5 ${
+        className={`w-full cursor-pointer px-3 py-2 text-left text-sm transition-colors hover:bg-ink/5 ${
             danger ? 'text-danger' : 'text-stone-800'
         }`}
     >

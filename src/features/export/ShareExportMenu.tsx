@@ -480,7 +480,7 @@ const MenuItem = ({
         role="menuitem"
         disabled={disabled}
         onClick={onClick}
-        className="flex w-full flex-col items-start px-3 py-2 text-left transition hover:bg-ink/5 disabled:opacity-50"
+        className="flex w-full flex-col items-start px-3 py-2 text-left transition-colors hover:bg-ink/5 disabled:opacity-50"
     >
         <span className="text-sm text-stone-800">{label}</span>
         {hint ? <span className="text-xs text-stone-500">{hint}</span> : null}

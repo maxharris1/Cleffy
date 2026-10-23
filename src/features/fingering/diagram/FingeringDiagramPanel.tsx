@@ -80,8 +80,7 @@ export const FingeringDiagramPanel = ({
         suggestion && selectedOption > 0
             ? (suggestion.alternatives[selectedOption - 1]?.sequences ?? suggestion.sequences)
             : suggestion?.sequences;
-    const sequences =
-        effectiveSource === 'suggested' && selectedSequences ? selectedSequences : annotated;
+    const sequences = effectiveSource === 'suggested' && selectedSequences ? selectedSequences : annotated;
 
     // `current` clamps rather than resetting on region edits, so a re-reviewed
     // phrase keeps (or safely truncates to) the step the teacher was on.
@@ -98,16 +97,13 @@ export const FingeringDiagramPanel = ({
 
     const eventIndex = steps[current];
     const pressed = eventIndex === undefined ? [] : pressedAtIndex(sequences, eventIndex);
-    const showApply =
-        effectiveSource === 'suggested' && canApply && onApply !== undefined && canPlaceProposals(region);
+    const showApply = effectiveSource === 'suggested' && canApply && onApply !== undefined && canPlaceProposals(region);
 
     const movedForReach = useMemo(() => {
         if (!suggestion || eventIndex === undefined) {
             return null;
         }
-        const moved = region.notes.filter(
-            (n) => n.eventIndex === eventIndex && suggestion.movedNoteIds.includes(n.id),
-        );
+        const moved = region.notes.filter((n) => n.eventIndex === eventIndex && suggestion.movedNoteIds.includes(n.id));
         if (moved.length === 0) {
             return null;
         }
@@ -135,7 +131,7 @@ export const FingeringDiagramPanel = ({
             data-ui-overlay
             className="pointer-events-none absolute inset-x-0 bottom-[calc(4.5rem+var(--safe-bottom))] z-30 flex justify-center px-2 sm:bottom-6"
         >
-            <div className="pointer-events-auto w-full max-w-xl rounded-2xl border border-stone-200 bg-white/95 p-3 shadow-xl backdrop-blur">
+            <div className="chrome-glass pointer-events-auto w-full max-w-xl rounded-2xl border border-stone-200 bg-white/95 p-3 shadow-xl backdrop-blur">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-semibold text-stone-800">Fingering — p. {region.page + 1}</h3>
                     <div className="flex items-center gap-1">
@@ -149,7 +145,7 @@ export const FingeringDiagramPanel = ({
                                     type="button"
                                     aria-pressed={effectiveSource === 'annotated'}
                                     onClick={() => setSource('annotated')}
-                                    className={`rounded-md px-2 py-1 transition ${
+                                    className={`rounded-md px-2 py-1 transition-colors ${
                                         effectiveSource === 'annotated'
                                             ? 'bg-accent-soft text-accent'
                                             : 'text-stone-600'
@@ -161,7 +157,7 @@ export const FingeringDiagramPanel = ({
                                     type="button"
                                     aria-pressed={effectiveSource === 'suggested'}
                                     onClick={() => setSource('suggested')}
-                                    className={`rounded-md px-2 py-1 transition ${
+                                    className={`rounded-md px-2 py-1 transition-colors ${
                                         effectiveSource === 'suggested'
                                             ? 'bg-accent-soft text-accent'
                                             : 'text-stone-600'
@@ -180,7 +176,7 @@ export const FingeringDiagramPanel = ({
                             type="button"
                             aria-label="Close fingering diagram"
                             onClick={onClose}
-                            className="rounded-lg p-1.5 text-stone-500 transition hover:bg-stone-100"
+                            className="rounded-lg p-1.5 text-stone-500 transition-colors hover:bg-stone-100"
                         >
                             <CloseIcon size={16} />
                         </button>
@@ -211,10 +207,7 @@ export const FingeringDiagramPanel = ({
                         {pressed.length > 0 ? (
                             <span className="tabular-nums text-stone-500">
                                 {pressed
-                                    .map(
-                                        (p) =>
-                                            `${midiToName(p.midi, region.keySignature)}·${String(p.finger ?? '?')}`,
-                                    )
+                                    .map((p) => `${midiToName(p.midi, region.keySignature)}·${String(p.finger ?? '?')}`)
                                     .join('  ')}
                             </span>
                         ) : null}
@@ -282,10 +275,9 @@ export const FingeringDiagramPanel = ({
                         </div>
                         <p className="mt-1.5 text-[11px] leading-snug text-stone-500">
                             One good option, not the only one — editions differ
-                            {optionCount > 1 ? '; try Option 2/3 for nearby alternatives' : ''}. Suggestions
-                            consider only the selected notes. Select through the end of a phrase so crossings
-                            land where the music continues. A “?” badge means the reach exceeds the chosen hand
-                            size.
+                            {optionCount > 1 ? '; try Option 2/3 for nearby alternatives' : ''}. Suggestions consider
+                            only the selected notes. Select through the end of a phrase so crossings land where the
+                            music continues. A “?” badge means the reach exceeds the chosen hand size.
                         </p>
                     </div>
                 ) : null}

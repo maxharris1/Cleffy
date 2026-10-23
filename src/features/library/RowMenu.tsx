@@ -160,7 +160,7 @@ const MenuPopover = ({
                 aria-expanded={open}
                 aria-label="Score actions"
                 onClick={() => setOpen((v) => !v)}
-                className={`relative grid place-items-center rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 ${
+                className={`relative grid place-items-center rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-ink/5 hover:text-stone-600 ${
                     inline
                         ? 'pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-3 pointer-coarse:before:-inset-y-2'
                         : 'pointer-coarse:before:absolute pointer-coarse:before:-inset-2'
@@ -186,7 +186,7 @@ const MenuItem = ({ label, danger = false, onClick }: { label: string; danger?: 
         type="button"
         role="menuitem"
         onClick={onClick}
-        className={`w-full px-3 py-2 text-left text-sm transition hover:bg-ink/5 ${
+        className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-ink/5 ${
             danger ? 'text-danger' : 'text-stone-800'
         }`}
     >

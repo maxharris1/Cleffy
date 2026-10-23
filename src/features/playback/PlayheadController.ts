@@ -2,6 +2,7 @@ import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { measureIndexAtTick, xAtTickInMeasure } from '@/features/playback/scoreTime';
 import { NO_OBSCURED, clampScroll, scrollForPagePoint, type ObscuredEdges } from '@/features/viewer/geometry';
 import type { DocumentLayout } from '@/features/viewer/geometry';
+import { prefersReducedMotion } from '@/lib/motion';
 import { useViewerStore } from '@/state/store';
 import type { ScoreData } from '@/types/scoreData';
 
@@ -242,6 +243,12 @@ export class PlayheadController {
             height,
             obscured,
         );
+        if (prefersReducedMotion()) {
+            // No glide: the view jumps straight to the playhead's system.
+            this.anim = null;
+            store.setView({ scale: view.scale, scrollX: target.scrollX, scrollY: target.scrollY });
+            return;
+        }
         this.anim = {
             from: { x: view.scrollX, y: view.scrollY },
             to: { x: target.scrollX, y: target.scrollY },

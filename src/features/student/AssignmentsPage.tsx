@@ -276,7 +276,7 @@ const AssignmentCard = ({ score: { assignment, document: doc } }: { score: Assig
         <li>
             <Link
                 to={`/doc/${assignment.document_id}`}
-                className="block rounded-xl border border-stone-300/60 bg-white/70 px-4 py-3.5 transition hover:border-accent/50 hover:bg-white"
+                className="block rounded-xl border border-stone-300/60 bg-white/70 px-4 py-3.5 transition-colors hover:border-accent/50 hover:bg-white"
             >
                 <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
                     {/* Two lines before it ellipsizes — a long catalogue title

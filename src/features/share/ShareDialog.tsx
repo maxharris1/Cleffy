@@ -253,7 +253,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                             type="button"
                             aria-pressed={linkRole === r}
                             onClick={() => setLinkRole(r)}
-                            className={`rounded-md px-3 py-1.5 text-sm transition ${
+                            className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
                                 linkRole === r ? 'bg-accent text-white' : 'text-stone-600 hover:bg-ink/5'
                             }`}
                         >
@@ -310,7 +310,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                             type="button"
                                             disabled={expired}
                                             onClick={() => void copy(link.token)}
-                                            className="rounded px-2 py-1 text-xs text-accent transition hover:bg-accent-soft disabled:opacity-40 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                                            className="rounded px-2 py-1 text-xs text-accent transition-colors hover:bg-accent-soft disabled:opacity-40 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                                         >
                                             {copiedToken === link.token ? 'Copied!' : 'Copy'}
                                         </button>
@@ -318,7 +318,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                         <button
                                             type="button"
                                             onClick={() => setRevokeTarget(link)}
-                                            className="rounded px-2 py-1 text-xs text-danger transition hover:bg-red-50 pointer-coarse:ml-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                                            className="rounded px-2 py-1 text-xs text-danger transition-colors hover:bg-red-50 pointer-coarse:ml-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                                         >
                                             Revoke
                                         </button>
@@ -382,7 +382,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                                 aria-label={`Remove ${label}`}
                                                 disabled={busy}
                                                 onClick={() => setRemoveTarget(member)}
-                                                className="rounded px-2 py-1 text-xs text-danger transition hover:bg-red-50 disabled:opacity-40"
+                                                className="rounded px-2 py-1 text-xs text-danger transition-colors hover:bg-red-50 disabled:opacity-40"
                                             >
                                                 Remove
                                             </button>
@@ -407,7 +407,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                     setRevokeTarget(target);
                                 }
                             }}
-                            className="rounded px-2 py-1 text-xs text-danger transition hover:bg-red-50"
+                            className="rounded px-2 py-1 text-xs text-danger transition-colors hover:bg-red-50"
                         >
                             Revoke that link…
                         </button>

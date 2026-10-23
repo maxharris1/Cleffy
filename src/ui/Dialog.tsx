@@ -134,7 +134,7 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
                             type="button"
                             aria-label="Close"
                             onClick={onClose}
-                            className="inline-flex size-7.5 shrink-0 items-center justify-center rounded-lg text-stone-500 transition hover:bg-stone-100 pointer-coarse:-m-[7px] pointer-coarse:size-11"
+                            className="inline-flex size-7.5 shrink-0 items-center justify-center rounded-lg text-stone-500 transition-colors hover:bg-stone-100 pointer-coarse:-m-[7px] pointer-coarse:size-11"
                         >
                             <CloseIcon size={18} className="shrink-0" />
                         </button>

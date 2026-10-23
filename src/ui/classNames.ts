@@ -8,7 +8,7 @@ export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'dang
 export type ButtonSize = 'md' | 'sm';
 
 const BUTTON_BASE =
-    'inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap font-medium transition disabled:cursor-default disabled:opacity-50';
+    'inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-colors disabled:cursor-default disabled:opacity-50';
 
 const BUTTON_SIZE_CLASSES: Record<ButtonSize, string> = {
     md: 'rounded-xl px-5 py-3',
@@ -38,7 +38,7 @@ const FIELD_SIZE_CLASSES: Record<FieldSize, string> = {
  * in index.css (accent border + soft ring), which replaces the default outline.
  */
 export const fieldClassName = (size: FieldSize = 'md', extra = ''): string =>
-    `landing-input w-full border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
+    `landing-input w-full border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition-colors placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
 
 /**
  * Filter/facet chip — pill toggle matching the transport bar's pill language.
@@ -47,7 +47,7 @@ export const fieldClassName = (size: FieldSize = 'md', extra = ''): string =>
  */
 export const chipClassName = (active: boolean, extra = ''): string =>
     [
-        'inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-xs font-medium transition',
+        'inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-xs font-medium transition-colors',
         active ? 'border-accent bg-accent-soft text-accent' : 'border-stone-200 text-stone-600 hover:bg-ink/5',
         extra,
     ]
@@ -62,4 +62,4 @@ export const fieldLabelClassName = 'block text-xs font-medium uppercase tracking
  * still hold and desktop is unchanged.
  */
 export const linkClassName =
-    'relative text-sm text-accent underline decoration-accent/30 underline-offset-2 transition hover:text-accent-hover hover:decoration-accent/60 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';
+    'relative text-sm text-accent underline decoration-accent/30 underline-offset-2 transition-colors hover:text-accent-hover hover:decoration-accent/60 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';

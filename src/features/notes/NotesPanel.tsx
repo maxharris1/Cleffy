@@ -328,7 +328,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                     onClick={() =>
                                                         setMenuFor((current) => (current === note.id ? null : note.id))
                                                     }
-                                                    className="rounded-lg p-1.5 text-stone-500 transition hover:bg-ink/5 pointer-coarse:-m-2 pointer-coarse:p-3.5"
+                                                    className="rounded-lg p-1.5 text-stone-500 transition-colors hover:bg-ink/5 pointer-coarse:-m-2 pointer-coarse:p-3.5"
                                                 >
                                                     <MoreVerticalIcon size={16} />
                                                 </button>

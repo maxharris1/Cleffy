@@ -56,7 +56,7 @@ const DEFAULT_INSTRUMENT = 'piano';
 
 /** Chip strips scroll on phones (like the library's) and wrap from sm up. */
 const CHIP_ROW_CLASS =
-    'no-scrollbar -mx-4 flex items-center gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0';
+    'no-scrollbar -mx-4 flex items-center gap-2 overflow-x-auto overscroll-x-contain px-4 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0';
 
 /** The library shelf's exact columns — both pages fill the same shell width. */
 const GRID_UL_CLASS = 'grid grid-cols-2 gap-x-5 gap-y-7 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6';
@@ -464,7 +464,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     type="button"
                     onClick={() => onSelectTitle(hit.title)}
                     disabled={disabled}
-                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
+                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
                 >
                     <span className="text-sm font-medium text-stone-800">{highlightMatches(parsed.work, tokens)}</span>
                     {composer ? (
@@ -653,7 +653,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                                                 type="button"
                                                 onClick={() => onSelectTitle(item.title)}
                                                 disabled={disabled}
-                                                className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
+                                                className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
                                             >
                                                 <span className="text-sm font-medium text-stone-800">{item.label}</span>
                                                 <span className="text-xs text-stone-500">

@@ -1065,7 +1065,7 @@ export const LibraryPage = () => {
                             ) : null}
                         </div>
 
-                        <div className="no-scrollbar -mx-4 mt-2 flex items-center gap-2 overflow-x-auto px-4 py-0.5 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0">
+                        <div className="no-scrollbar -mx-4 mt-2 flex items-center gap-2 overflow-x-auto overscroll-x-contain px-4 py-0.5 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0">
                             <FilterChip active={favoritesOnly} onClick={() => setFavoritesOnly((v) => !v)}>
                                 Favorites
                             </FilterChip>
@@ -1322,7 +1322,7 @@ const SortToggle = ({ sort, onChange }: { sort: LibrarySort; onChange: (s: Libra
                 onClick={() => onChange(value)}
                 // On touch the hit area reaches past the 26px pill, up and down
                 // into the gaps around the toolbar row.
-                className={`relative h-full rounded-md px-2.5 font-medium transition pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2.5 ${
+                className={`relative h-full rounded-md px-2.5 font-medium transition-colors pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2.5 ${
                     sort === value ? 'bg-accent-soft text-accent' : 'text-stone-600 hover:text-stone-800'
                 }`}
             >
@@ -1351,7 +1351,7 @@ const AddScoreTile = ({
     onUpload: (file: File) => Promise<void>;
 }) => (
     <label
-        className={`flex aspect-[1/1.414] cursor-pointer flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed border-stone-300 text-stone-500 transition hover:border-accent hover:text-accent focus-within:border-accent focus-within:text-accent ${
+        className={`flex aspect-[1/1.414] cursor-pointer flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed border-stone-300 text-stone-500 transition-colors hover:border-accent hover:text-accent focus-within:border-accent focus-within:text-accent ${
             uploading || quotaExhausted ? 'pointer-events-none opacity-60' : ''
         }`}
     >
@@ -1403,7 +1403,7 @@ const ScoreRow = memo(
                 className={`library-list-item${entranceDelay === null ? ' library-card-settled' : ''}`}
                 style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
             >
-                <div className="group relative flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40 hover:bg-ink/[0.03]">
+                <div className="group relative flex items-center gap-0.5 border-b border-stone-300/50 transition-colors hover:border-accent/40 hover:bg-ink/[0.03]">
                     {/*
                       Sibling of the text block, not a child of it: that block turns
                       into a column on phones, which would stack the thumbnail above
@@ -1415,7 +1415,7 @@ const ScoreRow = memo(
                             <div className="flex min-w-0 items-center gap-2">
                                 <Link
                                     to={`/doc/${doc.id}`}
-                                    className="min-w-0 font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover sm:line-clamp-none sm:block sm:truncate after:absolute after:inset-0 after:content-['']"
+                                    className="min-w-0 font-medium text-stone-800 transition-colors line-clamp-2 group-hover:text-accent-hover sm:line-clamp-none sm:block sm:truncate after:absolute after:inset-0 after:content-['']"
                                 >
                                     {stripComposer ? displayTitleOf(doc.title) : doc.title}
                                 </Link>
@@ -1442,7 +1442,7 @@ const ScoreRow = memo(
                                             <button
                                                 type="button"
                                                 onClick={() => actions.filterTag(tag.id)}
-                                                className="relative max-w-[8rem] text-xs text-stone-500 transition hover:text-stone-700 hover:underline pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2"
+                                                className="relative max-w-[8rem] text-xs text-stone-500 transition-colors hover:text-stone-700 hover:underline pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2"
                                                 title={`Filter by ${tag.name}`}
                                             >
                                                 {/* Truncated inside, not on the button: its overflow
@@ -1460,7 +1460,7 @@ const ScoreRow = memo(
                                         <button
                                             type="button"
                                             onClick={onTags}
-                                            className="text-xs text-stone-400 transition hover:text-stone-600"
+                                            className="text-xs text-stone-400 transition-colors hover:text-stone-600"
                                             aria-label={`Edit tags, ${overflow} more`}
                                         >
                                             +{overflow}
@@ -1486,7 +1486,7 @@ const ScoreRow = memo(
                         aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                         title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                         onClick={() => actions.toggleFavorite(doc, !isFavorite)}
-                        className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
+                        className={`relative grid place-items-center rounded-lg p-2 transition-colors hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
                             isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
                         }`}
                     >
@@ -1497,7 +1497,7 @@ const ScoreRow = memo(
                         aria-label={hasTags ? 'Edit tags' : 'Add tags'}
                         title={hasTags ? 'Edit tags' : 'Add tags'}
                         onClick={onTags}
-                        className={`relative grid place-items-center rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:mx-1.5 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
+                        className={`relative grid place-items-center rounded-lg p-2 transition-colors hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:mx-1.5 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
                             hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
                         }`}
                     >

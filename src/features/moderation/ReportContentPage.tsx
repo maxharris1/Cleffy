@@ -239,7 +239,7 @@ export const ReportContentPage = () => {
                             ).map(([value, title, description]) => (
                                 <label
                                     key={value}
-                                    className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-3 transition ${kind === value ? 'border-accent bg-accent-soft' : 'border-stone-300/90 bg-white/70'}`}
+                                    className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-3 transition-colors ${kind === value ? 'border-accent bg-accent-soft' : 'border-stone-300/90 bg-white/70'}`}
                                 >
                                     <input
                                         type="radio"

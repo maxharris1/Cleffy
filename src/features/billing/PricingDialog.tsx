@@ -149,7 +149,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                             aria-pressed={interval === option}
                             onClick={() => setInterval(option)}
                             className={[
-                                'cursor-pointer rounded-lg px-3 py-1.5 text-sm transition',
+                                'cursor-pointer rounded-lg px-3 py-1.5 text-sm transition-colors',
                                 interval === option
                                     ? 'bg-accent-soft font-medium text-accent'
                                     : 'text-stone-600 hover:bg-ink/5',
@@ -168,7 +168,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                             <section
                                 key={card.tier}
                                 className={[
-                                    'rounded-2xl border p-4 transition',
+                                    'rounded-2xl border p-4 transition-colors',
                                     isCurrent ? 'border-accent/40 bg-accent-soft/30' : 'border-stone-200 bg-white',
                                 ].join(' ')}
                             >

@@ -43,7 +43,7 @@ export const ImslpScoreCard = ({
             type="button"
             onClick={onClick}
             disabled={disabled}
-            className="group block w-full text-left transition disabled:opacity-50"
+            className="group block w-full text-left transition-colors disabled:opacity-50"
         >
             <div
                 aria-hidden="true"
@@ -58,7 +58,7 @@ export const ImslpScoreCard = ({
                   `display: -webkit-box`, and the two utilities set the same
                   property (see ScoreCard's identical note).
                 */}
-                <span className="text-sm font-medium text-stone-800 transition line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover">
+                <span className="text-sm font-medium text-stone-800 transition-colors line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover">
                     {title}
                 </span>
                 {composer ? <span className="mt-0.5 block truncate text-xs text-stone-500">{composer}</span> : null}

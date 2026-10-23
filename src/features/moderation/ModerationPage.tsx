@@ -16,6 +16,7 @@ import {
 } from '@/features/moderation/moderationApi';
 import { REPEAT_INFRINGER_STRIKES } from '@/features/moderation/moderationRules';
 import { usePagedList, type PagedList } from '@/features/moderation/usePagedList';
+import { scrollBehavior } from '@/lib/motion';
 import { Button } from '@/ui/Button';
 import { fieldClassName, fieldLabelClassName, linkClassName } from '@/ui/classNames';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -228,7 +229,7 @@ export const ModerationPage = () => {
         });
         setNotice(null);
         setActionError(null);
-        document.getElementById('takedown-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        document.getElementById('takedown-form')?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
     };
 
     const submitDraft = (event: FormEvent) => {

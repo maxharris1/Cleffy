@@ -356,7 +356,7 @@ export const ImportReviewPanel = ({
                             </label>
                         </div>
 
-                        <ul className="mt-3 flex max-h-72 flex-col gap-3 overflow-y-auto pr-1">
+                        <ul className="mt-3 flex max-h-72 flex-col gap-3 overflow-y-auto overscroll-contain pr-1">
                             {proposal.pages.map((page) => (
                                 <PageSection
                                     key={page.pageIndex}

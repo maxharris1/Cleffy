@@ -116,7 +116,7 @@ const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean;
  */
 const SHELL_CONTAINER = 'mx-auto w-full max-w-[100rem] px-4 sm:px-6 lg:px-10';
 
-const NAV_LINK_BASE = 'shrink-0 rounded-lg px-3 py-1.5 text-sm transition';
+const NAV_LINK_BASE = 'shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors';
 const NAV_LINK_ACTIVE = 'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50';
 const NAV_LINK_IDLE = 'text-stone-600 hover:bg-ink/5 hover:text-stone-900';
 
@@ -434,7 +434,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 progress and the account menu stay reachable from any page. */}
             <header
                 ref={headerRef}
-                className="sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur"
+                className="chrome-paper sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur"
             >
                 <div
                     className={`${SHELL_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-6 sm:py-0`}
@@ -450,7 +450,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         one gutter short and strand the last link behind a dead margin. */}
                     <nav
                         aria-label="Main"
-                        className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto px-4 sm:order-none sm:mx-0 sm:w-auto sm:overflow-x-visible sm:px-0"
+                        className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto overscroll-x-contain px-4 sm:order-none sm:mx-0 sm:w-auto sm:overflow-x-visible sm:px-0"
                     >
                         {navItems.map((item) => (
                             <NavLink
@@ -676,7 +676,7 @@ const AccountMenu = ({
                 aria-expanded={open}
                 aria-label={`Account menu (${userLabel})`}
                 onClick={() => setOpenedAt(open ? null : pathname)}
-                className="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition hover:bg-ink/5 sm:pr-1.5"
+                className="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-ink/5 sm:pr-1.5"
             >
                 <span
                     aria-hidden="true"
@@ -702,7 +702,7 @@ const AccountMenu = ({
                         role="menuitem"
                         to="/account"
                         onClick={close}
-                        className="block px-3 py-2 text-sm text-stone-800 transition hover:bg-ink/5"
+                        className="block px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-ink/5"
                     >
                         Account
                     </Link>
@@ -710,7 +710,7 @@ const AccountMenu = ({
                         role="menuitem"
                         href={`mailto:${LEGAL_ENTITY.contactEmail}`}
                         onClick={close}
-                        className="block px-3 py-2 text-sm text-stone-800 transition hover:bg-ink/5"
+                        className="block px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-ink/5"
                     >
                         Help &amp; support
                     </a>
@@ -722,7 +722,7 @@ const AccountMenu = ({
                             close();
                             onSignOut();
                         }}
-                        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5 disabled:cursor-default disabled:text-stone-400 disabled:hover:bg-transparent"
+                        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition-colors hover:bg-ink/5 disabled:cursor-default disabled:text-stone-400 disabled:hover:bg-transparent"
                     >
                         {signingOut ? 'Saving changes…' : 'Sign out'}
                     </button>
@@ -734,7 +734,7 @@ const AccountMenu = ({
                                 role="menuitem"
                                 to={to}
                                 onClick={close}
-                                className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
+                                className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition-colors hover:bg-ink/5"
                             >
                                 {label}
                             </Link>

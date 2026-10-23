@@ -154,7 +154,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
             type="button"
             aria-label="Dismiss"
             onClick={() => setState('dismissed')}
-            className="rounded p-1 text-amber-700 transition hover:text-amber-900"
+            className="rounded p-1 text-amber-700 transition-colors hover:text-amber-900"
         >
             <CloseIcon size={16} />
         </button>

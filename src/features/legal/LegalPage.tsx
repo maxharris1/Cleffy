@@ -131,7 +131,10 @@ const LegalPage = ({ document: doc }: { document: LegalDocument }) => (
                     <ol className="grid gap-1 text-sm sm:grid-cols-2">
                         {doc.sections.map((section) => (
                             <li key={section.id}>
-                                <a href={`#${section.id}`} className="text-stone-600 transition hover:text-accent">
+                                <a
+                                    href={`#${section.id}`}
+                                    className="text-stone-600 transition-colors hover:text-accent"
+                                >
                                     {section.heading}
                                 </a>
                             </li>

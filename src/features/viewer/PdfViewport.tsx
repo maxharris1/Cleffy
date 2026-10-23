@@ -999,7 +999,7 @@ const ReadOnlyFingeringToggle = () => {
                 aria-pressed={active}
                 title={active ? 'Stop selecting' : 'Fingering — drag over a chord or phrase'}
                 onClick={() => useViewerStore.getState().setTool(active ? 'pan' : 'fingering')}
-                className={`pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg backdrop-blur transition ${
+                className={`pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg backdrop-blur transition-colors ${
                     active
                         ? 'border-accent bg-accent-soft text-accent'
                         : 'border-stone-200 bg-white/95 text-stone-600 hover:bg-white'
@@ -1072,7 +1072,7 @@ const Pager = ({
 };
 
 const roundControlClassName =
-    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition active:bg-stone-100';
+    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition-colors active:bg-stone-100';
 
 const pagerButtonClassName = `${roundControlClassName} disabled:opacity-40 disabled:active:bg-white`;
 
