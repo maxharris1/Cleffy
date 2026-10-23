@@ -92,7 +92,7 @@ describe('deletion-pending policy per writer (launch-fix item 16, decision 70(1)
         expect(events).toMatch(/await store\.releaseEvent\(event\.id\);\s+return \{\s+status: 503,/);
         const cancel = read('supabase/functions/_shared/cancelFlow.ts');
         const pending = cancel.slice(cancel.indexOf('const deletionPendingCancel = async'));
-        expect(pending.slice(0, 400)).toContain('await requestRefund(deps, body, resolved, mirrored, true)');
+        expect(pending.slice(0, 400)).toContain('await requestRefund(deps, body, resolved, mirrored)');
         expect(pending.slice(0, 400)).not.toContain('cancelAtPeriodEnd');
         expect(pending.slice(0, 400)).not.toContain('consumeToken');
     });
