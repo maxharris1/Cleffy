@@ -90,6 +90,16 @@ describe('deletion-pending policy per writer (launch-fix item 16, decision 70(1)
         const events = read('supabase/functions/_shared/stripeEvents.ts');
         expect(events).toContain('const deletionRefusal = async (');
         expect(events).toMatch(/await store\.releaseEvent\(event\.id\);\s+return \{\s+status: 503,/);
+        // Asked again after Stripe's read, right before the row and before the
+        // archive or restore (decision 72(2)).
+        const apply = events.slice(events.indexOf('const applySubscription = async ('));
+        const firstAsk = apply.indexOf('await deletionRefusal(store, event, [userId])');
+        expect(firstAsk).toBeGreaterThan(-1);
+        expect(apply.indexOf('await store.upsertSubscription(')).toBeGreaterThan(firstAsk);
+        const secondAsk = apply.indexOf('await deletionRefusal(store, event, [userId])', firstAsk + 1);
+        expect(secondAsk).toBeGreaterThan(apply.indexOf('await store.upsertSubscription('));
+        expect(apply.indexOf('await store.restorePlanArchivedScores(')).toBeGreaterThan(secondAsk);
+        expect(apply.indexOf('await store.applyFreeTierArchival(')).toBeGreaterThan(secondAsk);
         const cancel = read('supabase/functions/_shared/cancelFlow.ts');
         const pending = cancel.slice(cancel.indexOf('const deletionPendingCancel = async'));
         expect(pending.slice(0, 400)).toContain('await requestRefund(deps, body, resolved, mirrored)');

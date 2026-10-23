@@ -2203,7 +2203,145 @@ describe('an account whose deletion is pending', () => {
             PRICE_TIERS,
         );
         expect(result.status).toBe(200);
-        expect(store.deletionChecks).toEqual(['teacher-1', 'teacher-1']);
+        // Before the lock; then, after Stripe's read, before the row and
+        // before the scores (decision 72(2)).
+        expect(store.deletionChecks).toEqual(['teacher-1', 'teacher-1', 'teacher-1']);
+    });
+});
+
+/**
+ * Codex r1 finding 3 on #73, decision 72(2): the check before the lock is a
+ * moment, not a lock. A deletion can begin while the event reads Stripe, or
+ * between the row's write and the archive or restore that follows it; the
+ * webhook asks again right before each, and on a pending answer writes nothing
+ * more, releases the claim and answers 503 -- so the retry is processed
+ * normally if the deletion is abandoned.
+ */
+describe('a deletion that begins while the event is being applied', () => {
+    let store: FakeStore;
+
+    beforeEach(() => {
+        store = new FakeStore();
+    });
+
+    const ACTIVE: StripeSubscriptionLike = {
+        id: 'sub_1',
+        status: 'active',
+        customer: 'cus_1',
+        current_period_end: 1_800_000_000,
+        items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+        metadata: { user_id: 'teacher-1' },
+    };
+    /** Stripe's read is where the deletion begins: clear before it, pending after. */
+    const deletionBeginsDuringStripeRead = () => {
+        const read = store.fetchSubscription;
+        store.fetchSubscription = async (id: string) => {
+            store.deletion.set('teacher-1', 'pending');
+            return read(id);
+        };
+    };
+    const refusedAndReleased = (result: unknown, eventId: string) => {
+        expect(result).toEqual({ status: 503, body: { error: 'account_deletion_pending', retry: true } });
+        expect(store.events.has(eventId)).toBe(false);
+        expect(store.released).toContain(eventId);
+        expect(store.locks.size).toBe(0);
+    };
+
+    it('a subscription event: nothing written after the Stripe read, the claim released', async () => {
+        deletionBeginsDuringStripeRead();
+        const result = await deliver(store, subscriptionEvent('evt_race_sub', 'customer.subscription.updated'));
+        refusedAndReleased(result, 'evt_race_sub');
+        expect(store.writes).toEqual([]);
+        expect(store.subscriptions.size).toBe(0);
+        expect(store.restored).toEqual([]);
+        expect(store.cancellations).toEqual([]);
+    });
+
+    it('a checkout: the customer link made before it stands, but no subscription row and no purchase notice', async () => {
+        store.remote.set('sub_1', ACTIVE);
+        deletionBeginsDuringStripeRead();
+        const result = await handleStripeEvent(
+            {
+                id: 'evt_race_checkout',
+                type: 'checkout.session.completed',
+                created: EVENT_CREATED,
+                data: {
+                    object: {
+                        id: 'cs_1',
+                        customer: 'cus_1',
+                        subscription: 'sub_1',
+                        client_reference_id: 'teacher-1',
+                        metadata: { user_id: 'teacher-1', consent_id: 'consent-1' },
+                        amount_total: 2100,
+                        currency: 'eur',
+                    },
+                },
+            },
+            store,
+            PRICE_TIERS,
+        );
+        refusedAndReleased(result, 'evt_race_checkout');
+        expect(store.writes).toEqual([]);
+        expect(store.purchases).toEqual([]);
+    });
+
+    it('an invoice: nothing written after the Stripe read', async () => {
+        await deliver(store, subscriptionEvent('evt_start', 'customer.subscription.created'));
+        const writes = store.writes.length;
+        deletionBeginsDuringStripeRead();
+        const result = await handleStripeEvent(
+            { id: 'evt_race_inv', type: 'invoice.paid', data: { object: { subscription: 'sub_1' } } },
+            store,
+            PRICE_TIERS,
+        );
+        refusedAndReleased(result, 'evt_race_inv');
+        expect(store.writes.length).toBe(writes);
+    });
+
+    it('between the row and its restore: no scores restored, the claim released', async () => {
+        const upsert = store.upsertSubscription;
+        store.upsertSubscription = async (row, holder) => {
+            const written = await upsert(row, holder);
+            store.deletion.set('teacher-1', 'pending');
+            return written;
+        };
+        const result = await deliver(store, subscriptionEvent('evt_race_restore', 'customer.subscription.updated'));
+        refusedAndReleased(result, 'evt_race_restore');
+        expect(store.restored).toEqual([]);
+        expect(store.archived).toEqual([]);
+    });
+
+    it('between the row and its archive: no scores archived', async () => {
+        const upsert = store.upsertSubscription;
+        store.upsertSubscription = async (row, holder) => {
+            const written = await upsert(row, holder);
+            store.deletion.set('teacher-1', 'pending');
+            return written;
+        };
+        const result = await deliver(
+            store,
+            subscriptionEvent('evt_race_archive', 'customer.subscription.updated', { status: 'unpaid' }),
+        );
+        refusedAndReleased(result, 'evt_race_archive');
+        expect(store.archived).toEqual([]);
+    });
+
+    it('deletion abandoned: the retried event is processed normally, once', async () => {
+        const event = subscriptionEvent('evt_race_retry', 'customer.subscription.updated');
+        const read = store.fetchSubscription;
+        deletionBeginsDuringStripeRead();
+        expect((await deliver(store, event)).status).toBe(503);
+
+        store.fetchSubscription = read;
+        store.deletion.delete('teacher-1');
+        expect(await deliverLate(store, event)).toEqual({
+            status: 200,
+            body: { received: true, applied: 'subscription_upserted' },
+        });
+        expect(store.subscriptions.get('sub_1')).toMatchObject({ user_id: 'teacher-1', status: 'active' });
+        expect(store.restored).toEqual(['teacher-1']);
+        expect((await deliverLate(store, event)).body).toMatchObject({ duplicate: true });
+        expect(store.writes).toEqual(['sub_1']);
     });
 });
 

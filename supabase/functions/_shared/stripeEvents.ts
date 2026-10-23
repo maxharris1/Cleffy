@@ -938,6 +938,15 @@ const applySubscription = async (
     priceTiers: Record<string, BillingTier>,
     holder: string,
 ): Promise<WebhookResult | null> => {
+    // Asked again right before each write (Codex r1 finding 3 on #73, decision
+    // 72(2)): the check before the lock is a moment, and a deletion can begin
+    // during the Stripe read every caller makes first, or between the row and
+    // the archive or restore below. Pending: nothing more is written, the
+    // claim is released, 503 (deletionRefusal).
+    const beforeRow = await deletionRefusal(store, event, [userId]);
+    if (beforeRow) {
+        return beforeRow;
+    }
     const written = await store.upsertSubscription(
         subscriptionRowFrom(sub, userId, priceTiers, eventStampOf(event)),
         holder,
@@ -949,6 +958,10 @@ const applySubscription = async (
         return await leaseLost(store, event, sub.id);
     }
     await linkDistrictCustomer(store, sub, userId);
+    const beforeScores = await deletionRefusal(store, event, [userId]);
+    if (beforeScores) {
+        return beforeScores;
+    }
     if (shouldArchiveOnStatus(sub.status)) {
         await store.applyFreeTierArchival(userId);
     } else if (isEntitlingStatus(sub.status)) {
@@ -1328,8 +1341,9 @@ const dispatchStripeEvent = async (
             }
             // Before the lock (decision 70(1)): whoever the database already
             // ties this invoice to. The user the Stripe read resolves is asked
-            // again below, before the write -- after the lock, where only a
-            // duplicate refund some earlier delivery still owed can have run.
+            // again before the write (applySubscription) -- after the lock,
+            // where only a duplicate refund some earlier delivery still owed
+            // can have run.
             const invoiceCustomer = idOf(invoice.customer);
             const pendingInvoice = await deletionRefusal(store, event, [
                 invoiceCustomer ? await store.userIdForCustomer(invoiceCustomer) : null,
@@ -1360,11 +1374,8 @@ const dispatchStripeEvent = async (
                 if (!userId) {
                     return { status: 200, body: { received: true, ignored: 'unknown_user' } };
                 }
-                const pendingPayer = await deletionRefusal(store, event, [userId]);
-                if (pendingPayer) {
-                    return pendingPayer;
-                }
-
+                // The payer the Stripe read resolved is asked before the
+                // write, in applySubscription, as every event's is.
                 const refused = await applySubscription(store, event, sub, userId, priceTiers, holder);
                 if (refused) {
                     return refused;
