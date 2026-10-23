@@ -13,9 +13,12 @@
 --      nothing again;
 --   2. the guard still refuses every other un-spend: a direct UPDATE by the
 --      service role (also in a session that never set the release's setting,
---      which reads NULL) or the table's owner, and one under a setting that names
---      another link; the setting is cleared before the release returns, and
---      lets nothing else through (an expiry moved later is still refused);
+--      which reads NULL) or the table's owner, one under a setting that names
+--      another link, and -- since the guard asks account_deletion_pending()
+--      itself (Codex r2 finding 3 on #73) -- one under a setting that names
+--      the link's own hash while its account is clear; the setting is cleared
+--      before the release returns, and lets nothing else through (an expiry
+--      moved later is still refused);
 --   3. only the service role may call it; it is SECURITY DEFINER with its
 --      search_path pinned; it asks account_deletion_pending() before it takes
 --      the link's history locks, and writes in one UPDATE;
@@ -155,6 +158,29 @@ select pg_temp.refused('23 the setting lets nothing else through: an expiry move
 $q$select set_config('cleffy.cancel_link_release', pg_temp.h('other'), true);
    update public.billing_cancel_tokens set expires_at = expires_at + interval '1 day' where token_hash = pg_temp.h('other')$q$,
 '55000', 'a saved cancel link keeps its expiry');
+select set_config('cleffy.cancel_link_release', '', true);
+-- Codex r2 finding 3 on #73: the setting is the caller's to set, so a
+-- matching one alone is no authority. The guard asks account_deletion_pending()
+-- itself: on a clear account, a direct UPDATE under the link's own hash is
+-- refused like any other.
+select pg_temp.as_role('service_role');
+select pg_temp.refused('23b a matching setting on a clear account: the service role''s direct UPDATE is still refused',
+$q$select set_config('cleffy.cancel_link_release', pg_temp.h('spent'), true);
+   update public.billing_cancel_tokens set used_at = null where token_hash = pg_temp.h('spent')$q$,
+'55000', 'a spent cancel link stays spent');
+select set_config('cleffy.cancel_link_release', '', true);
+select pg_temp.refused('23c ... and another clear account''s link under its own hash too',
+$q$select set_config('cleffy.cancel_link_release', pg_temp.h('other'), true);
+   update public.billing_cancel_tokens set used_at = null where token_hash = pg_temp.h('other')$q$,
+'55000', 'a spent cancel link stays spent');
+select set_config('cleffy.cancel_link_release', '', true);
+select pg_temp.chk('23d (both links are still spent)',
+$q$select pg_temp.used('spent') is not null and pg_temp.used('other') is not null$q$);
+reset role;
+select pg_temp.refused('23e nor the table''s owner, under the matching setting',
+$q$select set_config('cleffy.cancel_link_release', pg_temp.h('spent'), true);
+   update public.billing_cancel_tokens set used_at = null where token_hash = pg_temp.h('spent')$q$,
+'55000', 'a spent cancel link stays spent');
 select set_config('cleffy.cancel_link_release', '', true);
 select pg_temp.as_role('service_role');
 insert into t_ids (label, v) values ('attempt2', public.begin_account_deletion_attempt (pg_temp.u(1))::text);

@@ -27058,8 +27058,11 @@ grant execute on function public.sweep_stale_account_deletions (integer) to serv
 --     20261020160700 defines it) refuses ANY update that un-spends a link --
 --     the service role's direct UPDATE included -- except the one this
 --     function makes, which names the link's hash in a transaction-local
---     setting first. Every other refusal is unchanged: no un-spending by
---     anyone else, no new expiry, nothing that changes what the link cancels;
+--     setting first, and only while the link's account is being deleted: the
+--     guard asks account_deletion_pending() itself, since the setting alone is
+--     one any service-role session can set (Codex r2 finding 3 on #73). Every
+--     other refusal is unchanged: no un-spending by anyone else, no new
+--     expiry, nothing that changes what the link cancels;
 --   * the deletion's lock is taken before the link's history locks
 --     (billing_cancel_link_lock, 20261020160600). Nothing that takes the
 --     deletion's lock exclusively (begin, settle, mark destructive, the stale
@@ -27098,8 +27101,11 @@ alter table public.billing_cancel_tokens add column if not exists refund_request
 -- ---------------------------------------------------------------------------
 -- As 20261020160700 defines it, with one exception to "a spent cancel link
 -- stays spent": used_at set back to null on the row whose hash
--- release_cancel_link_token_for_deletion named in cleffy.cancel_link_release.
--- A session that never set it reads NULL, coalesced to '': no hash matches.
+-- release_cancel_link_token_for_deletion named in cleffy.cancel_link_release,
+-- AND whose account's deletion is pending (account_deletion_pending(), asked
+-- here and not only by the release: the setting is one any service-role
+-- session can set). A session that never set it reads NULL, coalesced to '':
+-- no hash matches.
 create or replace function public.billing_cancel_tokens_lifetime ()
 returns trigger
 language plpgsql
@@ -27110,6 +27116,7 @@ declare
     v_status text;
     v_kind text;
     v_expires timestamptz;
+    v_release boolean;
 begin
     if tg_op = 'INSERT' then
         select o.status, o.kind, o.link_expires_at into v_status, v_kind, v_expires
@@ -27135,11 +27142,22 @@ begin
             raise exception 'a saved cancel link keeps its expiry and what it cancels'
                 using errcode = '55000';
         end if;
-        if old.used_at is not null and new.used_at is distinct from old.used_at
-           and not (new.used_at is null
-                    and coalesce(pg_catalog.current_setting('cleffy.cancel_link_release', true), '') = old.token_hash) then
-            raise exception 'a spent cancel link stays spent'
-                using errcode = '55000';
+        if old.used_at is not null and new.used_at is distinct from old.used_at then
+            -- The setting is the caller's to set, so it only says which link:
+            -- the guard asks account_deletion_pending() itself (Codex r2
+            -- finding 3 on #73). Asked last, and only for the one un-spend
+            -- the setting names: the release has already taken the deletion's
+            -- lock (shared, which this takes again without waiting), and
+            -- nothing else gets this far.
+            v_release := new.used_at is null
+                and coalesce(pg_catalog.current_setting('cleffy.cancel_link_release', true), '') = old.token_hash;
+            if v_release then
+                v_release := public.account_deletion_pending (old.user_id);
+            end if;
+            if not v_release then
+                raise exception 'a spent cancel link stays spent'
+                    using errcode = '55000';
+            end if;
         end if;
         if old.refund_request is not null and new.refund_request is distinct from old.refund_request then
             raise exception 'a cancel link keeps the refund request it first sent'
