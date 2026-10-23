@@ -2449,8 +2449,17 @@ The account refuses new scores, students, uploads, joins and checkouts until a
 deletion completes. Check `last_error` (billing, storage, auth) and fix the
 cause. Then ask the person to retry Delete account (it needs their session and
 password). If they cannot be reached, escalate to Max for a service-role
-completion. Never clear the row by hand while data is half-deleted. Untouched
-markers (no `destructive_started_at`, no live attempt) restrict nothing.
+completion. Never clear the row by hand while data is half-deleted. Mind the
+clock (decision 71(4)): while the account is pending, `stripe-webhook` answers
+its events 503 and Stripe retries a failed event for about 3 days, then stops.
+An account left half-deleted longer than that never receives those mirror
+events (subscription changes, invoices, checkouts), so `subscriptions` and
+`billing_customers` stay as they were when it stopped. That is safe for the
+money: the completing deletion's step 7 (`accountDeletion.ts`) sweeps Stripe
+again and cancels anything that can still bill, whatever the mirror says. But
+do not read the mirror as current for such an account; check Stripe itself.
+Untouched markers (no `destructive_started_at`, no live attempt) restrict
+nothing.
 `select public.sweep_stale_account_deletions();` (`20261022141000`, decision
 49(6)) removes them, closes attempts whose lease ran out, never touches a
 half-deleted row, and reports how many half-deleted rows wait for this runbook

@@ -87,6 +87,15 @@ describe('deletion-pending policy per writer (launch-fix item 16, decision 70(1)
         }
     });
 
+    it('the half-deleted runbook says Stripe stops retrying the refused events after about 3 days (decision 71(4))', () => {
+        const deploy = read('DEPLOY.md');
+        const runbook = deploy.slice(deploy.indexOf('**Half-deleted accounts**'));
+        const note = runbook.slice(0, runbook.indexOf('**Inbound support mail'));
+        expect(note).toMatch(/Stripe retries a failed event for about 3 days/);
+        expect(note).toMatch(/never receives those mirror\s+events/);
+        expect(note).toMatch(/step 7/);
+    });
+
     it('stripe-portal refuses a new portal session (409, or 503 for a check it could not make) before anything else (decision 71(6))', () => {
         const flow = read('supabase/functions/_shared/portalFlow.ts');
         const handler = flow.slice(flow.indexOf('export const handlePortal = async'));
