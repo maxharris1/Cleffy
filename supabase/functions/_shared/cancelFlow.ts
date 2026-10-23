@@ -120,6 +120,13 @@ export interface LiveSubscription {
 export interface LiveCancelToken {
     userId: string;
     mode: StripeMode;
+    /**
+     * The refund request kept with the link (keepRefundRequest) as the read
+     * found it, or null if none was yet: set once and never changed, so what
+     * is read here is what support was sent, even if the link is gone by the
+     * time this press would ask again (Codex r3 on #73).
+     */
+    refundRequest: RefundRequestMail | null;
 }
 
 /**
@@ -134,6 +141,18 @@ export type ConsumeTokenAnswer =
     /** Already spent. */
     | 'used'
     /** No such link. */
+    | 'not_found';
+
+/**
+ * What release_cancel_link_token_for_deletion answered (migration
+ * 20261022160000), under the account's deletion lock.
+ */
+export type ReleaseTokenAnswer =
+    /** The account is being deleted: the link is unspent again. */
+    | 'released'
+    /** The account is not being deleted: nothing changed. */
+    | 'clear'
+    /** No such link (its account may be gone). */
     | 'not_found';
 
 type Gate = { ok: true } | { ok: false; retryAfterSec: number };
@@ -227,6 +246,19 @@ export interface CancelLinkDeps {
     logError: (code: string, err: unknown) => void;
 }
 
+/**
+ * A link's refund request to support as it is sent: the email and the buyer's
+ * address it replies to. Kept with the link the first time (keepRefundRequest),
+ * so every later send under the link's one idempotency key is this, byte for
+ * byte.
+ */
+export interface RefundRequestMail {
+    subject: string;
+    text: string;
+    html: string;
+    replyTo: string;
+}
+
 export interface CancelDeps {
     json: (body: unknown, status?: number) => Response;
     /**
@@ -272,6 +304,24 @@ export interface CancelDeps {
     idempotencyKey: IdempotencyKey;
     terms: Pick<typeof BillingTerms, 'refundRequestEmail' | 'withinRefundWindow' | 'TRADER'>;
     planNameForPrice: (priceId: string | null) => string | null;
+    /**
+     * account_deletion_pending() for the link's account (deletionPending.ts),
+     * launch-fix item 16. `unknown` is a check that could not be answered.
+     */
+    accountDeletionPending: (userId: string) => Promise<'clear' | 'pending' | 'unknown'>;
+    /**
+     * After the link is spent: if the account's deletion is pending NOW, puts
+     * the link back unspent, in one statement under the deletion's lock
+     * (decision 72(1)). Throws when it cannot be asked.
+     */
+    releaseTokenIfDeletionPending: (hash: string) => Promise<ReleaseTokenAnswer>;
+    /**
+     * Keeps this link's refund request the first time it is sent, and answers
+     * with the one kept: what support is mailed for this link on every send,
+     * whatever the account's email or plan has become since (Codex r2 finding
+     * 2 on #73). null: no such link any more. Throws when it cannot be asked.
+     */
+    keepRefundRequest: (hash: string, request: RefundRequestMail) => Promise<RefundRequestMail | null>;
     now: () => number;
     logError: (code: string, err: unknown) => void;
 }
@@ -590,10 +640,86 @@ const summaryOf = (deps: CancelDeps, resolved: Resolved, subscription: Cancellab
     refundEligible: deps.terms.withinRefundWindow(resolved.firstPurchaseAt, deps.now()),
 });
 
+/**
+ * While the link's account is being deleted (launch-fix item 16, decision
+ * 70(1)). The deletion cancels every subscription itself, immediately, so the
+ * page leaves Stripe alone; and the link is NOT spent, so if the deletion is
+ * abandoned the same link -- or a new one -- cancels as usual. What it still
+ * does is the one thing the deletion does not: a refund request inside the 14
+ * days goes to support, because withdrawing is the buyer's legal right whatever
+ * happens to the account. The answer says plainly that nothing was cancelled
+ * here, and why.
+ *
+ * Nothing here reads Stripe: by now the deletion has usually cancelled the
+ * subscription already, and the page would otherwise answer "nothing to
+ * cancel" and never reach the refund request. The mirror says which
+ * subscription; the webhook leaves it alone while the deletion is pending.
+ */
+const deletionPendingSummary = (deps: CancelDeps, resolved: Resolved, mirrored: CancellableSubscription) => ({
+    ...summaryOf(deps, resolved, mirrored),
+    deletionPending: true,
+});
+
+const deletionPendingCancel = async (
+    deps: CancelDeps,
+    body: Record<string, unknown>,
+    resolved: Resolved,
+    mirrored: CancellableSubscription,
+): Promise<Response> => {
+    const refund = await requestRefund(deps, body, resolved, mirrored);
+    return deps.json({ cancelled: false, deletionPending: true, ...refund });
+};
+
+/**
+ * After the link is spent: has the account's deletion begun since the check
+ * before the spend (Codex r1 finding 3 on #73, decision 72(1))? Asked with
+ * release_cancel_link_token_for_deletion, which answers under the deletion's
+ * own lock and, if it has, puts the link back unspent in the same statement --
+ * so an abandoned deletion leaves a link that still cancels, as when the
+ * deletion was pending from the start. The answer is then that one's: Stripe
+ * left alone, the refund request sent. Null is "go on": the account is clear,
+ * or the question could not be answered -- the check before the spend said
+ * clear, and the cancel the buyer asked for is still the right thing to do.
+ */
+const deletionBeganSince = async (
+    deps: CancelDeps,
+    body: Record<string, unknown>,
+    resolved: Resolved,
+    mirrored: CancellableSubscription,
+): Promise<Response | null> => {
+    let answer: ReleaseTokenAnswer;
+    try {
+        answer = await deps.releaseTokenIfDeletionPending(resolved.hash);
+    } catch (err) {
+        deps.logError('cancel_token_release_failed', err);
+        return null;
+    }
+    return answer === 'released' ? deletionPendingCancel(deps, body, resolved, mirrored) : null;
+};
+
+/** What the deletion check answered, or the 503 for one it could not make. */
+const deletionCheck = async (deps: CancelDeps, resolved: Resolved): Promise<'clear' | 'pending' | Response> => {
+    const answer = await deps.accountDeletionPending(resolved.row.userId);
+    if (answer === 'unknown') {
+        deps.logError('cancel_deletion_check_failed', new Error('account_deletion_pending() did not answer'));
+        return deps.json(CANCEL_ERRORS.unavailable, 503);
+    }
+    return answer;
+};
+
 const peekCancel = async (deps: CancelDeps, body: Record<string, unknown>): Promise<Response> => {
     const resolved = await resolveToken(deps, body.token);
     if (resolved instanceof Response) {
         return resolved;
+    }
+    if (resolved.mirrored) {
+        const deletion = await deletionCheck(deps, resolved);
+        if (deletion instanceof Response) {
+            return deletion;
+        }
+        if (deletion === 'pending') {
+            return deps.json(deletionPendingSummary(deps, resolved, resolved.mirrored));
+        }
     }
     let subscription: CancellableSubscription | null;
     try {
@@ -613,8 +739,19 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     if (resolved instanceof Response) {
         return resolved;
     }
-    if (!resolved.mirrored) {
+    const mirrored = resolved.mirrored;
+    if (!mirrored) {
         return deps.json(CANCEL_ERRORS.nothingToCancel, 404);
+    }
+    // Before the link is spent or Stripe is read (decision 70(1)). A moment,
+    // not a lock: a deletion can begin right after it, which is what
+    // deletionBeganSince asks after the spend.
+    const deletion = await deletionCheck(deps, resolved);
+    if (deletion instanceof Response) {
+        return deletion;
+    }
+    if (deletion === 'pending') {
+        return deletionPendingCancel(deps, body, resolved, mirrored);
     }
 
     // The link first, before any Stripe call or the refund request (Codex
@@ -624,7 +761,8 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     // spends it, and only `consumed` goes on. It also decides which of two
     // racing clicks goes on, so support hears about a refund once. A Stripe
     // failure after it leaves the link spent: the buyer asks for a new one
-    // (decision 27). This function's clock decides nothing here.
+    // (decision 27) -- unless a deletion began meanwhile (deletionBeganSince).
+    // This function's clock decides nothing here.
     let spent: ConsumeTokenAnswer;
     try {
         spent = await deps.consumeToken(resolved.hash);
@@ -641,15 +779,29 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
     // Stripe's answer to the update SAYS cancelling: a buyer told "cancelled"
     // while Stripe is still going to renew is the one outcome this page must
     // never produce.
+    const notCancelled = async () =>
+        (await deletionBeganSince(deps, body, resolved, mirrored)) ?? deps.json(CANCEL_ERRORS.notCancelled, 502);
     let subscription: CancellableSubscription | null;
     try {
         subscription = await liveCopy(deps, resolved);
     } catch (err) {
         deps.logError('cancel_lookup_failed', err);
-        return deps.json(CANCEL_ERRORS.notCancelled, 502);
+        return notCancelled();
+    }
+    // Asked again now that Stripe has been read, and before it is written
+    // (decision 72(1)).
+    const began = await deletionBeganSince(deps, body, resolved, mirrored);
+    if (began) {
+        return began;
     }
     if (!subscription) {
-        return deps.json(CANCEL_ERRORS.nothingToCancel, 404);
+        // Already ended at Stripe -- by the portal, or by a deletion that has
+        // since completed or been abandoned. Nothing to cancel, but a refund
+        // asked for inside the 14 days still goes to support (decisions 71(2)
+        // and 72(1)): the same email, under the link's one key, as any other
+        // press of this link would send.
+        const refund = await requestRefund(deps, body, resolved, mirrored);
+        return deps.json({ ...CANCEL_ERRORS.nothingToCancel, ...refund }, 404);
     }
     let endsAt: string | null = subscription.periodEnd;
     if (!subscription.cancelAtPeriodEnd) {
@@ -657,40 +809,91 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
         try {
             updated = await deps.cancelAtPeriodEnd(subscription.subscriptionId, resolved.row.mode);
         } catch (err) {
+            // Also how a deletion that began after the question above shows
+            // up: it cancelled the subscription, and Stripe refuses the update.
             deps.logError('cancel_stripe_failed', err);
-            return deps.json(CANCEL_ERRORS.notCancelled, 502);
+            return notCancelled();
         }
         if (!updated.cancelling) {
             deps.logError(
                 'cancel_not_confirmed',
                 new Error(`Stripe did not confirm the cancellation of ${subscription.subscriptionId}`),
             );
-            return deps.json(CANCEL_ERRORS.notCancelled, 502);
+            return notCancelled();
         }
         endsAt = updated.endsAt ?? endsAt;
     }
 
     const cancelledAt = new Date(deps.now()).toISOString();
+    const refund = await requestRefund(deps, body, resolved, subscription);
+    return deps.json({ cancelled: true, cancelledAt, endsAt, ...refund });
+};
+
+/**
+ * The refund request to support, when the buyer asked for it inside the 14
+ * days. The same email for a cancel and for an account being deleted
+ * (launch-fix item 16), and the one kept with the link the first time it went
+ * (keepRefundRequest), so that a link sent again after the deletion was
+ * abandoned is answered as the request support already has.
+ */
+const requestRefund = async (
+    deps: CancelDeps,
+    body: Record<string, unknown>,
+    resolved: Resolved,
+    subscription: CancellableSubscription,
+): Promise<{ refundRequested: boolean; refundRequestFailed: boolean }> => {
     const wantsRefund = body.requestRefund === true;
     const refundEligible = deps.terms.withinRefundWindow(resolved.firstPurchaseAt, deps.now());
     let refundRequested = false;
     if (wantsRefund && refundEligible && resolved.email) {
+        // Keyed by this link's hash: one request per link, never the address.
+        // Resend answers a repeat under it without mailing support again --
+        // also a second press while the account is being deleted, which
+        // leaves the link unspent -- only when it is byte for byte the same
+        // email. Nothing in it depends on the clock or on the deletion (Codex
+        // r1 finding 1 on #73), and the email, the plan and the subscription
+        // it names are the ones kept with the link the first time: the
+        // account can change between a press while it is being deleted and
+        // one after the deletion was abandoned (Codex r2 finding 2).
+        //
+        // A request already kept when the link was read is sent as it is,
+        // without asking again: it never changes, and the deletion can remove
+        // the link before a second ask, which would leave nothing but the
+        // account's current data to build from under a key already used
+        // (Codex r3 on #73).
+        let mail = resolved.row.refundRequest;
+        if (!mail) {
+            const built = {
+                ...deps.terms.refundRequestEmail({
+                    userId: resolved.row.userId,
+                    email: resolved.email,
+                    subscriptionId: subscription.subscriptionId,
+                    planName: deps.planNameForPrice(subscription.priceId),
+                    mode: resolved.row.mode,
+                    firstPurchaseAtMs: resolved.firstPurchaseAt,
+                }),
+                replyTo: resolved.email,
+            };
+            let kept: RefundRequestMail | null;
+            try {
+                kept = await deps.keepRefundRequest(resolved.hash, built);
+            } catch (err) {
+                // Nothing is sent that might not be the email kept for the
+                // link: the buyer is told to write in instead.
+                deps.logError('refund_request_keep_failed', err);
+                return { refundRequested: false, refundRequestFailed: true };
+            }
+            // null: the link is gone (its account deleted since it was read),
+            // so no later press can send under its key again; and none had
+            // been kept when it was read, so none went before this one --
+            // short of two presses at once, built from the same moment.
+            mail = kept ?? built;
+        }
         const sent = await deps.sendEmail(
             deps.terms.TRADER.supportEmail,
-            deps.terms.refundRequestEmail({
-                userId: resolved.row.userId,
-                email: resolved.email,
-                subscriptionId: subscription.subscriptionId,
-                planName: deps.planNameForPrice(subscription.priceId),
-                mode: resolved.row.mode,
-                firstPurchaseAtMs: resolved.firstPurchaseAt,
-                requestedAtMs: deps.now(),
-            }),
-            // Keyed by this link's hash: one request per spent link, never
-            // the address. Resend answers a repeat under it without mailing
-            // support again.
+            { subject: mail.subject, text: mail.text, html: mail.html },
             {
-                replyTo: resolved.email,
+                replyTo: mail.replyTo,
                 tag: 'refund_request',
                 idempotencyKey: deps.idempotencyKey(REFUND_REQUEST_KEY, resolved.hash),
             },
@@ -703,15 +906,11 @@ const confirmCancel = async (deps: CancelDeps, body: Record<string, unknown>): P
             deps.logError('refund_request_not_sent', new Error(`${sent.outcome}: ${sent.reason}`));
         }
     }
-
-    return deps.json({
-        cancelled: true,
-        cancelledAt,
-        endsAt,
+    return {
         refundRequested,
         // Said so the page can tell the buyer to email support themselves.
         refundRequestFailed: wantsRefund && refundEligible && !refundRequested,
-    });
+    };
 };
 
 /**

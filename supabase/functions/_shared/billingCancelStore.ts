@@ -1,5 +1,5 @@
 import type { ConfirmationDeps } from './billingOutbox.ts';
-import type { CancelDeps, CancellableSubscription, CancelLinkDeps } from './cancelFlow.ts';
+import type { CancelDeps, CancellableSubscription, CancelLinkDeps, RefundRequestMail } from './cancelFlow.ts';
 import { CANCELLABLE_STATUSES } from './cancelFlow.ts';
 import { mailLimit } from './mailBudget.ts';
 import { serviceClient } from './rateLimit.ts';
@@ -157,4 +157,67 @@ export const consumeToken: CancelDeps['consumeToken'] = async (hash) => {
         throw new Error(`consume_cancel_link_token answered ${JSON.stringify(data)}`);
     }
     return answer;
+};
+
+/**
+ * After a link is spent: if its account's deletion is pending now, puts it back
+ * unspent, through release_cancel_link_token_for_deletion (migration
+ * 20261022160000) -- under the deletion's lock, so the answer and the link
+ * agree (Codex r1 finding 3 on #73, decision 72(1)). `clear` changes nothing.
+ * cancelFlow.ts deletionBeganSince asks it after Stripe's read, and after a
+ * Stripe failure.
+ */
+export const releaseTokenIfDeletionPending: CancelDeps['releaseTokenIfDeletionPending'] = async (hash) => {
+    const { data, error } = await admin().rpc('release_cancel_link_token_for_deletion', { p_hash: hash });
+    if (error) {
+        throw new Error(`could not ask whether the cancel link's account is being deleted: ${error.message}`);
+    }
+    const answer = (data as { answer?: unknown } | null)?.answer;
+    if (answer !== 'released' && answer !== 'clear' && answer !== 'not_found') {
+        throw new Error(`release_cancel_link_token_for_deletion answered ${JSON.stringify(data)}`);
+    }
+    return answer;
+};
+
+/**
+ * The refund request kept with a link, through keep_cancel_link_refund_request
+ * (migration 20261022160000): the first call saves `request` on the link, and
+ * every call -- that one included -- answers with what is saved. So every send
+ * under the link's one Resend key is the email that went first, whatever the
+ * account's email or plan has become since (Codex r2 finding 2 on #73). null:
+ * no such link.
+ */
+export const keepRefundRequest: CancelDeps['keepRefundRequest'] = async (hash, request) => {
+    const { data, error } = await admin().rpc('keep_cancel_link_refund_request', {
+        p_hash: hash,
+        p_request: request,
+    });
+    if (error) {
+        throw new Error(`could not keep the refund request with the cancel link: ${error.message}`);
+    }
+    const answer = (data as { answer?: unknown } | null)?.answer;
+    if (answer === 'not_found') {
+        return null;
+    }
+    const kept = answer === 'kept' ? refundRequestOf((data as { request?: unknown }).request) : null;
+    if (!kept) {
+        throw new Error(`keep_cancel_link_refund_request answered ${JSON.stringify(data)}`);
+    }
+    return kept;
+};
+
+/** A kept refund request as the database holds it, or null if it is not one. */
+export const refundRequestOf = (value: unknown): RefundRequestMail | null => {
+    const kept = value as Record<string, unknown> | null | undefined;
+    if (
+        !kept ||
+        typeof kept !== 'object' ||
+        typeof kept.subject !== 'string' ||
+        typeof kept.text !== 'string' ||
+        typeof kept.html !== 'string' ||
+        typeof kept.replyTo !== 'string'
+    ) {
+        return null;
+    }
+    return { subject: kept.subject, text: kept.text, html: kept.html, replyTo: kept.replyTo };
 };

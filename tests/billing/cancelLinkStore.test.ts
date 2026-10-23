@@ -73,6 +73,8 @@ interface Store {
     cancelSecret: CancelLinkDeps['secret'];
     cancelLinkMailBudget: () => CancelLinkDeps['mailBudget'];
     consumeToken: CancelDeps['consumeToken'];
+    releaseTokenIfDeletionPending: CancelDeps['releaseTokenIfDeletionPending'];
+    keepRefundRequest: CancelDeps['keepRefundRequest'];
 }
 const shared = (name: string) => `../../supabase/functions/_shared/${name}`;
 const store = (await import(/* @vite-ignore */ shared('billingCancelStore'))) as Store;
@@ -396,6 +398,83 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
         expect(await spend(otherHash)).toBe('used');
         expect(await spend(sha256(randomUUID()))).toBe('not_found');
         expect(resend.requests).toHaveLength(2);
+    });
+
+    it("a link spent as its account's deletion began is put back unspent, and only then (Codex r1 finding 3 on #73)", async () => {
+        const { userId, rowId } = await subscriber();
+        await drainBillingMailNow();
+        const hash = await hashOf(rowId);
+        expect(await spend(hash)).toBe('consumed');
+        // Clear: nothing changes.
+        expect(await store.releaseTokenIfDeletionPending(hash)).toBe('clear');
+        expect((await tokenRow(hash))?.used_at).not.toBeNull();
+
+        // The deletion begins: the link is unspent again, and opens.
+        const attempt = must(await db.rpc('begin_account_deletion_attempt', { p_user: userId }), 'begin deletion');
+        expect(await store.releaseTokenIfDeletionPending(hash)).toBe('released');
+        expect((await tokenRow(hash))?.used_at).toBeNull();
+        expect(await linkWorks(hash)).toBe(true);
+        // Nothing else may un-spend a link: the service role's direct UPDATE is refused.
+        expect(await spend(hash)).toBe('consumed');
+        const direct = await db
+            .from('billing_cancel_tokens')
+            .update({ used_at: null })
+            .eq('token_hash', hash)
+            .select('token_hash');
+        expect(direct.error?.message).toContain('a spent cancel link stays spent');
+
+        // Abandoned: clear again, and the link spent since stays spent.
+        ok(
+            await db.rpc('settle_account_deletion_attempt', {
+                p_user: userId,
+                p_attempt: attempt,
+                p_outcome: 'abandoned',
+                p_error: null,
+            }),
+            'abandon deletion',
+        );
+        expect(await store.releaseTokenIfDeletionPending(hash)).toBe('clear');
+        expect((await tokenRow(hash))?.used_at).not.toBeNull();
+        expect(await store.releaseTokenIfDeletionPending(sha256(randomUUID()))).toBe('not_found');
+    });
+
+    it('a link keeps the first refund request it sent, whatever is asked later (Codex r2 finding 2 on #73)', async () => {
+        const { rowId } = await subscriber();
+        await drainBillingMailNow();
+        const hash = await hashOf(rowId);
+        const first = {
+            subject: 'Refund — a@x.test',
+            text: 'Plan: Teacher',
+            html: '<p>Plan: Teacher</p>',
+            replyTo: 'a@x.test',
+        };
+        const later = {
+            subject: 'Refund — b@x.test',
+            text: 'Plan: Studio',
+            html: '<p>Plan: Studio</p>',
+            replyTo: 'b@x.test',
+        };
+        const read = async () => {
+            const { data, error } = await db.rpc('read_cancel_link_token', { p_hash: hash });
+            ok({ error }, 'read the link');
+            return data as Record<string, unknown>;
+        };
+        expect(await read()).not.toHaveProperty('refund_request');
+        expect(await store.keepRefundRequest(hash, first)).toEqual(first);
+        expect(await store.keepRefundRequest(hash, later)).toEqual(first);
+        // The link's read answers with it too (Codex r3 on #73).
+        expect((await read()).refund_request).toEqual(first);
+        // Nothing changes it afterwards, the service role's direct UPDATE included.
+        const direct = await db
+            .from('billing_cancel_tokens')
+            .update({ refund_request: later })
+            .eq('token_hash', hash)
+            .select('token_hash');
+        expect(direct.error?.message).toContain('a cancel link keeps the refund request it first sent');
+        expect(await store.keepRefundRequest(hash, later)).toEqual(first);
+        // Keeping it neither spends the link nor moves its expiry.
+        expect(await linkWorks(hash)).toBe(true);
+        expect(await store.keepRefundRequest(sha256(randomUUID()), first)).toBeNull();
     });
 
     it('a link sent with its answer lost, used, then retried late and cleaned up, never works again', async () => {

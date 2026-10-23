@@ -1370,6 +1370,33 @@ it paused.
     first, `student-provision` first among the functions) already gives all
     three. Nothing in them is scheduled.
 
+    **Launch-fix item 16 (deletion-pending policy per writer, decision 70(1)),
+    when merged.** One migration,
+    `20261022160000_cancel_link_release_for_deletion` (decision 72(1)): the
+    cancel-link guard's one exception,
+    `release_cancel_link_token_for_deletion()`, and the link's kept refund
+    request (`billing_cancel_tokens.refund_request` and
+    `keep_cancel_link_refund_request()`, Codex r2 finding 2 on #73, which
+    `read_cancel_link_token()` now answers with too, Codex r3 on #73; either
+    `billing-cancel` reads either version of it), service role only,
+    re-runnable.
+    Redeploy `stripe-webhook`, `billing-cancel`, `stripe-portal`,
+    `guest-email-start` and `guest-email-confirm`, and the frontend (the cancel
+    page's "account is being deleted" and "already ended" answers). Each asks
+    `account_deletion_pending()` (`20261022110400`, P3), already in place. The
+    order: the migration before `billing-cancel` (which calls the new function
+    once a link is spent; a `billing-cancel` without it logs
+    `cancel_token_release_failed` and cancels as before -- but it cannot keep
+    a refund request either, so it logs `refund_request_keep_failed`, sends
+    support nothing and tells the buyer to email support), and the frontend with
+    or before `billing-cancel`, since an older cancel page shows the new answer
+    for an account being deleted as an ordinary cancellation, and an
+    already-ended subscription's refund outcome not at all. `stripe-portal`
+    now answers 409 `account_deletion_pending` (503
+    `deletion_check_unavailable` when the check fails) instead of a portal
+    session while the account is being deleted (decision 71(6)); the
+    frontend shows any refusal's message as it does today.
+
     **P3's code reset: `20261022110700` / `20261022110800` and the
     `student-provision` deploy go back to back, inside the freeze** (decision
     64). `20261022110700_student_code_reset_worker` **drops** the old
@@ -2429,8 +2456,17 @@ The account refuses new scores, students, uploads, joins and checkouts until a
 deletion completes. Check `last_error` (billing, storage, auth) and fix the
 cause. Then ask the person to retry Delete account (it needs their session and
 password). If they cannot be reached, escalate to Max for a service-role
-completion. Never clear the row by hand while data is half-deleted. Untouched
-markers (no `destructive_started_at`, no live attempt) restrict nothing.
+completion. Never clear the row by hand while data is half-deleted. Mind the
+clock (decision 71(4)): while the account is pending, `stripe-webhook` answers
+its events 503 and Stripe retries a failed event for about 3 days, then stops.
+An account left half-deleted longer than that never receives those mirror
+events (subscription changes, invoices, checkouts), so `subscriptions` and
+`billing_customers` stay as they were when it stopped. That is safe for the
+money: the completing deletion's step 7 (`accountDeletion.ts`) sweeps Stripe
+again and cancels anything that can still bill, whatever the mirror says. But
+do not read the mirror as current for such an account; check Stripe itself.
+Untouched markers (no `destructive_started_at`, no live attempt) restrict
+nothing.
 `select public.sweep_stale_account_deletions();` (`20261022141000`, decision
 49(6)) removes them, closes attempts whose lease ran out, never touches a
 half-deleted row, and reports how many half-deleted rows wait for this runbook

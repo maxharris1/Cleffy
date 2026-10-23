@@ -68,6 +68,78 @@ describe('CancelPage', () => {
         expect(screen.getByText(/passed your refund request/)).toBeInTheDocument();
     });
 
+    it('a subscription that had already ended still reports the refund request it sent (decision 72(1))', async () => {
+        const user = userEvent.setup();
+        peekCancel.mockResolvedValue({
+            email: 'a•••@example.com',
+            plan: 'Teacher',
+            status: 'active',
+            periodEnd: '2026-11-20T20:00:00.000Z',
+            alreadyCancelling: false,
+            refundEligible: true,
+        });
+        confirmCancel.mockResolvedValue({
+            cancelled: false,
+            alreadyEnded: true,
+            refundRequested: false,
+            refundRequestFailed: true,
+        });
+        renderAt('/cancel?token=tok-123');
+
+        await screen.findByText('Cleffy Teacher');
+        await user.click(screen.getByRole('checkbox', { name: /request a full refund/ }));
+        await user.click(screen.getByRole('button', { name: 'Cancel now' }));
+
+        expect(await screen.findByRole('heading', { name: 'Your subscription has already ended' })).toBeInTheDocument();
+        expect(screen.getByText(/could not send your refund request/)).toBeInTheDocument();
+    });
+
+    it('while the account is being deleted, offers only the refund request and says nothing was cancelled', async () => {
+        const user = userEvent.setup();
+        peekCancel.mockResolvedValue({
+            email: 'a•••@example.com',
+            plan: 'Teacher',
+            status: 'active',
+            periodEnd: '2026-11-20T20:00:00.000Z',
+            alreadyCancelling: false,
+            refundEligible: true,
+            deletionPending: true,
+        });
+        confirmCancel.mockResolvedValue({
+            cancelled: false,
+            deletionPending: true,
+            refundRequested: true,
+            refundRequestFailed: false,
+        });
+        renderAt('/cancel?token=tok-123');
+
+        expect(await screen.findByText(/This account is being deleted/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Cancel now' })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Request a full refund' }));
+
+        expect(confirmCancel).toHaveBeenCalledWith('tok-123', true);
+        expect(await screen.findByRole('heading', { name: 'Your account is being deleted' })).toBeInTheDocument();
+        expect(screen.getByText(/nothing was changed here/)).toBeInTheDocument();
+        expect(screen.getByText(/passed your refund request/)).toBeInTheDocument();
+        expect(screen.getByText(/If the deletion does not go through, use this link again/)).toBeInTheDocument();
+    });
+
+    it('while the account is being deleted and the 14 days are over, offers no button at all', async () => {
+        peekCancel.mockResolvedValue({
+            email: 'a•••@example.com',
+            plan: 'Teacher',
+            status: 'active',
+            periodEnd: '2026-11-20T20:00:00.000Z',
+            alreadyCancelling: false,
+            refundEligible: false,
+            deletionPending: true,
+        });
+        renderAt('/cancel?token=tok-123');
+
+        expect(await screen.findByText(/This account is being deleted/)).toBeInTheDocument();
+        expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    });
+
     it('falls back to the email form for a spent or expired link', async () => {
         const { CancelError } = await import('@/features/billing/cancelApi');
         peekCancel.mockRejectedValue(new CancelError('This cancellation link has expired.', 'link_invalid'));

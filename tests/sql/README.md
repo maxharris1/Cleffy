@@ -961,7 +961,15 @@ win, that triggers and cron jobs exist once, and that the run still works on
 the replayed data. psql only (`\ir`); ends with `failures | total`. Proven
 against the local stack on 2026-10-22: all 8 checks passed; with a row in the
 step 00f48a65 added, the same replay stopped at 20261021120800 ("check
-constraint district_retention_log_step_check ... is violated by some row").
+constraint district_retention_log_step_check ... is violated by some row"). Since launch-fix item 16 (decision 70(8)) the list is every migration from
+`20261020160300` to the newest, P1 to P6 and the `14xxxx` follow-ups included
+(it had stopped at `20261022130400`), and `tests/legal/districtReattribution.test.ts`
+fails when it no longer equals the directory. The fixtures' deferred trigger
+events fire before the replay (`set constraints all immediate`), as at the
+commit a recovery replays after; otherwise `20261022120000`'s ALTER TABLE on
+the rotation queue refuses the table's pending events. Check 13c holds the
+follow-ups' definitions. Proven against the local stack on 2026-10-22: all 10
+checks passed; with the old list (through `20261022130400`), 13c failed.
 
 ## Launchfix follow-ups
 
@@ -1132,6 +1140,77 @@ bounded runs (`p_limit` 1) reach a newer crashed marker past older
 reported-only half-deleted ones and a live one, which stay as they were. Ends
 with `failures | total`. Proven against the local stack on 2026-10-22: all 12
 checks passed; check 11 fails with the first version of the function.
+
+## Launch-fix item 16
+
+`stripe_webhook_deletion_pending.sql` proves the database half of
+stripe-webhook's refusal while an account's deletion is pending (decision
+70(1); `stripeEvents.ts` `deletionRefusal`), as the service role: the
+predicate is true while an attempt is live and false once it is abandoned or
+the deletion completes; a claim released on the refusal is claimed afresh by
+Stripe's retry, finished once and read as `done` by every later delivery
+(processed exactly once); once the deletion has completed, the retry's
+subscription write answers `missing_user` (the deleted-account path) and its
+customer link fails on the user FK. Each delivery's release and finish carry
+the `claimed_at` its own claim returned, as the store's do, and checks 16-20c
+take a claim over from a stale holder and show the old holder can neither
+release nor finish the successor's claim (Codex r1 finding 2 on #73). Ends with
+`failures | total`. Proven against the local stack on 2026-10-23: all 24
+checks passed; with the first revision's helpers, which matched the row's own
+current `claimed_at` and finished by status alone, checks 18, 19, 20 and 20c
+fail.
+
+`cancel_link_release_for_deletion.sql` proves
+`supabase/migrations/20261022160000_cancel_link_release_for_deletion.sql`
+(decision 72(1); Codex r1 finding 3 on #73): a cancel link spent just as its
+account's deletion began is put back unspent by
+`release_cancel_link_token_for_deletion()`, which answers `clear` and changes
+nothing for an account that is not being deleted (before the attempt, after it
+is abandoned, and for another account's link), `released` while an attempt is
+live -- the link reads as good again, keeps its expiry and can be spent again
+-- and `not_found` for an unknown hash; the token guard still refuses every
+other un-spend (the service role's direct UPDATE, also in a session that never
+set the release's setting, the table owner's, one under a setting naming
+another link), and the setting lets no other change through; it is the
+service role's alone, SECURITY DEFINER with its search_path pinned, and asks
+`account_deletion_pending()` before it takes the link's history locks. One
+transaction, rolled back; ends with `failures | total`. Proven against the
+local stack on 2026-10-23: all 28 checks passed; against the schema at
+57960f9f (no such function, 20261020160700's guard) 17 failed, and with the
+guard's setting compared without `coalesce`, check 02c (the never-set setting
+reads NULL and let the un-spend through) and the four that follow from it
+failed.
+
+Checks 23b-23e (Codex r2 finding 3 on #73) hold the guard to asking
+`account_deletion_pending()` itself: the setting is any service-role
+session's to set, so with it naming the link's own hash on a clear account a
+direct `UPDATE ... SET used_at = null` is still refused (the service role's,
+for that account and for another clear one, and the table owner's), and both
+links stay spent. Against the guard as it stood at e91a7089 (the setting
+alone let the un-spend through) those four failed, and check 46 with them
+(its link had been un-spent); with the predicate in the guard all 44 pass.
+
+Its section 4 (Codex r2 finding 2 on #73) proves
+`keep_cancel_link_refund_request()`: a saved link starts with no refund
+request, the first one asked is kept and every later call answers with it,
+the guard refuses changing or clearing a kept one (the service role's direct
+UPDATE included), keeping it neither spends the link nor moves its expiry,
+`not_found` for an unknown hash, `22023` for a request that is not a JSON
+object, and it is the service role's alone, SECURITY DEFINER with its
+search_path pinned. Proven against the local stack on 2026-10-23: all 40
+checks passed (44 with checks 23b-23e); against the migration as it stood at e91a7089 (no such
+function, no `refund_request` column) psql stopped at check 41 with "function
+public.keep_cancel_link_refund_request(text, jsonb) does not exist".
+
+Checks 40b and 45b (Codex r3 on #73) hold `read_cancel_link_token()`, as
+the same migration redefines it, to answering with the link's kept refund
+request beside its account and mode, and with its account and mode alone for
+a link that has none. billing-cancel sends the request it read with the link
+without asking `keep_cancel_link_refund_request()` again, so a deletion that
+removes the link between the two cannot leave a retry rebuilding the email
+under a key already used. Proven against the local stack on 2026-10-23: all
+46 checks passed; with 20261020160600's `read_cancel_link_token()` in place,
+check 45b failed.
 
 ## In CI
 

@@ -11,7 +11,12 @@
 --
 -- What it replays: every migration from 20261020160300 on, in filename order,
 -- which is every migration that can be applied a second time (each was checked
--- alone on 2026-10-22). The ones before it create tables, policies and
+-- alone on 2026-10-22). Since decision 70(8) that is the whole directory from
+-- there to the newest -- P1 to P6, the launch-fix follow-ups (14xxxx) and
+-- everything after -- and tests/legal/districtReattribution.test.ts holds the
+-- list below equal to the directory, so a new migration fails CI until it is
+-- listed here. CI's own re-apply step replays the same files one psql call
+-- each; this one replays them in a single transaction, over real data. The ones before it create tables, policies and
 -- triggers without IF NOT EXISTS and never could; a fresh install (supabase
 -- start / db reset) applies those, and all of these, once, in order. A recovery
 -- replay of this list must pass with real data present. In particular
@@ -152,6 +157,13 @@ select pg_temp.chk ('00 before: skip rows from both halves, a carried-over resto
 -- ---------------------------------------------------------------------------
 set local client_min_messages = warning;
 
+-- The fixtures' deferred trigger events (the district soft delete queues its
+-- students' scores for a realtime rotation, 20261022120000) fire now, as they
+-- would at the commit a recovery replays after: one transaction otherwise
+-- holds them pending, and that migration's ALTER TABLE on the queue refuses a
+-- table with pending trigger events. Immediate for the rest of the proof.
+set constraints all immediate;
+
 \ir ../../supabase/migrations/20261020160300_cancel_link_token_lifetime.sql
 \ir ../../supabase/migrations/20261020160400_cancel_link_tombstones_db_clock.sql
 \ir ../../supabase/migrations/20261020160500_cancel_link_save_replayable.sql
@@ -176,10 +188,46 @@ set local client_min_messages = warning;
 \ir ../../supabase/migrations/20261021120700_district_retention.sql
 \ir ../../supabase/migrations/20261021120800_district_student_attribution.sql
 \ir ../../supabase/migrations/20261021120900_district_notice_mail_budget.sql
+\ir ../../supabase/migrations/20261022100000_explicit_service_role_grants.sql
+\ir ../../supabase/migrations/20261022100100_billing_lock_tables_client_revoke.sql
+\ir ../../supabase/migrations/20261022100200_deployment_config.sql
+\ir ../../supabase/migrations/20261022100300_one_studio_per_owner.sql
+\ir ../../supabase/migrations/20261022100400_storage_object_names.sql
+\ir ../../supabase/migrations/20261022100500_storage_bucket_limits.sql
+\ir ../../supabase/migrations/20261022100600_superseded_studio_followups.sql
+\ir ../../supabase/migrations/20261022100700_client_table_privileges.sql
+\ir ../../supabase/migrations/20261022100800_storage_quota_and_thumbnail_lifecycle.sql
+\ir ../../supabase/migrations/20261022100900_storage_cleanup_markers_and_thumbnail_cap.sql
+\ir ../../supabase/migrations/20261022101000_storage_quota_lock_and_cover_reuse.sql
+\ir ../../supabase/migrations/20261022110000_student_claim_reservation.sql
+\ir ../../supabase/migrations/20261022110100_account_deletion_pending.sql
+\ir ../../supabase/migrations/20261022110200_support_inbound_lease.sql
+\ir ../../supabase/migrations/20261022110300_support_inbound_retry_window.sql
+\ir ../../supabase/migrations/20261022110400_account_deletion_attempts.sql
+\ir ../../supabase/migrations/20261022110500_student_code_reset_holder.sql
+\ir ../../supabase/migrations/20261022110600_account_deletion_barrier.sql
+\ir ../../supabase/migrations/20261022110700_student_code_reset_worker.sql
+\ir ../../supabase/migrations/20261022110800_student_code_reset_quarantine.sql
+\ir ../../supabase/migrations/20261022120000_realtime_revocation_rotation.sql
+\ir ../../supabase/migrations/20261022120100_realtime_revocation_races.sql
+\ir ../../supabase/migrations/20261022120200_realtime_archive_recovery.sql
+\ir ../../supabase/migrations/20261022120300_realtime_rotation_queue_service_role_grant.sql
 \ir ../../supabase/migrations/20261022130000_district_retention_reattribution.sql
 \ir ../../supabase/migrations/20261022130100_content_strikes_survive_deletion.sql
 \ir ../../supabase/migrations/20261022130300_district_retention_late_students.sql
 \ir ../../supabase/migrations/20261022130400_district_retention_moveout_locks.sql
+\ir ../../supabase/migrations/20261022140000_district_retention_restore_hand_on.sql
+\ir ../../supabase/migrations/20261022140100_district_retention_detach_kept.sql
+\ir ../../supabase/migrations/20261022140200_district_barrier_lifts_on_renewal.sql
+\ir ../../supabase/migrations/20261022140300_student_provision_intent_window.sql
+\ir ../../supabase/migrations/20261022140400_student_provision_intent_proven.sql
+\ir ../../supabase/migrations/20261022140500_thumbnail_publish_lock_order.sql
+\ir ../../supabase/migrations/20261022140600_my_storage_usage.sql
+\ir ../../supabase/migrations/20261022140700_clear_stale_code_reset_markers.sql
+\ir ../../supabase/migrations/20261022140800_student_email_reset_fence.sql
+\ir ../../supabase/migrations/20261022140900_end_student_sessions_lock_order.sql
+\ir ../../supabase/migrations/20261022141000_sweep_stale_account_deletions.sql
+\ir ../../supabase/migrations/20261022160000_cancel_link_release_for_deletion.sql
 
 reset client_min_messages;
 
@@ -222,6 +270,14 @@ select pg_temp.chk ('13b and the late-student fix''s: the barrier, the sweep and
                like '%district_retention_list_late%'
        and pg_get_functiondef('public.admin_set_student_district(uuid, uuid, text)'::regprocedure)
                like '%district_deletion_pending%'$q$);
+
+select pg_temp.chk ('13c and the launch-fix follow-ups'' (14xxxx): the run, the queue and the sweeps', $q$
+    select pg_get_functiondef('public.retention_district_run(timestamptz, int)'::regprocedure) like '%detached_kept%'
+       and pg_get_functiondef('public.retention_district_run(timestamptz, int)'::regprocedure) like '%district_retention_hand_on_restore%'
+       and to_regprocedure('public.my_storage_usage()') is not null
+       and to_regprocedure('public.clear_stale_code_reset_markers(integer)') is not null
+       and to_regprocedure('public.sweep_stale_account_deletions(integer)') is not null
+       and to_regclass('public.document_realtime_rotation_queue') is not null$q$);
 
 select pg_temp.chk ('14 one of each: strike triggers, retention jobs', $q$
     select (select count(*) = 1 from pg_trigger

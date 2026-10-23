@@ -1,9 +1,17 @@
-import { cancellableSubscription, consumeToken, sha256Hex } from '../_shared/billingCancelStore.ts';
+import {
+    cancellableSubscription,
+    consumeToken,
+    keepRefundRequest,
+    refundRequestOf,
+    releaseTokenIfDeletionPending,
+    sha256Hex,
+} from '../_shared/billingCancelStore.ts';
 import { emailOfUser, enqueueBillingMail } from '../_shared/billingMail.ts';
 import { drainInBackground, sendBillingEmailWithinBudget } from '../_shared/billingMailWorker.ts';
 import * as billingTerms from '../_shared/billingTerms.ts';
 import { handleCancel, type LiveSubscription } from '../_shared/cancelFlow.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { accountDeletionPending } from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import { resendIdempotencyKey } from '../_shared/resendDelivery.ts';
@@ -74,7 +82,8 @@ Deno.serve((req) =>
         },
         // Used or expired is the database's answer, on its own clock
         // (read_cancel_link_token, migration 20261020160600): it answers only
-        // for a link that is neither.
+        // for a link that is neither. With the refund request kept for it, if
+        // one is (migration 20261022160000; Codex r3 on #73).
         readToken: async (hash) => {
             const { data, error } = await admin().rpc('read_cancel_link_token', { p_hash: hash });
             if (error) {
@@ -83,11 +92,20 @@ Deno.serve((req) =>
             if (data === null) {
                 return null;
             }
-            const { user_id: userId, mode } = data as { user_id?: unknown; mode?: unknown };
-            if (typeof userId !== 'string' || (mode !== 'live' && mode !== 'test')) {
+            const {
+                user_id: userId,
+                mode,
+                refund_request: kept,
+            } = data as { user_id?: unknown; mode?: unknown; refund_request?: unknown };
+            const refundRequest = kept == null ? null : refundRequestOf(kept);
+            if (
+                typeof userId !== 'string' ||
+                (mode !== 'live' && mode !== 'test') ||
+                (kept != null && !refundRequest)
+            ) {
                 throw new Error(`read_cancel_link_token answered ${JSON.stringify(data)}`);
             }
-            return { userId, mode };
+            return { userId, mode, refundRequest };
         },
         // Spent only while unused and unexpired on the database's clock, in one
         // statement (consume_cancel_link_token, migration 20261020160700), and
@@ -118,6 +136,30 @@ Deno.serve((req) =>
             const slot = priceId ? slotForPrice(priceId) : null;
             return slot ? billingTerms.PLAN_NAMES[slot] : null;
         },
+        // Launch-fix item 16, decision 70(1): while the account is being
+        // deleted the link leaves Stripe alone and stays unspent, and only the
+        // refund request goes out (cancelFlow.ts deletionPendingCancel). The
+        // one predicate (../_shared/deletionPending.ts); a failed check is
+        // `unknown`, answered with a 503.
+        accountDeletionPending: async (userId) => {
+            const pending = await accountDeletionPending(admin(), userId);
+            if (!pending.ok) {
+                console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+                return 'unknown';
+            }
+            return pending.pending ? 'pending' : 'clear';
+        },
+        // Asked once the link is spent, after Stripe's read and after a
+        // Stripe failure (decision 72(1)): a deletion that began since the
+        // check above gets the link back unspent, in one statement under the
+        // deletion's lock (release_cancel_link_token_for_deletion, migration
+        // 20261022160000).
+        releaseTokenIfDeletionPending,
+        // The refund request kept with the link the first time it goes, so a
+        // later press sends the same email whatever the account's email or plan
+        // has become (keep_cancel_link_refund_request, migration 20261022160000;
+        // Codex r2 finding 2 on #73).
+        keepRefundRequest,
         now: () => Date.now(),
         logError: (code, err) => logError('billing-cancel', err, { code }),
     }),

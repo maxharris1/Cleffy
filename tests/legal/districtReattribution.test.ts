@@ -152,19 +152,19 @@ describe('no migration logs a step 20261021120800’s replay would refuse', () =
         expect(migration).not.toMatch(/'skipped_reattributed'\s*\)|step in \(/);
     });
 
-    it('the ordered replay proof replays, in order, every rerunnable migration through this one', () => {
+    it('the ordered replay proof replays, in order, every rerunnable migration through the newest', () => {
         const proof = read('tests/sql/migrations_ordered_replay.sql');
         const included = [...proof.matchAll(/^\\ir \.\.\/\.\.\/supabase\/migrations\/(\S+)$/gm)].map((m) => m[1]);
         expect(included[0]).toBe('20261020160300_cancel_link_token_lifetime.sql');
-        expect(included).toEqual([...included].sort());
         expect(included).toContain('20261021120800_district_student_attribution.sql');
-        expect(included.slice(-4)).toEqual([
-            '20261022130000_district_retention_reattribution.sql',
-            '20261022130100_content_strikes_survive_deletion.sql',
-            '20261022130300_district_retention_late_students.sql',
-            '20261022130400_district_retention_moveout_locks.sql',
-        ]);
-        for (const name of included) expect(() => read(`supabase/migrations/${name}`), name).not.toThrow();
+        // Decision 70(8): the list is every migration from 20261020160300 on,
+        // in filename order -- P1 to P6, the follow-ups and everything after --
+        // so a new migration is replayed by being listed, and a list that falls
+        // behind the directory fails here rather than going stale.
+        const rerunnable = readdirSync(resolve(process.cwd(), 'supabase/migrations'))
+            .filter((name) => name.endsWith('.sql') && name >= '20261020160300')
+            .sort();
+        expect(included).toEqual(rerunnable);
     });
 });
 

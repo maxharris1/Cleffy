@@ -184,8 +184,17 @@ describe('service-role writers ask account_deletion_pending() first (Codex r2 on
         before(source, 'await accountDeletionPending(admin, doc.owner_id as string)', "rpc('omr_enqueue_job'");
     });
 
+    it('stripe-webhook: the store asks the one predicate, and a failed check is `unknown` (item 16)', () => {
+        const source = read('supabase/functions/stripe-webhook/index.ts');
+        const port = source.slice(source.indexOf('accountDeletionPending: async (userId) =>'));
+        expect(port.slice(0, 500)).toContain('await accountDeletionPending(admin, userId)');
+        expect(port.slice(0, 500)).toMatch(/if \(!pending\.ok\) \{[\s\S]{0,200}?return 'unknown';/);
+        expect(port.slice(0, 500)).toContain("return pending.pending ? 'pending' : 'clear';");
+    });
+
     it('a failed check is a refusal, never a pass', () => {
         for (const path of [
+            'supabase/functions/stripe-webhook/index.ts',
             'supabase/functions/student-provision/index.ts',
             'supabase/functions/stripe-checkout/index.ts',
             'supabase/functions/imslp-download/index.ts',
