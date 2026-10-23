@@ -1181,6 +1181,15 @@ guard's setting compared without `coalesce`, check 02c (the never-set setting
 reads NULL and let the un-spend through) and the four that follow from it
 failed.
 
+Checks 23b-23e (Codex r2 finding 3 on #73) hold the guard to asking
+`account_deletion_pending()` itself: the setting is any service-role
+session's to set, so with it naming the link's own hash on a clear account a
+direct `UPDATE ... SET used_at = null` is still refused (the service role's,
+for that account and for another clear one, and the table owner's), and both
+links stay spent. Against the guard as it stood at e91a7089 (the setting
+alone let the un-spend through) those four failed, and check 46 with them
+(its link had been un-spent); with the predicate in the guard all 44 pass.
+
 Its section 4 (Codex r2 finding 2 on #73) proves
 `keep_cancel_link_refund_request()`: a saved link starts with no refund
 request, the first one asked is kept and every later call answers with it,
@@ -1189,7 +1198,7 @@ UPDATE included), keeping it neither spends the link nor moves its expiry,
 `not_found` for an unknown hash, `22023` for a request that is not a JSON
 object, and it is the service role's alone, SECURITY DEFINER with its
 search_path pinned. Proven against the local stack on 2026-10-23: all 40
-checks passed; against the migration as it stood at e91a7089 (no such
+checks passed (44 with checks 23b-23e); against the migration as it stood at e91a7089 (no such
 function, no `refund_request` column) psql stopped at check 41 with "function
 public.keep_cancel_link_refund_request(text, jsonb) does not exist".
 
