@@ -27082,7 +27082,12 @@ grant execute on function public.sweep_stale_account_deletions (integer) to serv
 --     set once and never changed (a new link starts without one);
 --   * keep_cancel_link_refund_request (below) saves it if the link has none
 --     and answers with what the link holds, which is what billing-cancel
---     sends (cancelFlow.ts requestRefund).
+--     sends (cancelFlow.ts requestRefund);
+--   * read_cancel_link_token (20261020160600, redefined below) answers with
+--     the request kept for the link too, and billing-cancel sends that one
+--     without asking again: the deletion can remove the link between the read
+--     and the keep, which would otherwise leave only the account's current
+--     data to build an email from under a key already used (Codex r3 on #73).
 --
 -- tests/sql/cancel_link_release_for_deletion.sql proves it, tests/billing/
 -- cancelLinkStore.test.ts runs the store against it, and tests/billing/
@@ -27277,3 +27282,32 @@ $$;
 
 revoke all on function public.keep_cancel_link_refund_request (text, jsonb) from public, anon, authenticated;
 grant execute on function public.keep_cancel_link_refund_request (text, jsonb) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- read_cancel_link_token: with the refund request kept for the link
+-- ---------------------------------------------------------------------------
+-- As 20261020160600 defines it -- only for a link unused and unexpired on
+-- clock_timestamp(), else null -- and with "refund_request" as the link holds
+-- it, when it holds one (a link with none answers as before). The request is
+-- set once and never changed, so what this read answers is what support was
+-- sent under the link's key, even if the link is gone by the time the press
+-- that read it would ask keep_cancel_link_refund_request (Codex r3 on #73).
+create or replace function public.read_cancel_link_token (p_hash text)
+returns jsonb
+language sql
+volatile
+set search_path = ''
+as $$
+    select pg_catalog.jsonb_build_object('user_id', t.user_id, 'mode', t.mode)
+        || case
+               when t.refund_request is null then '{}'::jsonb
+               else pg_catalog.jsonb_build_object('refund_request', t.refund_request)
+           end
+    from public.billing_cancel_tokens t
+    where t.token_hash = p_hash
+      and t.used_at is null
+      and t.expires_at > pg_catalog.clock_timestamp()
+$$;
+
+revoke all on function public.read_cancel_link_token (text) from public, anon, authenticated;
+grant execute on function public.read_cancel_link_token (text) to service_role;

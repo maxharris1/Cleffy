@@ -1202,6 +1202,16 @@ checks passed (44 with checks 23b-23e); against the migration as it stood at e91
 function, no `refund_request` column) psql stopped at check 41 with "function
 public.keep_cancel_link_refund_request(text, jsonb) does not exist".
 
+Checks 40b and 45b (Codex r3 on #73) hold `read_cancel_link_token()`, as
+the same migration redefines it, to answering with the link's kept refund
+request beside its account and mode, and with its account and mode alone for
+a link that has none. billing-cancel sends the request it read with the link
+without asking `keep_cancel_link_refund_request()` again, so a deletion that
+removes the link between the two cannot leave a retry rebuilding the email
+under a key already used. Proven against the local stack on 2026-10-23: all
+46 checks passed; with 20261020160600's `read_cancel_link_token()` in place,
+check 45b failed.
+
 ## In CI
 
 The `supabase-local` job runs every `tests/sql/*.sql` and

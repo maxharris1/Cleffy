@@ -120,6 +120,13 @@ export interface LiveSubscription {
 export interface LiveCancelToken {
     userId: string;
     mode: StripeMode;
+    /**
+     * The refund request kept with the link (keepRefundRequest) as the read
+     * found it, or null if none was yet: set once and never changed, so what
+     * is read here is what support was sent, even if the link is gone by the
+     * time this press would ask again (Codex r3 on #73).
+     */
+    refundRequest: RefundRequestMail | null;
 }
 
 /**
@@ -848,26 +855,40 @@ const requestRefund = async (
         // it names are the ones kept with the link the first time: the
         // account can change between a press while it is being deleted and
         // one after the deletion was abandoned (Codex r2 finding 2).
-        const built = deps.terms.refundRequestEmail({
-            userId: resolved.row.userId,
-            email: resolved.email,
-            subscriptionId: subscription.subscriptionId,
-            planName: deps.planNameForPrice(subscription.priceId),
-            mode: resolved.row.mode,
-            firstPurchaseAtMs: resolved.firstPurchaseAt,
-        });
-        let kept: RefundRequestMail | null;
-        try {
-            kept = await deps.keepRefundRequest(resolved.hash, { ...built, replyTo: resolved.email });
-        } catch (err) {
-            // Nothing is sent that might not be the email kept for the link:
-            // the buyer is told to write in instead.
-            deps.logError('refund_request_keep_failed', err);
-            return { refundRequested: false, refundRequestFailed: true };
+        //
+        // A request already kept when the link was read is sent as it is,
+        // without asking again: it never changes, and the deletion can remove
+        // the link before a second ask, which would leave nothing but the
+        // account's current data to build from under a key already used
+        // (Codex r3 on #73).
+        let mail = resolved.row.refundRequest;
+        if (!mail) {
+            const built = {
+                ...deps.terms.refundRequestEmail({
+                    userId: resolved.row.userId,
+                    email: resolved.email,
+                    subscriptionId: subscription.subscriptionId,
+                    planName: deps.planNameForPrice(subscription.priceId),
+                    mode: resolved.row.mode,
+                    firstPurchaseAtMs: resolved.firstPurchaseAt,
+                }),
+                replyTo: resolved.email,
+            };
+            let kept: RefundRequestMail | null;
+            try {
+                kept = await deps.keepRefundRequest(resolved.hash, built);
+            } catch (err) {
+                // Nothing is sent that might not be the email kept for the
+                // link: the buyer is told to write in instead.
+                deps.logError('refund_request_keep_failed', err);
+                return { refundRequested: false, refundRequestFailed: true };
+            }
+            // null: the link is gone (its account deleted since it was read),
+            // so no later press can send under its key again; and none had
+            // been kept when it was read, so none went before this one --
+            // short of two presses at once, built from the same moment.
+            mail = kept ?? built;
         }
-        // null: the link is gone (its account deleted since it was read), so
-        // no later press can send under its key again.
-        const mail = kept ?? { ...built, replyTo: resolved.email };
         const sent = await deps.sendEmail(
             deps.terms.TRADER.supportEmail,
             { subject: mail.subject, text: mail.text, html: mail.html },

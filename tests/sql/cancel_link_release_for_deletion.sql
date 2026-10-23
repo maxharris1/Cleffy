@@ -27,7 +27,9 @@
 --      later call answers with it, whatever it asks; nothing changes it once
 --      kept, the service role's direct UPDATE included; keeping it neither
 --      spends the link nor moves its expiry; only the service role may call
---      it, SECURITY DEFINER with its search_path pinned.
+--      it, SECURITY DEFINER with its search_path pinned; read_cancel_link_token
+--      answers with the kept request beside the link's account and mode, and
+--      as before for a link with none (Codex r3 on #73).
 --
 -- One transaction, ROLLED BACK. Run it against the LOCAL stack
 -- (scripts/ci/sql-proof.sh does, in CI):
@@ -230,6 +232,9 @@ select pg_temp.as_role('service_role');
 select pg_temp.chk('40 a saved link starts with no refund request',
 $q$select bool_and(refund_request is null) from public.billing_cancel_tokens
    where token_hash in (select hash from t_ids where hash is not null)$q$);
+select pg_temp.chk('40b ... and read_cancel_link_token answers for it with its account and mode alone',
+$q$select public.read_cancel_link_token (pg_temp.h('unspent')) - 'mode' = jsonb_build_object('user_id', pg_temp.u(1))
+      and public.read_cancel_link_token (pg_temp.h('unspent')) ? 'mode'$q$);
 select pg_temp.chk('41 the first request is kept, and answered',
 $q$select pg_temp.keep('unspent', '{"subject":"one","text":"Plan: Teacher","html":"<p>one</p>","replyTo":"a@x.test"}')
       = jsonb_build_object('answer', 'kept', 'request',
@@ -245,6 +250,10 @@ $q$update public.billing_cancel_tokens set refund_request = null where token_has
 '55000', 'a cancel link keeps the refund request it first sent');
 select pg_temp.chk('45 keeping it neither spent the link nor moved its expiry',
 $q$select pg_temp.used('unspent') is null and public.read_cancel_link_token (pg_temp.h('unspent')) is not null$q$);
+select pg_temp.chk('45b read_cancel_link_token answers with the request kept first, beside its account and mode (Codex r3 on #73)',
+$q$select public.read_cancel_link_token (pg_temp.h('unspent'))->'refund_request'
+          = '{"subject":"one","text":"Plan: Teacher","html":"<p>one</p>","replyTo":"a@x.test"}'::jsonb
+      and public.read_cancel_link_token (pg_temp.h('unspent')) - 'refund_request' - 'mode' = jsonb_build_object('user_id', pg_temp.u(1))$q$);
 select pg_temp.chk('46 a spent link keeps one too, and stays spent',
 $q$select pg_temp.keep('other', '{"subject":"o","text":"o","html":"o","replyTo":"o@x.test"}')->>'answer' = 'kept'
       and pg_temp.used('other') is not null$q$);

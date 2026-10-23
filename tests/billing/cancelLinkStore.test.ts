@@ -454,8 +454,16 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
             html: '<p>Plan: Studio</p>',
             replyTo: 'b@x.test',
         };
+        const read = async () => {
+            const { data, error } = await db.rpc('read_cancel_link_token', { p_hash: hash });
+            ok({ error }, 'read the link');
+            return data as Record<string, unknown>;
+        };
+        expect(await read()).not.toHaveProperty('refund_request');
         expect(await store.keepRefundRequest(hash, first)).toEqual(first);
         expect(await store.keepRefundRequest(hash, later)).toEqual(first);
+        // The link's read answers with it too (Codex r3 on #73).
+        expect((await read()).refund_request).toEqual(first);
         // Nothing changes it afterwards, the service role's direct UPDATE included.
         const direct = await db
             .from('billing_cancel_tokens')

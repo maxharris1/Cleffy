@@ -1376,8 +1376,10 @@ it paused.
     cancel-link guard's one exception,
     `release_cancel_link_token_for_deletion()`, and the link's kept refund
     request (`billing_cancel_tokens.refund_request` and
-    `keep_cancel_link_refund_request()`, Codex r2 finding 2 on #73), service
-    role only, re-runnable.
+    `keep_cancel_link_refund_request()`, Codex r2 finding 2 on #73, which
+    `read_cancel_link_token()` now answers with too, Codex r3 on #73; either
+    `billing-cancel` reads either version of it), service role only,
+    re-runnable.
     Redeploy `stripe-webhook`, `billing-cancel`, `stripe-portal`,
     `guest-email-start` and `guest-email-confirm`, and the frontend (the cancel
     page's "account is being deleted" and "already ended" answers). Each asks
