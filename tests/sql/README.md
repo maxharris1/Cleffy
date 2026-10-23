@@ -1151,8 +1151,14 @@ the deletion completes; a claim released on the refusal is claimed afresh by
 Stripe's retry, finished once and read as `done` by every later delivery
 (processed exactly once); once the deletion has completed, the retry's
 subscription write answers `missing_user` (the deleted-account path) and its
-customer link fails on the user FK. Ends with `failures | total`. Proven
-against the local stack on 2026-10-22: all 16 checks passed.
+customer link fails on the user FK. Each delivery's release and finish carry
+the `claimed_at` its own claim returned, as the store's do, and checks 16-20c
+take a claim over from a stale holder and show the old holder can neither
+release nor finish the successor's claim (Codex r1 finding 2 on #73). Ends with
+`failures | total`. Proven against the local stack on 2026-10-23: all 24
+checks passed; with the first revision's helpers, which matched the row's own
+current `claimed_at` and finished by status alone, checks 18, 19, 20 and 20c
+fail.
 
 ## In CI
 
