@@ -61,6 +61,11 @@ export type CommitOp =
 export interface AuthoredOp {
     op: CommitOp;
     author: string | null;
+    /**
+     * When its edit began (InkWriteGuard.order): what keeps a mark's held ops
+     * oldest first, however late one of them comes to be held (see appendHeld).
+     */
+    order?: number;
 }
 
 /** What export reads from an open viewer when the database cannot be read (see registerOpenStore). */
@@ -86,6 +91,8 @@ interface RecoveryEntry {
      * Retry, but this account's own edit all the same — Export keeps it.
      */
     conflicts: Map<string, Annotation>;
+    /** When the edit of each conflict began (AuthoredOp.order), where known. */
+    conflictOrders: Map<string, number>;
     /**
      * The live set before the first edit whose day-start snapshot could not
      * be written, and the day it was for: the day's true starting point,
@@ -165,6 +172,8 @@ const docEpochs = new Map<string, number>();
 const forgottenAt = new Map<string, number>();
 /** Local edits applied in memory whose write has not finished (AnnotationStore.hasUnsavedEdit). */
 let inFlight = 0;
+/** The last InkWriteGuard.order handed out: edits are numbered in the order they began. */
+let lastEditOrder = 0;
 
 const keyOf = (userId: string | null, docId: string): string => JSON.stringify([userId, docId]);
 /** Where a closed entry is kept (see RecoveryEntry.closed): never a key a viewer or a write looks up. */
@@ -226,6 +235,8 @@ export interface InkWriteGuard {
      * user, forgetDocInk); null while the score is still open here.
      */
     readonly scoreLost: () => 'closed' | 'forgotten' | null;
+    /** Where the edit falls among this tab's edits, oldest first (AuthoredOp.order). */
+    readonly order: number;
 }
 
 export const editBoundTo = (userId: string | null, docId: string): InkWriteGuard => {
@@ -234,8 +245,12 @@ export const editBoundTo = (userId: string | null, docId: string): InkWriteGuard
     const open = () => (docEpochs.get(docId) ?? 0) === epoch;
     return Object.assign(() => account() && open(), {
         scoreLost: () => (open() ? null : (forgottenAt.get(docId) ?? 0) > epoch ? 'forgotten' : 'closed'),
+        order: ++lastEditOrder,
     });
 };
+
+/** Whether edit order `a` began before `b`; unknown either way (an op made without one), not. */
+const isOlder = (a: number | undefined, b: number | undefined): boolean => a !== undefined && b !== undefined && a < b;
 
 /** A write its account's sign-out, or its score's loss here, overtook: it wrote nothing. */
 export class RecoveryCancelled extends Error {
@@ -272,6 +287,7 @@ const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string, clos
             ops: [],
             marks: new Map(),
             conflicts: new Map(),
+            conflictOrders: new Map(),
             startingPoint: null,
             refused: 0,
             conflictNoticeHidden: false,
@@ -395,6 +411,7 @@ export const discardConflicts = (userId: string | null, docId: string): void => 
         return;
     }
     entry.conflicts.clear();
+    entry.conflictOrders.clear();
     entry.conflictNoticeHidden = false;
     pruneEntry(entry);
     changed();
@@ -571,7 +588,7 @@ const moveToConflicts = (entry: RecoveryEntry, ids: Iterable<string>): void => {
     const kept: AuthoredOp[] = [];
     for (const held of entry.ops) {
         if (gone.has(held.op.annotation.id)) {
-            entry.conflicts.set(held.op.annotation.id, held.op.annotation);
+            keepConflict(entry, held.op.annotation, held.order);
         } else {
             kept.push(held);
         }
@@ -582,6 +599,19 @@ const moveToConflicts = (entry: RecoveryEntry, ids: Iterable<string>): void => {
     entry.conflictNoticeHidden = false;
     pruneEntry(entry);
     changed();
+};
+
+/** Hold `mark` as its conflict, unless the one held already is of a newer edit. */
+const keepConflict = (entry: RecoveryEntry, mark: Annotation, order: number | undefined): void => {
+    if (isOlder(order, entry.conflictOrders.get(mark.id))) {
+        return;
+    }
+    entry.conflicts.set(mark.id, mark);
+    if (order === undefined) {
+        entry.conflictOrders.delete(mark.id);
+    } else {
+        entry.conflictOrders.set(mark.id, order);
+    }
 };
 
 /** The day-start snapshot an earlier failed edit still owes today, if any (see RecoveryEntry.startingPoint). */
@@ -688,29 +718,40 @@ export const holdOps = (
 };
 
 /**
- * Append one op. A run of updates to one mark keeps only the newest (each
- * carries the whole mark), so dragging a held text note does not grow the
- * entry by an op per frame. The replacement is a new object: a write already
- * carrying the older one releases that one, and this one stays held.
+ * Append one op, in the order its edit began (AuthoredOp.order): one held
+ * late — cut off behind a Retry, say, after newer ink of its mark was kept
+ * (keepCancelled) — goes in before every newer op, never after, so the
+ * newest held version of a mark is always its newest edit. A run of updates
+ * to one mark keeps only the newest (each carries the whole mark), so
+ * dragging a held text note does not grow the entry by an op per frame. The
+ * replacement is a new object: a write already carrying the older one
+ * releases that one, and this one stays held.
  */
 const appendHeld = (entry: RecoveryEntry, held: AuthoredOp): void => {
     const { id } = held.op.annotation;
+    let at = entry.ops.length;
+    while (at > 0 && isOlder(held.order, entry.ops[at - 1]?.order)) {
+        at--;
+    }
     if (held.op.type === 'update' && entry.marks.has(id)) {
-        for (let i = entry.ops.length - 1; i >= 0; i--) {
+        for (let i = at - 1; i >= 0; i--) {
             const prior = entry.ops[i];
             if (prior?.op.annotation.id !== id) {
                 continue;
             }
             if (prior.op.type === 'update' && prior.author === held.author) {
-                entry.ops[i] = { author: held.author, op: { ...held.op, prev: prior.op.prev } };
+                entry.ops[i] = { ...held, op: { ...held.op, prev: prior.op.prev } };
                 return;
             }
             break;
         }
     }
     // A newer edit of a mark held as a conflict is the user's latest word on it.
-    entry.conflicts.delete(id);
-    entry.ops.push(held);
+    if (!isOlder(held.order, entry.conflictOrders.get(id))) {
+        entry.conflicts.delete(id);
+        entry.conflictOrders.delete(id);
+    }
+    entry.ops.splice(at, 0, held);
     entry.marks.set(id, (entry.marks.get(id) ?? 0) + 1);
 };
 
@@ -918,7 +959,7 @@ export const persistOps = (
     ops: CommitOp[],
     live: InkWriteGuard = editBoundTo(author, docId),
 ): Promise<void> => {
-    const fresh = ops.map((op): AuthoredOp => ({ op, author }));
+    const fresh = ops.map((op): AuthoredOp => ({ op, author, order: live.order }));
     const entry = entryFor(author, docId);
     if (!entry) {
         return writeQueue(db, author, docId, [], fresh, live);
@@ -1086,7 +1127,7 @@ const writeHeld = async (entry: RecoveryEntry, live: () => boolean, options: Ret
         }
         entry.startingPoint = null;
         entry.refused = 0;
-        // Ops held meanwhile only ever join at the end.
+        // Ops held meanwhile join the entry too, and are written in turn.
         while (entry.ops.length > 0) {
             const chunk = entry.ops.slice(0, PERSIST_CHUNK).filter((held) => held.author === entry.userId);
             if (chunk.length === 0) {
@@ -1318,7 +1359,7 @@ export const closeDocInk = (docId: string): void => {
                 appendHeld(earlier, held);
             }
             for (const [id, mark] of entry.conflicts) {
-                earlier.conflicts.set(id, mark);
+                keepConflict(earlier, mark, entry.conflictOrders.get(id));
             }
         } else {
             entries.set(entryKey(entry), entry);

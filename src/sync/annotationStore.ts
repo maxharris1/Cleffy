@@ -1208,10 +1208,11 @@ export class AnnotationStore {
                     // held as signed-out or closed ink (Export or Discard),
                     // and no longer drawn here.
                     const cancelled = !live();
+                    const held = { op, author, order: live.order };
                     if (cancelled) {
-                        keepCancelled(this.db, author, this.docId, [{ op, author }], live);
+                        keepCancelled(this.db, author, this.docId, [held], live);
                     }
-                    const refused = cancelled ? [op] : holdOps(this.db, this.docId, [{ op, author }], preEdit);
+                    const refused = cancelled ? [op] : holdOps(this.db, this.docId, [held], preEdit);
                     if (refused.length > 0) {
                         this.rollBack([op]);
                     }

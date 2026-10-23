@@ -931,4 +931,46 @@ describe('an ordinary edit under way when the score is lost to this device (PR #
         expect(closedInk(A)).toEqual([]);
         expect(lostAccessInk()).toEqual([]);
     });
+
+    describe('fix round 3', () => {
+        it('an older edit cut off after the score closed, reopened and closed again never replaces the newer version of its mark in the closed ink', async () => {
+            accountSignedIn(A);
+            const synced = [
+                { ...stroke('a1'), seq: 5, pending: 0 as const },
+                { ...stroke('a2'), seq: 6, pending: 0 as const },
+            ];
+            await db.annotations.bulkPut(synced);
+            const store = await storeAs(A);
+            // Held ink, so a Retry has something to write: a2 recoloured blue on a full disk.
+            await withFullDisk(() => store.update('a2', { color: '#0000ff' }));
+            let answer!: (rows: Annotation[]) => void;
+            const serverRows = vi.fn(() => new Promise<Annotation[]>((resolve) => (answer = resolve)));
+            const retry = retryHeld(A, DOC, { serverRows });
+            await vi.waitFor(() => expect(serverRows).toHaveBeenCalled());
+
+            // 1. An ordinary red edit of a1 queues behind the Retry.
+            const queued = nextWrite(store);
+            const red = store.update('a1', { color: '#ff0000' });
+            await queued;
+            // 2. The score closes, 3. reopens, and a newer green edit of a1 fails storage...
+            await purge();
+            await db.annotations.bulkPut(synced);
+            const reopened = await storeAs(A);
+            await withFullDisk(() => reopened.update('a1', { color: '#00ff00' }));
+            expect(heldMarksFor(A, DOC).map((a) => `${a.id}:${a.color}`)).toEqual(['a1:#00ff00']);
+            // 4. ...and it closes again.
+            await purge();
+            expect(closedInk(A)).toEqual(['a1:#00ff00', 'a2:#0000ff']);
+
+            // 5. The old Retry releases, and the red edit queued behind it is cut off.
+            answer([]);
+            await expect(retry).resolves.toMatchObject({ ok: false, wrote: [] });
+            await expect(red).rejects.toThrow(/closed/);
+
+            // Kept, but behind the newer green: Export has green.
+            expect(closedInk(A)).toEqual(['a1:#00ff00', 'a2:#0000ff']);
+            expect(lostAccessInk().map((score) => [score.userId, score.docId, score.marks])).toEqual([[A, DOC, 2]]);
+            expect(await db.ops.count()).toBe(0);
+        });
+    });
 });
