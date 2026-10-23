@@ -3,11 +3,11 @@ import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/vie
 import type { LocalAnnotation, ScribblerDb } from '@/sync/db';
 import {
     baseOf,
-    boundTo,
     conflictCount,
     conflictMarksFor,
     conflictNoticeHidden,
     discardConflicts,
+    editBoundTo,
     HeldInkFull,
     RecoveryCancelled,
     heldMarkCount,
@@ -16,7 +16,7 @@ import {
     hideConflictNotice,
     holdOps,
     isHeld,
-    keepCutOff,
+    keepCancelled,
     noteEditsInFlight,
     noteRefusedEdit,
     overflowCount,
@@ -29,6 +29,7 @@ import {
     startingPointWritten,
     sweepCutOffWrites,
     type CommitOp,
+    type InkWriteGuard,
     type RetryOptions,
 } from '@/sync/inkRecovery';
 import { foreignMarkIds } from '@/sync/opOwnership';
@@ -571,12 +572,13 @@ export class AnnotationStore {
             return;
         }
         const author = this.author;
-        const live = boundTo(author);
+        const live = editBoundTo(author, this.docId);
         const generation = this.generation;
         await this.captureStartingPoint(author, this.startingPointFor(author), live);
         if (!live() || generation !== this.generation) {
-            // Signed out, or memory reset for another account, while it
-            // waited: none of these marks is applied here, or written.
+            // Signed out, the score lost, or memory reset for another
+            // account, while it waited: none of these marks is applied here,
+            // or written.
             throw new RecoveryCancelled();
         }
         const touched = new Set<number>();
@@ -1087,7 +1089,7 @@ export class AnnotationStore {
         }
         const CHUNK = 4000;
         const author = this.author;
-        const live = boundTo(author);
+        const live = editBoundTo(author, this.docId);
         const generation = this.generation;
         const reversed = [...ops].reverse();
         const inverses: UndoableOp[] = [];
@@ -1181,9 +1183,10 @@ export class AnnotationStore {
             return false;
         }
         // The account the edit is made under, whatever it is by the time it
-        // is written — and its epoch then: a sign-out before the write ends it.
+        // is written — and its epoch and the score's then: a sign-out, or the
+        // score lost to this device, before the write ends it (editBoundTo).
         const author = this.author;
-        const live = boundTo(author);
+        const live = editBoundTo(author, this.docId);
         const generation = this.generation;
 
         // Creates apply to the live map before any IndexedDB yield so the
@@ -1201,11 +1204,12 @@ export class AnnotationStore {
                     // Never written, but drawn: held for retry like a failed
                     // write, with the day's starting point it still owes —
                     // or, past the registry's bounds, undone and said so.
-                    // Once its account has signed out: held as its signed-out
-                    // ink (Export or Discard), and no longer drawn here.
+                    // Once its account has signed out, or the score is lost:
+                    // held as signed-out or closed ink (Export or Discard),
+                    // and no longer drawn here.
                     const cancelled = !live();
                     if (cancelled) {
-                        keepCutOff(this.db, author, this.docId, [{ op, author }]);
+                        keepCancelled(this.db, author, this.docId, [{ op, author }], live);
                     }
                     const refused = cancelled ? [op] : holdOps(this.db, this.docId, [{ op, author }], preEdit);
                     if (refused.length > 0) {
@@ -1312,7 +1316,7 @@ export class AnnotationStore {
     private async captureStartingPoint(
         author: string | null,
         preEdit: Annotation[],
-        live: () => boolean,
+        live: InkWriteGuard,
     ): Promise<void> {
         await ensureDayStartingSnapshot(this.db, this.docId, preEdit, null, live);
         startingPointWritten(author, this.docId);
@@ -1385,7 +1389,7 @@ export class AnnotationStore {
      * readers. An edit of a held mark is written behind its held ops; what
      * could not be written is held, and the error rethrown.
      */
-    private async persistMany(ops: CommitOp[], author: string | null, live: () => boolean): Promise<void> {
+    private async persistMany(ops: CommitOp[], author: string | null, live: InkWriteGuard): Promise<void> {
         const held = heldMarkCount(author, this.docId);
         try {
             await this.writeMany(ops, author, live);
@@ -1396,9 +1400,10 @@ export class AnnotationStore {
                 this.notifyMeta();
                 this.onHeldChange?.();
             } else if (err instanceof RecoveryCancelled) {
-                // Its account signed out on the way: not written, and held
-                // as that account's signed-out ink (inkRecovery.keepCutOff),
-                // so not drawn here any more, whoever this store draws for now.
+                // Its account signed out, or the score was lost, on the way:
+                // not written, and held as signed-out or closed ink
+                // (inkRecovery.keepCancelled), so not drawn here any more,
+                // whoever this store draws for now.
                 this.rollBack(ops);
                 this.notifyMeta();
                 this.onHeldChange?.();
@@ -1414,7 +1419,7 @@ export class AnnotationStore {
     }
 
     /** The write itself (a seam the interleaving tests slow down). */
-    private writeMany(ops: CommitOp[], author: string | null, live: () => boolean): Promise<void> {
+    private writeMany(ops: CommitOp[], author: string | null, live: InkWriteGuard): Promise<void> {
         return persistOps(this.db, author, this.docId, ops, live);
     }
 

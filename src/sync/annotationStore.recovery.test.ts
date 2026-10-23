@@ -12,6 +12,7 @@ import {
     conflictCount,
     conflictMarksFor,
     discardSignedOutInk,
+    forgetDocInk,
     HeldInkFull,
     heldInkForExport,
     heldMarksFor,
@@ -828,5 +829,106 @@ describe('a Retry under way when the score is lost to this device (PR #72 fix 1)
         expect(await db.ops.count()).toBe(0);
         expect((await db.annotations.get('a1'))?.color).toBe('#111111');
         expect(closedInk(A)).toEqual(['a1:#ff0000']);
+    });
+});
+
+describe('an ordinary edit under way when the score is lost to this device (PR #72 fix round 2)', () => {
+    const closedInk = (userId: string): string[] =>
+        heldInkForExport(userId, DOC, true)
+            .held.map((a) => `${a.id}:${a.color}`)
+            .sort();
+
+    /** purgeLocalDocument's local half, on this test's database: close the ink, then delete the score's rows. */
+    const purge = async (): Promise<void> => {
+        closeDocInk(DOC);
+        await Promise.all([
+            db.syncState.delete(DOC),
+            db.annotations.where('docId').equals(DOC).delete(),
+            db.ops.where('docId').equals(DOC).delete(),
+            db.annotationSnapshots.where('docId').equals(DOC).delete(),
+        ]);
+    };
+
+    /** Resolves once the store hands its next write to inkRecovery.persistOps. */
+    const nextWrite = (store: AnnotationStore): Promise<void> => {
+        const writes = store as unknown as { writeMany(...args: unknown[]): Promise<void> };
+        const write = writes.writeMany.bind(store);
+        return new Promise((resolve) => {
+            vi.spyOn(writes, 'writeMany').mockImplementationOnce((...args: unknown[]) => {
+                const run = write(...args);
+                resolve();
+                return run;
+            });
+        });
+    };
+
+    it('queued behind a Retry awaiting the server, then the score closed and purged: neither recreates the mark or its outbox row, and both are kept as closed ink', async () => {
+        accountSignedIn(A);
+        const store = await heldRedOverSynced(A);
+        let answer!: (rows: Annotation[]) => void;
+        const serverRows = vi.fn(() => new Promise<Annotation[]>((resolve) => (answer = resolve)));
+
+        // 1. Retry awaits the server.
+        const retry = retryHeld(A, DOC, { serverRows });
+        await vi.waitFor(() => expect(serverRows).toHaveBeenCalled());
+        // 2. An ordinary write queues behind it.
+        const queued = nextWrite(store);
+        const edit = store.create(stroke('a2'));
+        await queued;
+        // 3. The score is lost: closed and purged, all of it done.
+        await purge();
+        // 4. The server answers, and the Retry is cut off.
+        answer([{ ...stroke('a1'), seq: 5 }]);
+        await expect(retry).resolves.toMatchObject({ ok: false, wrote: [] });
+
+        // 5. The queued write is cut off too: nothing recreated in the purged score.
+        await expect(edit).rejects.toThrow(/closed/);
+        expect(await db.annotations.count()).toBe(0);
+        expect(await db.ops.count()).toBe(0);
+        // The user's marks are kept for Export (both), not drawn, not retried.
+        expect(closedInk(A)).toEqual(['a1:#ff0000', 'a2:#111111']);
+        expect(lostAccessInk().map((score) => [score.userId, score.docId, score.marks])).toEqual([[A, DOC, 2]]);
+        expect(heldMarksFor(A, DOC)).toEqual([]);
+        expect(store.getPage(0).has('a2')).toBe(false);
+    });
+
+    it('closed while it waits on its day snapshot: no snapshot, mark or outbox row is written, and the edit is kept as closed ink', async () => {
+        accountSignedIn(A);
+        const store = await storeAs(A);
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        const ensure = snapshotService.ensureDayStartingSnapshot;
+        vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
+            await gate;
+            return ensure(...args);
+        });
+
+        const edit = store.create(stroke('a1'));
+        await purge();
+        release();
+
+        await expect(edit).rejects.toThrow(/closed/);
+        expect(await db.annotationSnapshots.count()).toBe(0);
+        expect(await db.annotations.count()).toBe(0);
+        expect(await db.ops.count()).toBe(0);
+        expect(closedInk(A)).toEqual(['a1:#111111']);
+        expect(store.getPage(0).has('a1')).toBe(false);
+    });
+
+    it('the user deleting the score themselves lets a queued edit go with it: nothing written, nothing kept', async () => {
+        accountSignedIn(A);
+        const store = await storeAs(A);
+        const { release, spy } = gateWrites();
+
+        const edit = store.create(stroke('a1'));
+        await vi.waitFor(() => expect(spy.mock.calls.some((args: unknown[]) => args.includes(db.ops))).toBe(true));
+        forgetDocInk(DOC);
+        release();
+
+        await expect(edit).rejects.toThrow(/closed/);
+        expect(await db.ops.count()).toBe(0);
+        expect(await db.annotations.count()).toBe(0);
+        expect(closedInk(A)).toEqual([]);
+        expect(lostAccessInk()).toEqual([]);
     });
 });

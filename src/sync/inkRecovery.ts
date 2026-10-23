@@ -159,8 +159,10 @@ const listeners = new Set<() => void>();
 const openStores = new Set<OpenStore>();
 /** Per account, moved on whenever its held ink is cleared (see epochOf). */
 const epochs = new Map<string | null, number>();
-/** Per score, moved on whenever it is lost to this device or deleted here (see closedSince). */
+/** Per score, moved on whenever it is lost to this device or deleted here (see editBoundTo). */
 const docEpochs = new Map<string, number>();
+/** Per score, the epoch its last delete here (forgetDocInk) moved it to: its ink went with it. */
+const forgottenAt = new Map<string, number>();
 /** Local edits applied in memory whose write has not finished (AnnotationStore.hasUnsavedEdit). */
 let inFlight = 0;
 
@@ -201,26 +203,44 @@ export const boundTo = (userId: string | null): (() => boolean) => {
     return () => epochOf(userId) === epoch;
 };
 
+const closeDocEpoch = (docId: string): number => {
+    const epoch = (docEpochs.get(docId) ?? 0) + 1;
+    docEpochs.set(docId, epoch);
+    return epoch;
+};
+
 /**
- * A Retry's guard for its score: true until the score is lost to this device
- * or deleted here (closeDocInk, forgetDocInk) after this was called. A Retry
- * holds its entry across awaits, so the entry it holds may be closed (or
- * gone) by the time it writes: this, checked after every await and inside
- * the write's transaction, cuts it off, and the closed ink stays as it was.
+ * An edit's guard: its account's epoch (boundTo) and its score's
+ * (openDocBoundTo), both as they were when the edit began. Taken there and
+ * carried through its day-snapshot wait and every write of it, so a
+ * sign-out, or the score lost to this device (closeDocInk, as purged by
+ * purgeLocalDocument), cuts it off wherever it then is — queued behind a
+ * Retry, waiting on storage, or inside its transaction — and nothing of it
+ * lands in a purged score's mirror or outbox.
  */
-const openDocBoundTo = (docId: string): (() => boolean) => {
+export interface InkWriteGuard {
+    (): boolean;
+    /**
+     * What the score's loss since the edit began left of it: 'closed' (kept
+     * for Export or Discard, closeDocInk) or 'forgotten' (deleted here by the
+     * user, forgetDocInk); null while the score is still open here.
+     */
+    readonly scoreLost: () => 'closed' | 'forgotten' | null;
+}
+
+export const editBoundTo = (userId: string | null, docId: string): InkWriteGuard => {
+    const account = boundTo(userId);
     const epoch = docEpochs.get(docId) ?? 0;
-    return () => (docEpochs.get(docId) ?? 0) === epoch;
+    const open = () => (docEpochs.get(docId) ?? 0) === epoch;
+    return Object.assign(() => account() && open(), {
+        scoreLost: () => (open() ? null : (forgottenAt.get(docId) ?? 0) > epoch ? 'forgotten' : 'closed'),
+    });
 };
 
-const closeDocEpoch = (docId: string): void => {
-    docEpochs.set(docId, (docEpochs.get(docId) ?? 0) + 1);
-};
-
-/** A write its account's sign-out overtook: it wrote nothing, and nothing of it is held. */
+/** A write its account's sign-out, or its score's loss here, overtook: it wrote nothing. */
 export class RecoveryCancelled extends Error {
-    constructor() {
-        super('The account signed out before this could be written');
+    constructor(message = 'The account signed out before this could be written') {
+        super(message);
         this.name = 'RecoveryCancelled';
     }
 }
@@ -240,8 +260,9 @@ export class HeldInkFull extends Error {
     }
 }
 
-const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string): RecoveryEntry => {
-    const key = keyOf(userId, docId);
+/** `closed`: the score's closed entry (RecoveryEntry.closed), for ink kept after its loss. */
+const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string, closed = false): RecoveryEntry => {
+    const key = closed ? closedKeyOf(userId, docId) : keyOf(userId, docId);
     let entry = entries.get(key);
     if (!entry) {
         entry = {
@@ -255,7 +276,7 @@ const ensureEntry = (db: ScribblerDb, userId: string | null, docId: string): Rec
             refused: 0,
             conflictNoticeHidden: false,
             chain: Promise.resolve(),
-            closed: false,
+            closed,
         };
         entries.set(key, entry);
     }
@@ -736,6 +757,43 @@ export const keepCutOff = (db: ScribblerDb, author: string | null, docId: string
 };
 
 /**
+ * Edits `live` (editBoundTo) cut off on their way to storage: kept as the
+ * account's signed-out ink (keepCutOff) or, the score lost to this device
+ * since they began, as its closed ink — out of every viewer and of Retry,
+ * for Export or Discard, as closeDocInk keeps what was held then (decision
+ * 65(1)). Never written into the purged score. The score deleted here by the
+ * user (forgetDocInk) lets them go with it. Not bounded by admits: they are
+ * at most the writes that were under way.
+ */
+export const keepCancelled = (
+    db: ScribblerDb,
+    author: string | null,
+    docId: string,
+    ops: readonly AuthoredOp[],
+    live: InkWriteGuard,
+): void => {
+    const lost = live.scoreLost();
+    if (!lost) {
+        keepCutOff(db, author, docId, ops);
+        return;
+    }
+    if (lost === 'forgotten' || ops.length === 0 || (author !== null && !retired.has(author) && signedIn !== author)) {
+        return;
+    }
+    const entry = ensureEntry(db, author, docId, true);
+    for (const held of ops) {
+        appendHeld(entry, held);
+    }
+    changed();
+};
+
+/** RecoveryCancelled for a write `live` cut off, saying which it was. */
+const cancelledBy = (live: InkWriteGuard): RecoveryCancelled =>
+    live.scoreLost()
+        ? new RecoveryCancelled('The score was closed on this device before this could be written')
+        : new RecoveryCancelled();
+
+/**
  * A day snapshot that failed for an edit of an existing mark, which was
  * refused (see RecoveryEntry.refused). Counted, with its starting point,
  * only when that fits (see admits); else said as overflow. The edit was
@@ -846,17 +904,19 @@ const writeOpsWithin = (
  * the older one it builds on, and once it lands nothing older is held to
  * override it. What could not be written is held, and the error rethrown —
  * or, past the registry's bounds, HeldInkFull names what was not held.
- * Bound to the author's epoch as it was when the edit was made (`live`,
- * from boundTo; else from the call): a sign-out before it runs, between its
- * chunks or during one ends it with RecoveryCancelled, writing nothing more;
- * what it had not written is held as the signed-out account's (keepCutOff).
+ * Bound to the author's epoch and the score's as they were when the edit was
+ * made (`live`, from editBoundTo; else from the call): a sign-out, or the
+ * score's loss to this device, before it runs (queued behind a Retry, say),
+ * between its chunks or during one ends it with RecoveryCancelled, writing
+ * nothing more; what it had not written is held as the signed-out account's
+ * or as the lost score's closed ink (keepCancelled).
  */
 export const persistOps = (
     db: ScribblerDb,
     author: string | null,
     docId: string,
     ops: CommitOp[],
-    live: () => boolean = boundTo(author),
+    live: InkWriteGuard = editBoundTo(author, docId),
 ): Promise<void> => {
     const fresh = ops.map((op): AuthoredOp => ({ op, author }));
     const entry = entryFor(author, docId);
@@ -879,7 +939,7 @@ const writeQueue = async (
     docId: string,
     carried: AuthoredOp[],
     fresh: AuthoredOp[],
-    live: () => boolean,
+    live: InkWriteGuard,
 ): Promise<void> => {
     const queue = [...carried, ...fresh];
     let written = 0;
@@ -900,15 +960,17 @@ const writeQueue = async (
     } catch (err) {
         const carriedSet = new Set(carried);
         if (!live()) {
-            // Signed out meanwhile: cut off, and not written — still the
-            // user's, so held for Export or Discard. The carried ops already are.
-            keepCutOff(
+            // Signed out, or the score lost, meanwhile: cut off, and not
+            // written — still the user's, so held for Export or Discard. The
+            // carried ops already are.
+            keepCancelled(
                 db,
                 author,
                 docId,
                 queue.slice(written).filter((held) => !carriedSet.has(held)),
+                live,
             );
-            throw err instanceof RecoveryCancelled ? err : new RecoveryCancelled();
+            throw cancelledBy(live);
         }
         // Chunks before this one committed; this one rolled back whole. The
         // carried ops it had are still held; the fresh ones join them, if
@@ -954,7 +1016,7 @@ export interface RetryOptions {
  * not replayed over it, but kept for Export (RecoveryEntry.conflicts).
  * `ok` false: a write failed again, and what was not written is still held.
  * Bound to the account's epoch at the call (see persistOps), and to the
- * score staying on this device (openDocBoundTo): closed meanwhile, it writes
+ * score staying on this device (editBoundTo): closed meanwhile, it writes
  * nothing more and its closed ink is kept as it was.
  */
 export const retryHeld = (userId: string | null, docId: string, options: RetryOptions = {}): Promise<RetryResult> => {
@@ -967,9 +1029,7 @@ export const retryHeld = (userId: string | null, docId: string, options: RetryOp
         return Promise.resolve({ ok: true, wrote: [], overtaken: [] });
     }
     // Cut off by the account's sign-out, or by the score's loss to this device.
-    const account = boundTo(userId);
-    const open = openDocBoundTo(docId);
-    const live = () => account() && open();
+    const live = editBoundTo(userId, docId);
     const run = entry.chain.then(() => writeHeld(entry, live, options));
     entry.chain = run.then(() => undefined);
     return run;
@@ -1230,7 +1290,8 @@ const heldScoreOf = (entry: RecoveryEntry): SignedOutScore => {
  * (only a refused edit, or an owed starting point) just goes.
  */
 export const closeDocInk = (docId: string): void => {
-    // A Retry still on its way writes nothing more (openDocBoundTo).
+    // A Retry or an edit still on its way writes nothing more, and what it
+    // had not written joins the closed ink (editBoundTo, keepCancelled).
     closeDocEpoch(docId);
     let any = false;
     for (const key of [...overflowNotes.keys()]) {
@@ -1322,7 +1383,8 @@ export const heldInkForExport = (
  * losing a score keeps it for Export or Discard (closeDocInk).
  */
 export const forgetDocInk = (docId: string): void => {
-    closeDocEpoch(docId);
+    // A write still on its way writes nothing, and is not kept (keepCancelled).
+    forgottenAt.set(docId, closeDocEpoch(docId));
     for (const key of [...overflowNotes.keys()]) {
         if ((JSON.parse(key) as [string | null, string])[1] === docId) {
             overflowNotes.delete(key);
@@ -1552,6 +1614,7 @@ export const resetInkRecoveryForTests = (): void => {
     openStores.clear();
     epochs.clear();
     docEpochs.clear();
+    forgottenAt.clear();
     overflowNotes.clear();
     retired.clear();
     sources.clear();
