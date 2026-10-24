@@ -13,6 +13,7 @@ import {
 } from '@/features/export/exportClaim';
 import { exportAnnotatedPageImage } from '@/features/export/exportPageImage';
 import { buildAnnotatedPdf, deliverPdf } from '@/features/export/exportPdf';
+import type { ShareOutcome } from '@/features/export/shareFile';
 import { fetchDocument, isCloudDocId, loadDocumentBytes } from '@/features/library/documentsService';
 import type { UploadProgress } from '@/lib/storageUpload';
 import { getCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
@@ -22,6 +23,7 @@ import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { buttonClassName } from '@/ui/classNames';
 import { onMenuKeyDown } from '@/ui/menuKeyboard';
+import { toast } from '@/ui/toast';
 
 // Lazy for the same reason as the library shell's copy: pricing is a rare
 // destination, and the viewer should not carry it in its first paint.
@@ -210,6 +212,20 @@ export const ShareExportMenu = ({
     };
 
     /**
+     * Done: say so, as a toast. The menu has usually closed by now (and on an
+     * iPad the share sheet came and went over it), so without one a finished
+     * export and an export that never started look the same. Nothing for a
+     * dismissed share sheet, which says so in the menu instead.
+     */
+    const confirmDelivery = (outcome: ShareOutcome, subject: string, format: string) => {
+        if (outcome === 'shared') {
+            toast.shared(`${subject} shared as ${format}`, { description: title });
+        } else if (outcome === 'downloaded') {
+            toast.saved(`${subject} saved as ${format}`, { description: title });
+        }
+    };
+
+    /**
      * Sending the page as a photo: a PNG, which is not what the pdf_exports
      * allowance counts (the pricing promises "1 PDF export a month"), so it is
      * built and handed over in one step with no claim.
@@ -217,7 +233,8 @@ export const ShareExportMenu = ({
     const runUnmetered = async (
         label: string,
         failureLabel: string,
-        action: (source: ArrayBuffer, onNotice: (notice: string) => void) => Promise<unknown>,
+        action: (source: ArrayBuffer, onNotice: (notice: string) => void) => Promise<ShareOutcome>,
+        subject: string,
     ) => {
         if (!begin(label)) {
             return;
@@ -227,11 +244,12 @@ export const ShareExportMenu = ({
             const source = await sourceFor(label);
             stage = 'export';
             let noticed = false;
-            await action(source, (notice) => {
+            const outcome = await action(source, (notice) => {
                 noticed = true;
                 noteMarks(notice);
             });
             setOpen(noticed);
+            confirmDelivery(outcome, subject, 'a photo');
         } catch (err) {
             fail(stage, failureLabel, err);
         } finally {
@@ -281,13 +299,15 @@ export const ShareExportMenu = ({
                 setOpen(true);
                 return;
             }
-            if ((await deliverPdf(file)) === 'cancelled') {
+            const outcome = await deliverPdf(file);
+            if (outcome === 'cancelled') {
                 setNotSent(true);
                 setOpen(true);
                 return;
             }
             markExportDelivered(attempt);
             setOpen(noticed);
+            confirmDelivery(outcome, page === null ? 'Score' : `Page ${page + 1}`, 'a PDF');
         } catch (err) {
             fail(stage, failureLabel, err);
         } finally {
@@ -342,16 +362,20 @@ export const ShareExportMenu = ({
                                 hint="PNG — send via Messages"
                                 disabled={busy !== null}
                                 onClick={() =>
-                                    void runUnmetered('Exporting…', 'The export', (source, onNotice) =>
-                                        exportAnnotatedPageImage(
-                                            docId,
-                                            source,
-                                            focusedPageIndex,
-                                            title,
-                                            markOwner,
-                                            onNotice,
-                                            lostAccess,
-                                        ),
+                                    void runUnmetered(
+                                        'Exporting…',
+                                        'The export',
+                                        (source, onNotice) =>
+                                            exportAnnotatedPageImage(
+                                                docId,
+                                                source,
+                                                focusedPageIndex,
+                                                title,
+                                                markOwner,
+                                                onNotice,
+                                                lostAccess,
+                                            ),
+                                        `Page ${pageLabel}`,
                                     )
                                 }
                             />

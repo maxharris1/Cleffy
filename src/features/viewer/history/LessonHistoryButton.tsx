@@ -8,6 +8,7 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { toast } from '@/ui/toast';
 import { buttonClassName } from '@/ui/classNames';
 
 interface LessonHistoryButtonProps {
@@ -94,6 +95,11 @@ const LessonHistoryDialog = ({
                 return;
             }
             await store.restoreFromSnapshot(snap.payload);
+            // Fired with the close, so the dialog's exit and the toast's
+            // entrance read as one hand-off.
+            toast.success('Marks restored', {
+                description: `To the starting point of ${formatDay(snap.capturedOn)}. Undo brings back what was there.`,
+            });
             onClose();
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Restore failed');
