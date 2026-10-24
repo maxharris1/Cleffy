@@ -4,9 +4,7 @@ import { useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from 'react';
 
 import { CloseButton } from '@/ui/CloseButton';
-
-/** Open dialogs, oldest first — Escape acts on the top one only. */
-const dialogStack: symbol[] = [];
+import { dialogStack } from '@/ui/dialogStack';
 
 /** A sheet dragged down this far (px), or flicked faster than this (px/ms), closes. */
 const SHEET_CLOSE_DISTANCE = 96;

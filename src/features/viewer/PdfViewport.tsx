@@ -64,6 +64,7 @@ import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { clampTextNote, isTextPayload, type ViewState } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
+import { isDialogOpen } from '@/ui/dialogStack';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, CoverPageIcon, ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
@@ -143,7 +144,7 @@ const pageTurnDirection = (e: KeyboardEvent): -1 | 1 | null => {
 const keyTargetsControl = (target: EventTarget | null): boolean =>
     target instanceof Element &&
     target.closest(
-        'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"]',
+        'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="alertdialog"]',
     ) !== null;
 
 interface ViewportSize {
@@ -808,9 +809,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
     }, [view, viewportSize.height, layout]);
 
     // Keyboard: page turns (any role — pedals send these keys) and undo/redo.
+    // None while a dialog is open, wherever its keys land: a page turned or a
+    // mark undone under a confirm is a change made behind the user's back.
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.defaultPrevented || keyTargetsControl(e.target)) {
+            if (e.defaultPrevented || isDialogOpen() || keyTargetsControl(e.target)) {
                 return;
             }
             const direction = pageTurnDirection(e);
