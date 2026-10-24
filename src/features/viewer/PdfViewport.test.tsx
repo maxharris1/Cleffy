@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { playheadRect } from '@/features/playback/PlayheadController';
-import { MIN_SCALE, PAGE_GAP, computeDocumentLayout } from '@/features/viewer/geometry';
+import { MIN_SCALE, PAGE_GAP, clampScroll, computeDocumentLayout } from '@/features/viewer/geometry';
 import { PdfViewport, type PlaybackFeature } from '@/features/viewer/PdfViewport';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
@@ -283,18 +283,24 @@ describe('PdfViewport follow under the notice stack', () => {
     });
 });
 
-/** The notice region over the viewport, as ViewerPage arranges them; the rejected-changes card can be dismissed. */
+/**
+ * The notice region over the viewport, as ViewerPage arranges them; the
+ * rejected-changes card can be dismissed, or shown and hidden by `rejected`.
+ */
 const ViewerUnderNotices = ({
     readOnly = true,
     playback,
     onStore,
+    rejected,
 }: {
     readOnly?: boolean;
     playback?: PlaybackFeature;
     onStore?: (store: AnnotationStore) => void;
+    rejected?: boolean;
 }) => {
     const [inset, setInset] = useState(0);
-    const [showRejected, setShowRejected] = useState(true);
+    const [shown, setShowRejected] = useState(true);
+    const showRejected = rejected ?? shown;
     return (
         <div>
             <ViewerNoticeRegion onInsetChange={setInset}>
@@ -366,6 +372,14 @@ const reportResizes = () => {
 };
 
 const view = () => useViewerStore.getState().view;
+
+/** A pointer on the score, at viewport px (x, y). */
+const pointer = (type: string, pointerId: number, pointerType: string, x: number, y: number) =>
+    act(() => {
+        document
+            .querySelector('.ink-surface')!
+            .dispatchEvent(new PointerEvent(type, { pointerId, pointerType, clientX: x, clientY: y, bubbles: true }));
+    });
 
 describe('PdfViewport page turns under a tall notice stack', () => {
     const layout = computeDocumentLayout(PAGE_SIZES, 1, false);
@@ -575,16 +589,6 @@ describe('PdfViewport when a notice goes away', () => {
     });
 
     describe('a gesture that starts while the score glides up', () => {
-        /** A pointer on the score, at viewport px (x, y). */
-        const pointer = (type: string, pointerId: number, pointerType: string, x: number, y: number) =>
-            act(() => {
-                document
-                    .querySelector('.ink-surface')!
-                    .dispatchEvent(
-                        new PointerEvent(type, { pointerId, pointerType, clientX: x, clientY: y, bubbles: true }),
-                    );
-            });
-
         /** Dismiss the notice and let 30 ms of the 180 ms glide run: the score is part way up. */
         const dismissAndGlidePartway = (frames: ReturnType<typeof manualFrames>) => {
             dismiss();
@@ -712,5 +716,56 @@ describe('PdfViewport when a notice goes away', () => {
         }
         expect(frames.pending()).toHaveLength(0);
         expect(view().scrollY).toBeCloseTo(-stackBottomPx(2));
+    });
+});
+
+describe('PdfViewport when a notice comes up over a score that fits', () => {
+    // Zoomed out on an iPad, the whole score fits below the stack, so the top
+    // bound is also the bottom one: a card coming up moves the score down.
+    const IPAD = { width: 768, height: 1024 };
+
+    it('finishes a settle that a stroke cut short once the pen lifts', async () => {
+        viewport = IPAD;
+        const frames = manualFrames();
+        let store: AnnotationStore | null = null;
+        const { rerender } = render(
+            <ViewerUnderNotices readOnly={false} rejected={false} onStore={(s) => (store = s)} />,
+        );
+        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(2)));
+        await waitFor(() => expect(store).not.toBeNull());
+        const layout = computeDocumentLayout(PAGE_SIZES, 1, false);
+        const twoCards = { top: stackBottomPx(2), bottom: 0 };
+        act(() =>
+            useViewerStore
+                .getState()
+                .setView(clampScroll({ ...view(), scale: MIN_SCALE }, layout, IPAD.width, IPAD.height, twoCards)),
+        );
+        expect(view().scrollY).toBe(-stackBottomPx(2));
+        act(() => useViewerStore.getState().setTool('pen'));
+
+        // The card comes up (166 -> 224 px): the score glides down under it.
+        rerender(<ViewerUnderNotices readOnly={false} rejected onStore={(s) => (store = s)} />);
+        expect(screen.getAllByRole('status')).toHaveLength(3);
+        reportResizes();
+        frames.advance(0);
+        frames.advance(30);
+        const midway = view().scrollY;
+        expect(midway).toBeLessThan(-stackBottomPx(2) - 10);
+        expect(midway).toBeGreaterThan(-stackBottomPx(3));
+
+        // A stroke 30 ms in stops the glide where it is...
+        pointer('pointerdown', 7, 'pen', 360, 600);
+        for (const x of [370, 380, 390, 400]) {
+            frames.advance(30);
+            pointer('pointermove', 7, 'pen', x, 600);
+        }
+        expect(view().scrollY).toBe(midway);
+        pointer('pointerup', 7, 'pen', 400, 600);
+
+        // ...and the rest of it runs once the pen lifts, to the new bound.
+        frames.advance(0);
+        frames.advance(1000);
+        expect(view().scrollY).toBe(-stackBottomPx(3));
+        expect(frames.pending()).toHaveLength(0);
     });
 });

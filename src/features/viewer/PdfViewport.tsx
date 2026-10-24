@@ -323,6 +323,11 @@ export const PdfViewport = ({
      * than it already was, so nothing jumps under the finger. Null otherwise.
      */
     const slackTopRef = useRef<number | null>(null);
+    /**
+     * A settle into the bounds that a pointer on the score held off (or cut
+     * short), in either direction: it resumes once the last pointer lifts.
+     */
+    const settlePendingRef = useRef(false);
     const settleGlideRef = useRef<number | null>(null);
     const cancelSettleGlide = useCallback(() => {
         if (settleGlideRef.current !== null) {
@@ -346,14 +351,17 @@ export const PdfViewport = ({
         const target = clampScroll(from, layoutRef.current, width, height, obscuredRef.current);
         if (Math.abs(target.scrollY - from.scrollY) < 0.5 && Math.abs(target.scrollX - from.scrollX) < 0.5) {
             slackTopRef.current = null;
+            settlePendingRef.current = false;
             return;
         }
         if (gestureRef.current?.pointerActive) {
             // Settles once the last pointer lifts (below).
             slackTopRef.current ??= from.scrollY;
+            settlePendingRef.current = true;
             return;
         }
         slackTopRef.current = null;
+        settlePendingRef.current = false;
         if (prefersReducedMotion()) {
             setView(target);
             return;
@@ -387,9 +395,10 @@ export const PdfViewport = ({
         const el = containerRef.current;
         // A finger, pen or mouse coming down on the score stops a settle where
         // it is — a stroke must not start on a page gliding under the pen, nor
-        // a pan's first move snap the rest of the way — and keeps what is left
-        // as slack, to settle once the last pointer lifts (below). Ahead of
-        // the gesture controller, so the slack is in place for its first move.
+        // a pan's first move snap the rest of the way — and leaves what is left
+        // to settle once the last pointer lifts (below), whichever way it was
+        // going; above the top bound, as slack too. Ahead of the gesture
+        // controller, so the slack is in place for its first move.
         const onPointerDown = (e: PointerEvent) => {
             if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
                 return;
@@ -401,13 +410,16 @@ export const PdfViewport = ({
             }
             const v = useViewerStore.getState().view;
             const bound = clampScroll(v, layoutRef.current, width, height, obscuredRef.current);
+            if (Math.abs(v.scrollY - bound.scrollY) >= 0.5 || Math.abs(v.scrollX - bound.scrollX) >= 0.5) {
+                settlePendingRef.current = true;
+            }
             if (v.scrollY < bound.scrollY - 0.5) {
                 slackTopRef.current ??= v.scrollY;
             }
         };
         // After the controller has seen the pointer go (it listens on the score).
         const onPointerEnd = () => {
-            if (slackTopRef.current !== null) {
+            if (settlePendingRef.current || slackTopRef.current !== null) {
                 settleIntoBounds();
             }
         };
