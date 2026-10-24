@@ -1,7 +1,7 @@
 # Cleffy PR #74 lazy-load fix pass (narrow): report
 **Status:** Complete
 **PR:** https://github.com/maxharris1/Cleffy/pull/74 (draft, base `dev`, left draft and unmerged) · **Branch:** `mh/ui-polish-emil` · **New head:** `c52c708fbaf968ab60c2b3265cc4fffac7c0874e`
-**Checks (local, on c52c708):** lint:check ✅ · typecheck ✅ · test ✅ (254 files / 3983 passed, 22 skipped) · build ✅ · prettier ✅ (`--check` clean on every changed file) · **GitHub CI on c52c708:** ⏳ pending at report time: `omr-service`, `edge-functions-deno`, `supabase-drift` and Vercel Preview Comments passed; `checks` and `supabase-local` still running (this report will be updated when they finish)
+**Checks (local, on c52c708):** lint:check ✅ · typecheck ✅ · test ✅ (254 files / 3983 passed, 22 skipped) · build ✅ · prettier ✅ (`--check` clean on every changed file) · **GitHub CI on c52c708:** ✅ green: every check passed (`checks`, `supabase-local`, `edge-functions-deno`, `supabase-drift`, `omr-service`, in both the push and pull_request runs, plus Vercel Preview Comments); Supabase Preview skipped. The PR is mergeable (`clean`) and still a draft
 **Open questions:** see the "Open questions" section below (4 items: bundle +~0.7 kB, a dropped keyboard open after blur, `onClose` vs `onOpenChange`, the notice's copy and design).
 
 ## Environment
@@ -71,7 +71,7 @@ Files: `src/ui/Menu.tsx`, `src/ui/MenuBase.tsx`, `src/ui/Dialog.tsx`, plus `src/
 - Most of that is a chunking side effect. `Menu.tsx` (shell) now imports `createPortal` from `react-dom` for the notice, and rolldown moved `react` (2.88 kB gzip) into its own modulepreloaded chunk; the shared `Dialog` wrapper chunk shrank from 2.23 to 1.91 kB. Lazy chunks: MenuBase 14.14 → 14.19 kB and DialogPanel 4.87 kB (unchanged). No Base UI code is in an initial chunk.
 
 ## GitHub CI on c52c708
-Two workflow runs (push + pull_request), both on c52c708. At the time of writing: `omr-service` ✅, `edge-functions-deno` ✅, `supabase-drift` ✅, Vercel Preview Comments ✅, Supabase Preview skipped; `checks` and `supabase-local` in progress.
+**Green.** Two workflow runs on c52c708 (runs 40103720642 and 40103723620), each with `checks` ✅, `supabase-local` ✅, `edge-functions-deno` ✅, `supabase-drift` ✅ and `omr-service` ✅. Vercel Preview Comments ✅; Supabase Preview skipped. The last check finished at 14:48:03Z. PR mergeable state: `clean`; the PR is still a draft and was not merged.
 
 ## Open questions
 1. **Bundle (+~0.7–1.0 kB initial).** The notice needs `createPortal`: menus sit under the `backdrop-blur` sticky header, where a `position: fixed` child would be placed against the header rather than the viewport. That import caused the `react` chunk split above. If even this is too much, the notice could become an absolutely positioned element in a wrapper span (with a small risk of clipping in scroll containers). Keep as is?
