@@ -131,10 +131,7 @@ export const ScoreCard = memo(
 
                     {/* Past the free cap: still readable and exportable, just not writable. */}
                     {doc.archived_at ? (
-                        <span
-                            className="absolute bottom-1.5 left-1.5 z-10"
-                            title="Read-only — over your plan’s score limit"
-                        >
+                        <span className="absolute bottom-1.5 left-1.5 z-10">
                             <Badge tone="warn">Archived</Badge>
                         </span>
                     ) : null}
@@ -155,7 +152,7 @@ export const ScoreCard = memo(
                         // context. Under a composer heading there is nothing to
                         // restore, so the visible text stands on its own.
                         aria-label={!stripComposer && composer ? doc.title : undefined}
-                        className="text-sm font-medium text-stone-800 transition-colors line-clamp-2 group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
+                        className="text-sm font-medium text-stone-800 transition-colors line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
                     >
                         {title}
                     </Link>
@@ -164,6 +161,10 @@ export const ScoreCard = memo(
                         {pages}
                         {formatUpdated(doc.updated_at)}
                     </p>
+                    {/* The reason, in words: a title tooltip never shows on touch. */}
+                    {doc.archived_at ? (
+                        <p className="mt-0.5 text-xs text-amber-700">Read-only: over your plan’s score limit</p>
+                    ) : null}
                 </div>
             </div>
         );

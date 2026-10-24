@@ -1,3 +1,4 @@
+import { ViewerNotice } from '@/features/viewer/ViewerNotice';
 import { Button } from '@/ui/Button';
 
 interface SyncRejectedNoticeProps {
@@ -11,7 +12,7 @@ interface SyncRejectedNoticeProps {
  * access, archived score, invalid mark). The sync engine has already put
  * those marks back to the shared score's version; without this the edit
  * would just vanish, and the musician would find out at the lesson.
- * Same amber strip as the viewer's other notices — the app has no toasts.
+ * Same amber card as the viewer's other notices (ViewerNotice) — the app has no toasts.
  */
 export const SyncRejectedNotice = ({ count, onDismiss }: SyncRejectedNoticeProps) => {
     if (count <= 0) {
@@ -19,18 +20,15 @@ export const SyncRejectedNotice = ({ count, onDismiss }: SyncRejectedNoticeProps
     }
     const subject = count === 1 ? 'One of your changes' : `${count} of your changes`;
     return (
-        <div
-            className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
-            role="status"
-        >
-            <p className="text-sm text-amber-900">
+        <ViewerNotice>
+            <p className="min-w-0 flex-1">
                 {subject} could not be saved to this score and {count === 1 ? 'was' : 'were'} undone. You may no longer
                 have permission to edit it.
             </p>
             <Button size="sm" variant="secondary" onClick={onDismiss}>
                 Dismiss
             </Button>
-        </div>
+        </ViewerNotice>
     );
 };
 
@@ -61,19 +59,19 @@ export const SyncHeldNotice = ({ count, reason = 'archived' }: SyncHeldNoticePro
     const are = count === 1 ? 'is' : 'are';
     const upload = count === 1 ? 'It uploads' : 'They upload';
     return (
-        <div className="border-b border-amber-200 bg-amber-50 px-3 py-2" role="status">
+        <ViewerNotice bare>
             {reason === 'seat-read-only' ? (
-                <p className="text-sm text-amber-900">
+                <p>
                     Your Academy seat is read-only, so {changes} you made to this score {are} saved only on this device.{' '}
                     {upload} automatically once your seat is active again, for example when the academy&rsquo;s owner
                     renews or picks your seat.
                 </p>
             ) : (
-                <p className="text-sm text-amber-900">
+                <p>
                     This score is archived and read-only, so {changes} you made to it {are} saved only on this device.{' '}
                     {upload} automatically once the score is restored, for example when its owner renews their plan.
                 </p>
             )}
-        </div>
+        </ViewerNotice>
     );
 };

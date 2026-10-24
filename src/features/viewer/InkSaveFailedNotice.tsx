@@ -1,5 +1,6 @@
 import { useCallback, useState, useSyncExternalStore } from 'react';
 
+import { ViewerNotice } from '@/features/viewer/ViewerNotice';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { subscribeInkRecovery } from '@/sync/inkRecovery';
 import { Button } from '@/ui/Button';
@@ -141,11 +142,8 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
     const { short, long } = copy(state, retryFailed, state === 'conflicts' ? exportableConflicts > 0 : exportable);
 
     return (
-        <div
-            className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 sm:flex-wrap sm:py-2"
-            role="status"
-        >
-            <p className="min-w-0 flex-1 text-sm leading-snug text-amber-900">
+        <ViewerNotice bare className="flex items-center gap-2 sm:flex-wrap">
+            <p className="min-w-0 flex-1 leading-snug">
                 <span className="sm:hidden">{short}</span>
                 <span className="hidden sm:inline">{long}</span>
             </p>
@@ -205,7 +203,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
                     onCancel={() => setConfirmingDiscard(false)}
                 />
             ) : null}
-        </div>
+        </ViewerNotice>
     );
 };
 

@@ -352,7 +352,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 : `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`
           : isLiveQuery
             ? `${facetPrefix}${liveError ? 'Search unavailable' : 'Searching IMSLP…'}`
-            : `${facetPrefix}Popular · ${curatedWorks.length} scores`;
+            : `${facetPrefix}Popular · ${curatedWorks.length} ${curatedWorks.length === 1 ? 'score' : 'scores'}`;
 
     const relaxedHint = (() => {
         if (relaxed.length === 0) {

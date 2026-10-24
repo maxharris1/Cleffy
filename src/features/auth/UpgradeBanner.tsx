@@ -5,6 +5,7 @@ import { passwordProblem, passwordProblemMessage } from '../../../supabase/funct
 import { confirmGuestEmailUpgrade, GuestUpgradeError, startGuestEmailUpgrade } from '@/features/auth/guestUpgrade';
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { ViewerNotice } from '@/features/viewer/ViewerNotice';
 import { fieldClassName } from '@/ui/classNames';
 import { CloseButton } from '@/ui/CloseButton';
 
@@ -160,7 +161,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     );
 
     return (
-        <div data-ui-overlay className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-900">
+        <ViewerNotice bare overlay role={null}>
             {state === 'done' ? (
                 <div className="flex items-center justify-between gap-2">
                     <p role="status">
@@ -264,6 +265,6 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     {dismissButton}
                 </div>
             )}
-        </div>
+        </ViewerNotice>
     );
 };

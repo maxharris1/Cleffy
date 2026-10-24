@@ -19,6 +19,7 @@ import {
     type LinkExpiry,
 } from '@/features/share/shareService';
 import type { DocumentMemberListing, MemberRole, ShareLinkRow, ShareRole } from '@/types/database';
+import { middleEllipsis, useFlash } from '@/lib/useFlash';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -92,7 +93,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
     const [expiry, setExpiry] = useState<LinkExpiry>(DEFAULT_LINK_EXPIRY);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [copiedToken, setCopiedToken] = useState<string | null>(null);
+    const [copiedToken, flashCopied] = useFlash<string>(1500);
     const [linksError, setLinksError] = useState<string | null>(null);
     const [membersError, setMembersError] = useState<string | null>(null);
     const [revokeTarget, setRevokeTarget] = useState<ShareLinkRow | null>(null);
@@ -152,8 +153,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
     const copy = async (token: string) => {
         try {
             await navigator.clipboard.writeText(shareUrlFor(token));
-            setCopiedToken(token);
-            setTimeout(() => setCopiedToken(null), 1500);
+            flashCopied(token);
         } catch {
             setError('Could not copy — long-press the link to copy it manually.');
         }
@@ -303,16 +303,35 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                         <Badge tone={link.role === 'editor' ? 'ok' : 'neutral'}>
                                             {link.role === 'editor' ? 'edit' : 'view'}
                                         </Badge>
-                                        <span className="min-w-0 flex-1 truncate text-xs text-stone-500">
-                                            {shareUrlFor(link.token)}
+                                        {/* Middle-truncated: the origin and the token's end are what
+                                            tell links apart. The full URL is what Copy copies. */}
+                                        <span
+                                            className="min-w-0 flex-1 truncate text-xs text-stone-500"
+                                            title={shareUrlFor(link.token)}
+                                        >
+                                            {middleEllipsis(shareUrlFor(link.token), 36)}
                                         </span>
                                         <button
                                             type="button"
                                             disabled={expired}
+                                            aria-label={copiedToken === link.token ? 'Copied!' : 'Copy'}
                                             onClick={() => void copy(link.token)}
                                             className="rounded px-2 py-1 text-xs text-accent transition-colors hover:bg-accent-soft disabled:opacity-40 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                                         >
-                                            {copiedToken === link.token ? 'Copied!' : 'Copy'}
+                                            {/* Both labels share one grid cell, so the button keeps
+                                                the wider one's width and Revoke never shifts. */}
+                                            <span aria-hidden="true" className="grid">
+                                                <span
+                                                    className={`col-start-1 row-start-1 ${copiedToken === link.token ? 'invisible' : ''}`}
+                                                >
+                                                    Copy
+                                                </span>
+                                                <span
+                                                    className={`col-start-1 row-start-1 ${copiedToken === link.token ? '' : 'invisible'}`}
+                                                >
+                                                    Copied!
+                                                </span>
+                                            </span>
                                         </button>
                                         {/* On touch, extra room between Copy and the destructive Revoke. */}
                                         <button

@@ -1123,7 +1123,7 @@ const Pager = ({
     return (
         <div
             data-ui-overlay
-            className="absolute left-2 top-2 z-10 flex items-center gap-1 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-4 sm:top-auto"
+            className="absolute left-[max(0.5rem,var(--safe-left))] top-2 z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-[max(1rem,var(--safe-left))] sm:top-auto"
         >
             <button
                 type="button"
@@ -1181,7 +1181,7 @@ const ZoomControls = ({
             // (PHONE_CONTROLS_STRIP). Larger screens: a column at the
             // bottom-right — a row again on short landscape screens, where the
             // column would climb under the toolbar.
-            className="absolute right-2 top-2 flex flex-row gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-4 sm:top-auto sm:flex-col sm:[@media(max-height:500px)]:flex-row"
+            className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-[max(1rem,var(--safe-right))] sm:top-auto sm:flex-col sm:[@media(max-height:500px)]:flex-row"
         >
             {pageColumns !== null ? (
                 <button

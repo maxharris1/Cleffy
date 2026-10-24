@@ -173,7 +173,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                                 ].join(' ')}
                             >
                                 <div className="flex items-baseline justify-between gap-3">
-                                    <h3 className="font-display text-lg font-semibold text-stone-900">
+                                    <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
                                         {card.name}
                                         {isCurrent ? (
                                             <Badge tone="accent" className="ml-2 align-middle">
@@ -251,7 +251,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                     {founding?.priceId ? (
                         <section className="rounded-2xl border border-amber-300/70 bg-amber-50/60 p-4">
                             <div className="flex items-baseline justify-between gap-3">
-                                <h3 className="font-display text-lg font-semibold text-stone-900">
+                                <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
                                     Founding Teacher
                                     <Badge tone="warn" className="ml-2 align-middle">
                                         Limited

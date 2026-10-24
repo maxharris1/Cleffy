@@ -97,7 +97,7 @@ const DocumentNav = ({ current }: { current: LegalDocumentId }) => (
  * the wordmark linking home and the sibling documents one click away.
  */
 const LegalPage = ({ document: doc }: { document: LegalDocument }) => (
-    <main className="paper-page min-h-full">
+    <main className="paper-page safe-page min-h-full">
         <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6 sm:py-10">
             <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
                 <Link to="/" className="landing-brand font-display text-2xl font-semibold sm:text-3xl">

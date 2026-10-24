@@ -126,12 +126,20 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         if (!overlay || !viewport || !onObscuredChange) {
             return;
         }
+        const root = document.documentElement;
         const measure = () => {
             const bar = overlay.getBoundingClientRect();
             const box = viewport.getBoundingClientRect();
+            const atBottom = bar.height > 0 && bar.top > box.top + box.height / 2;
+            // App-wide bars pinned to the window's bottom edge (SignedOutInkNotice)
+            // sit above a bottom toolbar rather than over its buttons.
+            root.style.setProperty(
+                '--toolbar-bottom-clearance',
+                atBottom ? `${Math.max(0, Math.round(window.innerHeight - bar.top))}px` : '0px',
+            );
             if (bar.height === 0) {
                 onObscuredChange({ top: 0, bottom: 0 });
-            } else if (bar.top > box.top + box.height / 2) {
+            } else if (atBottom) {
                 onObscuredChange({ top: 0, bottom: Math.max(0, Math.round(box.bottom - bar.top)) });
             } else {
                 onObscuredChange({ top: Math.max(0, Math.round(bar.bottom - box.top)), bottom: 0 });
@@ -145,6 +153,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         return () => {
             observer?.disconnect();
             window.removeEventListener('resize', measure);
+            root.style.removeProperty('--toolbar-bottom-clearance');
             onObscuredChange({ top: 0, bottom: 0 });
         };
     }, [onObscuredChange]);
@@ -187,7 +196,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         <div
             ref={overlayRef}
             data-ui-overlay
-            className="pointer-events-none absolute inset-x-2 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:inset-x-0 sm:bottom-auto sm:top-3"
+            className="pointer-events-none absolute bottom-[calc(0.75rem+var(--safe-bottom))] left-[max(0.5rem,var(--safe-left))] right-[max(0.5rem,var(--safe-right))] z-20 flex justify-center sm:inset-x-0 sm:bottom-auto sm:top-3"
         >
             <div className="chrome-glass pointer-events-auto relative flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2 lg:pointer-coarse:gap-3">
                 {TOOLS.map(({ tool: t, label, short, icon }) => (

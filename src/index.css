@@ -22,8 +22,8 @@
 
     /* Brand palette — pristine engraving, living markings.
        Chrome belongs to the printed page; the one accent belongs to the marking hand.
-       Keep paper/accent in sync with the PWA manifest colors in vite.config.ts
-       and the theme-color meta in index.html. */
+       Keep paper in sync with the PWA manifest colors in vite.config.ts and
+       the theme-color meta in index.html (both are paper, like the header). */
     --color-paper: #f7f5ef;
     --color-paper-deep: #edeae0;
     --color-ink: #1c1917;
@@ -85,6 +85,15 @@
  * black-translucent. max() keeps Safari-in-tab padding when the inset is 0
  * and lifts controls out from under the iPhone status bar / notch in PWA.
  */
+/* Plain document pages (assignments, legal, report): clear the notch and the
+   home indicator in an installed PWA; nothing changes where the insets are 0. */
+.safe-page {
+    padding-top: var(--safe-top);
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+    padding-bottom: var(--safe-bottom);
+}
+
 .safe-landing-nav {
     padding-top: max(1.5rem, var(--safe-top));
 }

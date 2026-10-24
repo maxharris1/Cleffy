@@ -5,8 +5,9 @@
         <!-- Zoomable everywhere (WCAG 1.4.4). The score keeps pinch for itself with
              touch-action, not the viewport: src/lib/viewportZoom.ts. -->
         <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-        <!-- Keep in sync with --color-accent in src/index.css @theme and the PWA manifest in vite.config.ts -->
-        <meta name="theme-color" content="#4338ca" />
+        <!-- The browser chrome matches the app's header: paper, --color-paper in src/index.css
+             @theme. Keep in sync with theme_color in the PWA manifest (vite.config.ts). -->
+        <meta name="theme-color" content="#f7f5ef" />
         <meta
             name="description"
             content="Annotate sheet music together in real time. Upload scores, share a link, and mark up with your ensemble."

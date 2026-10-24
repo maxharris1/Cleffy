@@ -676,14 +676,8 @@ const TempoControl = ({
                 +
             </button>
             {compound ? <span className="ml-0.5 text-xs text-stone-400">(♩· = {Math.round(bpm / 1.5)})</span> : null}
-            {inferred ? (
-                <span
-                    className="ml-0.5 text-xs text-stone-400"
-                    title="Estimated from the printed tempo marking, which gives no number"
-                >
-                    est.
-                </span>
-            ) : null}
+            {/* Said inline, not in a tooltip, so touch sees why the number is a guess. */}
+            {inferred ? <span className="ml-0.5 text-xs text-stone-500">est. from marking</span> : null}
         </div>
     );
 };

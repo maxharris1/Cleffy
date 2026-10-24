@@ -688,7 +688,9 @@ export const LibraryPage = () => {
         }
         if (remoteResults) {
             const more = remoteResults.hasMore ? '+' : '';
-            return filtering ? `${visible.length}${more} found` : `${visible.length}${more} scores, A–Z`;
+            return filtering
+                ? `${visible.length}${more} found`
+                : `${visible.length}${more} ${visible.length === 1 && !more ? 'score' : 'scores'}, A–Z`;
         }
         // Below here with hasMore, the server was not (or could not be)
         // asked: everything counted is what this page has loaded.
@@ -1421,10 +1423,7 @@ const ScoreRow = memo(
                                 </Link>
                                 {/* Past the free cap: still readable and exportable, just not writable. */}
                                 {doc.archived_at ? (
-                                    <span
-                                        className="relative shrink-0"
-                                        title="Read-only — over your plan’s score limit"
-                                    >
+                                    <span className="relative shrink-0">
                                         <Badge tone="warn">Archived</Badge>
                                     </span>
                                 ) : null}
@@ -1470,6 +1469,10 @@ const ScoreRow = memo(
                             ) : null}
                         </div>
                         <span className="text-xs text-stone-500 sm:shrink-0">
+                            {/* The reason, in words: a title tooltip never shows on touch. */}
+                            {doc.archived_at ? (
+                                <span className="text-amber-700">Read-only: over plan limit · </span>
+                            ) : null}
                             {doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : ''}
                             {formatUpdated(doc.updated_at)}
                         </span>
