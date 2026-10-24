@@ -358,15 +358,17 @@ export const ShareExportMenu = ({
                             labels={{
                                 idle: 'Export',
                                 exporting: 'Exporting…',
-                                downloading:
-                                    downloadPct === null ? (
-                                        'Downloading…'
-                                    ) : (
-                                        <>
-                                            Downloading…{' '}
-                                            <span className="inline-block w-[4ch] text-right">{downloadPct}%</span>
-                                        </>
-                                    ),
+                                // The percentage's slot is there even before the
+                                // size is known, so the button never widens when
+                                // the number arrives.
+                                downloading: (
+                                    <>
+                                        Downloading…{' '}
+                                        <span data-download-pct className="inline-block w-[4ch] text-right">
+                                            {downloadPct === null ? null : `${downloadPct}%`}
+                                        </span>
+                                    </>
+                                ),
                             }}
                             active={active}
                         />

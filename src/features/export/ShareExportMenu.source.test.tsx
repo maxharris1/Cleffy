@@ -107,8 +107,17 @@ describe('ShareExportMenu', () => {
         render(<ShareExportMenu docId={DOC_ID} doc={row()} title="Sonata" />);
         await openAndExport(user);
 
+        // No size yet: the percentage's slot is held empty, so the button
+        // does not widen when the number arrives.
+        report({ loaded: 10, total: 0 });
+        const slot = (await screen.findByRole('button', { name: 'Downloading…' })).querySelector('[data-download-pct]');
+        expect(slot).toHaveClass('inline-block', 'w-[4ch]');
+        expect(slot).toBeEmptyDOMElement();
+
         report({ loaded: 25, total: 100 });
         const trigger = await screen.findByRole('button', { name: 'Downloading… 25%' });
+        expect(trigger.querySelector('[data-download-pct]')).toBe(slot);
+        expect(slot).toHaveTextContent('25%');
         // Every caption is in the button (SwapLabel), so it never changes width.
         expect(within(trigger).getByText('Export')).toHaveAttribute('aria-hidden', 'true');
         // The menu closed on the press; opened again mid-export, it offers nothing to start.
