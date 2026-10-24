@@ -20,6 +20,8 @@
 
 **GitHub CI on the head (`2c14ccd`): green.** Both workflow runs ([40095594207](https://github.com/maxharris1/Cleffy/actions/runs/40095594207), [40095605707](https://github.com/maxharris1/Cleffy/actions/runs/40095605707)) passed every job: `checks`, `supabase-local`, `supabase-drift`, `edge-functions-deno`, `omr-service`. `Vercel Preview Comments` success (preview deployed Ready); `Supabase Preview` skipped. PR mergeable state: clean.
 
+**Outcome:** maxharris1 marked #75 ready for review and merged it into `dev` (`8584ed5`) at 2026-10-24 18:16 UTC. #74 merged right after (`3c0e8cb`). This session merged nothing.
+
 ## Open questions
 
 - None blocking.
