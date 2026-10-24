@@ -343,7 +343,9 @@ export const fitPageWidthScale = (layout: DocumentLayout, viewportWidth: number)
  * whose widest page turned out wider is fitted again. The centre is that of
  * the part of the viewport no strip covers (`obscured`), and the page it is
  * measured on is the one there — not the pager's last row at the bottom
- * bound, which can sit far below it when zoomed out. Unclamped.
+ * bound, which can sit far below it when zoomed out. A view pinned at the top
+ * bound stays pinned, so page 1 is not pushed out of view by a page below it
+ * growing. Unclamped.
  */
 export const reanchorView = (
     view: ViewState,
@@ -369,7 +371,14 @@ export const reanchorView = (
     const cy = (view.scrollY + anchorY) / view.scale;
     const x = cx * (after.contentWidth / before.contentWidth);
     const y = to.top + ((cy - from.top) / from.height) * to.height;
-    return { scale, scrollX: x * scale - viewportWidth / 2, scrollY: y * scale - anchorY };
+    // The top bound (clampScroll's minY) does not depend on the page sizes.
+    const minY = obscured.top > 0 ? -obscured.top : 0;
+    const pinnedTop = view.scrollY <= minY + BOUND_EPSILON_PX;
+    return {
+        scale,
+        scrollX: x * scale - viewportWidth / 2,
+        scrollY: pinnedTop ? view.scrollY : y * scale - anchorY,
+    };
 };
 
 /** A point on a specific page in normalized (0–1) page coordinates. */

@@ -574,4 +574,22 @@ describe('reanchorView', () => {
         expect(cy).toBeGreaterThan(page8.top);
         expect(cy).toBeLessThan(page8.top + page8.height);
     });
+
+    it('keeps a view pinned at the top bound there when a page below page 1 grows', () => {
+        // Zoomed out under a 72 px strip, scrolled to the very top: page 3
+        // holds the centre of the part of the viewport the strip leaves.
+        const VW = 768;
+        const VH = 1024;
+        const strip = { top: 72, bottom: 0 };
+        const before = computeDocumentLayout(Array.from({ length: 10 }, () => ({ width: 612, height: 792 })));
+        const after = computeDocumentLayout(
+            Array.from({ length: 10 }, (_, i) => ({ width: 612, height: i === 1 ? 1584 : 792 })),
+        );
+        const view = { scale: MIN_SCALE, scrollX: 0, scrollY: -72 };
+
+        const next = clampScroll(reanchorView(view, before, after, VW, VH, strip), after, VW, VH, strip);
+        // Page 1 stays in full view just under the strip.
+        expect(next.scrollY).toBeCloseTo(-72);
+        expect(focusedPageIndex(next, VH, after.layouts, strip)).toBe(0);
+    });
 });
