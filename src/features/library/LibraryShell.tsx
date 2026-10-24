@@ -36,6 +36,7 @@ import { buttonClassName } from '@/ui/classNames';
 import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
 import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
 import { ProgressBar } from '@/ui/ProgressBar';
+import { SwapLabel } from '@/ui/SwapLabel';
 
 /** The legal documents, as the account menu's last row lists them. */
 const LEGAL_MENU_LINKS = [
@@ -575,10 +576,17 @@ const ShellUploadButton = ({
         )}
     >
         <UploadIcon size={16} />
-        <span className="sr-only sm:not-sr-only">{uploading ? 'Uploading…' : 'Upload score'}</span>
+        <SwapLabel
+            labels={{ idle: 'Upload score', busy: 'Uploading…' }}
+            active={uploading ? 'busy' : 'idle'}
+            className="sr-only sm:not-sr-only"
+        />
         <input
             type="file"
             accept={UPLOAD_ACCEPT}
+            // Named outright: the wrapping label carries the inactive caption
+            // too (aria-hidden), which a plain text match would read as one.
+            aria-label={uploading ? 'Uploading…' : 'Upload score'}
             className="sr-only"
             disabled={uploading || quotaExhausted}
             onChange={(e) => {

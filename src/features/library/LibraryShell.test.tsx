@@ -209,6 +209,21 @@ describe('LibraryShell', () => {
         expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', before, document);
     });
 
+    it('swaps the upload caption in place while a score uploads', async () => {
+        const user = userEvent.setup();
+        readCachedLibraryList.mockResolvedValue(null);
+        uploadDocument.mockReturnValue(new Promise(() => undefined));
+        renderShell();
+
+        const input = screen.getByLabelText('Upload score', { selector: 'input' });
+        await user.upload(input, new File(['%PDF-1.4'], 'new.pdf', { type: 'application/pdf' }));
+
+        expect(await screen.findByLabelText('Uploading…', { selector: 'input' })).toBeDisabled();
+        const caption = screen.getByText('Uploading…', { selector: '[data-swap-active]' });
+        expect(caption.parentElement).toHaveClass('swap-label');
+        expect(screen.getByText('Upload score', { selector: 'span' })).toHaveAttribute('aria-hidden', 'true');
+    });
+
     it('never offers smart import after an upload while the feature is off', async () => {
         const user = userEvent.setup();
         readCachedLibraryList.mockResolvedValue(null);

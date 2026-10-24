@@ -21,6 +21,7 @@ import { useViewerStore } from '@/state/store';
 import type { DocumentRow, MemberRole } from '@/types/database';
 import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
+import { SwapLabel } from '@/ui/SwapLabel';
 import { buttonClassName } from '@/ui/classNames';
 import { onMenuKeyDown } from '@/ui/menuKeyboard';
 import { toast } from '@/ui/toast';
@@ -72,6 +73,9 @@ interface ShareExportMenuProps {
      */
     lostAccess?: boolean;
 }
+
+/** The busy label while the source PDF downloads; the button adds its percentage. */
+const DOWNLOADING = 'Downloading…';
 
 /** A failure the teacher can act on, worded for them rather than for a log. */
 class ExportProblem extends Error {}
@@ -149,7 +153,7 @@ export const ShareExportMenu = ({
             return bytes;
         }
         const onProgress = (progress: UploadProgress) => {
-            setBusy('Downloading…');
+            setBusy(DOWNLOADING);
             setDownload(progress);
         };
         const userId = session?.user.id;
@@ -316,6 +320,7 @@ export const ShareExportMenu = ({
     };
 
     const pageLabel = focusedPageIndex + 1;
+    const downloadPct = download && download.total > 0 ? Math.round((download.loaded / download.total) * 100) : null;
     const status = refusal ?? (notSent ? EXPORT_NOT_SENT_MESSAGE : null);
     const wide = Boolean(limit || status || error || marksNotice);
 
@@ -343,9 +348,21 @@ export const ShareExportMenu = ({
                 title="Export — this page as a photo or PDF, or the whole score as PDF"
                 className={buttonClassName('ghost', 'sm', 'tabular-nums')}
             >
-                {busy && download && download.total > 0
-                    ? `${busy} ${Math.round((download.loaded / download.total) * 100)}%`
-                    : (busy ?? 'Export')}
+                <SwapLabel
+                    labels={{
+                        idle: 'Export',
+                        exporting: 'Exporting…',
+                        downloading:
+                            downloadPct === null ? (
+                                'Downloading…'
+                            ) : (
+                                <>
+                                    Downloading… <span className="inline-block w-[4ch] text-right">{downloadPct}%</span>
+                                </>
+                            ),
+                    }}
+                    active={busy === null ? 'idle' : busy === DOWNLOADING ? 'downloading' : 'exporting'}
+                />
             </Popover.Trigger>
             <Popover.Portal>
                 <Popover.Positioner side="bottom" align="end" sideOffset={4} collisionPadding={12} className="z-50">

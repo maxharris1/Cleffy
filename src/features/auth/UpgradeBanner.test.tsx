@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -44,6 +44,18 @@ const fillDetails = async (user: ReturnType<typeof userEvent.setup>, email = 'ad
 };
 
 describe('UpgradeBanner', () => {
+    it('swaps the code request label in place while the code is sent', async () => {
+        startGuestEmailUpgrade.mockReturnValue(new Promise(() => undefined));
+        const user = userEvent.setup();
+        renderBanner();
+
+        await fillDetails(user);
+
+        const sending = screen.getByRole('button', { name: 'Sending…' });
+        expect(sending).toBeDisabled();
+        expect(within(sending).getByText('Email me a code')).toHaveAttribute('aria-hidden', 'true');
+    });
+
     it('attaches the email only after the mailed code comes back — never with updateUser', async () => {
         startGuestEmailUpgrade.mockResolvedValue(undefined);
         confirmGuestEmailUpgrade.mockResolvedValue('signed_in');

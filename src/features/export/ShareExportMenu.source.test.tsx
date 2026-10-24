@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -108,7 +108,10 @@ describe('ShareExportMenu', () => {
         await openAndExport(user);
 
         report({ loaded: 25, total: 100 });
-        expect(await screen.findByRole('button', { name: 'Downloading… 25%' })).toBeDisabled();
+        const trigger = await screen.findByRole('button', { name: 'Downloading… 25%' });
+        expect(trigger).toBeDisabled();
+        // Every caption is in the button (SwapLabel), so it never changes width.
+        expect(within(trigger).getByText('Export')).toHaveAttribute('aria-hidden', 'true');
         expect(screen.getByRole('progressbar', { name: 'Downloading score for export' })).toHaveAttribute(
             'aria-valuenow',
             '25',

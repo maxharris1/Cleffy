@@ -8,6 +8,7 @@ import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { ViewerNotice } from '@/features/viewer/ViewerNotice';
 import { fieldClassName } from '@/ui/classNames';
 import { CloseButton } from '@/ui/CloseButton';
+import { SwapLabel } from '@/ui/SwapLabel';
 
 type BannerState = 'collapsed' | 'details' | 'code' | 'done' | 'signInNeeded' | 'dismissed';
 
@@ -208,7 +209,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     />
                     {captchaField}
                     <button type="submit" disabled={busy} className={PRIMARY_CLASS}>
-                        {busy ? 'Saving…' : 'Save my work'}
+                        <SwapLabel labels={{ idle: 'Save my work', busy: 'Saving…' }} active={busy ? 'busy' : 'idle'} />
                     </button>
                     <button type="button" disabled={busy} onClick={sendCode} className={LINK_BUTTON_CLASS}>
                         Send a new code
@@ -247,7 +248,10 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     />
                     {captchaField}
                     <button type="submit" disabled={busy} className={PRIMARY_CLASS}>
-                        {busy ? 'Sending…' : 'Email me a code'}
+                        <SwapLabel
+                            labels={{ idle: 'Email me a code', busy: 'Sending…' }}
+                            active={busy ? 'busy' : 'idle'}
+                        />
                     </button>
                     <button type="button" onClick={() => goTo('collapsed')} className={LINK_BUTTON_CLASS}>
                         Cancel
