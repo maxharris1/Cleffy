@@ -35,14 +35,16 @@ export const CoverImage = ({
     const imgRef = useRef<HTMLImageElement | null>(null);
 
     useEffect(() => {
-        noteCoverShown(cacheKey);
         const img = imgRef.current;
         if (settled || !img) {
             return;
         }
         let current = true;
+        // Shown once it is revealed, not on mount: a cover unmounted before
+        // it decoded was never seen, and fades in when it comes back.
         const reveal = () => {
             if (current) {
+                noteCoverShown(cacheKey);
                 setLoaded(true);
             }
         };

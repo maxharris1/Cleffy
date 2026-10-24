@@ -64,6 +64,29 @@ describe('CoverImage', () => {
         expect(screen.queryByText('engraved placeholder')).not.toBeInTheDocument();
     });
 
+    it('still fades in a cover that was unmounted before it decoded', () => {
+        stubDecode();
+        const first = render(<CoverImage src="blob:a" cacheKey="d1:0:" placeholder={placeholder} />);
+        first.unmount();
+
+        // Never revealed, so never seen: no skipping the fade on the way back.
+        const { container } = render(<CoverImage src="blob:b" cacheKey="d1:0:" placeholder={placeholder} />);
+        const img = container.querySelector('img') as HTMLImageElement;
+        expect(img).not.toHaveAttribute('data-settled');
+        expect(img).not.toHaveAttribute('data-loaded');
+        expect(screen.getByText('engraved placeholder')).toBeInTheDocument();
+    });
+
+    it('does not count a decode that lands after unmount as shown', async () => {
+        const { finish } = stubDecode();
+        const first = render(<CoverImage src="blob:a" cacheKey="d1:0:" />);
+        first.unmount();
+        await finish();
+
+        const { container } = render(<CoverImage src="blob:b" cacheKey="d1:0:" />);
+        expect(container.querySelector('img')).not.toHaveAttribute('data-settled');
+    });
+
     it('fades a new revision of a score in again', async () => {
         const { finish } = stubDecode();
         const first = render(<CoverImage src="blob:a" cacheKey="d1:0:" />);
