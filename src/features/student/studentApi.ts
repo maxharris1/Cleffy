@@ -163,6 +163,11 @@ export const loginStudent = async (
             if (error.code === 'user_banned') {
                 throw new StudentAuthError(STUDENT_ARCHIVED_MESSAGE, 'student_archived');
             }
+            // The same refusal student-login gives a wrong username or
+            // password, so the page answers both halves of the roster alike.
+            if (error.code === 'invalid_credentials') {
+                throw new StudentAuthError(mapAuthError(error, 'Could not sign in.'), 'invalid_credentials');
+            }
             throw new Error(mapAuthError(error, 'Could not sign in.'));
         }
         const meta = data.session?.user.user_metadata as Record<string, unknown> | undefined;

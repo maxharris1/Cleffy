@@ -8,6 +8,7 @@ import { resetTurnstileLoaderForTests, type TurnstileRenderOptions } from '@/fea
 import { StudentClaimPage } from '@/features/student/StudentClaimPage';
 import { StudentAuthError } from '@/features/student/studentApi';
 import type * as studentApiModule from '@/features/student/studentApi';
+import { stubAnimate } from '@/test/animate';
 
 const claimStudentAccount = vi.fn();
 
@@ -192,6 +193,85 @@ describe('StudentClaimPage', () => {
 
         expect(await screen.findByText('That code did not work')).toBeInTheDocument();
         expect(screen.getByLabelText('Setup code')).toHaveValue('ABCD-EFGH-JKMN');
+    });
+
+    describe('a refused code', () => {
+        let motion: ReturnType<typeof stubAnimate>;
+        afterEach(() => motion.restore());
+
+        it('shakes the code field, marks it, and selects the code for retyping', async () => {
+            motion = stubAnimate();
+            const user = userEvent.setup();
+            claimStudentAccount.mockRejectedValue(new StudentAuthError('That code did not work', 'invalid_code'));
+            renderClaim();
+
+            await enterCode(user);
+            await fillCredentials(user);
+            await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+            const field = await screen.findByLabelText('Setup code');
+            await waitFor(() => expect(motion.animate).toHaveBeenCalledTimes(1));
+            // On the field's wrapper, a 280ms decaying translateX.
+            expect(motion.animate.mock.contexts[0]).toBe(field.parentElement);
+            expect(motion.animate.mock.calls[0]).toEqual([
+                expect.arrayContaining([{ transform: 'translateX(-6px)' }]),
+                { duration: 280, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
+            ]);
+            expect(field).toHaveAttribute('aria-invalid', 'true');
+            expect(field).toHaveFocus();
+            expect((field as HTMLInputElement).selectionStart).toBe(0);
+            expect((field as HTMLInputElement).selectionEnd).toBe('ABCD-EFGH-JKMN'.length);
+            expect(screen.getByText('That code did not work')).toHaveClass('ui-error-in');
+
+            // Editing clears the mark.
+            await user.type(field, 'X');
+            expect(field).not.toHaveAttribute('aria-invalid');
+        });
+
+        it('shakes again for a second refusal', async () => {
+            motion = stubAnimate();
+            const user = userEvent.setup();
+            claimStudentAccount.mockRejectedValue(new StudentAuthError('That code did not work', 'invalid_code'));
+            renderClaim();
+
+            await enterCode(user);
+            await fillCredentials(user);
+            await user.click(screen.getByRole('button', { name: 'Create my account' }));
+            await waitFor(() => expect(motion.animate).toHaveBeenCalledTimes(1));
+
+            await user.click(screen.getByRole('button', { name: 'Next' }));
+            await user.click(screen.getByRole('button', { name: 'Create my account' }));
+            await waitFor(() => expect(motion.animate).toHaveBeenCalledTimes(2));
+        });
+
+        it('never shakes for the shape check while typing', async () => {
+            motion = stubAnimate();
+            const user = userEvent.setup();
+            renderClaim();
+
+            await enterCode(user, 'ABCD');
+
+            expect(await screen.findByText('That doesn’t look like a complete code')).toBeInTheDocument();
+            expect(motion.animate).not.toHaveBeenCalled();
+            expect(screen.getByLabelText('Setup code')).not.toHaveAttribute('aria-invalid');
+        });
+
+        it('does not move under reduced motion, but still marks and selects the field', async () => {
+            motion = stubAnimate({ reducedMotion: true });
+            const user = userEvent.setup();
+            claimStudentAccount.mockRejectedValue(new StudentAuthError('That code did not work', 'invalid_code'));
+            renderClaim();
+
+            await enterCode(user);
+            await fillCredentials(user);
+            await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+            const field = await screen.findByLabelText('Setup code');
+            await waitFor(() => expect(field).toHaveFocus());
+            expect(motion.animate).not.toHaveBeenCalled();
+            expect(field).toHaveAttribute('aria-invalid', 'true');
+            expect((field as HTMLInputElement).selectionEnd).toBe('ABCD-EFGH-JKMN'.length);
+        });
     });
 
     it('sends them to sign in when the claim landed but the session did not', async () => {

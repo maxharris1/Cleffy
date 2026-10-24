@@ -314,6 +314,18 @@ body {
     box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
+/* A field the server just refused (a wrong code, a wrong password): the border
+   says so, focused or not, until it is edited. Colour only, so it is the whole
+   signal under reduced motion, where the field does not shake (lib/shake). */
+.landing-input[aria-invalid='true'] {
+    border-color: var(--color-danger);
+}
+
+.landing-input[aria-invalid='true']:focus {
+    border-color: var(--color-danger);
+    box-shadow: 0 0 0 3px rgb(185 28 28 / 0.12);
+}
+
 /* Hero demo: ink strokes draw themselves (pathLength=100), presence chips pop in.
    The animations wait for .is-inview, which HeroDemo latches on once the frame
    scrolls into view. :where() contributes no specificity, so these stay at
@@ -832,4 +844,11 @@ body {
         filter: none;
         transform: none;
     }
+}
+
+/* An inline error arrives as a fade, not a pop (ui/ErrorText): paired with a
+   refused code's shake, the shake says "no" and the line says why. Opacity
+   only, so it stays under reduced motion. */
+.ui-error-in {
+    animation: ui-fade-in var(--duration-exit) var(--ease-out);
 }

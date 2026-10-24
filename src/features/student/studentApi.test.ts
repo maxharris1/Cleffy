@@ -52,6 +52,18 @@ afterEach(() => {
 });
 
 describe('loginStudent', () => {
+    it('refuses a wrong email-student password the way student-login refuses a username', async () => {
+        signInWithPassword.mockResolvedValue({
+            data: { session: null },
+            error: { code: 'invalid_credentials', message: 'Invalid login credentials', status: 400 },
+        });
+
+        const failure = loginStudent('kid@example.com', 'wrong');
+
+        await expect(failure).rejects.toBeInstanceOf(StudentAuthError);
+        await expect(failure).rejects.toMatchObject({ code: 'invalid_credentials' });
+    });
+
     it('signs an email student in client-side, without touching the edge function', async () => {
         signInWithPassword.mockResolvedValue({
             data: { session: { user: { user_metadata: { display_name: 'Ada Lovelace' } } } },

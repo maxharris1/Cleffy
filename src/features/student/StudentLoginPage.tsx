@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
@@ -7,7 +7,8 @@ import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { SignedOutByTeacherState } from '@/features/student/endedSignIn';
 import { discardedChangesNotice, keptChangesNotice } from '@/features/student/keptChangesNotice';
-import { loginStudent } from '@/features/student/studentApi';
+import { StudentAuthError, loginStudent } from '@/features/student/studentApi';
+import { refuseInput } from '@/lib/shake';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
@@ -82,6 +83,27 @@ const CredentialEntry = () => {
     const [captchaToken, setCaptchaToken] = useState<string | null>(null);
     const [captchaRound, setCaptchaRound] = useState(0);
     const captchaRequired = isTurnstileEnabled();
+    /**
+     * How many times the server has said "that username and password did not
+     * work". Each one shakes the two fields once they are enabled again (the
+     * render that carries the failure still has them disabled), and keys the
+     * error line so it fades in afresh.
+     */
+    const [refusals, setRefusals] = useState(0);
+    /** The pair as typed was refused, until either is edited. */
+    const [refused, setRefused] = useState(false);
+    const fieldsRef = useRef<HTMLDivElement | null>(null);
+    const passwordRef = useRef<HTMLInputElement | null>(null);
+    const shakenRefusals = useRef(0);
+
+    // Then the caret goes to the password, selected: the likelier slip, and a
+    // child can retype it without clearing it first.
+    useEffect(() => {
+        if (refusals > shakenRefusals.current) {
+            shakenRefusals.current = refusals;
+            refuseInput(fieldsRef.current, passwordRef.current);
+        }
+    }, [refusals]);
 
     const submit = async (e: FormEvent) => {
         e.preventDefault();
@@ -106,6 +128,12 @@ const CredentialEntry = () => {
         } catch (err) {
             setBusy(false);
             setError(err instanceof Error ? err.message : 'That did not work');
+            // Only the server refusing the credential shakes: not a network
+            // failure, not an archived account, never the empty-field check.
+            if (err instanceof StudentAuthError && err.code === 'invalid_credentials') {
+                setRefused(true);
+                setRefusals((n) => n + 1);
+            }
             if (captchaRequired) {
                 // The token is spent the moment it is redeemed, whatever became
                 // of the credential beside it, so a retry needs a new challenge
@@ -132,36 +160,51 @@ const CredentialEntry = () => {
                 </p>
             ) : null}
             <form onSubmit={(e) => void submit(e)}>
-                <TextField
-                    id="student-identifier"
-                    label="Username or email"
-                    value={identifier}
-                    onChange={(e) => setIdentifier(e.target.value)}
-                    disabled={busy}
-                    autoFocus
-                    // Real credentials now, not a code off a card: a password
-                    // manager that offers to fill and remember these is doing a
-                    // student a favour, so nothing here waves it away.
-                    autoComplete="username"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                />
-                <TextField
-                    id="student-password"
-                    label="Password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    disabled={busy}
-                    autoComplete="current-password"
-                    spaced
-                />
+                <div ref={fieldsRef}>
+                    <TextField
+                        id="student-identifier"
+                        label="Username or email"
+                        value={identifier}
+                        onChange={(e) => {
+                            setIdentifier(e.target.value);
+                            setRefused(false);
+                        }}
+                        aria-invalid={refused || undefined}
+                        disabled={busy}
+                        autoFocus
+                        // Real credentials now, not a code off a card: a password
+                        // manager that offers to fill and remember these is doing a
+                        // student a favour, so nothing here waves it away.
+                        autoComplete="username"
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
+                    />
+                    <TextField
+                        id="student-password"
+                        label="Password"
+                        type="password"
+                        ref={passwordRef}
+                        value={password}
+                        onChange={(e) => {
+                            setPassword(e.target.value);
+                            setRefused(false);
+                        }}
+                        aria-invalid={refused || undefined}
+                        disabled={busy}
+                        autoComplete="current-password"
+                        spaced
+                    />
+                </div>
                 <TurnstileField key={captchaRound} action="student-login" onToken={setCaptchaToken} />
                 <Button type="submit" disabled={busy} className="mt-4 w-full">
                     {busy ? 'Opening…' : 'Open my music'}
                 </Button>
-                {error ? <ErrorText className="mt-2.5">{error}</ErrorText> : null}
+                {error ? (
+                    <ErrorText key={refusals} className="mt-2.5">
+                        {error}
+                    </ErrorText>
+                ) : null}
             </form>
             <p className="mt-6 text-center text-sm text-stone-600">
                 <Link to="/student/claim" className={linkClassName}>
