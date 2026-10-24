@@ -18,7 +18,7 @@
 | `npx prettier --write package.json package-lock.json` | no changes (package-lock.json is prettier-ignored) |
 | `npm audit --omit=dev --audit-level=high` | **0 vulnerabilities** (exit 0) |
 
-**GitHub CI on the head:** pending at the time of writing — `checks`, `supabase-local`, `supabase-drift`, `edge-functions-deno`, `omr-service` were queued/in progress; `Vercel Preview Comments` success; `Supabase Preview` skipped. If CI finishes before this session ends, this file is updated with the result.
+**GitHub CI on the head (`2c14ccd`): green.** Both workflow runs ([40095594207](https://github.com/maxharris1/Cleffy/actions/runs/40095594207), [40095605707](https://github.com/maxharris1/Cleffy/actions/runs/40095605707)) passed every job: `checks`, `supabase-local`, `supabase-drift`, `edge-functions-deno`, `omr-service`. `Vercel Preview Comments` success (preview deployed Ready); `Supabase Preview` skipped. PR mergeable state: clean.
 
 ## Open questions
 
