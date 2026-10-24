@@ -98,6 +98,11 @@ describe('computeDocumentLayout', () => {
 
 describe('pageTurnView', () => {
     const view = { scale: 2, scrollX: 40, scrollY: 0 };
+    /** `view` scrolled so page `i`'s row starts the viewport, as a turn to it leaves it. */
+    const at = (layout: ReturnType<typeof computeDocumentLayout>, i: number) => ({
+        ...view,
+        scrollY: ((layout.layouts[i]?.top ?? 0) - PAGE_GAP) * view.scale,
+    });
 
     it('steps one page at a time in a single column and lands its top at the viewport top', () => {
         const layout = computeDocumentLayout(pages);
@@ -105,23 +110,38 @@ describe('pageTurnView', () => {
         expect(next?.pageIndex).toBe(1);
         expect(next?.view.scale).toBe(2);
         expect(next?.view.scrollY).toBe(((layout.layouts[1]?.top ?? 0) - PAGE_GAP) * 2);
-        expect(pageTurnView(view, layout, 1, -1, 800, 600)?.pageIndex).toBe(0);
+        expect(pageTurnView(at(layout, 1), layout, 1, -1, 800, 600)?.pageIndex).toBe(0);
     });
 
     it('returns null at either end of the document', () => {
         const layout = computeDocumentLayout(pages);
         expect(pageTurnView(view, layout, 0, -1, 800, 600)).toBeNull();
-        expect(pageTurnView(view, layout, 2, 1, 800, 600)).toBeNull();
+        const end = clampScroll({ ...view, scrollY: 1e9 }, layout, 800, 600);
+        expect(pageTurnView(end, layout, 2, 1, 800, 600)).toBeNull();
         expect(pageTurnView(view, layout, 99, 1, 800, 600)).toBeNull();
+    });
+
+    it('goes on to the end of the last page, and back to the top of the first', () => {
+        const layout = computeDocumentLayout(pages);
+        // Zoomed in, the last page's top starts the view and its end is out of sight.
+        const end = pageTurnView(at(layout, 2), layout, 2, 1, 800, 600);
+        expect(end?.pageIndex).toBe(2);
+        expect(end?.view.scrollY).toBe(layout.contentHeight * view.scale - 600);
+        // Partway down page 1 (as a zoom can leave it), Previous returns to its top.
+        const start = pageTurnView({ ...view, scrollY: 300 }, layout, 0, -1, 800, 600);
+        expect(start?.pageIndex).toBe(0);
+        expect(start?.view.scrollY).toBe(0);
     });
 
     it('steps a whole spread in two columns, from either page of the pair', () => {
         const layout = computeDocumentLayout([...pages, { width: 600, height: 800 }], 2);
         expect(pageTurnView(view, layout, 0, 1, 800, 600)?.pageIndex).toBe(2);
         expect(pageTurnView(view, layout, 1, 1, 800, 600)?.pageIndex).toBe(2);
-        expect(pageTurnView(view, layout, 3, -1, 800, 600)?.pageIndex).toBe(0);
-        expect(pageTurnView(view, layout, 2, -1, 800, 600)?.pageIndex).toBe(0);
-        expect(pageTurnView(view, layout, 3, 1, 800, 600)).toBeNull();
+        expect(pageTurnView(at(layout, 2), layout, 3, -1, 800, 600)?.pageIndex).toBe(0);
+        expect(pageTurnView(at(layout, 2), layout, 2, -1, 800, 600)?.pageIndex).toBe(0);
+        expect(
+            pageTurnView(clampScroll({ ...view, scrollY: 1e9 }, layout, 800, 600), layout, 3, 1, 800, 600),
+        ).toBeNull();
     });
 
     it('steps from the cover row to the 2|3 spread and back', () => {
@@ -131,19 +151,46 @@ describe('pageTurnView', () => {
         expect(next?.pageIndex).toBe(1);
         expect(next?.view.scrollY).toBe(((layout.layouts[1]?.top ?? 0) - PAGE_GAP) * 2);
         // Back from either page of the spread returns to the cover.
-        expect(pageTurnView(view, layout, 1, -1, 800, 600)?.pageIndex).toBe(0);
-        expect(pageTurnView(view, layout, 2, -1, 800, 600)?.pageIndex).toBe(0);
+        expect(pageTurnView(at(layout, 1), layout, 1, -1, 800, 600)?.pageIndex).toBe(0);
+        expect(pageTurnView(at(layout, 1), layout, 2, -1, 800, 600)?.pageIndex).toBe(0);
         // Forward from the spread reaches the trailing page; the cover has no page before it.
-        expect(pageTurnView(view, layout, 2, 1, 800, 600)?.pageIndex).toBe(3);
+        expect(pageTurnView(at(layout, 1), layout, 2, 1, 800, 600)?.pageIndex).toBe(3);
         expect(pageTurnView(view, layout, 0, -1, 800, 600)).toBeNull();
     });
 
     it('clamps the target so a short last page does not over-scroll', () => {
         const layout = computeDocumentLayout(pages);
-        const tall = { width: 800, height: 5000 };
-        const turned = pageTurnView({ scale: 1, scrollX: 0, scrollY: 0 }, layout, 1, 1, tall.width, tall.height);
+        const tall = { width: 800, height: 1500 };
+        const from = { scale: 1, scrollX: 0, scrollY: (layout.layouts[1]?.top ?? 0) - PAGE_GAP };
+        const turned = pageTurnView(from, layout, 1, 1, tall.width, tall.height);
         expect(turned?.pageIndex).toBe(2);
-        expect(turned?.view.scrollY).toBe(0); // content shorter than the viewport
+        expect(turned?.view.scrollY).toBe(layout.contentHeight - tall.height);
+    });
+
+    it('is no turn when the scroll bounds keep the view where it is (the whole score fits)', () => {
+        const layout = computeDocumentLayout(pages);
+        const top = { scale: 1, scrollX: 0, scrollY: 0 };
+        expect(pageTurnView(top, layout, 0, 1, 800, 5000)).toBeNull();
+        expect(pageTurnView(top, layout, 1, 1, 800, 5000)).toBeNull();
+        expect(pageTurnView(top, layout, 2, -1, 800, 5000)).toBeNull();
+    });
+
+    it('steps past rows the bottom bound swallows, so Previous from the end moves the score', () => {
+        // Ten pages at minimum zoom on a tall viewport: the last few rows all
+        // clamp to the bottom bound, and a turn back to row 9 would not move.
+        const ten = computeDocumentLayout(Array.from({ length: 10 }, () => ({ width: 612, height: 792 })));
+        const edges = { top: 72, bottom: 0 };
+        const H = 1024;
+        const bottom = clampScroll({ scale: MIN_SCALE, scrollX: 0, scrollY: 1e9 }, ten, 768, H, edges);
+        const last = focusedPageIndex(bottom, H, ten.layouts, edges);
+        expect(last).toBe(9);
+        expect(pageTurnView(bottom, ten, last, 1, 768, H, edges)).toBeNull();
+        const back = pageTurnView(bottom, ten, last, -1, 768, H, edges);
+        expect(back).not.toBeNull();
+        expect(back!.view.scrollY).toBeLessThan(bottom.scrollY);
+        // The row it lands on starts just below the top strip.
+        const landed = ten.layouts[back!.pageIndex]!;
+        expect((landed.top - PAGE_GAP) * MIN_SCALE - back!.view.scrollY).toBeCloseTo(edges.top);
     });
 });
 
@@ -284,6 +331,35 @@ describe('focusedPageIndex', () => {
 
     it('returns 0 for empty layouts', () => {
         expect(focusedPageIndex({ scale: 1, scrollX: 0, scrollY: 0 }, 400, [])).toBe(0);
+    });
+
+    describe('under a tall notice stack', () => {
+        // Three letter pages, a 390×480 phone viewport, 224 px of notices over its top.
+        const letter = computeDocumentLayout(Array.from({ length: 3 }, () => ({ width: 612, height: 792 })));
+        const edges = { top: 224, bottom: 0 };
+        const H = 480;
+
+        it('counts the view above 0 that a turn to page 2 leaves at minimum zoom as page 2', () => {
+            const turned = pageTurnView({ scale: MIN_SCALE, scrollX: 0, scrollY: -224 }, letter, 0, 1, 390, H, edges);
+            expect(turned?.view.scrollY).toBeCloseTo(808 * MIN_SCALE - 224); // −22
+            expect(focusedPageIndex(turned!.view, H, letter.layouts, edges)).toBe(1);
+            // Only the real top bound (−224) is page 1.
+            expect(focusedPageIndex({ scale: MIN_SCALE, scrollX: 0, scrollY: -224 }, H, letter.layouts, edges)).toBe(0);
+        });
+
+        it('reads the page under the middle of the uncovered part, not the whole viewport', () => {
+            // At fit width, page 2 starting just below a stack past the viewport
+            // middle: the whole viewport's middle is still on page 1.
+            const scale = fitPageWidthScale(letter, 390);
+            const v = { scale, scrollX: 0, scrollY: ((letter.layouts[1]?.top ?? 0) - PAGE_GAP) * scale - 224 };
+            expect(focusedPageIndex(v, 400, letter.layouts)).toBe(0);
+            expect(focusedPageIndex(v, 400, letter.layouts, edges)).toBe(1);
+        });
+
+        it('is the last page at the bottom bound', () => {
+            const bottom = clampScroll({ scale: MIN_SCALE, scrollX: 0, scrollY: 1e9 }, letter, 390, H, edges);
+            expect(focusedPageIndex(bottom, H, letter.layouts, edges)).toBe(2);
+        });
     });
 });
 

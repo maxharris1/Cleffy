@@ -429,7 +429,7 @@ export const PdfViewport = ({
             // page that was being read starts the view, as a layout switch
             // does, at the same multiple of fit-width.
             const prevLayout = computeDocumentLayout(pageSizes, prevColumns, spreadCover);
-            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts);
+            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts, obscuredRef.current);
             const relative = v.scale / fitPageWidthScale(prevLayout, prev.width);
             const scale = Math.min(
                 MAX_SCALE,
@@ -472,7 +472,7 @@ export const PdfViewport = ({
         }
         const { view: v, setView } = useViewerStore.getState();
         const next = clampScroll(
-            reanchorView(v, prev.layout, layout, width, height),
+            reanchorView(v, prev.layout, layout, width, height, obscuredRef.current),
             layout,
             width,
             height,
@@ -486,11 +486,13 @@ export const PdfViewport = ({
      * Turn one row of pages. Reads live refs so the once-bound gesture
      * controller and the keyboard listener always run the current geometry.
      * Counts as a user gesture for auto-follow, exactly like a manual pan.
+     * The page it turns from is the one in the uncovered part of the viewport,
+     * as the pager reads it: a tall notice stack must not pin it to page 1.
      */
     const turnPage = useCallback((direction: -1 | 1) => {
         const { view: v, setView } = useViewerStore.getState();
         const { width, height } = viewportSizeRef.current;
-        const current = focusedPageIndex(v, height, layoutRef.current.layouts);
+        const current = focusedPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current);
         const next = pageTurnView(v, layoutRef.current, current, direction, width, height, obscuredRef.current);
         if (!next) {
             return;
@@ -509,7 +511,7 @@ export const PdfViewport = ({
         const { view: v, setView, setPageColumns, setSpreadCover } = useViewerStore.getState();
         const { width, height } = viewportSize;
         const nextLayout = computeDocumentLayout(pageSizes, columns, coverPage);
-        const focused = focusedPageIndex(v, height, layout.layouts);
+        const focused = focusedPageIndex(v, height, layout.layouts, obscured);
         const scale = fitPageWidthScale(nextLayout, width);
         const top = nextLayout.layouts[focused]?.top ?? PAGE_GAP;
         fittedViewportRef.current = viewportSize;
@@ -828,10 +830,12 @@ export const PdfViewport = ({
         const timer = setTimeout(() => {
             const range = visiblePageRange(view, viewportSize.height, layout.layouts, 0);
             channelRef.current?.setPage(Math.max(0, range.start));
-            useViewerStore.getState().setFocusedPageIndex(focusedPageIndex(view, viewportSize.height, layout.layouts));
+            useViewerStore
+                .getState()
+                .setFocusedPageIndex(focusedPageIndex(view, viewportSize.height, layout.layouts, obscured));
         }, 400);
         return () => clearTimeout(timer);
-    }, [view, viewportSize.height, layout]);
+    }, [view, viewportSize.height, layout, obscured]);
 
     // Keyboard: page turns (any role — pedals send these keys) and undo/redo.
     // None while a dialog is open, wherever its keys land: a page turned or a
@@ -1072,7 +1076,7 @@ export const PdfViewport = ({
                         onToggleSpreadCover={toggleSpreadCover}
                     />
                     {layout.layouts.length > 1 ? (
-                        <Pager layout={layout} viewportSize={viewportSize} onTurn={turnPage} />
+                        <Pager layout={layout} viewportSize={viewportSize} obscured={obscured} onTurn={turnPage} />
                     ) : null}
                 </>
             )}
@@ -1131,23 +1135,26 @@ const ReadOnlyFingeringToggle = () => {
 
 /**
  * Floating pager: previous / "p. 3 / 12" / next. Big round targets so a
- * player can hit them without looking away from the music. Reads the
- * debounced focused page, which is also what decides the ends.
+ * player can hit them without looking away from the music. Reads the focused
+ * page off the live view with the strips that cover it, exactly as a turn
+ * does, so the ends it disables are the turns that would do nothing.
  */
 const Pager = ({
     layout,
     viewportSize,
+    obscured,
     onTurn,
 }: {
     layout: DocumentLayout;
     viewportSize: ViewportSize;
+    obscured: ObscuredEdges;
     onTurn: (direction: -1 | 1) => void;
 }) => {
-    const pageIndex = useViewerStore((s) => s.focusedPageIndex);
     const view = useViewerStore((s) => s.view);
+    const pageIndex = focusedPageIndex(view, viewportSize.height, layout.layouts, obscured);
     const pageCount = layout.layouts.length;
     const canTurn = (direction: -1 | 1) =>
-        pageTurnView(view, layout, pageIndex, direction, viewportSize.width, viewportSize.height) !== null;
+        pageTurnView(view, layout, pageIndex, direction, viewportSize.width, viewportSize.height, obscured) !== null;
     return (
         <div
             data-ui-overlay

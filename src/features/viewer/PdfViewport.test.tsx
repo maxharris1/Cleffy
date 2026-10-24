@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { playheadRect } from '@/features/playback/PlayheadController';
-import { computeDocumentLayout } from '@/features/viewer/geometry';
+import { MIN_SCALE, PAGE_GAP, computeDocumentLayout } from '@/features/viewer/geometry';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
@@ -228,5 +228,157 @@ describe('PdfViewport follow under the notice stack', () => {
             expect(system.top).toBeGreaterThanOrEqual(stackBottom);
             expect(system.bottom).toBeLessThanOrEqual(PHONE.height);
         }
+    });
+});
+
+/** The notice region over the viewport, as ViewerPage arranges them; the rejected-changes card can be dismissed. */
+const ViewerUnderNotices = ({ rejected = true }: { rejected?: boolean }) => {
+    const [inset, setInset] = useState(0);
+    const [showRejected, setShowRejected] = useState(rejected);
+    return (
+        <div>
+            <ViewerNoticeRegion onInsetChange={setInset}>
+                <ViewerNotice>
+                    <p>Your access to this score changed.</p>
+                </ViewerNotice>
+                {showRejected ? <SyncRejectedNotice count={2} onDismiss={() => setShowRejected(false)} /> : null}
+                <SyncHeldNotice count={3} />
+            </ViewerNoticeRegion>
+            <PdfViewport docId="doc-notices" readOnly noticeInset={inset} />
+        </div>
+    );
+};
+
+/** How far down the stack reaches with `cards` notices up (56 + cards×52 + gaps). */
+const stackBottomPx = (cards: number) => REGION_TOP_PX + cards * NOTICE_PX + (cards - 1) * NOTICE_GAP_PX;
+
+const view = () => useViewerStore.getState().view;
+
+describe('PdfViewport page turns under a tall notice stack', () => {
+    const layout = computeDocumentLayout(PAGE_SIZES, 1, false);
+    const STACK = stackBottomPx(3);
+
+    const pagerLabel = () => screen.getByText(/^p\. \d+ \/ \d+$/).textContent;
+    const previous = () => screen.getByRole('button', { name: 'Previous page' });
+    const next = () => screen.getByRole('button', { name: 'Next page' });
+
+    /** Pager buttons, or a page-turner pedal's arrow keys. */
+    const turners = {
+        pager: (direction: -1 | 1) => fireEvent.click(direction === 1 ? next() : previous()),
+        keyboard: (direction: -1 | 1) =>
+            fireEvent.keyDown(document.body, { key: direction === 1 ? 'ArrowRight' : 'ArrowLeft' }),
+    };
+
+    /** Viewport px of page `i`'s top and bottom edges. */
+    const pageEdges = (i: number) => {
+        const v = view();
+        const page = layout.layouts[i]!;
+        return { top: page.top * v.scale - v.scrollY, bottom: (page.top + page.height) * v.scale - v.scrollY };
+    };
+
+    const expectPager = (page: number, canPrevious: boolean, canNext: boolean) => {
+        expect(pagerLabel()).toBe(`p. ${page} / 3`);
+        if (canPrevious) {
+            expect(previous()).toBeEnabled();
+        } else {
+            expect(previous()).toBeDisabled();
+        }
+        if (canNext) {
+            expect(next()).toBeEnabled();
+        } else {
+            expect(next()).toBeDisabled();
+        }
+    };
+
+    const openUnderStack = async () => {
+        render(<ViewerUnderNotices />);
+        expect(screen.getAllByRole('status')).toHaveLength(3);
+        // The first fit starts page 1 below the stack, at the top scroll bound.
+        await waitFor(() => expect(view().scrollY).toBe(-STACK));
+    };
+
+    it.each(Object.entries(turners))(
+        'pages forward to the last page and back at minimum zoom in a short phone viewport (%s)',
+        async (_, turn) => {
+            viewport = { width: 390, height: 480 };
+            await openUnderStack();
+            act(() => useViewerStore.getState().setView({ ...view(), scale: MIN_SCALE }));
+            expectPager(1, false, true);
+
+            // Page 1 -> 2 lands above 0 (808 × 0.25 − 224 = −22): still page 2, not page 1.
+            act(() => turn(1));
+            expect(view().scrollY).toBeCloseTo(-22);
+            expectPager(2, true, true);
+
+            // And on to page 3, which comes fully into view below the stack.
+            act(() => turn(1));
+            expectPager(3, true, false);
+            expect(pageEdges(2).top).toBeGreaterThanOrEqual(STACK);
+            expect(pageEdges(2).bottom).toBeLessThanOrEqual(480);
+            const atEnd = view().scrollY;
+            act(() => turn(1));
+            expect(view().scrollY).toBe(atEnd);
+
+            // Back the same way, to page 1 below the stack.
+            act(() => turn(-1));
+            expectPager(2, true, true);
+            expect(pageEdges(1).top).toBeCloseTo(STACK + 16 * MIN_SCALE);
+            act(() => turn(-1));
+            expectPager(1, false, true);
+            expect(view().scrollY).toBe(-STACK);
+            act(() => turn(-1));
+            expect(view().scrollY).toBe(-STACK);
+        },
+    );
+
+    it.each(Object.entries(turners))(
+        'pages through every page at fit width when the stack reaches past the viewport middle (%s)',
+        async (_, turn) => {
+            // 224 px of notices over a 400 px viewport: the middle of the whole
+            // viewport is under the stack.
+            viewport = { width: 390, height: 400 };
+            await openUnderStack();
+            expect(STACK).toBeGreaterThan(400 / 2);
+            expectPager(1, false, true);
+
+            for (const page of [2, 3]) {
+                const before = view().scrollY;
+                act(() => turn(1));
+                expect(view().scrollY).toBeGreaterThan(before);
+                // Each turn starts the next page just below the stack.
+                expect(pageEdges(page - 1).top).toBeCloseTo(STACK + 16 * view().scale);
+                expectPager(page, true, true);
+            }
+            // The rest of page 3 is still below: Next goes on to its end, then stops.
+            act(() => turn(1));
+            expect(pageEdges(2).bottom).toBeCloseTo(400 - 16 * view().scale);
+            expectPager(3, true, false);
+            for (const page of [2, 1]) {
+                act(() => turn(-1));
+                expect(pageEdges(page - 1).top).toBeCloseTo(STACK + 16 * view().scale);
+                expectPager(page, page > 1, true);
+            }
+        },
+    );
+});
+
+describe('PdfViewport zoomed out under a tall notice stack', () => {
+    it('lets Previous bring the top of page 1 out from under notices that came up over it', async () => {
+        viewport = { width: 390, height: 480 };
+        render(<ViewerUnderNotices />);
+        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+        // The score was opened before the notices came up (the fit put page 1
+        // below the pager strip only), then zoomed out about the viewport centre.
+        act(() => useViewerStore.getState().setView({ ...view(), scrollY: -REGION_TOP_PX }));
+        for (let i = 0; i < 4; i++) {
+            fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
+        }
+        const page1Top = PAGE_GAP * view().scale - view().scrollY;
+        expect(page1Top).toBeLessThan(stackBottomPx(3));
+        expect(screen.getByText('p. 1 / 3')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Previous page' })).toBeEnabled();
+        fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+        expect(view().scrollY).toBe(-stackBottomPx(3));
+        expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
     });
 });
