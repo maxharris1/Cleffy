@@ -21,9 +21,15 @@ export const SyncRejectedNotice = ({ count, onDismiss }: SyncRejectedNoticeProps
     const subject = count === 1 ? 'One of your changes' : `${count} of your changes`;
     return (
         <ViewerNotice>
+            {/* Short on phones, where every line of a notice hides score. */}
             <p className="min-w-0 flex-1">
-                {subject} could not be saved to this score and {count === 1 ? 'was' : 'were'} undone. You may no longer
-                have permission to edit it.
+                <span className="sm:hidden">
+                    {subject} couldn&rsquo;t be saved and {count === 1 ? 'was' : 'were'} undone.
+                </span>
+                <span className="hidden sm:inline">
+                    {subject} could not be saved to this score and {count === 1 ? 'was' : 'were'} undone. You may no
+                    longer have permission to edit it.
+                </span>
             </p>
             <Button size="sm" variant="secondary" onClick={onDismiss}>
                 Dismiss
@@ -60,16 +66,28 @@ export const SyncHeldNotice = ({ count, reason = 'archived' }: SyncHeldNoticePro
     const upload = count === 1 ? 'It uploads' : 'They upload';
     return (
         <ViewerNotice bare>
+            {/* It cannot be dismissed, so on phones it keeps to a line or two. */}
             {reason === 'seat-read-only' ? (
                 <p>
-                    Your Academy seat is read-only, so {changes} you made to this score {are} saved only on this device.{' '}
-                    {upload} automatically once your seat is active again, for example when the academy&rsquo;s owner
-                    renews or picks your seat.
+                    <span className="sm:hidden">
+                        Your seat is read-only: {changes} {are} saved only on this device until it&rsquo;s active.
+                    </span>
+                    <span className="hidden sm:inline">
+                        Your Academy seat is read-only, so {changes} you made to this score {are} saved only on this
+                        device. {upload} automatically once your seat is active again, for example when the
+                        academy&rsquo;s owner renews or picks your seat.
+                    </span>
                 </p>
             ) : (
                 <p>
-                    This score is archived and read-only, so {changes} you made to it {are} saved only on this device.{' '}
-                    {upload} automatically once the score is restored, for example when its owner renews their plan.
+                    <span className="sm:hidden">
+                        This score is archived: {changes} {are} saved only on this device until it&rsquo;s restored.
+                    </span>
+                    <span className="hidden sm:inline">
+                        This score is archived and read-only, so {changes} you made to it {are} saved only on this
+                        device. {upload} automatically once the score is restored, for example when its owner renews
+                        their plan.
+                    </span>
                 </p>
             )}
         </ViewerNotice>

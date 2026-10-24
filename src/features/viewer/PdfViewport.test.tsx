@@ -1,8 +1,14 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { tinyScore } from '@/features/playback/fixtures/tinyScore';
+import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
+import { playheadRect } from '@/features/playback/PlayheadController';
+import { computeDocumentLayout } from '@/features/viewer/geometry';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
+import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
+import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
 import { useViewerStore } from '@/state/store';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -139,5 +145,88 @@ describe('PdfViewport keyboard shortcuts under a confirmation', () => {
         await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
         fireEvent.keyDown(document.body, { key: 'ArrowRight' });
         expect(scrollY()).toBeGreaterThan(start);
+    });
+});
+
+describe('PdfViewport follow under the notice stack', () => {
+    const PHONE = { width: 390, height: 664 };
+    /** Measure 5 opens system 2, at the top of page 2. */
+    const SYSTEM_2_TICK = 8160;
+
+    /** The viewer page's arrangement: the notice region and the viewport in one container. */
+    const ViewerWithNotices = ({ tick }: { tick: { current: number } }) => {
+        const [inset, setInset] = useState(0);
+        return (
+            <div>
+                <ViewerNoticeRegion onInsetChange={setInset}>
+                    <ViewerNotice>
+                        <p>Your access to this score changed.</p>
+                    </ViewerNotice>
+                    <SyncRejectedNotice count={2} onDismiss={() => undefined} />
+                    <SyncHeldNotice count={3} />
+                </ViewerNoticeRegion>
+                <PdfViewport
+                    docId="doc-follow"
+                    readOnly
+                    noticeInset={inset}
+                    playback={{
+                        score: tinyScore,
+                        getEngine: () => ({ getPositionTicks: () => tick.current }) as unknown as PlaybackEngine,
+                    }}
+                />
+            </div>
+        );
+    };
+
+    it('keeps the followed system fully visible below several notices at a phone viewport', async () => {
+        viewport = PHONE;
+        const frames: FrameRequestCallback[] = [];
+        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+        vi.stubGlobal('cancelAnimationFrame', () => {});
+        let now = 0;
+        vi.spyOn(performance, 'now').mockImplementation(() => now);
+        const flushFrames = () => {
+            act(() => {
+                for (const callback of frames.splice(0, frames.length)) {
+                    callback(now);
+                }
+            });
+        };
+
+        const tick = { current: 0 };
+        render(<ViewerWithNotices tick={tick} />);
+        // Three cards: the stack reaches 56 + 3×52 + 2×6 = 224px down a 664px phone.
+        const stackBottom = REGION_TOP_PX + 3 * NOTICE_PX + 2 * NOTICE_GAP_PX;
+        expect(screen.getAllByRole('status')).toHaveLength(3);
+
+        // The opening view already starts page 1 below the stack.
+        const layout = computeDocumentLayout(PAGE_SIZES, 1, false);
+        const page0 = layout.layouts[0]!;
+        await waitFor(() => {
+            const v = useViewerStore.getState().view;
+            expect(page0.top * v.scale - v.scrollY).toBeGreaterThanOrEqual(stackBottom);
+        });
+
+        /** The followed system's top and bottom in viewport px, once the glide has finished. */
+        const followTo = (t: number) => {
+            tick.current = t;
+            act(() => useViewerStore.getState().notePlayheadJump());
+            flushFrames();
+            now += 10_000;
+            flushFrames();
+            const v = useViewerStore.getState().view;
+            const rect = playheadRect(tinyScore, t)!;
+            const page = layout.layouts[rect.pageIndex]!;
+            return {
+                top: (page.top + rect.y0 * page.height) * v.scale - v.scrollY,
+                bottom: (page.top + rect.y1 * page.height) * v.scale - v.scrollY,
+            };
+        };
+
+        for (const t of [0, SYSTEM_2_TICK, tinyScore.totalTicks - 1]) {
+            const system = followTo(t);
+            expect(system.top).toBeGreaterThanOrEqual(stackBottom);
+            expect(system.bottom).toBeLessThanOrEqual(PHONE.height);
+        }
     });
 });

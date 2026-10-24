@@ -222,6 +222,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
     const [exportSignal, setExportSignal] = useState(0);
+    /** How far the notices over the score reach down it (ViewerNoticeRegion). */
+    const [noticeInset, setNoticeInset] = useState(0);
     const [staleBytes, setStaleBytes] = useState(false);
     const [accessLoss, setAccessLoss] = useState<AccessLoss | null>(null);
     /** "Your access changed" banner after a live role change. */
@@ -1053,7 +1055,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 <div className="relative min-h-0 flex-1">
                     {/* Every notice floats over the score in one region, so one
                         coming or going never moves the music (ViewerNotice). */}
-                    <ViewerNoticeRegion>
+                    <ViewerNoticeRegion onInsetChange={setNoticeInset}>
                         <UpgradeBanner isGuest={Boolean(session?.user.is_anonymous)} />
                         {accessNotice ? (
                             <ViewerNotice>
@@ -1091,6 +1093,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                             docId={docId}
                             readOnly={readOnly}
                             onStoreReady={onStoreReady}
+                            noticeInset={noticeInset}
                             // Playhead, loop tint and tap-to-seek live only while
                             // the transport is on screen to drive them.
                             playback={playAlongEnabled && playAlongOpen ? playbackFeature : undefined}
@@ -1212,6 +1215,8 @@ const LocalViewer = ({ docId }: { docId: string }) => {
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
     const [exportSignal, setExportSignal] = useState(0);
+    /** How far the notices over the score reach down it (ViewerNoticeRegion). */
+    const [noticeInset, setNoticeInset] = useState(0);
     const [reopenError, setReopenError] = useState<string | null>(null);
     const bytes = getLocalDoc(docId);
 
@@ -1289,11 +1294,11 @@ const LocalViewer = ({ docId }: { docId: string }) => {
             </ViewerHeader>
             <main className="flex min-h-0 flex-1 flex-col">
                 <div className="relative min-h-0 flex-1">
-                    <ViewerNoticeRegion>
+                    <ViewerNoticeRegion onInsetChange={setNoticeInset}>
                         <InkSaveFailedNotice store={annotationStore} onExport={() => setExportSignal((n) => n + 1)} />
                     </ViewerNoticeRegion>
                     <PdfProvider data={bytes}>
-                        <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />
+                        <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} noticeInset={noticeInset} />
                     </PdfProvider>
                 </div>
             </main>

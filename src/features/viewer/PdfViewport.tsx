@@ -167,6 +167,12 @@ export interface PdfViewportProps {
     /** Present when play-along is available: playhead + tap-to-seek + loop tint. */
     playback?: PlaybackFeature;
     /**
+     * Px down from the viewport's top edge that the notices floating over the
+     * score reach (ViewerNoticeRegion): kept clear like a toolbar's strip, so
+     * follow, page turns and the first fit put the music below them.
+     */
+    noticeInset?: number;
+    /**
      * The signed-in account, once known, whether or not the score syncs yet
      * (a provisional offline open does not): whose queued marks are drawn.
      * Defaults to sync.userId.
@@ -199,7 +205,15 @@ export interface PdfViewportProps {
  * The scrollable, zoomable, annotatable stack of PDF pages. Owns the gesture +
  * ink wiring and page virtualization. Remount (key) per document.
  */
-export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, authorId, sync }: PdfViewportProps) => {
+export const PdfViewport = ({
+    docId,
+    readOnly = false,
+    onStoreReady,
+    playback,
+    noticeInset = 0,
+    authorId,
+    sync,
+}: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
     /**
      * React's copy of the view: settled, not live. Pan, pinch, wheel and the
@@ -274,12 +288,17 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
     // the document and reports (child effects first) in the same commit as the
     // first fit, which must already see it. Syncing it from state in the effect
     // above would put the stale value back before the fit reads it.
-    // Phones add the pager/zoom strip to the top edge (see PHONE_CONTROLS_STRIP).
+    // Phones add the pager/zoom strip to the top edge (see PHONE_CONTROLS_STRIP),
+    // and any notices floating over the score extend it (noticeInset).
     const toolbarEdgesRef = useRef<ObscuredEdges>(NO_OBSCURED);
     const controlsStripRef = useRef(0);
+    const noticeInsetRef = useRef(noticeInset);
     const applyObscured = useCallback(() => {
         const toolbar = toolbarEdgesRef.current;
-        const edges = { top: Math.max(toolbar.top, controlsStripRef.current), bottom: toolbar.bottom };
+        const edges = {
+            top: Math.max(toolbar.top, controlsStripRef.current, noticeInsetRef.current),
+            bottom: toolbar.bottom,
+        };
         obscuredRef.current = edges;
         setObscured((prev) => (prev.top === edges.top && prev.bottom === edges.bottom ? prev : edges));
     }, []);
@@ -290,6 +309,12 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         },
         [applyObscured],
     );
+    // Only the edge moves: the view stays where it is when a notice comes or
+    // goes, and the next follow step or page turn lands clear of the stack.
+    useLayoutEffect(() => {
+        noticeInsetRef.current = Math.max(0, noticeInset);
+        applyObscured();
+    }, [noticeInset, applyObscured]);
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
     // These live in state, not refs: the overlay divs only exist once the PDF
