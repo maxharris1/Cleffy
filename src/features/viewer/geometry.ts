@@ -241,6 +241,20 @@ export const focusedPageIndex = (
             layouts.findIndex((l) => l.top === lastTop),
         );
     }
+    return pageAtUncoveredCenter(view, viewportHeight, layouts, obscured);
+};
+
+/**
+ * Page whose middle is nearest the centre of the part of the viewport no
+ * strip covers — by geometry alone, without focusedPageIndex's overrides at
+ * the scroll bounds. What keeps the reading position when pages change size.
+ */
+const pageAtUncoveredCenter = (
+    view: ViewState,
+    viewportHeight: number,
+    layouts: readonly PageLayout[],
+    obscured: ObscuredEdges,
+): number => {
     const centerY = (view.scrollY + uncoveredCenterPx(viewportHeight, obscured)) / view.scale;
     let best = 0;
     let bestDist = Number.POSITIVE_INFINITY;
@@ -327,7 +341,9 @@ export const fitPageWidthScale = (layout: DocumentLayout, viewportWidth: number)
  * reader on page 40 is not moved by the pages above it, and the zoom stays
  * the same multiple of fit-width (as a rotation keeps it), so a fitted score
  * whose widest page turned out wider is fitted again. The centre is that of
- * the part of the viewport no strip covers (`obscured`). Unclamped.
+ * the part of the viewport no strip covers (`obscured`), and the page it is
+ * measured on is the one there — not the pager's last row at the bottom
+ * bound, which can sit far below it when zoomed out. Unclamped.
  */
 export const reanchorView = (
     view: ViewState,
@@ -337,9 +353,12 @@ export const reanchorView = (
     viewportHeight: number,
     obscured: ObscuredEdges = NO_OBSCURED,
 ): ViewState => {
-    const focused = focusedPageIndex(view, viewportHeight, before.layouts, obscured);
-    const from = before.layouts[focused];
-    const to = after.layouts[focused];
+    if (before.layouts.length === 0) {
+        return view;
+    }
+    const anchor = pageAtUncoveredCenter(view, viewportHeight, before.layouts, obscured);
+    const from = before.layouts[anchor];
+    const to = after.layouts[anchor];
     if (!from || !to || from.height <= 0 || before.contentWidth <= 0) {
         return view;
     }

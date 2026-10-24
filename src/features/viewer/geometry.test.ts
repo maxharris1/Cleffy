@@ -547,4 +547,31 @@ describe('reanchorView', () => {
         expect(next.scrollX).toBeCloseTo(10);
         expect(next.scrollY).toBeCloseTo(4000);
     });
+
+    it('keeps the reading position at the bottom bound, where the pager reads the last page', () => {
+        // Zoomed out to the minimum under a 72 px notice strip: the bottom of
+        // ten letter pages is at scrollY 1000, with page 8 at the middle of
+        // the part of the viewport the strip leaves.
+        const VW = 768;
+        const VH = 1024;
+        const strip = { top: 72, bottom: 0 };
+        const before = computeDocumentLayout(Array.from({ length: 10 }, () => ({ width: 612, height: 792 })));
+        // Streaming finds page 10 twice as tall.
+        const after = computeDocumentLayout(
+            Array.from({ length: 10 }, (_, i) => ({ width: 612, height: i === 9 ? 1584 : 792 })),
+        );
+        const view = clampScroll({ scale: MIN_SCALE, scrollX: 0, scrollY: 1e6 }, before, VW, VH, strip);
+        expect(view.scrollY).toBeCloseTo(1000);
+        // The pager's end override still holds: Next stops and Previous starts here.
+        expect(focusedPageIndex(view, VH, before.layouts, strip)).toBe(9);
+
+        const next = clampScroll(reanchorView(view, before, after, VW, VH, strip), after, VW, VH, strip);
+        // Nothing above page 10 moved, so neither does the score.
+        expect(next.scrollY).toBeCloseTo(1000);
+        const centre = 72 + (VH - 72) / 2;
+        const page8 = after.layouts[7]!;
+        const cy = (next.scrollY + centre) / next.scale;
+        expect(cy).toBeGreaterThan(page8.top);
+        expect(cy).toBeLessThan(page8.top + page8.height);
+    });
 });
