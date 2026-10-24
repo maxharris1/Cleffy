@@ -136,6 +136,19 @@ export const Menu = (props: MenuProps) => {
     const settle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     useEffect(() => () => clearTimeout(settle.current), []);
     const dismissFailure = useCallback(() => setFailedAt(null), []);
+    // Opened from outside (a controlled `open`, as a notice's button opens the
+    // Export menu) before the chunk is in: fetch it, and the real menu mounts
+    // open. One that cannot load hands the open back.
+    const openedFromOutside = props.open === true && !loaded;
+    const onOpenChangeRef = useRef(props.onOpenChange);
+    useEffect(() => {
+        onOpenChangeRef.current = props.onOpenChange;
+    });
+    useEffect(() => {
+        if (openedFromOutside) {
+            menuBase.load().catch(() => onOpenChangeRef.current?.(false));
+        }
+    }, [openedFromOutside]);
 
     if (loaded && (openOnLoad || openKey !== null || (!hovered && !pressing))) {
         // Opening hands focus to the popup itself (and back to the trigger on close).

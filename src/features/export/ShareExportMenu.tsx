@@ -1,5 +1,5 @@
 import { Popover } from '@base-ui/react/popover';
-import { Suspense, lazy, useState } from 'react';
+import { Suspense, lazy, useRef, useState } from 'react';
 
 import { useSession } from '@/features/auth/session';
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
@@ -23,7 +23,7 @@ import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { SwapLabel } from '@/ui/SwapLabel';
 import { buttonClassName } from '@/ui/classNames';
-import { onMenuKeyDown } from '@/ui/menuKeyboard';
+import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
 import { toast } from '@/ui/toast';
 
 // Lazy for the same reason as the library shell's copy: pricing is a rare
@@ -114,7 +114,12 @@ export const ShareExportMenu = ({
     userId: exportingFor,
     lostAccess = false,
 }: ShareExportMenuProps) => {
-    const [open, setOpen] = useState(false);
+    const [menuOpen, setMenuOpen] = useState(false);
+    /** The panel under the button that says how the last export went. */
+    const [noticeOpen, setNoticeOpen] = useState(false);
+    const anchorRef = useRef<HTMLSpanElement | null>(null);
+    /** The last export started, for the notice's Try again. */
+    const lastRun = useRef<(() => Promise<void>) | null>(null);
     const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     /** Set while the source PDF is being downloaded for an export. */
@@ -139,7 +144,8 @@ export const ShareExportMenu = ({
     const [seenSignal, setSeenSignal] = useState(openSignal);
     if (openSignal !== seenSignal) {
         setSeenSignal(openSignal);
-        setOpen(true);
+        setNoticeOpen(false);
+        setMenuOpen(true);
     }
 
     /**
@@ -199,9 +205,9 @@ export const ShareExportMenu = ({
     const fail = (stage: 'source' | 'export', failureLabel: string, err: unknown) => {
         console.warn('Export failed', err);
         setError(describeFailure(stage, failureLabel, err));
-        // The menu may have been dismissed while this ran; the failure must
-        // still be seen, not just logged.
-        setOpen(true);
+        // The menu closed when the export started; the failure must still be
+        // seen, not just logged.
+        showNotice();
     };
 
     const finish = () => {
@@ -209,10 +215,21 @@ export const ShareExportMenu = ({
         setDownload(null);
     };
 
-    /** An export whose marks need saying: kept open over it, as for a failure. */
+    /**
+     * Say how the export went, under the button. The menu holds only its
+     * items (a Base UI Menu); what an export has to say — a failure, a
+     * refusal, the limit with its way to the plans, marks it left out — is
+     * not a menu item, so it is a panel of its own.
+     */
+    const showNotice = () => {
+        setMenuOpen(false);
+        setNoticeOpen(true);
+    };
+
+    /** An export whose marks need saying: shown, as a failure is. */
     const noteMarks = (notice: string) => {
         setMarksNotice(notice);
-        setOpen(true);
+        showNotice();
     };
 
     /**
@@ -247,12 +264,7 @@ export const ShareExportMenu = ({
         try {
             const source = await sourceFor(label);
             stage = 'export';
-            let noticed = false;
-            const outcome = await action(source, (notice) => {
-                noticed = true;
-                noteMarks(notice);
-            });
-            setOpen(noticed);
+            const outcome = await action(source, noteMarks);
             confirmDelivery(outcome, subject, 'a photo');
         } catch (err) {
             fail(stage, failureLabel, err);
@@ -284,11 +296,7 @@ export const ShareExportMenu = ({
             const source = await sourceFor(label);
             stage = 'export';
             const userId = markOwner;
-            let noticed = false;
-            const onNotice = (notice: string) => {
-                noticed = true;
-                noteMarks(notice);
-            };
+            const onNotice = noteMarks;
             const file = await (page === null
                 ? buildAnnotatedPdf(docId, source, title, { userId, onNotice, lostAccess })
                 : buildAnnotatedPdf(docId, source, title, { userId, pageIndex: page, onNotice, lostAccess }));
@@ -299,18 +307,16 @@ export const ShareExportMenu = ({
                 } else {
                     setRefusal(claim.message);
                 }
-                // Seen even if the menu was dismissed while the claim ran.
-                setOpen(true);
+                showNotice();
                 return;
             }
             const outcome = await deliverPdf(file);
             if (outcome === 'cancelled') {
                 setNotSent(true);
-                setOpen(true);
+                showNotice();
                 return;
             }
             markExportDelivered(attempt);
-            setOpen(noticed);
             confirmDelivery(outcome, page === null ? 'Score' : `Page ${page + 1}`, 'a PDF');
         } catch (err) {
             fail(stage, failureLabel, err);
@@ -322,137 +328,185 @@ export const ShareExportMenu = ({
     const pageLabel = focusedPageIndex + 1;
     const downloadPct = download && download.total > 0 ? Math.round((download.loaded / download.total) * 100) : null;
     const status = refusal ?? (notSent ? EXPORT_NOT_SENT_MESSAGE : null);
-    const wide = Boolean(limit || status || error || marksNotice);
+    const hasNotice = Boolean(limit || status || error || marksNotice);
+    const active = busy === null ? 'idle' : busy === DOWNLOADING ? 'downloading' : 'exporting';
+    const downloadingLabel = downloadPct === null ? 'Downloading…' : `Downloading… ${downloadPct}%`;
 
-    // A Base UI popover holds the menu and its notices (which are not menu
-    // items, so it cannot be a Base UI Menu): outside press and Escape close it
-    // and give focus back to the button, and collision handling keeps it inside
-    // the screen's gutter however far it widens for a notice.
+    /** Start an export from the menu, remembered for the notice's Try again. */
+    const start = (run: () => Promise<void>) => {
+        lastRun.current = run;
+        void run();
+    };
+    const retry = () => {
+        setNoticeOpen(false);
+        if (lastRun.current) {
+            void lastRun.current();
+        }
+    };
+
     return (
-        <Popover.Root
-            open={open}
-            onOpenChange={(next) => {
-                if (next) {
-                    setLimit(null);
-                    setRefusal(null);
-                    setNotSent(false);
-                    setError(null);
-                    setMarksNotice(null);
-                }
-                setOpen(next);
-            }}
-        >
-            <Popover.Trigger
-                disabled={busy !== null}
-                aria-haspopup="menu"
-                title="Export — this page as a photo or PDF, or the whole score as PDF"
-                className={buttonClassName('ghost', 'sm', 'tabular-nums')}
-            >
-                <SwapLabel
-                    labels={{
-                        idle: 'Export',
-                        exporting: 'Exporting…',
-                        downloading:
-                            downloadPct === null ? (
-                                'Downloading…'
-                            ) : (
-                                <>
-                                    Downloading… <span className="inline-block w-[4ch] text-right">{downloadPct}%</span>
-                                </>
-                            ),
+        <>
+            {/* The anchor the notice panel hangs from; the download's progress
+                runs along the button's foot. */}
+            <span ref={anchorRef} className="relative inline-flex">
+                <Menu
+                    label={active === 'idle' ? 'Export' : active === 'exporting' ? 'Exporting…' : downloadingLabel}
+                    triggerTitle="Export — this page as a photo or PDF, or the whole score as PDF"
+                    triggerClassName={buttonClassName('ghost', 'sm', 'tabular-nums')}
+                    triggerContent={
+                        <SwapLabel
+                            labels={{
+                                idle: 'Export',
+                                exporting: 'Exporting…',
+                                downloading:
+                                    downloadPct === null ? (
+                                        'Downloading…'
+                                    ) : (
+                                        <>
+                                            Downloading…{' '}
+                                            <span className="inline-block w-[4ch] text-right">{downloadPct}%</span>
+                                        </>
+                                    ),
+                            }}
+                            active={active}
+                        />
+                    }
+                    menuLabel="Export"
+                    popupClassName="w-64"
+                    open={menuOpen}
+                    onOpenChange={(next) => {
+                        if (next) {
+                            setNoticeOpen(false);
+                            setLimit(null);
+                            setRefusal(null);
+                            setNotSent(false);
+                            setError(null);
+                            setMarksNotice(null);
+                        }
+                        setMenuOpen(next);
                     }}
-                    active={busy === null ? 'idle' : busy === DOWNLOADING ? 'downloading' : 'exporting'}
-                />
-            </Popover.Trigger>
-            <Popover.Portal>
-                <Popover.Positioner side="bottom" align="end" sideOffset={4} collisionPadding={12} className="z-50">
-                    <Popover.Popup
-                        aria-label="Export"
-                        className={`ui-menu-pop max-w-[calc(100vw-1.5rem)] rounded-xl border border-stone-200 bg-white py-1 shadow-lg outline-none ${
-                            wide ? 'w-80' : 'w-64'
-                        }`}
+                >
+                    <MenuItem
+                        className={EXPORT_ITEM_CLASS}
+                        disabled={busy !== null}
+                        onClick={() =>
+                            start(() =>
+                                runUnmetered(
+                                    'Exporting…',
+                                    'The export',
+                                    (source, onNotice) =>
+                                        exportAnnotatedPageImage(
+                                            docId,
+                                            source,
+                                            focusedPageIndex,
+                                            title,
+                                            markOwner,
+                                            onNotice,
+                                            lostAccess,
+                                        ),
+                                    `Page ${pageLabel}`,
+                                ),
+                            )
+                        }
                     >
-                        {/* The notice is a sibling of the menu, not an item in it. */}
-                        <div role="menu" aria-label="Export" onKeyDown={onMenuKeyDown}>
-                            <MenuItem
-                                label={`Send page ${pageLabel} as photo`}
-                                hint="PNG — send via Messages"
-                                disabled={busy !== null}
-                                onClick={() =>
-                                    void runUnmetered(
-                                        'Exporting…',
-                                        'The export',
-                                        (source, onNotice) =>
-                                            exportAnnotatedPageImage(
-                                                docId,
-                                                source,
-                                                focusedPageIndex,
-                                                title,
-                                                markOwner,
-                                                onNotice,
-                                                lostAccess,
-                                            ),
-                                        `Page ${pageLabel}`,
-                                    )
-                                }
-                            />
-                            <MenuItem
-                                label={`Save page ${pageLabel} as PDF`}
-                                disabled={busy !== null}
-                                onClick={() => void runMetered('Exporting…', 'The export', focusedPageIndex)}
-                            />
-                            <div role="separator" className="my-1 border-t border-stone-100" />
-                            <MenuItem
-                                label="Export whole score as PDF"
-                                disabled={busy !== null}
-                                onClick={() => void runMetered('Exporting…', 'The export', null)}
-                            />
-                        </div>
-                        {download ? (
-                            <ProgressBar
-                                value={download.total > 0 ? (download.loaded / download.total) * 100 : 0}
-                                indeterminate={download.total === 0}
-                                label="Downloading score for export"
-                                className="mx-3 my-2 w-auto"
-                            />
-                        ) : null}
-                        {error ? <ErrorText className="mx-3 my-2">{error}</ErrorText> : null}
-                        {marksNotice ? (
-                            <p
-                                role="status"
-                                className="m-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
-                            >
-                                {marksNotice}
-                            </p>
-                        ) : null}
-                        {limit ? (
-                            <LimitReachedNotice
-                                limit={limit}
-                                // No upgrade button when there is no checkout to send them
-                                // to — the message alone is still the honest answer.
-                                onUpgrade={
-                                    isBillingConfigured()
-                                        ? () => {
-                                              setPricingOpen(true);
-                                              setOpen(false);
-                                          }
-                                        : undefined
-                                }
-                                className="m-2"
-                            />
-                        ) : null}
-                        {status ? (
-                            <p
-                                role="status"
-                                className="m-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700"
-                            >
-                                {status}
-                            </p>
-                        ) : null}
-                    </Popover.Popup>
-                </Popover.Positioner>
-            </Popover.Portal>
-            {/* Outside the menu so dismissing the menu does not take the plans with it. */}
+                        <span className="text-sm text-stone-800">Send page {pageLabel} as photo</span>
+                        <span className="text-xs text-stone-500">PNG — send via Messages</span>
+                    </MenuItem>
+                    <MenuItem
+                        className={EXPORT_ITEM_CLASS}
+                        disabled={busy !== null}
+                        onClick={() => {
+                            const page = focusedPageIndex;
+                            start(() => runMetered('Exporting…', 'The export', page));
+                        }}
+                    >
+                        <span className="text-sm text-stone-800">Save page {pageLabel} as PDF</span>
+                    </MenuItem>
+                    <MenuSeparator />
+                    <MenuItem
+                        className={EXPORT_ITEM_CLASS}
+                        disabled={busy !== null}
+                        onClick={() => start(() => runMetered('Exporting…', 'The export', null))}
+                    >
+                        <span className="text-sm text-stone-800">Export whole score as PDF</span>
+                    </MenuItem>
+                </Menu>
+                {download ? (
+                    <ProgressBar
+                        value={download.total > 0 ? (download.loaded / download.total) * 100 : 0}
+                        indeterminate={download.total === 0}
+                        label="Downloading score for export"
+                        className="shell-progress absolute inset-x-1 bottom-0"
+                    />
+                ) : null}
+            </span>
+            {/* How the last export went. Outside press and Escape put it away;
+                opening the menu again clears it. */}
+            <Popover.Root open={noticeOpen && hasNotice} onOpenChange={setNoticeOpen}>
+                <Popover.Portal>
+                    <Popover.Positioner
+                        anchor={anchorRef}
+                        side="bottom"
+                        align="end"
+                        sideOffset={4}
+                        collisionPadding={12}
+                        className="z-50"
+                    >
+                        <Popover.Popup
+                            aria-label="Export"
+                            className="ui-menu-pop w-80 max-w-[calc(100vw-1.5rem)] rounded-xl border border-stone-200 bg-white py-1 shadow-lg outline-none"
+                        >
+                            {error ? <ErrorText className="mx-3 my-2">{error}</ErrorText> : null}
+                            {marksNotice ? (
+                                <p
+                                    role="status"
+                                    className="m-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+                                >
+                                    {marksNotice}
+                                </p>
+                            ) : null}
+                            {limit ? (
+                                <LimitReachedNotice
+                                    limit={limit}
+                                    // No upgrade button when there is no checkout to send them
+                                    // to — the message alone is still the honest answer.
+                                    onUpgrade={
+                                        isBillingConfigured()
+                                            ? () => {
+                                                  setPricingOpen(true);
+                                                  setNoticeOpen(false);
+                                              }
+                                            : undefined
+                                    }
+                                    className="m-2"
+                                />
+                            ) : null}
+                            {status ? (
+                                <p
+                                    role="status"
+                                    className="m-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700"
+                                >
+                                    {status}
+                                </p>
+                            ) : null}
+                            {/* What failed, or was held back or not sent, can be asked
+                                for again from here, as it could from the old menu. */}
+                            {error || status ? (
+                                <div className="mx-3 my-2">
+                                    <button
+                                        type="button"
+                                        onClick={retry}
+                                        className={buttonClassName('secondary', 'sm')}
+                                    >
+                                        Try again
+                                    </button>
+                                </div>
+                            ) : null}
+                        </Popover.Popup>
+                    </Popover.Positioner>
+                </Popover.Portal>
+            </Popover.Root>
+            {/* Outside the menu so dismissing it does not take the plans with it. */}
             {pricingOpen ? (
                 <Suspense fallback={null}>
                     <PricingDialog
@@ -462,29 +516,10 @@ export const ShareExportMenu = ({
                     />
                 </Suspense>
             ) : null}
-        </Popover.Root>
+        </>
     );
 };
 
-const MenuItem = ({
-    label,
-    hint,
-    disabled = false,
-    onClick,
-}: {
-    label: string;
-    hint?: string;
-    disabled?: boolean;
-    onClick: () => void;
-}) => (
-    <button
-        type="button"
-        role="menuitem"
-        disabled={disabled}
-        onClick={onClick}
-        className="flex w-full flex-col items-start px-3 py-2 text-left outline-none transition-colors hover:bg-ink/5 focus-visible:bg-ink/5 disabled:opacity-50 pointer-coarse:min-h-11"
-    >
-        <span className="text-sm text-stone-800">{label}</span>
-        {hint ? <span className="text-xs text-stone-500">{hint}</span> : null}
-    </button>
-);
+/** An export item: its label, and a hint under it when there is one. */
+const EXPORT_ITEM_CLASS =
+    'flex w-full cursor-pointer flex-col items-start px-3 py-2 text-left outline-none select-none data-highlighted:bg-ink/5 data-disabled:cursor-default data-disabled:opacity-50 pointer-coarse:min-h-11';

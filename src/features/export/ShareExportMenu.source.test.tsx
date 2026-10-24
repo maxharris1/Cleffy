@@ -109,9 +109,15 @@ describe('ShareExportMenu', () => {
 
         report({ loaded: 25, total: 100 });
         const trigger = await screen.findByRole('button', { name: 'Downloading… 25%' });
-        expect(trigger).toBeDisabled();
         // Every caption is in the button (SwapLabel), so it never changes width.
         expect(within(trigger).getByText('Export')).toHaveAttribute('aria-hidden', 'true');
+        // The menu closed on the press; opened again mid-export, it offers nothing to start.
+        await user.click(trigger);
+        expect(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' })).toHaveAttribute(
+            'aria-disabled',
+            'true',
+        );
+        await user.keyboard('{Escape}');
         expect(screen.getByRole('progressbar', { name: 'Downloading score for export' })).toHaveAttribute(
             'aria-valuenow',
             '25',
@@ -205,7 +211,7 @@ describe('ShareExportMenu', () => {
         expect(await screen.findByText('The export failed (Worker crashed). Please try again.')).toBeInTheDocument();
     });
 
-    it('re-opens the menu to show a failure that landed after it was dismissed', async () => {
+    it('shows a failure that landed after the menu was dismissed', async () => {
         const user = userEvent.setup();
         let fail: (err: Error) => void = () => undefined;
         exportAnnotatedPageImage.mockImplementation(
