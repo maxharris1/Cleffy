@@ -1,6 +1,7 @@
 import { memo, useRef } from 'react';
 import { Link } from 'react-router';
 
+import { CoverImage } from '@/features/library/CoverImage';
 import { composerOf, displayTitleOf } from '@/features/library/libraryView';
 import { formatUpdated } from '@/features/library/libraryFormat';
 import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
@@ -80,10 +81,15 @@ export const ScoreCard = memo(
                 <div className="relative">
                     <div
                         aria-hidden="true"
-                        className="library-card-cover aspect-[1/1.414] overflow-hidden rounded-md border border-stone-200/80 bg-white shadow-sm"
+                        className="library-card-cover relative aspect-[1/1.414] overflow-hidden rounded-md border border-stone-200/80 bg-white shadow-sm"
                     >
                         {url ? (
-                            <img src={url} alt="" className="h-full w-full object-cover object-top" />
+                            <CoverImage
+                                src={url}
+                                cacheKey={`${doc.id}:${doc.content_rev ?? 0}:${doc.thumb_rev ?? ''}`}
+                                placeholder={<TypesetCover title={title} composer={composer} />}
+                                className="absolute inset-0 h-full w-full object-cover object-top"
+                            />
                         ) : near ? (
                             /* Default pt-10 clears the favourite star pinned to the
                                cover's top-right corner — on a favourited score it is

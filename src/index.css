@@ -852,3 +852,28 @@ body {
 .ui-error-in {
     animation: ui-fade-in var(--duration-exit) var(--ease-out);
 }
+
+/*
+ * A cover's engraving fading in over its placeholder once it has decoded
+ * (library/CoverImage). Opacity only: a scale would shimmer across a shelf of
+ * two hundred. A cover this page has already shown is settled: no fade.
+ */
+.cover-fade {
+    opacity: 0;
+    transition: opacity 200ms var(--ease-out);
+}
+
+.cover-fade[data-loaded] {
+    opacity: 1;
+}
+
+.cover-fade[data-settled] {
+    transition: none;
+}
+
+/* Opacity is allowed under reduced motion; it is only quicker. */
+@media (prefers-reduced-motion: reduce) {
+    .cover-fade {
+        transition-duration: var(--duration-exit);
+    }
+}
