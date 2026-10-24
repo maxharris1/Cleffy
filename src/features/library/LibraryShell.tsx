@@ -467,7 +467,12 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 // The sweep becomes a full bar for the same finishing beat.
                 setImslpFilled(true);
                 await settleBar(startedAt, { fillMs: 0, hold: true });
-                navigate(`/doc/${result.document.id}`);
+                // Leaving during the hold or the fade is moving on too: Search
+                // unmounting aborts the import, and this is no longer the page
+                // it started on.
+                if (!signal?.aborted && pathnameRef.current === startedAt) {
+                    navigate(`/doc/${result.document.id}`);
+                }
             }
             toast.success('Imported from IMSLP', { description: result.document.title });
             return { ok: true as const };

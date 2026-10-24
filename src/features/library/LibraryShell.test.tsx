@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useEffect } from 'react';
 import { MemoryRouter, Route, Routes, useNavigate, useOutletContext } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -130,11 +131,15 @@ const ShellPage = ({ name }: { name: string }) => {
     );
 };
 
-/** Drives onImportImslp the way ImslpBrowser does, with a cancel handle. */
+/**
+ * Drives onImportImslp the way ImslpBrowser does, with a cancel handle that
+ * leaving the page aborts.
+ */
 const importControl = { controller: new AbortController() };
 const ImportPage = () => {
     const { onImportImslp, limitNotice, importLimit, quotaExhausted, quotaUpgradeHint, openPricing } =
         useOutletContext<LibraryOutletContext>();
+    useEffect(() => () => importControl.controller.abort(), []);
     return (
         <div>
             <p>search page</p>
@@ -606,6 +611,40 @@ describe('LibraryShell upload bar', () => {
         expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
         await elapse(150);
         expect(screen.getByText('viewer page')).toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    it('stays on the Library for a teacher who leaves Search during the hold', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(60);
+        expect(bar('Importing from IMSLP')).not.toHaveAttribute('data-done');
+
+        fireEvent.click(screen.getByRole('link', { name: 'Library' }));
+        expect(importControl.controller.signal.aborted).toBe(true);
+        await elapse(500);
+        expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        // The score is still theirs: the toast says where it went.
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    it('stays on the Library for a teacher who leaves Search during the fade', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(120);
+        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+
+        await elapse(75);
+        fireEvent.click(screen.getByRole('link', { name: 'Library' }));
+        expect(importControl.controller.signal.aborted).toBe(true);
+        await elapse(500);
+        expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
         expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
     });
 });
