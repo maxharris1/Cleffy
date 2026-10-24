@@ -17,7 +17,7 @@ describe('Dialog', () => {
                 <button type="button">Inside</button>
             </Dialog>,
         );
-        const dialog = screen.getByRole('dialog', { name: 'Share this score' });
+        const dialog = await screen.findByRole('dialog', { name: 'Share this score' });
         expect(dialog).toHaveAttribute('aria-modal', 'true');
         expect(screen.getByRole('heading', { name: 'Share this score' })).toBeInTheDocument();
         await user.keyboard('{Escape}');
@@ -48,7 +48,7 @@ describe('Dialog', () => {
                 <p>Body</p>
             </Dialog>,
         );
-        const dialog = screen.getByRole('dialog', { name: 'Share this score' });
+        const dialog = await screen.findByRole('dialog', { name: 'Share this score' });
         await user.click(dialog);
         expect(onClose).not.toHaveBeenCalled();
         const scrim = dialog.parentElement;
@@ -57,14 +57,14 @@ describe('Dialog', () => {
         expect(onClose).toHaveBeenCalledTimes(1);
     });
 
-    it('stays open when a press starts in the panel and ends on the scrim (a text selection dragged out)', () => {
+    it('stays open when a press starts in the panel and ends on the scrim (a text selection dragged out)', async () => {
         const onClose = vi.fn();
         render(
             <Dialog label="Rename score" onClose={onClose}>
                 <input aria-label="Title" defaultValue="Clementi" />
             </Dialog>,
         );
-        const field = screen.getByRole('textbox', { name: 'Title' });
+        const field = await screen.findByRole('textbox', { name: 'Title' });
         const scrim = screen.getByRole('dialog', { name: 'Rename score' }).parentElement as HTMLElement;
         // The browser targets click at the nearest common ancestor of the press
         // and the release — the scrim, when the drag ended outside the panel.
@@ -98,6 +98,7 @@ describe('Dialog', () => {
                 </Dialog>
             </>,
         );
+        await screen.findByText('Top');
         await user.keyboard('{Escape}');
         expect(onCloseTop).toHaveBeenCalledTimes(1);
         expect(onCloseBottom).not.toHaveBeenCalled();
@@ -111,20 +112,21 @@ describe('Dialog', () => {
                 <p>Body</p>
             </Dialog>,
         );
-        const dialog = screen.getByRole('alertdialog', { name: 'Delete score?' });
+        const dialog = await screen.findByRole('alertdialog', { name: 'Delete score?' });
         await user.click(dialog.parentElement as HTMLElement);
         expect(onClose).not.toHaveBeenCalled();
         await user.keyboard('{Escape}');
         expect(onClose).toHaveBeenCalledTimes(1);
     });
 
-    it('closes a phone sheet dragged down by its grab bar, and springs back from a short drag', () => {
+    it('closes a phone sheet dragged down by its grab bar, and springs back from a short drag', async () => {
         const onClose = vi.fn();
         render(
             <Dialog label="Lesson history" onClose={onClose} sheet>
                 <p>Body</p>
             </Dialog>,
         );
+        await screen.findByRole('dialog', { name: 'Lesson history' });
         const grabber = document.querySelector('[data-sheet-grabber]') as HTMLElement;
         expect(grabber).not.toBeNull();
 
@@ -137,5 +139,67 @@ describe('Dialog', () => {
         fireEvent.pointerMove(grabber, { pointerId: 2, clientY: 260 });
         fireEvent.pointerUp(grabber, { pointerId: 2, clientY: 260 });
         expect(onClose).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('Dialog, lazily loaded', () => {
+    /** Fresh copies of the modules, so the panel's chunk has not been loaded yet. */
+    const coldModules = async () => {
+        vi.resetModules();
+        const [{ Dialog: ColdDialog }, { isDialogOpen }, { dialogPanelModule }] = await Promise.all([
+            import('@/ui/Dialog'),
+            import('@/ui/dialogStack'),
+            import('@/ui/lazyPrimitives'),
+        ]);
+        return { ColdDialog, isDialogOpen, dialogPanelModule };
+    };
+
+    it('takes its place on the dialog stack before its panel has loaded, and shows nothing until then', async () => {
+        const { ColdDialog, isDialogOpen, dialogPanelModule } = await coldModules();
+        expect(dialogPanelModule.get()).toBeNull();
+        const { container, unmount } = render(
+            <ColdDialog label="Share this score" onClose={() => {}}>
+                <p>Body</p>
+            </ColdDialog>,
+        );
+        // Mounted, and already counted as open: the viewer's keys stand down now.
+        expect(isDialogOpen()).toBe(true);
+        // The Suspense fallback is nothing at all — no placeholder to flash.
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(container).toBeEmptyDOMElement();
+        expect(document.body.querySelector('[data-base-ui-portal]')).toBeNull();
+
+        expect(await screen.findByRole('dialog', { name: 'Share this score' })).toBeInTheDocument();
+        expect(dialogPanelModule.get()).not.toBeNull();
+        unmount();
+        expect(isDialogOpen()).toBe(false);
+    });
+
+    it('moves focus in and returns it to the opener on a first, lazy open', async () => {
+        const { ColdDialog } = await coldModules();
+        const opener = document.createElement('button');
+        document.body.appendChild(opener);
+        opener.focus();
+        const { unmount } = render(
+            <ColdDialog label="Confirm" onClose={() => {}}>
+                <p>Body</p>
+            </ColdDialog>,
+        );
+        const dialog = await screen.findByRole('dialog', { name: 'Confirm' });
+        await waitFor(() => expect(document.activeElement).toBe(dialog));
+        unmount();
+        await waitFor(() => expect(document.activeElement).toBe(opener));
+        opener.remove();
+    });
+
+    it('renders straight away, in the same commit, once the chunk has loaded', async () => {
+        const { ColdDialog, dialogPanelModule } = await coldModules();
+        await dialogPanelModule.load();
+        render(
+            <ColdDialog label="Delete score?" onClose={() => {}} alert>
+                <p>Body</p>
+            </ColdDialog>,
+        );
+        expect(screen.getByRole('alertdialog', { name: 'Delete score?' })).toBeInTheDocument();
     });
 });

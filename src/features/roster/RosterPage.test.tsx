@@ -501,7 +501,7 @@ describe('RosterPage', () => {
             expect(screen.getByRole('status')).toHaveTextContent('Your plan doesn’t include a student roster');
 
             await pickRowAction(user, 'Archive…');
-            await user.click(screen.getByRole('button', { name: 'Archive' }));
+            await user.click(await screen.findByRole('button', { name: 'Archive' }));
             expect(archiveStudent).toHaveBeenCalledWith('s1');
         } finally {
             outletContext.canManageStudents = true;
@@ -526,7 +526,7 @@ describe('RosterPage', () => {
             });
 
             await pickRowAction(user, 'Archive…');
-            await user.click(screen.getByRole('button', { name: 'Archive' }));
+            await user.click(await screen.findByRole('button', { name: 'Archive' }));
 
             await waitFor(async () => {
                 const row = await getDb().rosterCache.get('teacher-1');
@@ -558,7 +558,7 @@ describe('RosterPage', () => {
             expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
 
             await pickRowAction(user, 'Archive…');
-            await user.click(screen.getByRole('button', { name: 'Archive' }));
+            await user.click(await screen.findByRole('button', { name: 'Archive' }));
             expect(archiveStudent).toHaveBeenCalledWith('s1');
             await waitFor(() =>
                 expect(screen.getByRole('button', { name: /Ada Lovelace/ })).toHaveTextContent('Archived'),
@@ -622,7 +622,7 @@ describe('RosterPage', () => {
 
         expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
         await pickRowAction(user, 'Archive…');
-        await user.click(screen.getByRole('button', { name: 'Archive' }));
+        await user.click(await screen.findByRole('button', { name: 'Archive' }));
 
         // The archive is still in flight: the form is disabled, but it is not the
         // thing that is running. (Hidden: the confirmation stays up, modal, while

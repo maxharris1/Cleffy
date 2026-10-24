@@ -394,7 +394,7 @@ describe('AccountPage', () => {
 
         await user.click(remove);
         readOfflineStorage.mockResolvedValue({ scoreCount: 0, bytes: 0 });
-        await user.click(screen.getByRole('button', { name: 'Remove' }));
+        await user.click(await screen.findByRole('button', { name: 'Remove' }));
 
         expect(clearOfflineStorage).toHaveBeenCalledOnce();
         expect(await screen.findByText('Downloaded scores removed.')).toBeInTheDocument();
@@ -432,7 +432,7 @@ describe('AccountPage', () => {
         expect(screen.getByRole('heading', { name: 'Home screen' })).toBeInTheDocument();
         expect(screen.getByText(/Put your library on an iPhone or iPad like an app/)).toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Add to Home Screen' }));
-        expect(screen.getByRole('dialog', { name: 'Add to Home Screen' })).toBeInTheDocument();
+        expect(await screen.findByRole('dialog', { name: 'Add to Home Screen' })).toBeInTheDocument();
         expect(screen.getByText('On the iPhone or iPad, open cleffy.io in Safari.')).toBeInTheDocument();
     });
 

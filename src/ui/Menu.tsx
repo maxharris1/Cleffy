@@ -1,7 +1,7 @@
-import { Menu as BaseMenu } from '@base-ui/react/menu';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 
-import { menuItemClassName } from '@/ui/classNames';
+import { menuBaseModule as menuBase } from '@/ui/lazyPrimitives';
 
 /**
  * The app's dropdown menu, on Base UI's Menu: arrow keys and Home/End move
@@ -30,34 +30,85 @@ export interface MenuProps {
     children: ReactNode;
 }
 
-export const Menu = ({
-    label,
-    triggerClassName,
-    triggerContent,
-    triggerTitle,
-    disabled = false,
-    menuLabel,
-    popupClassName = 'w-48',
-    open,
-    onOpenChange,
-    children,
-}: MenuProps) => (
-    <BaseMenu.Root modal={false} open={open} onOpenChange={onOpenChange ? (next) => onOpenChange(next) : undefined}>
-        <BaseMenu.Trigger aria-label={label} title={triggerTitle} disabled={disabled} className={triggerClassName}>
+/**
+ * How long a released press holds back the switch to the loaded menu while
+ * its click is still to come: a touch's click follows its pointerup (and its
+ * pointerleave), and replacing the button in between would lose it.
+ */
+const PRESS_SETTLE_MS = 500;
+
+/**
+ * The Base UI menu (ui/MenuBase) is a lazy chunk. Until it has loaded, this
+ * renders a stand-in trigger with the same look and accessible name; hovering
+ * or focusing it warms the chunk, and pressing it opens the menu as soon as
+ * the chunk is in. Once loaded (on idle, usually, well before anyone reaches
+ * for a menu), every menu switches to the real one, carrying focus over if
+ * the stand-in had it — but never under a pointer that is over it or pressing
+ * it: a button swapped out from under the cursor loses its hover style until
+ * the mouse moves, and one swapped out mid-press loses the click. A stand-in
+ * that is pressed hands over as the menu opens.
+ */
+export const Menu = (props: MenuProps) => {
+    const loaded = useSyncExternalStore(menuBase.subscribe, menuBase.get, menuBase.get);
+    const [hovered, setHovered] = useState(false);
+    const [pressing, setPressing] = useState(false);
+    const [openOnLoad, setOpenOnLoad] = useState(false);
+    const [focused, setFocused] = useState(false);
+    const settle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    useEffect(() => () => clearTimeout(settle.current), []);
+
+    if (loaded && (openOnLoad || (!hovered && !pressing))) {
+        // Opening hands focus to the popup itself (and back to the trigger on close).
+        return <loaded.MenuBase {...props} defaultOpen={openOnLoad} focusTrigger={focused && !openOnLoad} />;
+    }
+
+    const { label, triggerClassName, triggerContent, triggerTitle, disabled = false, open, onOpenChange } = props;
+    const openWhenLoaded = () => {
+        clearTimeout(settle.current);
+        setOpenOnLoad(true);
+        onOpenChange?.(true);
+        void menuBase.load().catch(() => undefined);
+    };
+    return (
+        <button
+            type="button"
+            aria-label={label}
+            aria-haspopup="menu"
+            aria-expanded={open === true}
+            title={triggerTitle}
+            disabled={disabled}
+            className={triggerClassName}
+            onPointerEnter={() => {
+                setHovered(true);
+                menuBase.prefetch();
+            }}
+            onPointerLeave={() => setHovered(false)}
+            onFocus={() => {
+                setFocused(true);
+                menuBase.prefetch();
+            }}
+            onBlur={() => setFocused(false)}
+            onPointerDown={(event) => {
+                if (event.button === 0) {
+                    clearTimeout(settle.current);
+                    setPressing(true);
+                    menuBase.prefetch();
+                }
+            }}
+            onPointerUp={() => {
+                clearTimeout(settle.current);
+                settle.current = setTimeout(() => setPressing(false), PRESS_SETTLE_MS);
+            }}
+            onPointerCancel={() => {
+                clearTimeout(settle.current);
+                setPressing(false);
+            }}
+            onClick={openWhenLoaded}
+        >
             {triggerContent}
-        </BaseMenu.Trigger>
-        <BaseMenu.Portal>
-            <BaseMenu.Positioner side="bottom" align="end" sideOffset={4} collisionPadding={16} className="z-50">
-                <BaseMenu.Popup
-                    aria-label={menuLabel}
-                    className={`ui-menu-pop max-h-[var(--available-height)] overflow-y-auto overscroll-contain rounded-xl border border-stone-200 bg-white py-1 shadow-lg outline-none ${popupClassName}`}
-                >
-                    {children}
-                </BaseMenu.Popup>
-            </BaseMenu.Positioner>
-        </BaseMenu.Portal>
-    </BaseMenu.Root>
-);
+        </button>
+    );
+};
 
 export interface MenuItemProps {
     children: ReactNode;
@@ -69,17 +120,16 @@ export interface MenuItemProps {
     className?: string;
 }
 
-/** A menu item. A native <button> unless `render` swaps in a link. */
-export const MenuItem = ({ children, onClick, danger = false, disabled = false, render, className }: MenuItemProps) => (
-    <BaseMenu.Item
-        nativeButton={!render}
-        render={render ?? <button type="button" />}
-        disabled={disabled}
-        onClick={onClick}
-        className={className ?? menuItemClassName(danger)}
-    >
-        {children}
-    </BaseMenu.Item>
-);
+/**
+ * A menu item. A native <button> unless `render` swaps in a link. Items render
+ * inside the popup, which exists only once the menu chunk has loaded.
+ */
+export const MenuItem = (props: MenuItemProps) => {
+    const loaded = useSyncExternalStore(menuBase.subscribe, menuBase.get, menuBase.get);
+    return loaded ? <loaded.MenuBaseItem {...props} /> : null;
+};
 
-export const MenuSeparator = () => <BaseMenu.Separator className="my-1 border-t border-stone-200" />;
+export const MenuSeparator = () => {
+    const loaded = useSyncExternalStore(menuBase.subscribe, menuBase.get, menuBase.get);
+    return loaded ? <loaded.MenuBaseSeparator /> : null;
+};

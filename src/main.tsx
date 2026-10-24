@@ -9,6 +9,7 @@ import { monitoringEnabled, monitoringUserIdOf, setMonitoringUser, startMonitori
 import { registerServiceWorker } from '@/lib/serviceWorker';
 import { installStaleChunkRecovery } from '@/lib/staleChunk';
 import { getSupabase, isSupabaseConfigured } from '@/lib/supabase';
+import { installPrimitivesPrefetch } from '@/ui/lazyPrimitives';
 
 import './index.css';
 
@@ -31,6 +32,9 @@ if (monitoringEnabled() && isSupabaseConfigured()) {
 
 // Offline support. Not at load on a first visit: see registerServiceWorker.
 registerServiceWorker();
+
+// The dialog and menu chunks, warmed on idle or on the first hover or focus of a button.
+installPrimitivesPrefetch();
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

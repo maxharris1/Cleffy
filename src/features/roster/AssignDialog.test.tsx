@@ -87,7 +87,7 @@ describe('AssignDialog', () => {
 
         // The roster load has landed by now; the list must still be waiting.
         await waitFor(() => expect(listRoster).toHaveBeenCalled());
-        expect(screen.getByText('Loading your roster…')).toBeInTheDocument();
+        expect(await screen.findByText('Loading your roster…')).toBeInTheDocument();
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 
         releaseAssignments(new Map([['s1-user', [rosterAssignment('doc-1', 's1-user')]]]));

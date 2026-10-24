@@ -198,6 +198,72 @@ describe('PdfViewport keyboard shortcuts under a confirmation', () => {
         expect(scrollY()).toBe(start);
         expect(undoLast).not.toHaveBeenCalled();
     });
+
+    it('stands the keys down on the very first open of a lazy dialog, before its chunk has loaded', async () => {
+        // Fresh modules: the dialog panel's chunk has not been loaded by an
+        // earlier test, so this open is a first one, as on a fresh page.
+        vi.resetModules();
+        const [
+            { PdfViewport: ColdViewport },
+            { ConfirmDialog: ColdConfirm },
+            { dialogPanelModule },
+            { useViewerStore: coldStore },
+        ] = await Promise.all([
+            import('@/features/viewer/PdfViewport'),
+            import('@/ui/ConfirmDialog'),
+            import('@/ui/lazyPrimitives'),
+            import('@/state/store'),
+        ]);
+        coldStore.getState().resetView({ scale: 1, scrollY: 0, scrollX: 0 });
+        expect(dialogPanelModule.get()).toBeNull();
+
+        const ColdViewerWithConfirm = ({ onStore }: { onStore: (store: AnnotationStore) => void }) => {
+            const [confirming, setConfirming] = useState(false);
+            return (
+                <>
+                    <button type="button" onClick={() => setConfirming(true)}>
+                        Ask
+                    </button>
+                    <ColdViewport docId="doc-keys-lazy" onStoreReady={onStore} />
+                    {confirming ? (
+                        <ColdConfirm
+                            title="Delete this page?"
+                            body="It cannot be undone."
+                            confirmLabel="Delete"
+                            onConfirm={() => setConfirming(false)}
+                            onCancel={() => setConfirming(false)}
+                        />
+                    ) : null}
+                </>
+            );
+        };
+        let store: AnnotationStore | null = null;
+        render(<ColdViewerWithConfirm onStore={(s) => (store = s)} />);
+        await waitFor(() => expect(store).not.toBeNull());
+        const undoLast = vi.spyOn(store as unknown as AnnotationStore, 'undoLast');
+        const coldScrollY = () => coldStore.getState().view.scrollY;
+
+        fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+        // Opened, but its panel is still on its way: nothing on screen yet...
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+        // ...and a page-turner pedal or a shortcut pressed now does nothing.
+        const start = coldScrollY();
+        fireEvent.keyDown(document.body, { key: 'ArrowRight' });
+        fireEvent.keyDown(document.body, { key: ' ' });
+        fireEvent.keyDown(document.body, { key: 'PageDown' });
+        fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true });
+        expect(coldScrollY()).toBe(start);
+        expect(undoLast).not.toHaveBeenCalled();
+
+        // The panel arrives, and the keys stay down until it is answered.
+        const confirm = await screen.findByRole('alertdialog', { name: 'Delete this page?' });
+        fireEvent.keyDown(confirm, { key: 'ArrowRight' });
+        expect(coldScrollY()).toBe(start);
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+        fireEvent.keyDown(document.body, { key: 'ArrowRight' });
+        expect(coldScrollY()).toBeGreaterThan(start);
+    });
 });
 
 describe('PdfViewport follow under the notice stack', () => {
