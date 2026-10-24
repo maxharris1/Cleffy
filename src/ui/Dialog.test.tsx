@@ -1,5 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Dialog } from '@/ui/Dialog';
@@ -201,5 +202,109 @@ describe('Dialog, lazily loaded', () => {
             </ColdDialog>,
         );
         expect(screen.getByRole('alertdialog', { name: 'Delete score?' })).toBeInTheDocument();
+    });
+});
+
+describe('Dialog, Escape while its panel is loading', () => {
+    afterEach(() => {
+        vi.doUnmock('@/ui/lazyPrimitives');
+    });
+
+    /** Fresh modules whose panel chunk arrives only when `arrive` is called. */
+    const deferredModules = async () => {
+        vi.resetModules();
+        let arrive = () => {};
+        const gate = new Promise<void>((resolve) => {
+            arrive = resolve;
+        });
+        vi.doMock('@/ui/lazyPrimitives', async () => {
+            const { lazyModule } = await import('@/ui/lazyModule');
+            const panel = await import('@/ui/DialogPanel');
+            return { dialogPanelModule: lazyModule(() => gate.then(() => panel)) };
+        });
+        // One at a time: the mock's factory is async, and two imports racing it would make two modules.
+        const { dialogPanelModule } = await import('@/ui/lazyPrimitives');
+        const { Dialog: ColdDialog } = await import('@/ui/Dialog');
+        const { isDialogOpen } = await import('@/ui/dialogStack');
+        return { ColdDialog, isDialogOpen, dialogPanelModule, arrive };
+    };
+
+    it.each([
+        ['a dialog', false, 'dialog'],
+        ['an alertdialog', true, 'alertdialog'],
+    ] as const)('closes %s, which then never shows up', async (_name, alert, role) => {
+        const { ColdDialog, isDialogOpen, dialogPanelModule, arrive } = await deferredModules();
+        const onClose = vi.fn();
+        const Opener = () => {
+            const [open, setOpen] = useState(true);
+            return open ? (
+                <ColdDialog
+                    label="Delete score?"
+                    alert={alert}
+                    onClose={() => {
+                        onClose();
+                        setOpen(false);
+                    }}
+                >
+                    <p>Body</p>
+                </ColdDialog>
+            ) : null;
+        };
+        render(<Opener />);
+        expect(isDialogOpen()).toBe(true);
+        const windowKeys = vi.fn();
+        window.addEventListener('keydown', windowKeys);
+        await userEvent.keyboard('{Escape}');
+        window.removeEventListener('keydown', windowKeys);
+        expect(onClose).toHaveBeenCalledTimes(1);
+        // The key stops at the dialog, as Base UI's Escape does.
+        expect(windowKeys).not.toHaveBeenCalled();
+        // Off the stack at once: the viewer's keys are live again.
+        expect(isDialogOpen()).toBe(false);
+
+        await act(async () => arrive());
+        await waitFor(() => expect(dialogPanelModule.get()).not.toBeNull());
+        expect(screen.queryByRole(role)).not.toBeInTheDocument();
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes only the top dialog, and hands Escape to the panel once it is in', async () => {
+        const { ColdDialog, arrive } = await deferredModules();
+        const onCloseBelow = vi.fn();
+        const onCloseTop = vi.fn();
+        const Stack = () => {
+            const [top, setTop] = useState(true);
+            return (
+                <>
+                    <ColdDialog label="Share this score" onClose={onCloseBelow}>
+                        <p>Below</p>
+                    </ColdDialog>
+                    {top ? (
+                        <ColdDialog
+                            label="Discard changes?"
+                            alert
+                            onClose={() => {
+                                onCloseTop();
+                                setTop(false);
+                            }}
+                        >
+                            <p>Top</p>
+                        </ColdDialog>
+                    ) : null}
+                </>
+            );
+        };
+        render(<Stack />);
+        await userEvent.keyboard('{Escape}');
+        expect(onCloseTop).toHaveBeenCalledTimes(1);
+        expect(onCloseBelow).not.toHaveBeenCalled();
+
+        // The one left loads; from then on its panel handles Escape, once.
+        await act(async () => arrive());
+        expect(await screen.findByRole('dialog', { name: 'Share this score' })).toBeInTheDocument();
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+        await userEvent.keyboard('{Escape}');
+        expect(onCloseBelow).toHaveBeenCalledTimes(1);
+        expect(onCloseTop).toHaveBeenCalledTimes(1);
     });
 });
