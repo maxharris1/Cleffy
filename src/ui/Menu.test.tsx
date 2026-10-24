@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 afterEach(() => {
     cleanup();
+    vi.doUnmock('@/ui/lazyPrimitives');
 });
 
 /** Fresh copies of the modules, so the menu's chunk has not been loaded yet. */
@@ -172,5 +173,220 @@ describe('Menu, lazily loaded', () => {
         expect(standIn).toBeDisabled();
         await userEvent.click(standIn);
         expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    });
+});
+
+/**
+ * Fresh modules whose menu chunk arrives only when the test says so: each
+ * import of it (a prefetch, an open, a retry) waits on its own `imports` entry,
+ * to be resolved with the real ui/MenuBase or rejected.
+ */
+const deferredModules = async () => {
+    vi.resetModules();
+    const imports: { resolve: () => void; reject: (error: unknown) => void }[] = [];
+    vi.doMock('@/ui/lazyPrimitives', async () => {
+        const { lazyModule } = await import('@/ui/lazyModule');
+        const menuBase = await import('@/ui/MenuBase');
+        return {
+            menuBaseModule: lazyModule(
+                () =>
+                    new Promise<typeof menuBase>((resolve, reject) => {
+                        imports.push({ resolve: () => resolve(menuBase), reject });
+                    }),
+            ),
+        };
+    });
+    const [{ Menu, MenuItem }, staleChunk] = await Promise.all([import('@/ui/Menu'), import('@/lib/staleChunk')]);
+    return { Menu, MenuItem, staleChunk, imports };
+};
+
+/** What Chromium rejects an import with when its chunk is gone (a deploy replaced it). */
+const missingChunk = () =>
+    new TypeError('Failed to fetch dynamically imported module: https://dev.cleffy.io/assets/MenuBase-old.js');
+
+describe('Menu, when its chunk will not load', () => {
+    afterEach(() => {
+        window.sessionStorage.clear();
+        vi.restoreAllMocks();
+    });
+
+    const renderMenu = ({ Menu, MenuItem }: Awaited<ReturnType<typeof deferredModules>>) =>
+        render(
+            <Menu label="Score actions" triggerClassName="trigger" triggerContent="⋮">
+                <MenuItem>Rename</MenuItem>
+            </Menu>,
+        );
+
+    it('reloads for the current build when an open joins a prefetch that meets a stale chunk', async () => {
+        const modules = await deferredModules();
+        const { staleChunk, imports } = modules;
+        renderMenu(modules);
+        const standIn = screen.getByRole('button', { name: 'Score actions' });
+        // Hover starts the prefetch; the press joins the same import.
+        fireEvent.pointerEnter(standIn);
+        fireEvent.click(standIn);
+        expect(imports).toHaveLength(1);
+        await act(async () => imports[0]?.reject(missingChunk()));
+        // The prefetch's failure is dropped, the open's is not: the page reloads.
+        await waitFor(() => expect(staleChunk.isStaleChunkReloadPending()).toBe(true));
+        expect(window.sessionStorage.getItem('cleffy:stale-chunk-reload-at')).not.toBeNull();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        staleChunk.resetStaleChunkStateForTests();
+    });
+
+    it('says the menu could not open when it cannot reload, and opens on a press once the chunk loads', async () => {
+        const modules = await deferredModules();
+        const { staleChunk, imports } = modules;
+        // A reload for a stale chunk moments ago: another would only loop.
+        window.sessionStorage.setItem('cleffy:stale-chunk-reload-at', String(Date.now() - 2_000));
+        renderMenu(modules);
+        const standIn = screen.getByRole('button', { name: 'Score actions' });
+        // The prefetch fails first, on its own...
+        fireEvent.pointerEnter(standIn);
+        await act(async () => imports[0]?.reject(missingChunk()));
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        // ...then the press imports the chunk again, and that fails too.
+        fireEvent.click(standIn);
+        expect(imports).toHaveLength(2);
+        await act(async () => imports[1]?.reject(missingChunk()));
+        expect(await screen.findByRole('alert')).toHaveTextContent('This menu couldn’t open');
+        expect(staleChunk.isStaleChunkReloadPending()).toBe(false);
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+
+        // Pressing again tries again; this time the chunk is there.
+        fireEvent.pointerDown(standIn, { button: 0 });
+        fireEvent.click(standIn);
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(imports).toHaveLength(3);
+        await act(async () => imports[2]?.resolve());
+        expect(await screen.findByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
+    });
+
+    it('says so offline, and takes back a controlled menu’s open', async () => {
+        const { Menu, MenuItem, imports } = await deferredModules();
+        vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        const onOpenChange = vi.fn();
+        render(
+            <Menu
+                label="Account"
+                triggerClassName="trigger"
+                triggerContent="MH"
+                open={false}
+                onOpenChange={onOpenChange}
+            >
+                <MenuItem>Settings</MenuItem>
+            </Menu>,
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Account' }));
+        expect(onOpenChange).toHaveBeenLastCalledWith(true);
+        await act(async () => imports[0]?.reject(missingChunk()));
+        expect(await screen.findByRole('alert')).toHaveTextContent('You’re offline');
+        expect(onOpenChange).toHaveBeenLastCalledWith(false);
+        await userEvent.keyboard('{Escape}');
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+});
+
+describe('Menu, opened from the keyboard before its chunk is in', () => {
+    const focusedItem = () => document.activeElement?.textContent;
+
+    const renderMenu = async () => {
+        const { Menu, MenuItem, imports } = await deferredModules();
+        render(
+            <Menu label="Score actions" triggerClassName="trigger" triggerContent="⋮">
+                <MenuItem>Rename</MenuItem>
+                <MenuItem>Duplicate</MenuItem>
+                <MenuItem>Delete</MenuItem>
+            </Menu>,
+        );
+        const standIn = screen.getByRole('button', { name: 'Score actions' });
+        act(() => standIn.focus());
+        return { standIn, imports };
+    };
+
+    it.each([
+        ['ArrowDown', '{ArrowDown}', 'Rename'],
+        ['ArrowUp', '{ArrowUp}', 'Delete'],
+        ['Enter', '{Enter}', 'Rename'],
+        ['Space', ' ', 'Rename'],
+    ])('opens on %s, landing where Base UI does', async (_name, keys, item) => {
+        const user = userEvent.setup();
+        const { standIn, imports } = await renderMenu();
+        await user.keyboard(keys);
+        // Still loading: nothing yet, and the stand-in still has focus.
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+        expect(document.activeElement).toBe(standIn);
+        await act(async () => imports[0]?.resolve());
+        expect(await screen.findByRole('menu')).toBeInTheDocument();
+        await waitFor(() => expect(focusedItem()).toBe(item));
+        expect(document.activeElement).toHaveAttribute('role', 'menuitem');
+        // Escape closes it onto the real trigger, as any keyboard open does.
+        await user.keyboard('{Escape}');
+        await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Score actions' }));
+        expect(document.activeElement).not.toBe(standIn);
+    });
+
+    it.each([
+        ['{ArrowDown}', 'Rename'],
+        ['{ArrowUp}', 'Delete'],
+        ['{Enter}', 'Rename'],
+        [' ', 'Rename'],
+    ])('lands as an already-loaded menu does on %s', async (keys, item) => {
+        const user = userEvent.setup();
+        const { Menu, MenuItem } = await coldModules();
+        const { menuBaseModule } = await import('@/ui/lazyPrimitives');
+        await menuBaseModule.load();
+        render(
+            <Menu label="Score actions" triggerClassName="trigger" triggerContent="⋮">
+                <MenuItem>Rename</MenuItem>
+                <MenuItem>Duplicate</MenuItem>
+                <MenuItem>Delete</MenuItem>
+            </Menu>,
+        );
+        act(() => screen.getByRole('button', { name: 'Score actions' }).focus());
+        await user.keyboard(keys);
+        await waitFor(() => expect(focusedItem()).toBe(item));
+    });
+
+    it('asks a controlled menu to open on an early ArrowDown, once the chunk is in', async () => {
+        const user = userEvent.setup();
+        const { Menu, MenuItem, imports } = await deferredModules();
+        const onOpenChange = vi.fn();
+        const Controlled = () => {
+            const [open, setOpen] = useState(false);
+            return (
+                <Menu
+                    label="Account"
+                    triggerClassName="trigger"
+                    triggerContent="MH"
+                    open={open}
+                    onOpenChange={(next) => {
+                        onOpenChange(next);
+                        setOpen(next);
+                    }}
+                >
+                    <MenuItem>Settings</MenuItem>
+                    <MenuItem>Sign out</MenuItem>
+                </Menu>
+            );
+        };
+        render(<Controlled />);
+        act(() => screen.getByRole('button', { name: 'Account' }).focus());
+        await user.keyboard('{ArrowDown}');
+        expect(onOpenChange).not.toHaveBeenCalled();
+        await act(async () => imports[0]?.resolve());
+        await waitFor(() => expect(focusedItem()).toBe('Settings'));
+        expect(onOpenChange).toHaveBeenCalledWith(true);
+    });
+
+    it('opens a pointer press as before, without moving to an item', async () => {
+        const { standIn, imports } = await renderMenu();
+        fireEvent.pointerDown(standIn, { button: 0 });
+        fireEvent.pointerUp(standIn, { button: 0 });
+        fireEvent.click(standIn, { detail: 1 });
+        await act(async () => imports[0]?.resolve());
+        expect(await screen.findByRole('menu')).toBeInTheDocument();
+        expect(document.activeElement).not.toHaveAttribute('role', 'menuitem');
     });
 });

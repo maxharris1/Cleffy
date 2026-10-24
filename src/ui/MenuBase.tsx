@@ -4,6 +4,9 @@ import { useLayoutEffect, useRef } from 'react';
 import { menuItemClassName } from '@/ui/classNames';
 import type { MenuItemProps, MenuProps } from '@/ui/Menu';
 
+/** The keys a closed trigger opens on, as far as where the highlight lands goes. */
+export type MenuOpenKey = 'ArrowDown' | 'ArrowUp';
+
 /**
  * The app's dropdown menu on Base UI's Menu — ui/Menu, which callers use,
  * loads this chunk on idle, on the trigger's hover or focus, or on its first
@@ -12,6 +15,12 @@ import type { MenuItemProps, MenuProps } from '@/ui/Menu';
 export interface MenuBaseProps extends MenuProps {
     /** Open as it mounts: the trigger was pressed before this chunk had loaded. */
     defaultOpen?: boolean;
+    /**
+     * Open as it mounts, as this key on the trigger opens it: the stand-in got
+     * the key (or Enter or Space, which open as ArrowDown does) before this
+     * chunk had loaded.
+     */
+    openWithKey?: MenuOpenKey;
     /** Focus the trigger as it mounts: it takes over from a stand-in that had focus. */
     focusTrigger?: boolean;
 }
@@ -27,6 +36,7 @@ export const MenuBase = ({
     open,
     onOpenChange,
     defaultOpen = false,
+    openWithKey,
     focusTrigger = false,
     children,
 }: MenuBaseProps) => {
@@ -36,6 +46,16 @@ export const MenuBase = ({
             triggerRef.current?.focus();
         }
     }, [focusTrigger]);
+    useLayoutEffect(() => {
+        // The key is replayed on the real trigger, so Base UI opens the menu as
+        // it would have had the key landed there: as a keyboard open, with the
+        // first item (ArrowDown) or the last (ArrowUp) highlighted and focused.
+        if (openWithKey) {
+            triggerRef.current?.dispatchEvent(
+                new KeyboardEvent('keydown', { key: openWithKey, bubbles: true, cancelable: true }),
+            );
+        }
+    }, [openWithKey]);
     return (
         <BaseMenu.Root
             modal={false}
