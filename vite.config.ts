@@ -199,10 +199,35 @@ const buildConstantsPlugin = (): Plugin => ({
     },
 });
 
+/**
+ * Sonner injects its stylesheet from JS, as an inline <style>, the moment it
+ * is imported. The CSP (vercel.json: style-src 'self') refuses that, and it
+ * would only duplicate sonner/dist/styles.css, which ui/AppToaster imports as
+ * a same-origin file. Drop the injection, and with it a copy of the sheet from
+ * the toast chunk. Warns rather than fails if a Sonner upgrade moves it: the
+ * cost of a miss is a CSP console error, not a broken toast.
+ */
+const sonnerStylesPlugin = (): Plugin => ({
+    name: 'sonner-styles',
+    enforce: 'pre',
+    transform(code, id) {
+        if (!/[\\/]node_modules[\\/]sonner[\\/]dist[\\/]index\.mjs$/.test(id)) {
+            return null;
+        }
+        const stripped = code.replace(/\n__insertCSS\("(?:[^"\\]|\\.)*"\);/, '\n');
+        if (stripped === code) {
+            this.warn('sonner: __insertCSS call not found; its inline <style> will be refused by the CSP');
+            return null;
+        }
+        return { code: stripped, map: null };
+    },
+});
+
 export default defineConfig({
     plugins: [
         react(),
         tailwindcss(),
+        sonnerStylesPlugin(),
         pdfjsAssetsPlugin(),
         supabasePreconnectPlugin(),
         buildConstantsPlugin(),

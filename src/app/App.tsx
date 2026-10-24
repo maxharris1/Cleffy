@@ -5,6 +5,7 @@ import { ErrorBoundary } from '@/app/ErrorBoundary';
 import { AppRoutes } from '@/app/routes';
 import { SignedOutInkGate } from '@/app/SignedOutInkGate';
 import { AuthLinkErrorNotice } from '@/features/auth/AuthLinkErrorNotice';
+import { ToastHost } from '@/ui/ToastHost';
 
 export const App = () => {
     return (
@@ -16,6 +17,8 @@ export const App = () => {
                 <AppRoutes />
                 <AuthLinkErrorNotice />
                 <SignedOutInkGate />
+                {/* The one toast stack, portalled to <body> outside any dialog. */}
+                <ToastHost />
             </BrowserRouter>
         </ErrorBoundary>
     );

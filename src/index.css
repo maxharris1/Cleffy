@@ -43,6 +43,10 @@
     --duration-menu: 150ms;
     --duration-dialog: 180ms;
     --duration-enter: 220ms;
+    /* A state changing in place (a label, a colour), and something leaving:
+       exits are quicker than entrances. */
+    --duration-ui: 180ms;
+    --duration-exit: 150ms;
 }
 
 /*
@@ -773,5 +777,18 @@ body {
         -webkit-backdrop-filter: none;
         backdrop-filter: none;
         background-color: #fff;
+    }
+}
+
+/*
+ * Toasts keep Sonner's own motion (ui/AppToaster). Under reduced motion Sonner
+ * drops every transition, so a toast would pop in and out: keep the fade, drop
+ * the travel. Transforms (which also lay the stack out) land at once, opacity
+ * eases over 200ms. More specific than Sonner's own `transition: none
+ * !important`, so it wins.
+ */
+@media (prefers-reduced-motion: reduce) {
+    [data-sonner-toaster] [data-sonner-toast] {
+        transition: opacity 200ms ease !important;
     }
 }

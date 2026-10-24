@@ -1,5 +1,6 @@
 import { prefetchWhenIdle } from '@/lib/idlePrefetch';
 import { lazyModule } from '@/ui/lazyModule';
+import { toasterModule } from '@/ui/toast';
 
 /** Base UI's Dialog and AlertDialog, in a chunk of their own, for ui/Dialog. */
 export const dialogPanelModule = lazyModule(() => import('@/ui/DialogPanel'));
@@ -14,12 +15,14 @@ const INTENT_EVENTS = ['pointerover', 'focusin'] as const;
 const prefetchPrimitives = () => {
     dialogPanelModule.prefetch();
     menuBaseModule.prefetch();
+    toasterModule.prefetch();
 };
 
 /**
- * Warm the lazy dialog and menu chunks (ui/DialogPanel, ui/MenuBase) before anyone
- * opens one: when the page goes idle after its first render, or as soon as a
- * pointer comes over (or focus lands on) a button, whichever is first. A
+ * Warm the lazy dialog and menu chunks (ui/DialogPanel, ui/MenuBase), and the
+ * toast stack's (ui/AppToaster), before anyone opens one or a toast fires:
+ * when the page goes idle after its first render, or as soon as a pointer
+ * comes over (or focus lands on) a button, whichever is first. A
  * first open then renders straight away, as it did when Base UI was in the
  * shell bundle, without that bundle having to carry it to the first paint.
  *
