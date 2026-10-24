@@ -10,6 +10,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { TextField } from '@/ui/TextField';
+import { toast } from '@/ui/toast';
 import { buttonClassName } from '@/ui/classNames';
 
 export interface AssignDialogProps {
@@ -32,6 +33,12 @@ export interface AssignDialogProps {
  * Archived students are absent entirely. Their seat is freed and their login is
  * refused, and assign_score would reject them anyway.
  */
+/** "Assigned to Maya" for one student, "Assigned to 3 students" for more. */
+const assignedHeadline = (students: readonly ManagedStudentRow[]): string =>
+    students.length === 1 && students[0]
+        ? `Assigned to ${students[0].display_name}`
+        : `Assigned to ${students.length} students`;
+
 export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }: AssignDialogProps) => {
     const [roster, setRoster] = useState<ManagedStudentRow[] | null>(null);
     const [assigned, setAssigned] = useState<Set<string>>(new Set());
@@ -111,6 +118,9 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
         }
         setBusy(false);
         onAssigned?.();
+        // In the same tick as the close, so the dialog's exit and the toast's
+        // entrance overlap and read as one hand-off.
+        toast.success(assignedHeadline(targets), { description: documentTitle });
         onClose();
     };
 
