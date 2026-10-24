@@ -699,6 +699,7 @@ describe('PdfViewport when a notice goes away', () => {
         );
         await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
         frames.advance(0);
+        act(() => useViewerStore.getState().setPlaybackStatus('playing'));
 
         // Read further down, then follow is resumed: it glides back up to the
         // first system, which sits just under the three-card stack.
@@ -714,7 +715,12 @@ describe('PdfViewport when a notice goes away', () => {
         for (let i = 0; i < 40; i++) {
             frames.advance(16);
         }
-        expect(frames.pending()).toHaveLength(0);
+        expect(useViewerStore.getState().followMode).toBe('on');
+        expect(view().scrollY).toBeCloseTo(-stackBottomPx(2));
+        // Still playing, the follow holds it there.
+        for (let i = 0; i < 10; i++) {
+            frames.advance(16);
+        }
         expect(view().scrollY).toBeCloseTo(-stackBottomPx(2));
     });
 });
