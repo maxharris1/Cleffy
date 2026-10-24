@@ -6,7 +6,7 @@ import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { playheadRect } from '@/features/playback/PlayheadController';
 import { MIN_SCALE, PAGE_GAP, computeDocumentLayout } from '@/features/viewer/geometry';
-import { PdfViewport } from '@/features/viewer/PdfViewport';
+import { PdfViewport, type PlaybackFeature } from '@/features/viewer/PdfViewport';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
 import { useViewerStore } from '@/state/store';
@@ -286,9 +286,11 @@ describe('PdfViewport follow under the notice stack', () => {
 /** The notice region over the viewport, as ViewerPage arranges them; the rejected-changes card can be dismissed. */
 const ViewerUnderNotices = ({
     readOnly = true,
+    playback,
     onStore,
 }: {
     readOnly?: boolean;
+    playback?: PlaybackFeature;
     onStore?: (store: AnnotationStore) => void;
 }) => {
     const [inset, setInset] = useState(0);
@@ -302,7 +304,13 @@ const ViewerUnderNotices = ({
                 {showRejected ? <SyncRejectedNotice count={2} onDismiss={() => setShowRejected(false)} /> : null}
                 <SyncHeldNotice count={3} />
             </ViewerNoticeRegion>
-            <PdfViewport docId="doc-notices" readOnly={readOnly} noticeInset={inset} onStoreReady={onStore} />
+            <PdfViewport
+                docId="doc-notices"
+                readOnly={readOnly}
+                noticeInset={inset}
+                playback={playback}
+                onStoreReady={onStore}
+            />
         </div>
     );
 };
@@ -672,5 +680,37 @@ describe('PdfViewport when a notice goes away', () => {
             expect(frames.cancelled).toContain(glide);
             expect(frames.pending()).toHaveLength(0);
         });
+    });
+
+    it('ends a playback follow glide under way inside the bounds it leaves', async () => {
+        viewport = PHONE;
+        const frames = manualFrames();
+        render(
+            <ViewerUnderNotices
+                playback={{
+                    score: tinyScore,
+                    getEngine: () => ({ getPositionTicks: () => 0 }) as unknown as PlaybackEngine,
+                }}
+            />,
+        );
+        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+        frames.advance(0);
+
+        // Read further down, then follow is resumed: it glides back up to the
+        // first system, which sits just under the three-card stack.
+        act(() => useViewerStore.getState().setView({ ...view(), scrollY: 300 }));
+        act(() => useViewerStore.getState().setFollowMode('suspended'));
+        act(() => useViewerStore.getState().setFollowMode('on'));
+        frames.advance(0);
+        frames.advance(200);
+        expect(view().scrollY).toBeLessThan(-stackBottomPx(2));
+
+        // A card goes mid-glide: the top bound tightens to the two-card stack.
+        dismiss();
+        for (let i = 0; i < 40; i++) {
+            frames.advance(16);
+        }
+        expect(frames.pending()).toHaveLength(0);
+        expect(view().scrollY).toBeCloseTo(-stackBottomPx(2));
     });
 });

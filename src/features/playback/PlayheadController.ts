@@ -4,6 +4,7 @@ import { NO_OBSCURED, clampScroll, scrollForPagePoint, type ObscuredEdges } from
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import { prefersReducedMotion } from '@/lib/motion';
 import { useViewerStore } from '@/state/store';
+import type { ViewState } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 
 /**
@@ -291,10 +292,11 @@ export class PlayheadController {
         if (!this.anim) {
             return;
         }
+        const store = useViewerStore.getState();
+        this.rebaseFollowAnimation(store.view);
         const { from, to, startedAt } = this.anim;
         const t = Math.min(1, (performance.now() - startedAt) / FOLLOW_ANIM_MS);
         const ease = 1 - Math.pow(1 - t, 3);
-        const store = useViewerStore.getState();
         store.setView({
             scale: store.view.scale,
             scrollX: from.x + (to.x - from.x) * ease,
@@ -303,5 +305,35 @@ export class PlayheadController {
         if (t >= 1) {
             this.anim = null;
         }
+    }
+
+    /**
+     * The scroll bounds moved under a glide (a notice over the score went
+     * away, or pages were re-measured): head for the target they allow now,
+     * from where the view is, instead of finishing at a stale one. The follow
+     * write takes over the viewer's own settle into the new bounds, so this
+     * glide must end inside them or the room the notice left stays blank.
+     */
+    private rebaseFollowAnimation(view: ViewState): void {
+        const anim = this.anim;
+        const { width, height } = this.deps.getViewportSize();
+        if (!anim || width === 0 || height === 0) {
+            return;
+        }
+        const target = clampScroll(
+            { scale: view.scale, scrollX: anim.to.x, scrollY: anim.to.y },
+            this.deps.getLayout(),
+            width,
+            height,
+            this.deps.getObscured?.() ?? NO_OBSCURED,
+        );
+        if (Math.abs(target.scrollX - anim.to.x) < 0.5 && Math.abs(target.scrollY - anim.to.y) < 0.5) {
+            return;
+        }
+        this.anim = {
+            from: { x: view.scrollX, y: view.scrollY },
+            to: { x: target.scrollX, y: target.scrollY },
+            startedAt: performance.now(),
+        };
     }
 }
