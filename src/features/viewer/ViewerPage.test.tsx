@@ -418,7 +418,7 @@ describe('CloudViewer warm open', () => {
         renderViewer();
 
         await userEvent.click(await screen.findByRole('button', { name: 'Source' }));
-        expect(screen.getByRole('dialog', { name: 'About this score' })).toHaveTextContent('A. Engraver');
+        expect(await screen.findByRole('dialog', { name: 'About this score' })).toHaveTextContent('A. Engraver');
     });
 
     it('offers no Source control for an uploaded score', async () => {

@@ -2,7 +2,7 @@ import { Link } from 'react-router';
 
 // The footer link treatment LegalLinks uses: ~44px tall on coarse pointers, text unmoved.
 const LINK =
-    'relative transition hover:text-accent hover:underline underline-offset-2 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';
+    'relative transition-colors hover:text-accent hover:underline underline-offset-2 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';
 
 /**
  * "Cancel subscription" for every footer, signed in or not: /cancel needs no

@@ -34,9 +34,11 @@ const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
 /**
  * Phone buttons share one row: each may shrink to fit a 320px screen and
  * stops growing at 44px; from `sm` up they keep their natural labelled size.
+ * On touch the 40px-tall buttons reach 44px through an invisible ::after
+ * (hit-44-y): height only, since on a phone they sit edge to edge.
  */
 const BAR_BUTTON =
-    'flex h-10 min-w-0 max-w-11 flex-1 basis-0 items-center justify-center rounded-xl text-stone-600 transition sm:max-w-none sm:flex-none sm:basis-auto';
+    'flex h-10 min-w-0 max-w-11 flex-1 basis-0 items-center justify-center rounded-xl text-stone-600 active:bg-ink/10 pointer-coarse:hit-44-y sm:max-w-none sm:flex-none sm:basis-auto';
 
 const DIVIDER = 'mx-0.5 h-6 w-px shrink-0 bg-stone-200 sm:mx-1';
 
@@ -124,12 +126,20 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         if (!overlay || !viewport || !onObscuredChange) {
             return;
         }
+        const root = document.documentElement;
         const measure = () => {
             const bar = overlay.getBoundingClientRect();
             const box = viewport.getBoundingClientRect();
+            const atBottom = bar.height > 0 && bar.top > box.top + box.height / 2;
+            // App-wide bars pinned to the window's bottom edge (SignedOutInkNotice)
+            // sit above a bottom toolbar rather than over its buttons.
+            root.style.setProperty(
+                '--toolbar-bottom-clearance',
+                atBottom ? `${Math.max(0, Math.round(window.innerHeight - bar.top))}px` : '0px',
+            );
             if (bar.height === 0) {
                 onObscuredChange({ top: 0, bottom: 0 });
-            } else if (bar.top > box.top + box.height / 2) {
+            } else if (atBottom) {
                 onObscuredChange({ top: 0, bottom: Math.max(0, Math.round(box.bottom - bar.top)) });
             } else {
                 onObscuredChange({ top: Math.max(0, Math.round(bar.bottom - box.top)), bottom: 0 });
@@ -143,6 +153,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         return () => {
             observer?.disconnect();
             window.removeEventListener('resize', measure);
+            root.style.removeProperty('--toolbar-bottom-clearance');
             onObscuredChange({ top: 0, bottom: 0 });
         };
     }, [onObscuredChange]);
@@ -154,7 +165,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
             aria-label={`Color ${c}`}
             aria-pressed={color === c}
             onClick={() => setColor(c)}
-            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full pointer-coarse:hit-44 ${
                 color === c ? 'ring-2 ring-accent ring-offset-1' : ''
             }`}
         >
@@ -173,7 +184,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
             aria-label={`${sizeCaption} ${label}`}
             aria-pressed={widthKey === key}
             onClick={() => setWidthKey(key)}
-            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition ${
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl active:bg-ink/10 pointer-coarse:hit-44 ${
                 widthKey === key ? 'bg-accent-soft' : 'hover:bg-ink/5'
             }`}
         >
@@ -185,9 +196,9 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         <div
             ref={overlayRef}
             data-ui-overlay
-            className="pointer-events-none absolute inset-x-2 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:inset-x-0 sm:bottom-auto sm:top-3"
+            className="pointer-events-none absolute bottom-[calc(0.75rem+var(--safe-bottom))] left-[max(0.5rem,var(--safe-left))] right-[max(0.5rem,var(--safe-right))] z-20 flex justify-center sm:inset-x-0 sm:bottom-auto sm:top-3"
         >
-            <div className="pointer-events-auto relative flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg backdrop-blur sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2">
+            <div className="chrome-glass pointer-events-auto relative flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2 lg:pointer-coarse:gap-3">
                 {TOOLS.map(({ tool: t, label, short, icon }) => (
                     <button
                         key={t}
@@ -214,11 +225,12 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                             type="button"
                             title={styleLabel}
                             aria-label={styleLabel}
-                            aria-haspopup="true"
+                            // A disclosure, not a menu: aria-haspopup would promise menu
+                            // keys the swatches do not have. Expanded + controls says it.
                             aria-expanded={styleOpen}
                             aria-controls={styleOpen ? popoverId : undefined}
                             onClick={() => setStyleOpen((open) => !open)}
-                            className={`${BAR_BUTTON} sm:w-10 lg:hidden ${styleOpen ? 'bg-accent-soft' : 'hover:bg-ink/5'}`}
+                            className={`${BAR_BUTTON} sm:w-11 lg:hidden ${styleOpen ? 'bg-accent-soft' : 'hover:bg-ink/5'}`}
                         >
                             {showColors ? (
                                 <span
@@ -245,14 +257,16 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                                 role="group"
                                 aria-label={styleLabel}
                                 // Above the phone's bottom bar; below the bar docked at the top from sm.
-                                className="absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-lg backdrop-blur sm:bottom-auto sm:top-full sm:mb-0 sm:mt-2 lg:hidden"
+                                className="chrome-glass ui-menu-pop absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-lg [--transform-origin:bottom_center] sm:bottom-auto sm:[--transform-origin:top_center] sm:top-full sm:mb-0 sm:mt-2 lg:hidden"
                             >
                                 {showColors ? (
                                     <>
                                         <p className="text-[10px] font-medium uppercase tracking-wide text-stone-500">
                                             {colorCaption}
                                         </p>
-                                        <div className="mt-1 flex flex-wrap items-center gap-1">{colorButtons}</div>
+                                        <div className="mt-1 flex flex-wrap items-center gap-1 pointer-coarse:gap-3">
+                                            {colorButtons}
+                                        </div>
                                     </>
                                 ) : null}
                                 {showSize ? (
@@ -264,7 +278,9 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                                         >
                                             {sizeCaption}
                                         </p>
-                                        <div className="mt-1 flex items-center gap-1">{sizeButtons}</div>
+                                        <div className="mt-1 flex items-center gap-1 pointer-coarse:gap-3">
+                                            {sizeButtons}
+                                        </div>
                                     </>
                                 ) : null}
                             </div>
@@ -302,7 +318,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                     aria-label="Undo"
                     disabled={!canUndo}
                     onClick={() => settleEdit(store.undoLast())}
-                    className={`${BAR_BUTTON} hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent sm:w-10`}
+                    className={`${BAR_BUTTON} hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent sm:w-11`}
                 >
                     <UndoIcon size={20} />
                 </button>
@@ -312,7 +328,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                     aria-label="Redo"
                     disabled={!canRedo}
                     onClick={() => settleEdit(store.redoLast())}
-                    className={`${BAR_BUTTON} hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent sm:w-10`}
+                    className={`${BAR_BUTTON} hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent sm:w-11`}
                 >
                     <RedoIcon size={20} />
                 </button>

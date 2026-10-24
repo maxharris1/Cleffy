@@ -7,7 +7,13 @@ export interface ProgressBarProps {
     className?: string;
 }
 
-/** Progress bar (upload/download). Determinate width is dynamic, so it's inline style. */
+/**
+ * Progress bar (upload/download). The fill is a full-width bar slid left by
+ * the remaining fraction (inline transform): a transform animates on the
+ * compositor, a width would relayout the bar every frame. The track's
+ * overflow-hidden and rounding clip it. Under reduced motion the fill jumps to
+ * each value: a bar that slides there is decoration, the number is the point.
+ */
 export const ProgressBar = ({ value = 0, label, indeterminate = false, className = '' }: ProgressBarProps) => {
     const clamped = Math.max(0, Math.min(100, Math.round(value)));
     return (
@@ -24,8 +30,8 @@ export const ProgressBar = ({ value = 0, label, indeterminate = false, className
                 <div className="progress-indeterminate h-full w-1/3 rounded-full bg-accent" />
             ) : (
                 <div
-                    className="h-full rounded-full bg-accent transition-[width] duration-200"
-                    style={{ width: `${clamped}%` }}
+                    className="h-full w-full rounded-full bg-accent transition-transform duration-200 ease-out motion-reduce:transition-none"
+                    style={{ transform: `translateX(${clamped - 100}%)` }}
                 />
             )}
         </div>

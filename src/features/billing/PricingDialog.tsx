@@ -149,7 +149,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                             aria-pressed={interval === option}
                             onClick={() => setInterval(option)}
                             className={[
-                                'cursor-pointer rounded-lg px-3 py-1.5 text-sm transition',
+                                'cursor-pointer rounded-lg px-3 py-1.5 text-sm transition-colors',
                                 interval === option
                                     ? 'bg-accent-soft font-medium text-accent'
                                     : 'text-stone-600 hover:bg-ink/5',
@@ -168,12 +168,12 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                             <section
                                 key={card.tier}
                                 className={[
-                                    'rounded-2xl border p-4 transition',
+                                    'rounded-2xl border p-4 transition-colors',
                                     isCurrent ? 'border-accent/40 bg-accent-soft/30' : 'border-stone-200 bg-white',
                                 ].join(' ')}
                             >
                                 <div className="flex items-baseline justify-between gap-3">
-                                    <h3 className="font-display text-lg font-semibold text-stone-900">
+                                    <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
                                         {card.name}
                                         {isCurrent ? (
                                             <Badge tone="accent" className="ml-2 align-middle">
@@ -183,10 +183,12 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                                     </h3>
                                     {price ? (
                                         <p className="shrink-0 text-right">
-                                            <span className="font-display text-xl font-semibold text-stone-900">
+                                            <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
                                                 {price.amount}
                                             </span>
-                                            <span className="block text-xs text-stone-500">{price.caption}</span>
+                                            <span className="block text-xs tabular-nums text-stone-500">
+                                                {price.caption}
+                                            </span>
                                         </p>
                                     ) : null}
                                 </div>
@@ -249,14 +251,14 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                     {founding?.priceId ? (
                         <section className="rounded-2xl border border-amber-300/70 bg-amber-50/60 p-4">
                             <div className="flex items-baseline justify-between gap-3">
-                                <h3 className="font-display text-lg font-semibold text-stone-900">
+                                <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
                                     Founding Teacher
                                     <Badge tone="warn" className="ml-2 align-middle">
                                         Limited
                                     </Badge>
                                 </h3>
                                 <p className="shrink-0 text-right">
-                                    <span className="font-display text-xl font-semibold text-stone-900">
+                                    <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
                                         {founding.amount}
                                     </span>
                                     <span className="block text-xs text-stone-500">{founding.caption}</span>

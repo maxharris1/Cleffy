@@ -109,20 +109,20 @@ describe('ShareExportMenu export allowance', () => {
         vi.restoreAllMocks();
     });
 
-    it('opens when the viewer’s “couldn’t be saved” banner asks (openSignal), and only then', () => {
+    it('opens when the viewer’s “couldn’t be saved” banner asks (openSignal), and only then', async () => {
         const { rerender } = render(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" openSignal={0} />);
         expect(screen.queryByRole('menu')).not.toBeInTheDocument();
 
         rerender(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" openSignal={1} />);
 
-        expect(screen.getByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
+        expect(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
     });
 
     it('builds the PDF, then claims, then hands it over only once the claim is granted', async () => {
         rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledWith(builtPdf));
         expect(rpc).toHaveBeenCalledWith('claim_pdf_export', { p_claim: expect.any(String) });
@@ -138,14 +138,14 @@ describe('ShareExportMenu export allowance', () => {
         buildAnnotatedPdf.mockRejectedValueOnce(new Error('Worker crashed'));
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         expect(await screen.findByText('The export failed (Worker crashed). Please try again.')).toBeInTheDocument();
         expect(rpc).not.toHaveBeenCalled();
         expect(deliverPdf).not.toHaveBeenCalled();
 
         // The retry the message invites is the account's first claim, not a second.
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
         expect(rpc).toHaveBeenCalledTimes(1);
     });
@@ -155,9 +155,9 @@ describe('ShareExportMenu export allowance', () => {
         deliverPdf.mockResolvedValueOnce('cancelled');
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Save page 1 as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
         expect(await screen.findByText(EXPORT_NOT_SENT_MESSAGE)).toBeInTheDocument();
-        await user.click(screen.getByRole('menuitem', { name: 'Save page 1 as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
 
         const [first, second] = claimIds();
@@ -180,9 +180,9 @@ describe('ShareExportMenu export allowance', () => {
         deliverPdf.mockResolvedValueOnce('cancelled');
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Save page 1 as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
         expect(await screen.findByText(EXPORT_NOT_SENT_MESSAGE)).toBeInTheDocument();
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
         expect(screen.queryByText('You have used your 1 free PDF export this month')).not.toBeInTheDocument();
@@ -198,11 +198,11 @@ describe('ShareExportMenu export allowance', () => {
         });
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
         expect(await screen.findByText(EXPORT_OFFLINE_MESSAGE)).toBeInTheDocument();
         expect(deliverPdf).not.toHaveBeenCalled();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
         const [first, second] = claimIds();
         expect(second).toBe(first);
@@ -212,10 +212,10 @@ describe('ShareExportMenu export allowance', () => {
         rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
         await user.click(screen.getByRole('button', { name: 'Export' }));
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
 
         const [first, second] = claimIds();
@@ -227,7 +227,7 @@ describe('ShareExportMenu export allowance', () => {
         rpc.mockResolvedValue({ data: { ok: false, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         expect(await screen.findByText('You have used your 1 free PDF export this month')).toBeInTheDocument();
         expect(deliverPdf).not.toHaveBeenCalled();
@@ -237,7 +237,7 @@ describe('ShareExportMenu export allowance', () => {
         rpc.mockResolvedValue({ data: null, error: { message: 'internal error' } });
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Save page 1 as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
 
         expect(await screen.findByText(EXPORT_CLAIM_FAILED_MESSAGE)).toBeInTheDocument();
         expect(deliverPdf).not.toHaveBeenCalled();
@@ -247,7 +247,7 @@ describe('ShareExportMenu export allowance', () => {
         vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         expect(await screen.findByText(EXPORT_OFFLINE_MESSAGE)).toBeInTheDocument();
         expect(deliverPdf).not.toHaveBeenCalled();
@@ -259,7 +259,7 @@ describe('ShareExportMenu export allowance', () => {
         readCachedEntitlements.mockResolvedValue(plan('personal', -1));
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
         expect(screen.queryByText(EXPORT_OFFLINE_MESSAGE)).not.toBeInTheDocument();
@@ -269,7 +269,7 @@ describe('ShareExportMenu export allowance', () => {
         vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: /Send page 1 as photo/ }));
+        await user.click(await screen.findByRole('menuitem', { name: /Send page 1 as photo/ }));
 
         await waitFor(() => expect(exportAnnotatedPageImage).toHaveBeenCalledTimes(1));
         // Only what this account's viewer draws (see loadExportAnnotations).
@@ -296,11 +296,11 @@ describe('ShareExportMenu export allowance', () => {
         rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledWith(builtPdf));
         expect(await screen.findByText(missing)).toBeInTheDocument();
-        expect(screen.getByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
+        expect(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
     });
 
     it('shows the same notice for a page sent as a photo', async () => {
@@ -312,7 +312,7 @@ describe('ShareExportMenu export allowance', () => {
         });
         const user = await openMenu();
 
-        await user.click(screen.getByRole('menuitem', { name: /Send page 1 as photo/ }));
+        await user.click(await screen.findByRole('menuitem', { name: /Send page 1 as photo/ }));
 
         expect(await screen.findByText(conflict)).toBeInTheDocument();
     });
@@ -326,7 +326,7 @@ describe('ShareExportMenu export allowance', () => {
             rpc.mockResolvedValue({ data: { ok: true, limit: 1, unlimited: false, billed_to: 'owner' }, error: null });
             const user = await openMenu();
 
-            await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+            await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
             await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
             expect(rpc).toHaveBeenCalledWith('claim_pdf_export', { p_document: 'doc-1', p_claim: expect.any(String) });
@@ -336,7 +336,7 @@ describe('ShareExportMenu export allowance', () => {
             rpc.mockResolvedValue({ data: { ok: false, limit: 1, unlimited: false, billed_to: 'owner' }, error: null });
             const user = await openMenu();
 
-            await user.click(screen.getByRole('menuitem', { name: 'Save page 1 as PDF' }));
+            await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
 
             expect(await screen.findByText(EXPORT_GUEST_LIMIT_MESSAGE)).toBeInTheDocument();
             expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
@@ -347,7 +347,7 @@ describe('ShareExportMenu export allowance', () => {
             vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
             const user = await openMenu();
 
-            await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+            await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
             expect(await screen.findByText(EXPORT_GUEST_OFFLINE_MESSAGE)).toBeInTheDocument();
             expect(deliverPdf).not.toHaveBeenCalled();
@@ -357,7 +357,7 @@ describe('ShareExportMenu export allowance', () => {
             vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
             const user = await openMenu({ localOnly: true });
 
-            await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+            await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
             await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
             expect(rpc).not.toHaveBeenCalled();
@@ -393,7 +393,7 @@ describe('ShareExportMenu during a first open still streaming', () => {
         render(<ShareExportMenu docId="doc-1" doc={row} role="editor" title="Sonata" />);
         await user.click(screen.getByRole('button', { name: 'Export' }));
 
-        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
         expect(loadDocumentBytes).toHaveBeenCalledWith(

@@ -17,11 +17,14 @@ import { TypesetCover } from '@/ui/TypesetCover';
  *
  * Never `hidden` and never conditionally rendered — a keyboard user tabbing the
  * shelf has to reach the star and the menu, and the tests find them by role.
- * Touch has no hover at all, so there they stay visible rather than sitting
- * over the cover as invisible tap targets.
+ * They appear at once, no fade: a control that is still fading in when the
+ * pointer arrives reads as lag. Touch has no hover at all, so there they stay
+ * visible rather than sitting over the cover as invisible tap targets — and
+ * so does any coarse pointer, since hover only counts with a fine one (the
+ * hover variant in index.css).
  */
 const REVEAL =
-    'opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100';
+    'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 pointer-coarse:opacity-100';
 
 interface ScoreCardProps {
     doc: DocumentRow;
@@ -100,7 +103,7 @@ export const ScoreCard = memo(
                             title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                             onClick={() => actions.toggleFavorite(doc, !isFavorite)}
                             // The pill stays small on touch; an invisible ring takes the hit area to 44px.
-                            className={`relative grid place-items-center rounded-full bg-white/85 p-1.5 backdrop-blur transition hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2 ${
+                            className={`chrome-glass relative grid place-items-center rounded-full bg-white/90 p-1.5 transition-colors hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2 ${
                                 isFavorite ? 'text-amber-500' : 'text-stone-500 hover:text-stone-700'
                             }`}
                         >
@@ -112,7 +115,7 @@ export const ScoreCard = memo(
                         own menu is open — otherwise moving the pointer onto the
                         menu fades out the menu with it. */}
                     <div
-                        className={`absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/85 backdrop-blur has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
+                        className={`chrome-glass absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/90 has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
                     >
                         {isOwner ? (
                             <RowMenu
@@ -128,10 +131,7 @@ export const ScoreCard = memo(
 
                     {/* Past the free cap: still readable and exportable, just not writable. */}
                     {doc.archived_at ? (
-                        <span
-                            className="absolute bottom-1.5 left-1.5 z-10"
-                            title="Read-only — over your plan’s score limit"
-                        >
+                        <span className="absolute bottom-1.5 left-1.5 z-10">
                             <Badge tone="warn">Archived</Badge>
                         </span>
                     ) : null}
@@ -152,7 +152,7 @@ export const ScoreCard = memo(
                         // context. Under a composer heading there is nothing to
                         // restore, so the visible text stands on its own.
                         aria-label={!stripComposer && composer ? doc.title : undefined}
-                        className="text-sm font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
+                        className="text-sm font-medium text-stone-800 transition-colors line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
                     >
                         {title}
                     </Link>
@@ -161,6 +161,10 @@ export const ScoreCard = memo(
                         {pages}
                         {formatUpdated(doc.updated_at)}
                     </p>
+                    {/* The reason, in words: a title tooltip never shows on touch. */}
+                    {doc.archived_at ? (
+                        <p className="mt-0.5 text-xs text-amber-700">Read-only: over your plan’s score limit</p>
+                    ) : null}
                 </div>
             </div>
         );

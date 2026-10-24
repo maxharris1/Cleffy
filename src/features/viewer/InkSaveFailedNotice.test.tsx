@@ -164,7 +164,7 @@ describe('InkSaveFailedNotice', () => {
         render(<InkSaveFailedNotice store={store} onExport={onExport} />);
 
         await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
-        const dialog = screen.getByRole('dialog', { name: 'Discard your unsaved versions?' });
+        const dialog = await screen.findByRole('dialog', { name: 'Discard your unsaved versions?' });
         expect(dialog).toHaveTextContent(
             'One of your unsaved changes was overtaken elsewhere, and is kept only in this tab. Discarding deletes it for good. Export a copy first to keep it.',
         );
@@ -173,11 +173,12 @@ describe('InkSaveFailedNotice', () => {
         expect(store.conflictCount).toBe(1);
         // Export first opens the export and keeps them.
         await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
-        await userEvent.click(screen.getByRole('button', { name: 'Export first' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Export first' }));
         expect(onExport).toHaveBeenCalledTimes(1);
         expect(store.conflictCount).toBe(1);
         // Only the confirm discards.
         await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
+        await screen.findByRole('dialog', { name: 'Discard your unsaved versions?' });
         const confirm = screen.getAllByRole('button', { name: 'Discard' }).at(-1);
         await userEvent.click(confirm as HTMLElement);
         await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());

@@ -25,7 +25,7 @@ export const ViewToggle = ({ view, onChange }: { view: ToggleView; onChange: (v:
                 aria-label={label}
                 title={label}
                 onClick={() => onChange(value)}
-                className={`relative flex h-full items-center rounded-md px-2 transition pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2.5 ${
+                className={`relative flex h-full items-center rounded-md px-2 transition-colors pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2.5 ${
                     view === value ? 'bg-accent-soft text-accent' : 'text-stone-500 hover:text-stone-800'
                 }`}
             >

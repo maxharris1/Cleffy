@@ -97,7 +97,7 @@ const DocumentNav = ({ current }: { current: LegalDocumentId }) => (
  * the wordmark linking home and the sibling documents one click away.
  */
 const LegalPage = ({ document: doc }: { document: LegalDocument }) => (
-    <main className="paper-page min-h-full">
+    <main className="paper-page safe-page min-h-full">
         <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6 sm:py-10">
             <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
                 <Link to="/" className="landing-brand font-display text-2xl font-semibold sm:text-3xl">
@@ -131,7 +131,10 @@ const LegalPage = ({ document: doc }: { document: LegalDocument }) => (
                     <ol className="grid gap-1 text-sm sm:grid-cols-2">
                         {doc.sections.map((section) => (
                             <li key={section.id}>
-                                <a href={`#${section.id}`} className="text-stone-600 transition hover:text-accent">
+                                <a
+                                    href={`#${section.id}`}
+                                    className="text-stone-600 transition-colors hover:text-accent"
+                                >
                                     {section.heading}
                                 </a>
                             </li>

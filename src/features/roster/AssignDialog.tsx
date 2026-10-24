@@ -140,13 +140,13 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                 </EmptyState>
             ) : (
                 <>
-                    <ul className="mt-4 max-h-52 overflow-auto">
+                    <ul className="mt-4 max-h-52 overflow-auto overscroll-contain">
                         {roster.map((student) => {
                             const already = assigned.has(student.student_user_id);
                             return (
                                 <li key={student.id}>
                                     <label
-                                        className={`flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition ${
+                                        className={`flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition-colors ${
                                             already ? 'text-stone-500' : 'cursor-pointer text-stone-800 hover:bg-ink/5'
                                         }`}
                                     >
@@ -174,7 +174,7 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                                     type="button"
                                     aria-pressed={access === value}
                                     onClick={() => setAccess(value)}
-                                    className={`rounded-md px-3 py-1.5 text-sm transition ${
+                                    className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
                                         access === value ? 'bg-accent text-white' : 'text-stone-600 hover:bg-ink/5'
                                     }`}
                                 >

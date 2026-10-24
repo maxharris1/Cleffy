@@ -5,6 +5,7 @@ import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { LimitReachedError, isLimitReachedError } from '@/features/billing/limitErrors';
 import { countryName } from '@/features/legal/countries';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { useEntranceDelay } from '@/features/library/scoreRow';
 import { AgeAttestationFields } from '@/features/roster/AgeAttestationFields';
 import { StudentCodeCard } from '@/features/roster/StudentCodeCard';
 import {
@@ -34,6 +35,7 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { Menu, MenuItem } from '@/ui/Menu';
 import { RosterSkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
@@ -710,7 +712,7 @@ const AddStudentForm = ({
                     {SIGN_IN_METHODS.map((option) => (
                         <label
                             key={option.value}
-                            className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition ${
+                            className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition-colors ${
                                 method === option.value
                                     ? 'border-accent/60 bg-accent-soft/50'
                                     : 'border-stone-300/90 bg-white/70 hover:border-stone-400/90'
@@ -811,12 +813,16 @@ const StudentRow = ({
     const count = assignments.length > 0 ? assignments.length : (cachedCount ?? 0);
     /** The badge shows a snapshot count whose rows haven't arrived (yet, or at all). */
     const detailsMissing = assignments.length === 0 && (cachedCount ?? 0) > 0;
+    const entranceDelay = useEntranceDelay(index);
 
     return (
-        <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
+        <li
+            className={`library-list-item${entranceDelay === null ? ' library-card-settled' : ''}`}
+            style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
+        >
             {/* Archived rows dim their content, not the wrapper: opacity on the
                 wrapper would also wash out the ⋮ menu popover inside it. */}
-            <div className="group border-b border-stone-300/50 transition hover:border-accent/40">
+            <div className="group border-b border-stone-300/50 transition-colors hover:border-accent/40">
                 <div className="flex items-center gap-0.5">
                     <button
                         type="button"
@@ -834,7 +840,7 @@ const StudentRow = ({
                             line instead of splitting one line with the name, which
                             left an emoji name as "🎹🎻 …" beside a full email. */}
                         <span className="flex min-w-0 flex-col sm:flex-row sm:items-center sm:gap-2">
-                            <span className="truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
+                            <span className="truncate font-medium text-stone-800 transition-colors group-hover:text-accent-hover">
                                 {student.display_name}
                             </span>
                             {/* What they type to get in, beside the name the teacher
@@ -844,7 +850,9 @@ const StudentRow = ({
                         {student.claimed_at === null && !archived ? <Badge tone="warn">Invited</Badge> : null}
                         {archived ? <Badge>Archived</Badge> : null}
                     </button>
-                    <span className={`shrink-0 px-2 text-xs text-stone-500 ${archived ? 'opacity-60' : ''}`}>
+                    <span
+                        className={`shrink-0 px-2 text-xs tabular-nums text-stone-500 ${archived ? 'opacity-60' : ''}`}
+                    >
                         {count === 0 ? 'No scores' : `${count} ${count === 1 ? 'score' : 'scores'}`}
                     </span>
                     <RosterRowMenu
@@ -889,7 +897,7 @@ const StudentRow = ({
                                         <Link
                                             to={`/doc/${assignment.document_id}`}
                                             title={documentTitle}
-                                            className="min-w-0 basis-full truncate text-sm font-medium text-stone-800 transition hover:text-accent-hover sm:basis-0 sm:flex-1"
+                                            className="min-w-0 basis-full truncate text-sm font-medium text-stone-800 transition-colors hover:text-accent-hover sm:basis-0 sm:flex-1"
                                         >
                                             {documentTitle}
                                         </Link>
@@ -947,7 +955,7 @@ const AccessToggle = ({
                 aria-pressed={value === option}
                 disabled={disabled}
                 onClick={() => onChange(option)}
-                className={`rounded-md px-2 py-1 text-xs transition disabled:cursor-default disabled:opacity-50 ${
+                className={`rounded-md px-2 py-1 text-xs transition-colors disabled:cursor-default disabled:opacity-50 ${
                     value === option ? 'bg-accent text-white' : 'text-stone-600 hover:bg-ink/5'
                 }`}
             >
@@ -1009,7 +1017,7 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
                                         <div className="flex flex-wrap items-center gap-2">
                                             <Link
                                                 to={`/doc/${note.document_id}`}
-                                                className="min-w-0 text-xs text-stone-500 transition [overflow-wrap:anywhere] hover:text-stone-700 hover:underline"
+                                                className="min-w-0 text-xs text-stone-500 transition-colors [overflow-wrap:anywhere] hover:text-stone-700 hover:underline"
                                             >
                                                 {documentTitle}
                                             </Link>
@@ -1048,83 +1056,28 @@ const RosterRowMenu = ({
     onArchive: () => void;
     onRestore: () => void;
     onDelete: () => void;
-}) => {
-    const [open, setOpen] = useState(false);
-    const rootRef = useRef<HTMLDivElement | null>(null);
-
-    useEffect(() => {
-        if (!open) {
-            return;
-        }
-        const onPointerDown = (e: PointerEvent) => {
-            if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-                setOpen(false);
-            }
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                setOpen(false);
-            }
-        };
-        window.addEventListener('pointerdown', onPointerDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-            window.removeEventListener('pointerdown', onPointerDown);
-            window.removeEventListener('keydown', onKey);
-        };
-    }, [open]);
-
-    const pick = (action: () => void) => {
-        setOpen(false);
-        action();
-    };
-
-    return (
-        <div ref={rootRef} className="relative">
-            <button
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={open}
-                aria-label="Student actions"
-                disabled={busy}
-                onClick={() => setOpen((v) => !v)}
-                className={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
-                    archived ? 'opacity-60' : ''
-                }`}
-            >
-                <MoreVerticalIcon size={16} />
-            </button>
-            {open ? (
-                <div
-                    role="menu"
-                    className="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
-                >
-                    {archived ? (
-                        <MenuItem label="Restore…" onClick={() => pick(onRestore)} />
-                    ) : (
-                        <>
-                            <MenuItem label={resetLabel} onClick={() => pick(onReset)} />
-                            <MenuItem label="Archive…" onClick={() => pick(onArchive)} />
-                        </>
-                    )}
-                    <MenuItem label="Delete student…" danger onClick={() => pick(onDelete)} />
-                </div>
-            ) : null}
-        </div>
-    );
-};
-
-const MenuItem = ({ label, danger = false, onClick }: { label: string; danger?: boolean; onClick: () => void }) => (
-    <button
-        type="button"
-        role="menuitem"
-        onClick={onClick}
-        className={`w-full cursor-pointer px-3 py-2 text-left text-sm transition hover:bg-ink/5 ${
-            danger ? 'text-danger' : 'text-stone-800'
+}) => (
+    <Menu
+        label="Student actions"
+        disabled={busy}
+        popupClassName="w-56"
+        triggerContent={<MoreVerticalIcon size={16} />}
+        triggerClassName={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
+            archived ? 'opacity-60' : ''
         }`}
     >
-        {label}
-    </button>
+        {archived ? (
+            <MenuItem onClick={onRestore}>Restore…</MenuItem>
+        ) : (
+            <>
+                <MenuItem onClick={onReset}>{resetLabel}</MenuItem>
+                <MenuItem onClick={onArchive}>Archive…</MenuItem>
+            </>
+        )}
+        <MenuItem danger onClick={onDelete}>
+            Delete student…
+        </MenuItem>
+    </Menu>
 );
 
 /**

@@ -88,7 +88,7 @@ describe('ShareDialog for the owner', () => {
         createShareLink.mockResolvedValue(link('tok-new'));
         renderOwner();
 
-        expect(screen.getByRole('button', { name: 'View only' })).toHaveAttribute('aria-pressed', 'true');
+        expect(await screen.findByRole('button', { name: 'View only' })).toHaveAttribute('aria-pressed', 'true');
         expect(screen.getByRole('button', { name: 'Can edit' })).toHaveAttribute('aria-pressed', 'false');
         expect(screen.getByRole('combobox', { name: 'Link expires after' })).toHaveValue('7d');
 
@@ -101,7 +101,7 @@ describe('ShareDialog for the owner', () => {
         createShareLink.mockResolvedValue(link('tok-new'));
         renderOwner();
 
-        await user.click(screen.getByRole('button', { name: 'Can edit' }));
+        await user.click(await screen.findByRole('button', { name: 'Can edit' }));
         await user.selectOptions(screen.getByRole('combobox', { name: 'Link expires after' }), 'never');
         await user.click(screen.getByRole('button', { name: 'Create link & copy' }));
 
@@ -164,7 +164,7 @@ describe('ShareDialog for the owner', () => {
         await screen.findByText('Guest One');
 
         await user.click(screen.getByRole('button', { name: 'Remove Guest One' }));
-        const confirm = screen.getByRole('dialog', { name: 'Remove Guest One?' });
+        const confirm = await screen.findByRole('alertdialog', { name: 'Remove Guest One?' });
         // Their link still works — the owner should know they can come back.
         expect(confirm).toHaveTextContent('The link they joined with still works');
         expect(removeMember).not.toHaveBeenCalled();
@@ -183,7 +183,7 @@ describe('ShareDialog for the owner', () => {
         const editLink = items.find((li) => li.textContent?.includes('/join/tok-edit')) as HTMLElement;
 
         await user.click(within(editLink).getByRole('button', { name: 'Revoke' }));
-        const confirm = screen.getByRole('dialog', { name: 'Revoke this link?' });
+        const confirm = await screen.findByRole('dialog', { name: 'Revoke this link?' });
         const checkbox = within(confirm).getByRole('checkbox', { name: /remove the 2 people who joined/ });
         expect(checkbox).toBeChecked();
 
@@ -201,7 +201,7 @@ describe('ShareDialog for the owner', () => {
         const editLink = items.find((li) => li.textContent?.includes('/join/tok-edit')) as HTMLElement;
 
         await user.click(within(editLink).getByRole('button', { name: 'Revoke' }));
-        const confirm = screen.getByRole('dialog', { name: 'Revoke this link?' });
+        const confirm = await screen.findByRole('dialog', { name: 'Revoke this link?' });
         await user.click(within(confirm).getByRole('checkbox'));
         await user.click(within(confirm).getByRole('button', { name: 'Revoke link' }));
 
@@ -216,7 +216,7 @@ describe('ShareDialog for the owner', () => {
         const oldLink = items.find((li) => li.textContent?.includes('/join/tok-old')) as HTMLElement;
 
         await user.click(within(oldLink).getByRole('button', { name: 'Revoke' }));
-        const confirm = screen.getByRole('dialog', { name: 'Revoke this link?' });
+        const confirm = await screen.findByRole('dialog', { name: 'Revoke this link?' });
         expect(within(confirm).queryByRole('checkbox')).not.toBeInTheDocument();
         expect(confirm).toHaveTextContent('Anyone who has joined with it loses access too.');
         await user.click(within(confirm).getByRole('button', { name: 'Revoke link' }));
@@ -239,7 +239,7 @@ describe('ShareDialog for the owner', () => {
         expect(screen.queryByText('No links yet.')).not.toBeInTheDocument();
 
         await user.click(within(editLink).getByRole('button', { name: 'Revoke' }));
-        const confirm = screen.getByRole('dialog', { name: 'Revoke this link?' });
+        const confirm = await screen.findByRole('dialog', { name: 'Revoke this link?' });
         await user.click(within(confirm).getByRole('button', { name: 'Revoke link' }));
 
         // Nobody is known to have joined, and the owner made no choice to keep
@@ -283,7 +283,7 @@ describe('ShareDialog for the owner', () => {
         const notice = await screen.findByRole('status');
         expect(notice).toHaveTextContent('Guest One can only view now, but the edit link they joined with still works');
         await user.click(within(notice).getByRole('button', { name: 'Revoke that link…' }));
-        const confirm = screen.getByRole('dialog', { name: 'Revoke this link?' });
+        const confirm = await screen.findByRole('dialog', { name: 'Revoke this link?' });
         await user.click(within(confirm).getByRole('button', { name: 'Revoke link' }));
 
         await waitFor(() => expect(revokeShareLink).toHaveBeenCalledWith('tok-edit', { removeMembers: true }));
@@ -325,7 +325,7 @@ describe('ShareDialog for a member', () => {
     it('does not ask a viewer’s session for the member list', async () => {
         render(<ShareDialog docId="doc-1" userId="vi" role="viewer" onClose={vi.fn()} />);
 
-        expect(screen.getByText(/You can view it/)).toBeInTheDocument();
+        expect(await screen.findByText(/You can view it/)).toBeInTheDocument();
         expect(listDocumentMembers).not.toHaveBeenCalled();
         expect(screen.getByRole('button', { name: 'Leave score' })).toBeInTheDocument();
     });
@@ -336,8 +336,8 @@ describe('ShareDialog for a member', () => {
         leaveDocument.mockResolvedValue(undefined);
         render(<ShareDialog docId="doc-1" userId="vi" role="viewer" onClose={vi.fn()} onLeft={onLeft} />);
 
-        await user.click(screen.getByRole('button', { name: 'Leave score' }));
-        const confirm = screen.getByRole('dialog', { name: 'Leave this score?' });
+        await user.click(await screen.findByRole('button', { name: 'Leave score' }));
+        const confirm = await screen.findByRole('alertdialog', { name: 'Leave this score?' });
         expect(leaveDocument).not.toHaveBeenCalled();
         await user.click(within(confirm).getByRole('button', { name: 'Leave' }));
 
@@ -351,20 +351,22 @@ describe('ShareDialog for a member', () => {
         leaveDocument.mockRejectedValue(new Error('Your teacher assigned this score, so only they can remove it.'));
         render(<ShareDialog docId="doc-1" userId="vi" role="viewer" onClose={vi.fn()} onLeft={onLeft} />);
 
-        await user.click(screen.getByRole('button', { name: 'Leave score' }));
-        await user.click(screen.getByRole('button', { name: 'Leave' }));
+        await user.click(await screen.findByRole('button', { name: 'Leave score' }));
+        await user.click(await screen.findByRole('button', { name: 'Leave' }));
 
         expect(await screen.findByText(/Your teacher assigned this score/)).toBeInTheDocument();
         expect(onLeft).not.toHaveBeenCalled();
     });
 
-    it('hides Leave when the caller cannot leave', () => {
+    it('hides Leave when the caller cannot leave', async () => {
         render(<ShareDialog docId="doc-1" userId="vi" role="viewer" canLeave={false} onClose={vi.fn()} />);
+        await screen.findByRole('dialog', { name: 'Sharing' });
         expect(screen.queryByRole('button', { name: 'Leave score' })).not.toBeInTheDocument();
     });
 
-    it('offers a registered member no guest-profile deletion', () => {
+    it('offers a registered member no guest-profile deletion', async () => {
         render(<ShareDialog docId="doc-1" userId="vi" role="viewer" onClose={vi.fn()} />);
+        await screen.findByRole('dialog', { name: 'Sharing' });
         expect(screen.queryByRole('button', { name: 'Delete my guest profile' })).not.toBeInTheDocument();
     });
 });
@@ -386,9 +388,9 @@ describe('ShareDialog for a share-link guest', () => {
         );
 
         // Leaving one score is still on offer beside it.
-        expect(screen.getByRole('button', { name: 'Leave score' })).toBeInTheDocument();
+        expect(await screen.findByRole('button', { name: 'Leave score' })).toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Delete my guest profile' }));
-        const confirm = screen.getByRole('dialog', { name: 'Delete your guest profile?' });
+        const confirm = await screen.findByRole('alertdialog', { name: 'Delete your guest profile?' });
         expect(confirm).toHaveTextContent(/removed from every score shared with you/);
         expect(confirm).toHaveTextContent(/Marks you made stay on the scores/);
         expect(deleteGuestProfile).not.toHaveBeenCalled();
@@ -414,8 +416,8 @@ describe('ShareDialog for a share-link guest', () => {
             />,
         );
 
-        await user.click(screen.getByRole('button', { name: 'Delete my guest profile' }));
-        await user.click(screen.getByRole('button', { name: 'Delete guest profile' }));
+        await user.click(await screen.findByRole('button', { name: 'Delete my guest profile' }));
+        await user.click(await screen.findByRole('button', { name: 'Delete guest profile' }));
 
         expect(await screen.findByText(/could not finish deleting your guest profile/)).toBeInTheDocument();
         expect(onGuestDeleted).not.toHaveBeenCalled();

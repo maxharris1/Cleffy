@@ -61,6 +61,12 @@ interface PlaybackSlice {
     countInOn: boolean;
     loopRange: LoopRange | null;
     followMode: FollowMode;
+    /**
+     * Bumped whenever the engine's position jumps without playing (a seek,
+     * a rewind while paused): the playhead sleeps between such events.
+     */
+    playheadEpoch: number;
+    notePlayheadJump: () => void;
     setPlaybackStatus: (playbackStatus: PlaybackStatus) => void;
     setBpm: (bpm: number) => void;
     setCurrentMeasureIndex: (currentMeasureIndex: number | null) => void;
@@ -124,6 +130,7 @@ const INITIAL_PLAYBACK = {
     countInOn: true,
     loopRange: null,
     followMode: 'on',
+    playheadEpoch: 0,
 } satisfies Partial<ViewerStore>;
 
 /**
@@ -179,5 +186,6 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setCountInOn: (countInOn) => set({ countInOn }),
     setLoopRange: (loopRange) => set({ loopRange }),
     setFollowMode: (followMode) => set({ followMode }),
+    notePlayheadJump: () => set((state) => ({ playheadEpoch: state.playheadEpoch + 1 })),
     resetPlayback: () => set({ ...INITIAL_PLAYBACK }),
 }));

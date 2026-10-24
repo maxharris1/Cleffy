@@ -5,12 +5,14 @@ import { passwordProblem, passwordProblemMessage } from '../../../supabase/funct
 import { confirmGuestEmailUpgrade, GuestUpgradeError, startGuestEmailUpgrade } from '@/features/auth/guestUpgrade';
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { isTurnstileEnabled } from '@/features/auth/turnstile';
-import { CloseIcon } from '@/ui/icons';
+import { ViewerNotice } from '@/features/viewer/ViewerNotice';
+import { fieldClassName } from '@/ui/classNames';
+import { CloseButton } from '@/ui/CloseButton';
 
 type BannerState = 'collapsed' | 'details' | 'code' | 'done' | 'signInNeeded' | 'dismissed';
 
-const INPUT_CLASS =
-    'min-w-40 flex-1 rounded border border-amber-300 bg-white px-2 py-1 outline-none focus:border-amber-500';
+/* The shared field: 16px on touch (no iOS zoom) and the app's focus ring. */
+const INPUT_CLASS = fieldClassName('sm', 'min-w-40 flex-1 py-1');
 const PRIMARY_CLASS = 'rounded bg-amber-700 px-3 py-1 font-medium text-white hover:bg-amber-600 disabled:opacity-60';
 const LINK_BUTTON_CLASS = 'text-amber-800 underline disabled:opacity-60';
 
@@ -150,18 +152,16 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     ) : null;
 
     const dismissButton = (
-        <button
-            type="button"
-            aria-label="Dismiss"
+        <CloseButton
+            label="Dismiss"
+            iconSize={16}
             onClick={() => setState('dismissed')}
-            className="rounded p-1 text-amber-700 transition hover:text-amber-900"
-        >
-            <CloseIcon size={16} />
-        </button>
+            className="size-6 text-amber-700 hover:text-amber-900"
+        />
     );
 
     return (
-        <div data-ui-overlay className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-900">
+        <ViewerNotice bare overlay role={null}>
             {state === 'done' ? (
                 <div className="flex items-center justify-between gap-2">
                     <p role="status">
@@ -265,6 +265,6 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     {dismissButton}
                 </div>
             )}
-        </div>
+        </ViewerNotice>
     );
 };

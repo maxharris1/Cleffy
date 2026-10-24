@@ -41,7 +41,7 @@ describe('ScoreSourceButton', () => {
         render(<ScoreSourceButton doc={ccTypeset} />);
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
 
-        const dialog = screen.getByRole('dialog', { name: 'About this score' });
+        const dialog = await screen.findByRole('dialog', { name: 'About this score' });
         expect(within(dialog).getByText('Imported from IMSLP, the Petrucci Music Library.')).toBeInTheDocument();
         expect(within(dialog).getByText('Beethoven, Ludwig van')).toBeInTheDocument();
         expect(within(dialog).getByText('Viktor Keil')).toBeInTheDocument();
@@ -57,7 +57,7 @@ describe('ScoreSourceButton', () => {
     it('links the file to its IMSLP file page and keeps the work-page link', async () => {
         render(<ScoreSourceButton doc={ccTypeset} />);
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
-        const dialog = screen.getByRole('dialog', { name: 'About this score' });
+        const dialog = await screen.findByRole('dialog', { name: 'About this score' });
 
         const file = within(dialog).getByRole('link', { name: ccTypeset.source_filename });
         expect(file).toHaveAttribute(
@@ -90,7 +90,7 @@ describe('ScoreSourceButton', () => {
             />,
         );
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
-        const dialog = screen.getByRole('dialog', { name: 'About this score' });
+        const dialog = await screen.findByRole('dialog', { name: 'About this score' });
         expect(within(dialog).getByText('score.pdf')).toBeInTheDocument();
         expect(within(dialog).queryByRole('link', { name: 'score.pdf' })).not.toBeInTheDocument();
     });
@@ -106,7 +106,7 @@ describe('ScoreSourceButton', () => {
             />,
         );
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
-        const dialog = screen.getByRole('dialog', { name: 'About this score' });
+        const dialog = await screen.findByRole('dialog', { name: 'About this score' });
         expect(within(dialog).getByText('Diabelli, 1802')).toBeInTheDocument();
         expect(within(dialog).queryByText(/requires attribution/)).not.toBeInTheDocument();
     });
@@ -114,6 +114,7 @@ describe('ScoreSourceButton', () => {
     it('never links a non-https source', async () => {
         render(<ScoreSourceButton doc={{ ...ccTypeset, source_url: 'javascript:alert(1)' }} />);
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
+        await screen.findByRole('dialog', { name: 'About this score' });
         expect(screen.queryByRole('link', { name: 'View on IMSLP' })).not.toBeInTheDocument();
     });
 });

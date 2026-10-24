@@ -32,7 +32,7 @@ export const LocalOpenControl = ({ label, subtle = false }: { label: string; sub
             <label
                 className={
                     subtle
-                        ? 'cursor-pointer text-sm text-stone-500 underline decoration-stone-300 underline-offset-2 transition hover:text-accent hover:decoration-accent/40'
+                        ? 'cursor-pointer text-sm text-stone-500 underline decoration-stone-300 underline-offset-2 transition-colors hover:text-accent hover:decoration-accent/40'
                         : buttonClassName('primary', 'md')
                 }
             >

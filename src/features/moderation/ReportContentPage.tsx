@@ -23,7 +23,7 @@ const GOOD_FAITH_STATEMENT =
     'I believe in good faith that the information and allegations in this report are accurate and complete.';
 
 const Paper = ({ children }: { children: ReactNode }) => (
-    <main className="paper-page min-h-full">
+    <main className="paper-page safe-page min-h-full">
         <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6 sm:py-10">
             <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
                 <Link to="/" className="landing-brand font-display text-2xl font-semibold sm:text-3xl">
@@ -239,7 +239,7 @@ export const ReportContentPage = () => {
                             ).map(([value, title, description]) => (
                                 <label
                                     key={value}
-                                    className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-3 transition ${kind === value ? 'border-accent bg-accent-soft' : 'border-stone-300/90 bg-white/70'}`}
+                                    className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-3 transition-colors ${kind === value ? 'border-accent bg-accent-soft' : 'border-stone-300/90 bg-white/70'}`}
                                 >
                                     <input
                                         type="radio"

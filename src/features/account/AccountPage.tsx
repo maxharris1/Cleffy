@@ -497,7 +497,7 @@ export const AccountPage = () => {
                             <li key={metric}>
                                 <div className="flex items-baseline justify-between gap-4 text-sm">
                                     <span className="text-stone-700">{metricLabel}</span>
-                                    <span className="text-stone-500">
+                                    <span className="tabular-nums text-stone-500">
                                         {unlimited ? 'unlimited' : `${used} of ${limit} used this month`}
                                     </span>
                                 </div>
@@ -513,11 +513,15 @@ export const AccountPage = () => {
                     })}
                     <li className="flex items-baseline justify-between gap-4 text-sm">
                         <span className="text-stone-700">Active cloud scores</span>
-                        <span className="text-stone-500">{describeStock(entitlements?.limits.cloud_scores ?? 0)}</span>
+                        <span className="tabular-nums text-stone-500">
+                            {describeStock(entitlements?.limits.cloud_scores ?? 0)}
+                        </span>
                     </li>
                     <li className="flex items-baseline justify-between gap-4 text-sm">
                         <span className="text-stone-700">Student seats</span>
-                        <span className="text-stone-500">{describeStock(entitlements?.limits.students ?? 0)}</span>
+                        <span className="tabular-nums text-stone-500">
+                            {describeStock(entitlements?.limits.students ?? 0)}
+                        </span>
                     </li>
                 </ul>
                 {/*

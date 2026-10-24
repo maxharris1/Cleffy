@@ -22,8 +22,8 @@
 
     /* Brand palette — pristine engraving, living markings.
        Chrome belongs to the printed page; the one accent belongs to the marking hand.
-       Keep paper/accent in sync with the PWA manifest colors in vite.config.ts
-       and the theme-color meta in index.html. */
+       Keep paper in sync with the PWA manifest colors in vite.config.ts and
+       the theme-color meta in index.html (both are paper, like the header). */
     --color-paper: #f7f5ef;
     --color-paper-deep: #edeae0;
     --color-ink: #1c1917;
@@ -33,6 +33,30 @@
     --color-accent-hover: #3730a3;
     --color-accent-soft: rgb(67 56 202 / 0.1);
     --color-scrim: rgb(28 25 23 / 0.45);
+
+    /* Motion. One strong ease-out for anything entering or responding (UI
+       motion should start fast and settle), a drawer curve for sheets, and
+       short durations: a press is felt, not watched. */
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+    --duration-press: 120ms;
+    --duration-menu: 150ms;
+    --duration-dialog: 180ms;
+    --duration-enter: 220ms;
+}
+
+/*
+ * hover: only where a real pointer can hover. Touch browsers fire :hover on
+ * tap and leave it stuck until the next tap elsewhere; Tailwind's default
+ * (hover:hover) still matches some hybrid touch devices, so require a fine
+ * pointer too.
+ */
+@custom-variant hover {
+    @media (hover: hover) and (pointer: fine) {
+        &:hover {
+            @slot;
+        }
+    }
 }
 
 @theme inline {
@@ -61,6 +85,15 @@
  * black-translucent. max() keeps Safari-in-tab padding when the inset is 0
  * and lifts controls out from under the iPhone status bar / notch in PWA.
  */
+/* Plain document pages (assignments, legal, report): clear the notch and the
+   home indicator in an installed PWA; nothing changes where the insets are 0. */
+.safe-page {
+    padding-top: var(--safe-top);
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+    padding-bottom: var(--safe-bottom);
+}
+
 .safe-landing-nav {
     padding-top: max(1.5rem, var(--safe-top));
 }
@@ -104,6 +137,59 @@ body {
     :where(:focus-visible) {
         outline: 2px solid var(--color-accent);
         outline-offset: 2px;
+    }
+
+    /*
+     * Controls feel like an app, not a document: no double-tap-zoom delay, and
+     * a long press or a sloppy tap does not select a button's label or pop the
+     * iOS callout. Text fields and links stay selectable.
+     */
+    :where(button, [role='button'], [role='menuitem'], [role='tab'], [role='option'], select, summary, label) {
+        touch-action: manipulation;
+    }
+
+    :where(button, [role='button'], [role='menuitem'], [role='tab'], [role='option'], summary) {
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+    }
+
+    :where(a[href]) {
+        touch-action: manipulation;
+    }
+}
+
+/*
+ * Touch hit areas. On a coarse pointer (pointer-coarse:hit-44) an invisible
+ * ::after centred on the control grows its target to at least 44×44px without
+ * moving a pixel of layout. hit-44-y grows the height only, for controls that
+ * sit edge to edge in a row. Rows of hit-44 controls space themselves on touch
+ * (pointer-coarse:gap-*) so neighbouring areas never overlap.
+ */
+@utility hit-44 {
+    position: relative;
+
+    &::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: max(100%, 44px);
+        height: max(100%, 44px);
+        translate: -50% -50%;
+    }
+}
+
+@utility hit-44-y {
+    position: relative;
+
+    &::after {
+        content: '';
+        position: absolute;
+        inset-inline: 0;
+        top: 50%;
+        height: max(100%, 44px);
+        translate: 0 -50%;
     }
 }
 
@@ -159,7 +245,21 @@ body {
 }
 
 .landing-hero {
-    animation: landing-fade-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+    animation: landing-fade-in 0.6s var(--ease-out) backwards;
+}
+
+/* Auth, join and error frames: there and settled within 300ms — someone
+   signing in is waiting for the form, not watching it arrive. */
+.brand-enter {
+    animation: landing-fade-in 0.26s var(--ease-out) backwards;
+}
+
+.brand-rule {
+    width: 3rem;
+    height: 2px;
+    margin: 1.25rem auto 0;
+    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+    animation: landing-rule-in 0.24s var(--ease-out) 0.04s backwards;
 }
 
 .landing-brand {
@@ -173,11 +273,11 @@ body {
     height: 2px;
     margin: 1.25rem auto 0;
     background: color-mix(in srgb, var(--color-accent) 70%, transparent);
-    animation: landing-rule-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s backwards;
+    animation: landing-rule-in 0.7s var(--ease-out) 0.15s backwards;
 }
 
 .landing-demo-frame {
-    animation: landing-fade-in 0.75s cubic-bezier(0.22, 1, 0.36, 1) 0.12s backwards;
+    animation: landing-fade-in 0.75s var(--ease-out) 0.12s backwards;
     box-shadow:
         0 1px 0 rgb(28 25 23 / 0.04),
         0 18px 40px -20px rgb(28 25 23 / 0.28);
@@ -185,20 +285,23 @@ body {
 
 .landing-cta {
     background-color: var(--color-accent);
+    /* The shadow is not in the list: it changes with the hover, but animating
+       a box-shadow repaints every frame for an effect nobody watches. */
     transition:
-        background-color 0.15s ease,
-        transform 0.15s ease,
-        box-shadow 0.15s ease;
+        background-color var(--duration-press) ease,
+        transform var(--duration-press) var(--ease-out);
 }
 
-.landing-cta:hover:not(:disabled) {
-    background-color: var(--color-accent-hover);
-    transform: translateY(-1px);
-    box-shadow: 0 6px 18px color-mix(in srgb, var(--color-accent) 20%, transparent);
+@media (hover: hover) and (pointer: fine) {
+    .landing-cta:hover:not(:disabled) {
+        background-color: var(--color-accent-hover);
+        transform: translateY(-1px);
+        box-shadow: 0 6px 18px color-mix(in srgb, var(--color-accent) 20%, transparent);
+    }
 }
 
 .landing-cta:active:not(:disabled) {
-    transform: translateY(0);
+    transform: scale(0.97);
     box-shadow: none;
 }
 
@@ -218,16 +321,16 @@ body {
 }
 
 :where(.is-inview) .hero-ink {
-    animation: hero-draw var(--dur, 0.9s) cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0s) forwards;
+    animation: hero-draw var(--dur, 0.9s) var(--ease-out) var(--d, 0s) forwards;
 }
 
 .hero-chip {
     opacity: 0;
-    transform: scale(0.6);
+    transform: scale(0.9);
 }
 
 :where(.is-inview) .hero-chip {
-    animation: hero-chip-in 0.35s cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0s) forwards;
+    animation: hero-chip-in 0.35s var(--ease-out) var(--d, 0s) forwards;
 }
 
 @keyframes hero-draw {
@@ -240,6 +343,59 @@ body {
     to {
         opacity: 1;
         transform: scale(1);
+    }
+}
+
+/*
+ * Dialogs and menus appear from where they came from: a quick fade plus a
+ * small scale up from 0.96. Menus grow out of their trigger
+ * (--transform-origin, which Base UI sets from the anchor; top-right, the
+ * usual trigger corner, otherwise). A phone sheet rises from the bottom edge
+ * on the drawer curve instead. Nothing animates on the way out: a dismissed
+ * thing should be gone.
+ */
+.ui-dialog-pop {
+    animation: ui-pop-in var(--duration-dialog) var(--ease-out);
+}
+
+.ui-menu-pop {
+    transform-origin: var(--transform-origin, top right);
+    animation: ui-pop-in var(--duration-menu) var(--ease-out);
+}
+
+.ui-scrim-fade {
+    animation: ui-fade-in var(--duration-dialog) var(--ease-out);
+}
+
+@media (max-width: 39.99rem) {
+    .ui-sheet-pop {
+        animation: ui-sheet-in var(--duration-enter) var(--ease-drawer);
+    }
+}
+
+@media (min-width: 40rem) {
+    .ui-sheet-pop {
+        animation: ui-pop-in var(--duration-dialog) var(--ease-out);
+    }
+}
+
+@keyframes ui-pop-in {
+    from {
+        opacity: 0;
+        transform: scale(0.96);
+    }
+}
+
+@keyframes ui-fade-in {
+    from {
+        opacity: 0;
+    }
+}
+
+@keyframes ui-sheet-in {
+    from {
+        transform: translateY(24px);
+        opacity: 0;
     }
 }
 
@@ -265,21 +421,17 @@ body {
     }
 }
 
-/* Library: list entrance + empty-state presence. */
-.library-layout {
-    animation: landing-fade-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-
-.library-shell {
-    animation: landing-fade-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.04s backwards;
-}
-
+/*
+ * Library: rows enter once per session (useEntranceDelay), short and close.
+ * The page shell itself does not animate — it is the frame every visit
+ * returns to, and a frame that fades in on each navigation reads as loading.
+ */
 .library-list-item {
-    animation: library-row-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+    animation: library-row-in var(--duration-enter) var(--ease-out) backwards;
 }
 
 .library-empty {
-    animation: landing-fade-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s backwards;
+    animation: library-row-in var(--duration-enter) var(--ease-out) backwards;
 }
 
 /*
@@ -337,9 +489,19 @@ body {
     outline-offset: 2px;
 }
 
-/* Indeterminate progress: a sweeping segment for work with no byte count. */
+/* Indeterminate progress: a sweeping segment for work with no byte count.
+   Linear: a loop that eases in and out reads as stalling at each end. */
 .progress-indeterminate {
-    animation: progress-sweep 1.2s ease-in-out infinite;
+    animation: progress-sweep 1.2s linear infinite;
+}
+
+@keyframes progress-breathe {
+    from {
+        opacity: 0.35;
+    }
+    to {
+        opacity: 1;
+    }
 }
 
 @keyframes progress-sweep {
@@ -374,7 +536,7 @@ body {
 
 /* Shelf cards: the same entrance as list rows, staggered by an inline delay. */
 .library-card {
-    animation: library-row-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+    animation: library-row-in var(--duration-enter) var(--ease-out) backwards;
 }
 
 /* Rows that mounted below the first screens, or arrived with a "load more"
@@ -427,16 +589,21 @@ body {
    out-specify it — a utility and its motion-reduce variant have equal
    specificity, and which one wins would come down to Tailwind's output order. */
 .library-card-cover {
-    transition:
-        transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
-        box-shadow 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: transform var(--duration-enter) var(--ease-out);
 }
 
-.library-card:hover .library-card-cover {
-    transform: translateY(-2px);
-    box-shadow:
-        0 4px 6px -1px rgb(28 25 23 / 0.1),
-        0 2px 4px -2px rgb(28 25 23 / 0.08);
+/* A card pressed (touch or mouse) gives a little, like paper under a finger. */
+.library-card:active .library-card-cover {
+    transform: scale(0.98);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .library-card:hover .library-card-cover {
+        transform: translateY(-2px);
+        box-shadow:
+            0 4px 6px -1px rgb(28 25 23 / 0.1),
+            0 2px 4px -2px rgb(28 25 23 / 0.08);
+    }
 }
 
 /* Horizontal chip strips on phones: scroll instead of wrapping, no visible scrollbar. */
@@ -451,7 +618,7 @@ body {
 @keyframes library-row-in {
     from {
         opacity: 0;
-        transform: translateY(6px);
+        transform: translateY(4px);
     }
     to {
         opacity: 1;
@@ -489,7 +656,7 @@ body {
 }
 
 .imslp-panel-view {
-    animation: imslp-view-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+    animation: imslp-view-in 0.28s var(--ease-out) backwards;
 }
 
 @keyframes imslp-view-in {
@@ -514,17 +681,30 @@ body {
     .landing-hero,
     .landing-rule,
     .landing-demo-frame,
-    .library-layout,
-    .library-shell,
+    .brand-enter,
+    .brand-rule,
     .library-list-item,
     .library-empty,
     .imslp-panel-view {
         animation: none;
     }
 
-    /* Keep the activity signal, drop the sweep. */
+    /* Keep the activity signal, drop the travel: the segment fills the
+       track and breathes in place. */
     .progress-indeterminate {
-        animation-duration: 3.5s;
+        width: 100%;
+        animation: progress-breathe 1.6s ease-in-out infinite alternate;
+    }
+
+    /* Dialogs and menus fade in place. */
+    .ui-dialog-pop,
+    .ui-menu-pop,
+    .ui-sheet-pop {
+        animation-name: ui-fade-in;
+    }
+
+    .library-card:active .library-card-cover {
+        transform: none;
     }
 
     /* The hero demo settles to its finished, fully-annotated state. */
@@ -546,11 +726,6 @@ body {
         transition: none;
         transform: none;
         box-shadow: none;
-    }
-
-    /* Upload progress in the top bar jumps to each reported percentage. */
-    .shell-progress > div {
-        transition: none;
     }
 
     /* Shelf: no entrance stagger, and the cover stays flat on hover. The
@@ -580,9 +755,23 @@ body {
     background-color: rgb(28 25 23 / 0.09);
 }
 
-@media (prefers-reduced-motion: reduce) {
-    /* A meter that slides to its value is decoration; the number is the point. */
-    .account-meter > div {
-        transition: none;
+/*
+ * Translucent, blurred chrome reads as mush to anyone who asked the system for
+ * less transparency or more contrast: it goes opaque. .chrome-paper sits on the
+ * paper wash, .chrome-glass on white.
+ */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+    .imslp-search-sticky,
+    .imslp-action-footer,
+    .chrome-paper {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+        background-color: var(--color-paper);
+    }
+
+    .chrome-glass {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+        background-color: #fff;
     }
 }

@@ -12,7 +12,9 @@ import { TypesetCover } from '@/ui/TypesetCover';
  * links), so no stretched-link layering is needed. `library-card` and
  * `library-card-cover` are reused from the library shelf on purpose: the
  * entrance stagger, hover lift and their `prefers-reduced-motion` overrides
- * are design-system behaviours, not library ones.
+ * are design-system behaviours, not library ones. Live hits pass `settled`:
+ * they change under the user's typing, and a card that re-staggers on each
+ * keystroke is noise — only the Popular shelf gets the entrance.
  */
 export const ImslpScoreCard = ({
     coverTitle,
@@ -23,6 +25,7 @@ export const ImslpScoreCard = ({
     description,
     index,
     disabled,
+    settled = false,
     onClick,
 }: {
     /** Plain text for the decorative cover (no highlight marks inside aria-hidden). */
@@ -36,14 +39,19 @@ export const ImslpScoreCard = ({
     description?: ReactNode | null;
     index: number;
     disabled: boolean;
+    /** Render in place, no entrance (search hits). */
+    settled?: boolean;
     onClick: () => void;
 }) => (
-    <li className="library-card" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
+    <li
+        className={`library-card${settled ? ' library-card-settled' : ''}`}
+        style={settled ? undefined : { animationDelay: `${Math.min(index, 12) * 30}ms` }}
+    >
         <button
             type="button"
             onClick={onClick}
             disabled={disabled}
-            className="group block w-full text-left transition disabled:opacity-50"
+            className="group block w-full text-left transition-colors disabled:opacity-50"
         >
             <div
                 aria-hidden="true"
@@ -58,7 +66,7 @@ export const ImslpScoreCard = ({
                   `display: -webkit-box`, and the two utilities set the same
                   property (see ScoreCard's identical note).
                 */}
-                <span className="text-sm font-medium text-stone-800 transition line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover">
+                <span className="text-sm font-medium text-stone-800 transition-colors line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover">
                     {title}
                 </span>
                 {composer ? <span className="mt-0.5 block truncate text-xs text-stone-500">{composer}</span> : null}

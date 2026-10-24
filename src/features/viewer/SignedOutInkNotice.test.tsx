@@ -92,7 +92,7 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
 
         await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
 
-        const dialog = screen.getByRole('dialog', { name: 'Export your unsaved ink' });
+        const dialog = await screen.findByRole('dialog', { name: 'Export your unsaved ink' });
         expect(dialog).toHaveTextContent('Clair de lune (2 marks)');
         const menu = within(dialog).getByRole('button', { name: 'Export Clair de lune' });
         expect(menu).toHaveAttribute('data-doc', DOC);
@@ -106,7 +106,7 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
         retireAccountInk(USER);
 
         await userEvent.click(await screen.findByRole('button', { name: 'Discard' }));
-        const confirm = screen.getByRole('dialog', { name: 'Discard your unsaved ink?' });
+        const confirm = await screen.findByRole('dialog', { name: 'Discard your unsaved ink?' });
         expect(confirm).toHaveTextContent(
             '2 unsaved marks on 1 score are only in this tab. Discarding deletes them for good. Export a copy first to keep them.',
         );
@@ -115,17 +115,17 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
 
         await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
         await userEvent.click(
-            within(screen.getByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
+            within(await screen.findByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
                 name: 'Export first',
             }),
         );
-        expect(screen.getByRole('dialog', { name: 'Export your unsaved ink' })).toBeInTheDocument();
+        expect(await screen.findByRole('dialog', { name: 'Export your unsaved ink' })).toBeInTheDocument();
         expect(heldInkForExport(USER, DOC).held).toHaveLength(2);
         await userEvent.click(screen.getByRole('button', { name: 'Close' }));
 
         await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
         await userEvent.click(
-            within(screen.getByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
+            within(await screen.findByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
                 name: 'Discard',
             }),
         );
@@ -153,7 +153,7 @@ describe('held ink of a score lost to this device (decision 65(1))', () => {
         expect(heldInkForExport(USER, DOC, true).held).toHaveLength(2);
 
         await userEvent.click(within(notice).getByRole('button', { name: 'Export' }));
-        const dialog = screen.getByRole('dialog', { name: 'Export your unsaved ink' });
+        const dialog = await screen.findByRole('dialog', { name: 'Export your unsaved ink' });
         expect(dialog).toHaveTextContent('Clair de lune (2 marks)');
         const menu = within(dialog).getByRole('button', { name: 'Export Clair de lune' });
         expect(menu).toHaveAttribute('data-user', USER);
@@ -162,7 +162,7 @@ describe('held ink of a score lost to this device (decision 65(1))', () => {
 
         await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
         await userEvent.click(
-            within(screen.getByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
+            within(await screen.findByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
                 name: 'Discard',
             }),
         );

@@ -50,7 +50,7 @@ describe('useGuardedSignOut', () => {
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
 
-        const dialog = await screen.findByRole('dialog', { name: 'Sign out with unsynced changes?' });
+        const dialog = await screen.findByRole('alertdialog', { name: 'Sign out with unsynced changes?' });
         expect(dialog).toHaveTextContent('You have 3 unsynced changes');
         await user.click(screen.getByRole('button', { name: 'Stay signed in' }));
 
@@ -65,7 +65,7 @@ describe('useGuardedSignOut', () => {
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
 
-        const dialog = await screen.findByRole('dialog', { name: 'Sign out with unsynced changes?' });
+        const dialog = await screen.findByRole('alertdialog', { name: 'Sign out with unsynced changes?' });
         expect(dialog).toHaveTextContent('You have 1 unsynced change to your scores');
         expect(dialog).toHaveTextContent(
             'This device also holds 2 unsynced changes made by another account that was signed in here. Only that account can save them; signing out deletes them from this device.',
@@ -79,7 +79,7 @@ describe('useGuardedSignOut', () => {
         render(<Harness doSignOut={doSignOut} />);
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
-        expect(await screen.findByRole('dialog')).toHaveTextContent('You have 1 unsynced change ');
+        expect(await screen.findByRole('alertdialog')).toHaveTextContent('You have 1 unsynced change ');
         await user.click(screen.getByRole('button', { name: 'Sign out anyway' }));
 
         expect(doSignOut).toHaveBeenCalledTimes(1);
@@ -107,7 +107,7 @@ describe('useGuardedSignOut', () => {
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
 
-        const dialog = await screen.findByRole('dialog', { name: 'Some changes could not be saved' });
+        const dialog = await screen.findByRole('alertdialog', { name: 'Some changes could not be saved' });
         expect(dialog).toHaveTextContent('2 changes to your marks were refused by the server');
         expect(doSignOut).not.toHaveBeenCalled();
         // Nothing more to lose by leaving: a plain Sign out, not "anyway".
@@ -122,7 +122,7 @@ describe('useGuardedSignOut', () => {
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
 
-        const dialog = await screen.findByRole('dialog', { name: 'Sign out with unsynced changes?' });
+        const dialog = await screen.findByRole('alertdialog', { name: 'Sign out with unsynced changes?' });
         expect(dialog).toHaveTextContent('You have 1 unsynced change');
         expect(dialog).toHaveTextContent('1 change to your marks was refused by the server');
     });

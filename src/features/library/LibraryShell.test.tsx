@@ -280,7 +280,7 @@ describe('LibraryShell', () => {
         renderShell();
 
         await user.click(await screen.findByRole('button', { name: /Account menu/ }));
-        expect(screen.getByRole('menu', { name: 'Account' })).toBeInTheDocument();
+        expect(await screen.findByRole('menu', { name: 'Account' })).toBeInTheDocument();
 
         // Enter on a link dispatches click and no pointerdown, so the menu's
         // outside-click listener never learns that the route changed.
@@ -300,14 +300,18 @@ describe('LibraryShell', () => {
         renderShell();
 
         await user.click(await screen.findByRole('button', { name: /Account menu/ }));
-        await user.click(screen.getByRole('menuitem', { name: 'Sign out' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Sign out' }));
 
         // The menu closed on click; the wait must still be visible.
         expect(screen.getByRole('status')).toHaveTextContent('Saving changes…');
         expect(screen.getByRole('progressbar', { name: 'Saving changes before signing out' })).toBeInTheDocument();
         // Reopening the menu does not offer a second sign-out meanwhile.
         await user.click(screen.getByRole('button', { name: /Account menu/ }));
-        expect(screen.getByRole('menuitem', { name: 'Saving changes…' })).toBeDisabled();
+        // Disabled the menu way: still focusable for screen readers, but inert.
+        expect(await screen.findByRole('menuitem', { name: 'Saving changes…' })).toHaveAttribute(
+            'aria-disabled',
+            'true',
+        );
         expect(sessionMocks.signOut).not.toHaveBeenCalled();
 
         finish({ pending: 0, refused: 0 });
@@ -320,14 +324,14 @@ describe('LibraryShell', () => {
         renderShell();
 
         await user.click(await screen.findByRole('button', { name: /Account menu/ }));
-        expect(screen.getByRole('menuitem', { name: 'Help & support' })).toHaveAttribute(
+        expect(await screen.findByRole('menuitem', { name: 'Help & support' })).toHaveAttribute(
             'href',
             'mailto:support@cleffy.io',
         );
-        expect(screen.getByRole('menuitem', { name: 'Privacy' })).toHaveAttribute('href', '/privacy');
-        expect(screen.getByRole('menuitem', { name: 'Terms' })).toHaveAttribute('href', '/terms');
-        expect(screen.getByRole('menuitem', { name: 'Refunds' })).toHaveAttribute('href', '/refunds');
-        expect(screen.getByRole('menuitem', { name: 'Copyright' })).toHaveAttribute('href', '/copyright');
+        expect(await screen.findByRole('menuitem', { name: 'Privacy' })).toHaveAttribute('href', '/privacy');
+        expect(await screen.findByRole('menuitem', { name: 'Terms' })).toHaveAttribute('href', '/terms');
+        expect(await screen.findByRole('menuitem', { name: 'Refunds' })).toHaveAttribute('href', '/refunds');
+        expect(await screen.findByRole('menuitem', { name: 'Copyright' })).toHaveAttribute('href', '/copyright');
     });
 
     it('pads the chrome for the iPhone status bar', () => {

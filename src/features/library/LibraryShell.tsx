@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
 
+import { initialsOf } from '@/features/account/initials';
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
@@ -33,6 +34,7 @@ import { ownSubscriptionOf } from '@/features/billing/planStatus';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { buttonClassName } from '@/ui/classNames';
 import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
+import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
 import { ProgressBar } from '@/ui/ProgressBar';
 
 /** The legal documents, as the account menu's last row lists them. */
@@ -116,7 +118,7 @@ const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean;
  */
 const SHELL_CONTAINER = 'mx-auto w-full max-w-[100rem] px-4 sm:px-6 lg:px-10';
 
-const NAV_LINK_BASE = 'shrink-0 rounded-lg px-3 py-1.5 text-sm transition';
+const NAV_LINK_BASE = 'shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors';
 const NAV_LINK_ACTIVE = 'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50';
 const NAV_LINK_IDLE = 'text-stone-600 hover:bg-ink/5 hover:text-stone-900';
 
@@ -434,7 +436,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 progress and the account menu stay reachable from any page. */}
             <header
                 ref={headerRef}
-                className="sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur"
+                className="chrome-paper sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur"
             >
                 <div
                     className={`${SHELL_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-6 sm:py-0`}
@@ -450,7 +452,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         one gutter short and strand the last link behind a dead margin. */}
                     <nav
                         aria-label="Main"
-                        className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto px-4 sm:order-none sm:mx-0 sm:w-auto sm:overflow-x-visible sm:px-0"
+                        className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto overscroll-x-contain px-4 sm:order-none sm:mx-0 sm:w-auto sm:overflow-x-visible sm:px-0"
                     >
                         {navItems.map((item) => (
                             <NavLink
@@ -513,7 +515,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 ) : null}
             </header>
 
-            <div className={`library-layout ${SHELL_CONTAINER} py-8 lg:py-10`}>
+            <div className={`${SHELL_CONTAINER} py-8 lg:py-10`}>
                 <div
                     className="library-shell min-w-0"
                     style={barHeight ? ({ '--shell-bar-height': `${barHeight}px` } as CSSProperties) : undefined}
@@ -591,25 +593,10 @@ const ShellUploadButton = ({
 );
 
 /**
- * Two letters standing in for a face: first initials of a two-word display
- * name, else the opening of the local part of the email. Never empty — an
- * avatar with nothing in it reads as a broken image.
- */
-const initialsOf = (label: string): string => {
-    const words = label.trim().split(/\s+/).filter(Boolean);
-    const first = words[0] ?? '';
-    const second = words[1];
-    if (second) {
-        return `${first.slice(0, 1)}${second.slice(0, 1)}`.toUpperCase();
-    }
-    const localPart = first.split('@')[0] ?? '';
-    return localPart.slice(0, 2).toUpperCase() || '?';
-};
-
-/**
  * Account cluster at the right end of the bar: identity, plan, and the two
- * destinations that used to live in the sidebar. Closes on outside pointerdown,
- * Escape and route change so it can never outlive the page it was opened from.
+ * destinations that used to live in the sidebar. A Base UI menu (outside
+ * press, Escape, arrow keys, focus back on the avatar), and also closed by a
+ * route change so it can never outlive the page it was opened from.
  */
 const AccountMenu = ({
     userLabel,
@@ -628,13 +615,12 @@ const AccountMenu = ({
     // The route the menu was opened from, rather than a plain boolean: navigating
     // away closes it during render, with no effect that resets state after paint.
     const [openedAt, setOpenedAt] = useState<string | null>(null);
-    const rootRef = useRef<HTMLDivElement | null>(null);
     const { pathname } = useLocation();
     const open = openedAt === pathname;
     const close = () => setOpenedAt(null);
-    // Forget the route the moment it stops being the one we are on. The listeners
-    // below see pointerdown and Escape only, so a link taken from the keyboard —
-    // or Back, or a navigate() — leaves the old pathname sitting there, and
+    // Forget the route the moment it stops being the one we are on. The menu
+    // sees presses and Escape only, so a link taken from the keyboard — or
+    // Back, or a navigate() — leaves the old pathname sitting there, and
     // returning to that page would re-derive `open` and put the menu up again with
     // nobody having touched it. During render, so still no effect resetting state
     // after paint.
@@ -642,106 +628,58 @@ const AccountMenu = ({
         setOpenedAt(null);
     }
 
-    useEffect(() => {
-        if (!open) {
-            return;
-        }
-        const onPointerDown = (e: PointerEvent) => {
-            if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-                close();
-            }
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                close();
-            }
-        };
-        window.addEventListener('pointerdown', onPointerDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-            window.removeEventListener('pointerdown', onPointerDown);
-            window.removeEventListener('keydown', onKey);
-        };
-    }, [open]);
-
     // displayNameOf falls back to the email, so only show the second line when
     // it would actually say something the first line does not.
     const secondary = userEmail && userEmail !== userLabel ? userEmail : null;
 
     return (
-        <div ref={rootRef} className="relative">
-            <button
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={open}
-                aria-label={`Account menu (${userLabel})`}
-                onClick={() => setOpenedAt(open ? null : pathname)}
-                className="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition hover:bg-ink/5 sm:pr-1.5"
-            >
-                <span
-                    aria-hidden="true"
-                    className="grid h-8 w-8 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
-                >
-                    {initialsOf(userLabel)}
-                </span>
-                <ChevronDownIcon size={16} className="hidden text-stone-500 sm:block" />
-            </button>
-            {open ? (
-                <div
-                    role="menu"
-                    aria-label="Account"
-                    className="absolute right-0 z-40 mt-2 w-64 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
-                >
-                    <div className="px-3 py-2">
-                        <p className="truncate text-sm font-medium text-stone-800">{userLabel}</p>
-                        {secondary ? <p className="truncate text-xs text-stone-500">{secondary}</p> : null}
-                        <PlanBadge tier={tier} className="mt-2" />
-                    </div>
-                    <div className="my-1 border-t border-stone-200" />
-                    <Link
-                        role="menuitem"
-                        to="/account"
+        <Menu
+            label={`Account menu (${userLabel})`}
+            menuLabel="Account"
+            popupClassName="w-64"
+            open={open}
+            onOpenChange={(next) => setOpenedAt(next ? pathname : null)}
+            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-ink/5 sm:pr-1.5"
+            triggerContent={
+                <>
+                    <span
+                        aria-hidden="true"
+                        className="grid h-8 w-8 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
+                    >
+                        {initialsOf(userLabel)}
+                    </span>
+                    <ChevronDownIcon size={16} className="hidden text-stone-500 sm:block" />
+                </>
+            }
+        >
+            <div className="px-3 py-2">
+                <p className="truncate text-sm font-medium text-stone-800">{userLabel}</p>
+                {secondary ? <p className="truncate text-xs text-stone-500">{secondary}</p> : null}
+                <PlanBadge tier={tier} className="mt-2" />
+            </div>
+            <MenuSeparator />
+            <MenuItem render={<Link to="/account" />} onClick={close}>
+                Account
+            </MenuItem>
+            <MenuItem render={<a href={`mailto:${LEGAL_ENTITY.contactEmail}`} />} onClick={close}>
+                Help &amp; support
+            </MenuItem>
+            <MenuItem disabled={signingOut} onClick={onSignOut}>
+                {signingOut ? 'Saving changes…' : 'Sign out'}
+            </MenuItem>
+            <MenuSeparator />
+            <div className="flex flex-wrap gap-1 px-1.5 pb-0.5">
+                {LEGAL_MENU_LINKS.map(({ to, label }) => (
+                    <MenuItem
+                        key={to}
+                        render={<Link to={to} />}
                         onClick={close}
-                        className="block px-3 py-2 text-sm text-stone-800 transition hover:bg-ink/5"
+                        className="rounded-md px-1.5 py-1 text-xs text-stone-500 outline-none data-highlighted:bg-ink/5"
                     >
-                        Account
-                    </Link>
-                    <a
-                        role="menuitem"
-                        href={`mailto:${LEGAL_ENTITY.contactEmail}`}
-                        onClick={close}
-                        className="block px-3 py-2 text-sm text-stone-800 transition hover:bg-ink/5"
-                    >
-                        Help &amp; support
-                    </a>
-                    <button
-                        type="button"
-                        role="menuitem"
-                        disabled={signingOut}
-                        onClick={() => {
-                            close();
-                            onSignOut();
-                        }}
-                        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5 disabled:cursor-default disabled:text-stone-400 disabled:hover:bg-transparent"
-                    >
-                        {signingOut ? 'Saving changes…' : 'Sign out'}
-                    </button>
-                    <div className="my-1 border-t border-stone-200" />
-                    <div className="flex flex-wrap gap-1 px-1.5 pb-0.5">
-                        {LEGAL_MENU_LINKS.map(({ to, label }) => (
-                            <Link
-                                key={to}
-                                role="menuitem"
-                                to={to}
-                                onClick={close}
-                                className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
-                            >
-                                {label}
-                            </Link>
-                        ))}
-                    </div>
-                </div>
-            ) : null}
-        </div>
+                        {label}
+                    </MenuItem>
+                ))}
+            </div>
+        </Menu>
     );
 };

@@ -39,6 +39,7 @@ import { warmPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
 import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
 import { InkSaveFailedNotice } from '@/features/viewer/InkSaveFailedNotice';
+import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { features } from '@/lib/features';
@@ -221,6 +222,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
     const [exportSignal, setExportSignal] = useState(0);
+    /** How far the notices over the score reach down it (ViewerNoticeRegion). */
+    const [noticeInset, setNoticeInset] = useState(0);
     const [staleBytes, setStaleBytes] = useState(false);
     const [accessLoss, setAccessLoss] = useState<AccessLoss | null>(null);
     /** "Your access changed" banner after a live role change. */
@@ -1049,38 +1052,36 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             {/* The landmark for everything below the header — notices, the score
                 and its floating controls — so none of it sits outside one. */}
             <main className="flex min-h-0 flex-1 flex-col">
-                <UpgradeBanner isGuest={Boolean(session?.user.is_anonymous)} />
-                {accessNotice ? (
-                    <div
-                        className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
-                        role="status"
-                    >
-                        <p className="flex-1 text-sm text-amber-900">{accessNotice}</p>
-                        <Button size="sm" variant="ghost" onClick={() => setAccessNotice(null)}>
-                            Dismiss
-                        </Button>
-                    </div>
-                ) : null}
-                <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
-                <SyncHeldNotice count={heldCount} reason={held?.reason} />
-                <InkSaveFailedNotice
-                    store={annotationStore}
-                    onExport={confirmed ? () => setExportSignal((n) => n + 1) : undefined}
-                />
-                {staleBytes ? (
-                    <div
-                        className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
-                        role="status"
-                    >
-                        <p className="text-sm text-amber-900">
-                            The score file was updated (existing marks were made editable).
-                        </p>
-                        <Button size="sm" variant="secondary" onClick={() => void refreshBytes()}>
-                            Show the cleaned pages
-                        </Button>
-                    </div>
-                ) : null}
-                <div className="min-h-0 flex-1">
+                <div className="relative min-h-0 flex-1">
+                    {/* Every notice floats over the score in one region, so one
+                        coming or going never moves the music (ViewerNotice). */}
+                    <ViewerNoticeRegion onInsetChange={setNoticeInset}>
+                        <UpgradeBanner isGuest={Boolean(session?.user.is_anonymous)} />
+                        {accessNotice ? (
+                            <ViewerNotice>
+                                <p className="min-w-0 flex-1">{accessNotice}</p>
+                                <Button size="sm" variant="ghost" onClick={() => setAccessNotice(null)}>
+                                    Dismiss
+                                </Button>
+                            </ViewerNotice>
+                        ) : null}
+                        <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
+                        <SyncHeldNotice count={heldCount} reason={held?.reason} />
+                        <InkSaveFailedNotice
+                            store={annotationStore}
+                            onExport={confirmed ? () => setExportSignal((n) => n + 1) : undefined}
+                        />
+                        {staleBytes ? (
+                            <ViewerNotice>
+                                <p className="min-w-0 flex-1">
+                                    The score file was updated (existing marks were made editable).
+                                </p>
+                                <Button size="sm" variant="secondary" onClick={() => void refreshBytes()}>
+                                    Show the cleaned pages
+                                </Button>
+                            </ViewerNotice>
+                        ) : null}
+                    </ViewerNoticeRegion>
                     <PdfProvider
                         data={state.pdf}
                         onStreamComplete={onStreamComplete}
@@ -1092,6 +1093,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                             docId={docId}
                             readOnly={readOnly}
                             onStoreReady={onStoreReady}
+                            noticeInset={noticeInset}
                             // Playhead, loop tint and tap-to-seek live only while
                             // the transport is on screen to drive them.
                             playback={playAlongEnabled && playAlongOpen ? playbackFeature : undefined}
@@ -1213,6 +1215,8 @@ const LocalViewer = ({ docId }: { docId: string }) => {
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
     const [exportSignal, setExportSignal] = useState(0);
+    /** How far the notices over the score reach down it (ViewerNoticeRegion). */
+    const [noticeInset, setNoticeInset] = useState(0);
     const [reopenError, setReopenError] = useState<string | null>(null);
     const bytes = getLocalDoc(docId);
 
@@ -1289,10 +1293,12 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                 <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly openSignal={exportSignal} />
             </ViewerHeader>
             <main className="flex min-h-0 flex-1 flex-col">
-                <InkSaveFailedNotice store={annotationStore} onExport={() => setExportSignal((n) => n + 1)} />
-                <div className="min-h-0 flex-1">
+                <div className="relative min-h-0 flex-1">
+                    <ViewerNoticeRegion onInsetChange={setNoticeInset}>
+                        <InkSaveFailedNotice store={annotationStore} onExport={() => setExportSignal((n) => n + 1)} />
+                    </ViewerNoticeRegion>
                     <PdfProvider data={bytes}>
-                        <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />
+                        <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} noticeInset={noticeInset} />
                     </PdfProvider>
                 </div>
             </main>

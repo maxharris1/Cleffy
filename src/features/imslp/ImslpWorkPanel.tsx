@@ -173,7 +173,7 @@ export const ImslpWorkPanel = ({
                         choosable. 16rem alone does not keep Add above the fold on a
                         667px-tall phone (the page and work headers take the room) —
                         the sticky .imslp-action-footer below does that. */}
-                    <ul className="mt-2 max-h-[16rem] overflow-y-auto" aria-label="PDF editions">
+                    <ul className="mt-2 max-h-[16rem] overflow-y-auto overscroll-contain" aria-label="PDF editions">
                         {importable.map((edition) => {
                             const checked = selected?.filename === edition.filename;
                             const name = displayEditionName(edition.filename, edition);
@@ -324,7 +324,10 @@ export const ImslpWorkPanel = ({
                         IMSLP restricts these files or their license could not be confirmed. Open one on IMSLP to see
                         your options there.
                     </p>
-                    <ul className="mt-1 max-h-[12rem] overflow-y-auto" aria-label="Editions to open on IMSLP">
+                    <ul
+                        className="mt-1 max-h-[12rem] overflow-y-auto overscroll-contain"
+                        aria-label="Editions to open on IMSLP"
+                    >
                         {unavailable.map((edition) => (
                             <li
                                 key={edition.filename}

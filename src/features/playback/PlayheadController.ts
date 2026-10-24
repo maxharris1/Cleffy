@@ -2,7 +2,9 @@ import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { measureIndexAtTick, xAtTickInMeasure } from '@/features/playback/scoreTime';
 import { NO_OBSCURED, clampScroll, scrollForPagePoint, type ObscuredEdges } from '@/features/viewer/geometry';
 import type { DocumentLayout } from '@/features/viewer/geometry';
+import { prefersReducedMotion } from '@/lib/motion';
 import { useViewerStore } from '@/state/store';
+import type { ViewState } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 
 /**
@@ -11,7 +13,10 @@ import type { ScoreData } from '@/types/scoreData';
  * PdfViewport's transformed wrapper (they inherit pan/zoom for free; the
  * wrapper's coordinate space is base units × renderScale). Runs its own rAF
  * loop with change detection — no React re-renders at frame rate; only the
- * measure NUMBER lands in zustand, and only when it changes.
+ * measure NUMBER lands in zustand, and only when it changes. The loop runs
+ * only while something can move: playback, a follow glide, or pages not yet
+ * measured. Paused or idle it sleeps, and wake() — a seek (playheadEpoch), a
+ * status or follow change, new page geometry from PdfViewport — draws again.
  *
  * Auto-follow: when the playhead's system drifts out of the comfortable
  * viewport band, the view glides so the system sits near the top. A user
@@ -90,6 +95,9 @@ export class PlayheadController {
 
     private unsubscribeStore: () => void;
 
+    /** Pages had not been measured on the last draw: keep polling until they are. */
+    private awaitingLayout = false;
+
     constructor(deps: PlayheadDeps) {
         this.deps = deps;
         this.frame = this.frame.bind(this);
@@ -100,7 +108,27 @@ export class PlayheadController {
             if (state.followMode === 'on' && prev.followMode !== 'on') {
                 this.forceFollow = true;
             }
+            if (
+                state.followMode !== prev.followMode ||
+                state.playbackStatus !== prev.playbackStatus ||
+                state.playheadEpoch !== prev.playheadEpoch
+            ) {
+                this.wake();
+            }
         });
+    }
+
+    /** Draw on the next frame, restarting the loop if it is asleep. */
+    wake(): void {
+        if (!this.disposed && this.rafId === null) {
+            this.rafId = requestAnimationFrame(this.frame);
+        }
+    }
+
+    /** Playing, counting in, or loading samples: the tick can move by itself. */
+    private isRunning(): boolean {
+        const status = useViewerStore.getState().playbackStatus;
+        return status === 'playing' || status === 'counting' || status === 'loading';
     }
 
     destroy(): void {
@@ -122,15 +150,19 @@ export class PlayheadController {
     }
 
     private frame(): void {
+        this.rafId = null;
         if (this.disposed) {
             return;
         }
         this.draw();
         this.stepFollowAnimation();
-        this.rafId = requestAnimationFrame(this.frame);
+        if (this.isRunning() || this.anim !== null || this.awaitingLayout) {
+            this.rafId = requestAnimationFrame(this.frame);
+        }
     }
 
     private draw(): void {
+        this.awaitingLayout = false;
         const score = this.deps.getScore();
         const { lineEl, highlightEl } = this.deps;
         if (!score) {
@@ -180,6 +212,7 @@ export class PlayheadController {
             return;
         }
         const layout = layoutNow.layouts[rect.pageIndex];
+        this.awaitingLayout = !layout;
         if (!layout) {
             // Pages have not been measured yet (the controller can outrun the
             // PDF's first layout pass). Drop the memo so the next frame retries
@@ -242,6 +275,12 @@ export class PlayheadController {
             height,
             obscured,
         );
+        if (prefersReducedMotion()) {
+            // No glide: the view jumps straight to the playhead's system.
+            this.anim = null;
+            store.setView({ scale: view.scale, scrollX: target.scrollX, scrollY: target.scrollY });
+            return;
+        }
         this.anim = {
             from: { x: view.scrollX, y: view.scrollY },
             to: { x: target.scrollX, y: target.scrollY },
@@ -253,10 +292,11 @@ export class PlayheadController {
         if (!this.anim) {
             return;
         }
+        const store = useViewerStore.getState();
+        this.rebaseFollowAnimation(store.view);
         const { from, to, startedAt } = this.anim;
         const t = Math.min(1, (performance.now() - startedAt) / FOLLOW_ANIM_MS);
         const ease = 1 - Math.pow(1 - t, 3);
-        const store = useViewerStore.getState();
         store.setView({
             scale: store.view.scale,
             scrollX: from.x + (to.x - from.x) * ease,
@@ -265,5 +305,35 @@ export class PlayheadController {
         if (t >= 1) {
             this.anim = null;
         }
+    }
+
+    /**
+     * The scroll bounds moved under a glide (a notice over the score went
+     * away, or pages were re-measured): head for the target they allow now,
+     * from where the view is, instead of finishing at a stale one. The follow
+     * write takes over the viewer's own settle into the new bounds, so this
+     * glide must end inside them or the room the notice left stays blank.
+     */
+    private rebaseFollowAnimation(view: ViewState): void {
+        const anim = this.anim;
+        const { width, height } = this.deps.getViewportSize();
+        if (!anim || width === 0 || height === 0) {
+            return;
+        }
+        const target = clampScroll(
+            { scale: view.scale, scrollX: anim.to.x, scrollY: anim.to.y },
+            this.deps.getLayout(),
+            width,
+            height,
+            this.deps.getObscured?.() ?? NO_OBSCURED,
+        );
+        if (Math.abs(target.scrollX - anim.to.x) < 0.5 && Math.abs(target.scrollY - anim.to.y) < 0.5) {
+            return;
+        }
+        this.anim = {
+            from: { x: view.scrollX, y: view.scrollY },
+            to: { x: target.scrollX, y: target.scrollY },
+            startedAt: performance.now(),
+        };
     }
 }

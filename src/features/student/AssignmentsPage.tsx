@@ -208,7 +208,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
     }
 
     return (
-        <main className="paper-page min-h-full">
+        <main className="paper-page safe-page min-h-full">
             <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6 sm:py-10">
                 <header className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
@@ -276,7 +276,7 @@ const AssignmentCard = ({ score: { assignment, document: doc } }: { score: Assig
         <li>
             <Link
                 to={`/doc/${assignment.document_id}`}
-                className="block rounded-xl border border-stone-300/60 bg-white/70 px-4 py-3.5 transition hover:border-accent/50 hover:bg-white"
+                className="block rounded-xl border border-stone-300/60 bg-white/70 px-4 py-3.5 transition-colors hover:border-accent/50 hover:bg-white"
             >
                 <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
                     {/* Two lines before it ellipsizes — a long catalogue title

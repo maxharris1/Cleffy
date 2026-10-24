@@ -31,6 +31,8 @@ const renderSection = (ui: ReactElement) => render(<MemoryRouter>{ui}</MemoryRou
 const openDialog = async () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Delete account…' }));
+    // The dialog's panel is a lazy chunk: it mounts a tick after the click.
+    await screen.findByRole('dialog', { name: 'Delete your account?' });
     return user;
 };
 
