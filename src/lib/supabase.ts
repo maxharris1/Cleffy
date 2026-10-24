@@ -9,8 +9,24 @@ export type TypedSupabaseClient = SupabaseClient<Database>;
 
 let client: TypedSupabaseClient | null = null;
 
-const env = (key: string): string | undefined => {
-    const value = import.meta.env[key] as string | undefined;
+/**
+ * Every VITE_ variable this module reads, each named outright. Vite inlines an
+ * `import.meta.env.VITE_X` read as that one value; a read by computed key made
+ * it inline the whole env object instead — every VITE_ variable the build had,
+ * whatever it was for — into the shell bundle and this chunk. Built per call,
+ * not at module scope, so tests can `vi.stubEnv`.
+ */
+const supabaseEnv = () => ({
+    VITE_SUPABASE_URL: import.meta.env.VITE_SUPABASE_URL as string | undefined,
+    VITE_SUPABASE_ANON_KEY: import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined,
+    VITE_SUPABASE_PROD_URL: import.meta.env.VITE_SUPABASE_PROD_URL as string | undefined,
+    VITE_SUPABASE_PROD_ANON_KEY: import.meta.env.VITE_SUPABASE_PROD_ANON_KEY as string | undefined,
+    VITE_SUPABASE_DEV_URL: import.meta.env.VITE_SUPABASE_DEV_URL as string | undefined,
+    VITE_SUPABASE_DEV_ANON_KEY: import.meta.env.VITE_SUPABASE_DEV_ANON_KEY as string | undefined,
+});
+
+const env = (key: keyof ReturnType<typeof supabaseEnv>): string | undefined => {
+    const value = supabaseEnv()[key];
     return value && value.length > 0 ? value : undefined;
 };
 
