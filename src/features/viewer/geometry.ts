@@ -245,8 +245,9 @@ export const focusedPageIndex = (
 };
 
 /**
- * Page whose middle is nearest the centre of the part of the viewport no
- * strip covers — by geometry alone, without focusedPageIndex's overrides at
+ * Page whose span contains the centre of the part of the viewport no strip
+ * covers, else (the centre in a gap or past every page) the one whose middle
+ * is nearest it — by geometry alone, without focusedPageIndex's overrides at
  * the scroll bounds. What keeps the reading position when pages change size.
  */
 const pageAtUncoveredCenter = (
@@ -256,6 +257,12 @@ const pageAtUncoveredCenter = (
     obscured: ObscuredEdges,
 ): number => {
     const centerY = (view.scrollY + uncoveredCenterPx(viewportHeight, obscured)) / view.scale;
+    // A tall page's middle can sit further from the centre than a short
+    // neighbour's even with the centre inside it.
+    const containing = layouts.findIndex((l) => centerY >= l.top && centerY <= l.top + l.height);
+    if (containing >= 0) {
+        return containing;
+    }
     let best = 0;
     let bestDist = Number.POSITIVE_INFINITY;
     for (let i = 0; i < layouts.length; i++) {

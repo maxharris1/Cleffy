@@ -592,4 +592,34 @@ describe('reanchorView', () => {
         expect(next.scrollY).toBeCloseTo(-72);
         expect(focusedPageIndex(next, VH, after.layouts, strip)).toBe(0);
     });
+
+    it('anchors on the page the centre is in at the bottom bound, whatever the nearest middle', () => {
+        // A phone zoomed out under a 166 px notice stack, at the bottom of ten
+        // letter pages of which page 9 is already twice as tall. The centre of
+        // the uncovered part is low in page 9, nearer page 10's middle than its own.
+        const VW = 390;
+        const VH = 664;
+        const strip = { top: 166, bottom: 0 };
+        const sizes = (last: number) =>
+            Array.from({ length: 10 }, (_, i) => ({ width: 612, height: i === 8 ? 1584 : i === 9 ? last : 792 }));
+        const before = computeDocumentLayout(sizes(792));
+        // Streaming finds page 10 twice as tall too.
+        const after = computeDocumentLayout(sizes(1584));
+        const scale = MIN_SCALE;
+        const view = clampScroll({ scale, scrollX: 0, scrollY: 1e6 }, before, VW, VH, strip);
+        const centre = 166 + (VH - 166) / 2;
+        const cyBefore = (view.scrollY + centre) / scale;
+        const page9 = before.layouts[8]!;
+        const page10 = before.layouts[9]!;
+        expect(cyBefore).toBeGreaterThan(page9.top);
+        expect(cyBefore).toBeLessThan(page9.top + page9.height);
+        expect(Math.abs(page10.top + page10.height / 2 - cyBefore)).toBeLessThan(
+            Math.abs(page9.top + page9.height / 2 - cyBefore),
+        );
+
+        const next = clampScroll(reanchorView(view, before, after, VW, VH, strip), after, VW, VH, strip);
+        // Nothing above page 10 moved, so neither does page 9 on screen.
+        expect(next.scale).toBeCloseTo(scale);
+        expect(after.layouts[8]!.top * next.scale - next.scrollY).toBeCloseTo(page9.top * scale - view.scrollY);
+    });
 });
