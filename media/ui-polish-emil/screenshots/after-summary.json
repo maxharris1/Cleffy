@@ -1,0 +1,95 @@
+{
+  "desktop-1440": {
+    "landing": 0,
+    "login": 0,
+    "library": 0,
+    "search": 0,
+    "roster": 0,
+    "account": 0,
+    "viewer": 0,
+    "consoleErrors": 1,
+    "assignments": 0
+  },
+  "laptop-1280": {
+    "landing": 0,
+    "login": 0,
+    "library": 0,
+    "search": 0,
+    "roster": 0,
+    "account": 0,
+    "viewer": 0,
+    "consoleErrors": 1
+  },
+  "ipad-landscape": {
+    "landing": 8,
+    "login": 8,
+    "library": 12,
+    "search": 2,
+    "roster": 0,
+    "account": 7,
+    "viewer": 1,
+    "consoleErrors": 1
+  },
+  "ipad-portrait": {
+    "landing": 8,
+    "login": 8,
+    "library": 12,
+    "search": 2,
+    "roster": 0,
+    "account": 7,
+    "viewer": 1,
+    "consoleErrors": 1,
+    "assignments": 0
+  },
+  "ipad-mini-portrait": {
+    "landing": 8,
+    "login": 8,
+    "library": 11,
+    "search": 2,
+    "roster": 0,
+    "account": 7,
+    "viewer": 1,
+    "consoleErrors": 1
+  },
+  "iphone-14": {
+    "landing": 7,
+    "login": 8,
+    "library": 12,
+    "search": 2,
+    "roster": 0,
+    "account": 7,
+    "viewer": 1,
+    "consoleErrors": 1,
+    "assignments": 0
+  },
+  "iphone-se": {
+    "landing": 7,
+    "login": 8,
+    "library": 11,
+    "search": 2,
+    "roster": 0,
+    "account": 7,
+    "viewer": 1,
+    "consoleErrors": 1
+  },
+  "android-small": {
+    "landing": 7,
+    "login": 8,
+    "library": 11,
+    "search": 2,
+    "roster": 0,
+    "account": 7,
+    "viewer": 1,
+    "consoleErrors": 1
+  },
+  "iphone-landscape": {
+    "landing": 8,
+    "login": 8,
+    "library": 12,
+    "search": 2,
+    "roster": 0,
+    "account": 7,
+    "viewer": 1,
+    "consoleErrors": 1
+  }
+}
