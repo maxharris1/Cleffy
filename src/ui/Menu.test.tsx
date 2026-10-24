@@ -285,6 +285,34 @@ describe('Menu, when its chunk will not load', () => {
         await userEvent.keyboard('{Escape}');
         expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     });
+
+    it.each([
+        // A library row's trigger near the bottom-right corner: the notice flips above it.
+        ['flips above a trigger at the bottom of the screen', { top: 720, bottom: 752 }, 768, 656],
+        // A screen too short for it either way: kept inside the gutter.
+        ['stays on a screen too short for it below or above', { top: 40, bottom: 72 }, 120, 44],
+        // Room below: under the trigger, where the menu would have opened.
+        ['sits under a trigger with room below', { top: 100, bottom: 132 }, 768, 136],
+    ])('%s', async (_name, { top, bottom }, innerHeight, expectedTop) => {
+        const modules = await deferredModules();
+        const { imports } = modules;
+        window.sessionStorage.setItem('cleffy:stale-chunk-reload-at', String(Date.now() - 2_000));
+        vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(1024);
+        vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(innerHeight);
+        const noticeHeight = 60;
+        vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+            return this.getAttribute('role') === 'alert'
+                ? new DOMRect(0, 0, 240, noticeHeight)
+                : new DOMRect(1000, top, 24, bottom - top);
+        });
+        renderMenu(modules);
+        fireEvent.click(screen.getByRole('button', { name: 'Score actions' }));
+        await act(async () => imports[0]?.reject(missingChunk()));
+        const notice = await screen.findByRole('alert');
+        expect(notice.style.top).toBe(`${expectedTop}px`);
+        // Its end edge would be on the trigger's (1024), but it keeps the 16px gutter.
+        expect(notice.style.left).toBe(`${1024 - 16 - 240}px`);
+    });
 });
 
 describe('Menu, opened from the keyboard before its chunk is in', () => {
@@ -347,6 +375,25 @@ describe('Menu, opened from the keyboard before its chunk is in', () => {
         act(() => screen.getByRole('button', { name: 'Score actions' }).focus());
         await user.keyboard(keys);
         await waitFor(() => expect(focusedItem()).toBe(item));
+    });
+
+    it.each([
+        ['Space', 'Space'],
+        ['Enter', 'Enter'],
+    ])('opens on %s when the chunk comes in while the key is still down', async (_name, code) => {
+        const user = userEvent.setup();
+        const { standIn, imports } = await renderMenu();
+        await user.keyboard(`[${code}>]`);
+        // The import resolves before the key comes up: the stand-in is swapped out
+        // mid-key, and the menu opens on the key it got, not on a click to come.
+        await act(async () => imports[0]?.resolve());
+        expect(await screen.findByRole('menu')).toBeInTheDocument();
+        await waitFor(() => expect(focusedItem()).toBe('Rename'));
+        expect(screen.getByRole('button', { name: 'Score actions' })).not.toBe(standIn);
+        // Letting go neither closes it nor picks the item it landed on.
+        await user.keyboard(`[/${code}]`);
+        expect(screen.getByRole('menu')).toBeInTheDocument();
+        expect(focusedItem()).toBe('Rename');
     });
 
     it('asks a controlled menu to open on an early ArrowDown, once the chunk is in', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -40,8 +40,9 @@ export interface MenuProps {
  */
 const PRESS_SETTLE_MS = 500;
 
-/** The load-failure notice's width, and the page gutter it keeps from the screen edges (px). */
+/** The load-failure notice's width, its gap from the trigger, and the page gutter it keeps from the screen edges (px). */
 const NOTICE_WIDTH = 240;
+const NOTICE_OFFSET = 4;
 const GUTTER = 16;
 
 /**
@@ -71,10 +72,27 @@ const MenuLoadFailed = ({ anchor, onDismiss }: { anchor: DOMRect; onDismiss: () 
     // trigger's, kept off the screen edges by the page gutter (as the menu is).
     const width = Math.min(NOTICE_WIDTH, window.innerWidth - 2 * GUTTER);
     const left = Math.max(GUTTER, Math.min(anchor.right - width, window.innerWidth - GUTTER - width));
+    const notice = useRef<HTMLParagraphElement | null>(null);
+    const [top, setTop] = useState(anchor.bottom + NOTICE_OFFSET);
+    useLayoutEffect(() => {
+        // Measured before it paints: one that would run off the bottom of the
+        // screen (a trigger low on the page) flips above the trigger, as the
+        // menu does, and one that fits neither way is kept inside the gutter.
+        const height = notice.current?.getBoundingClientRect().height ?? 0;
+        const below = anchor.bottom + NOTICE_OFFSET;
+        const above = anchor.top - NOTICE_OFFSET - height;
+        const bottomEdge = window.innerHeight - GUTTER;
+        if (below + height > bottomEdge && above >= GUTTER) {
+            setTop(above);
+        } else {
+            setTop(Math.max(GUTTER, Math.min(below, bottomEdge - height)));
+        }
+    }, [anchor]);
     return createPortal(
         <p
+            ref={notice}
             role="alert"
-            style={{ top: anchor.bottom + 4, left, width }}
+            style={{ top, left, width }}
             className="fixed z-50 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 shadow-lg"
         >
             {navigator.onLine === false
@@ -115,8 +133,6 @@ export const Menu = (props: MenuProps) => {
     /** Where the stand-in was when an open failed to load the menu; null when it has not. */
     const [failedAt, setFailedAt] = useState<DOMRect | null>(null);
     const standIn = useRef<HTMLButtonElement | null>(null);
-    /** Enter or Space is down on the stand-in: the click that follows is the keyboard's. */
-    const keyPress = useRef(false);
     const settle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     useEffect(() => () => clearTimeout(settle.current), []);
     const dismissFailure = useCallback(() => setFailedAt(null), []);
@@ -180,21 +196,24 @@ export const Menu = (props: MenuProps) => {
                     setFocused(true);
                     menuBase.prefetch();
                 }}
-                onBlur={() => {
-                    setFocused(false);
-                    keyPress.current = false;
-                }}
+                onBlur={() => setFocused(false)}
                 onKeyDown={(event) => {
                     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
                         // As Base UI's trigger does: the arrow opens the menu, not scrolls the page.
                         event.preventDefault();
                         openOnKey(event.key);
                     } else if (event.key === 'Enter' || event.key === ' ') {
-                        keyPress.current = true;
+                        // Enter and Space land on the first item, as ArrowDown does. The open
+                        // is taken on the key, not on the click the button would fire for it:
+                        // Space's click comes on keyup, and the chunk may be in by then, with
+                        // this button swapped out from under the key. Cancel that click.
+                        event.preventDefault();
+                        if (!event.repeat) {
+                            openOnKey('ArrowDown');
+                        }
                     }
                 }}
                 onPointerDown={(event) => {
-                    keyPress.current = false;
                     if (event.button === 0) {
                         clearTimeout(settle.current);
                         setPressing(true);
@@ -209,15 +228,7 @@ export const Menu = (props: MenuProps) => {
                     clearTimeout(settle.current);
                     setPressing(false);
                 }}
-                onClick={() => {
-                    if (keyPress.current) {
-                        keyPress.current = false;
-                        // Enter and Space land on the first item, as ArrowDown does.
-                        openOnKey('ArrowDown');
-                    } else {
-                        openWhenLoaded();
-                    }
-                }}
+                onClick={openWhenLoaded}
             >
                 {triggerContent}
             </button>
