@@ -48,6 +48,7 @@ import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
 import { features } from '@/lib/features';
+import { prefersReducedMotion } from '@/lib/motion';
 import { getSupabase } from '@/lib/supabase';
 import { peerColor } from '@/lib/colors';
 import { AnnotationStore, settleEdit } from '@/sync/annotationStore';
@@ -77,6 +78,12 @@ import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, CoverPageIcon, ZoomInI
 const FingeringFlow = lazy(() =>
     import('@/features/fingering/FingeringFlow').then((m) => ({ default: m.FingeringFlow })),
 );
+
+/**
+ * Glide (ms) that takes the score up into the room a dismissed or shrunk
+ * notice leaves: short enough to read as the score settling, not scrolling.
+ */
+const SETTLE_GLIDE_MS = 180;
 
 /** Delay before re-rendering page bitmaps at a new zoom level (ms). */
 const RENDER_SETTLE_MS = 200;
@@ -309,12 +316,94 @@ export const PdfViewport = ({
         },
         [applyObscured],
     );
-    // Only the edge moves: the view stays where it is when a notice comes or
-    // goes, and the next follow step or page turn lands clear of the stack.
+    const gestureRef = useRef<GestureController | null>(null);
+    /**
+     * How far above the top bound a pan may keep the view while the bound
+     * tightened under it (a notice went away mid-gesture): never further out
+     * than it already was, so nothing jumps under the finger. Null otherwise.
+     */
+    const slackTopRef = useRef<number | null>(null);
+    const settleGlideRef = useRef<number | null>(null);
+    /**
+     * Bring a view the scroll bounds no longer allow back inside them — the
+     * room a dismissed notice leaves at the top is not left blank until the
+     * next touch. Glides (jumps under reduced motion), gives way to any other
+     * move of the view, and waits for a pan, pinch or stroke under way to end.
+     */
+    const settleIntoBounds = useCallback(() => {
+        if (settleGlideRef.current !== null) {
+            cancelAnimationFrame(settleGlideRef.current);
+            settleGlideRef.current = null;
+        }
+        const { width, height } = viewportSizeRef.current;
+        if (!didFitRef.current || width === 0 || height === 0) {
+            return;
+        }
+        const { view: from, setView } = useViewerStore.getState();
+        const target = clampScroll(from, layoutRef.current, width, height, obscuredRef.current);
+        if (Math.abs(target.scrollY - from.scrollY) < 0.5 && Math.abs(target.scrollX - from.scrollX) < 0.5) {
+            slackTopRef.current = null;
+            return;
+        }
+        if (gestureRef.current?.pointerActive) {
+            // Settles once the last pointer lifts (below).
+            slackTopRef.current ??= from.scrollY;
+            return;
+        }
+        slackTopRef.current = null;
+        if (prefersReducedMotion()) {
+            setView(target);
+            return;
+        }
+        const startedAt = performance.now();
+        let last = from;
+        const step = () => {
+            const live = useViewerStore.getState().view;
+            if (live !== last) {
+                // A pan, turn or follow moved the view meanwhile: it already clamps.
+                settleGlideRef.current = null;
+                return;
+            }
+            const t = Math.min(1, (performance.now() - startedAt) / SETTLE_GLIDE_MS);
+            const ease = 1 - Math.pow(1 - t, 3);
+            last =
+                t >= 1
+                    ? target
+                    : {
+                          scale: from.scale,
+                          scrollX: from.scrollX + (target.scrollX - from.scrollX) * ease,
+                          scrollY: from.scrollY + (target.scrollY - from.scrollY) * ease,
+                      };
+            setView(last);
+            settleGlideRef.current = t >= 1 ? null : requestAnimationFrame(step);
+        };
+        settleGlideRef.current = requestAnimationFrame(step);
+    }, []);
+    useEffect(() => {
+        // After the controller has seen the pointer go (it listens on the score).
+        const onPointerEnd = () => {
+            if (slackTopRef.current !== null) {
+                settleIntoBounds();
+            }
+        };
+        window.addEventListener('pointerup', onPointerEnd);
+        window.addEventListener('pointercancel', onPointerEnd);
+        return () => {
+            window.removeEventListener('pointerup', onPointerEnd);
+            window.removeEventListener('pointercancel', onPointerEnd);
+            if (settleGlideRef.current !== null) {
+                cancelAnimationFrame(settleGlideRef.current);
+            }
+        };
+    }, [settleIntoBounds]);
+    // A notice coming moves only the edge: the view stays where it is, and the
+    // next follow step or page turn lands clear of the stack. One going (or
+    // shrinking) frees the room it took, and a view resting in it settles up.
     useLayoutEffect(() => {
         noticeInsetRef.current = Math.max(0, noticeInset);
         applyObscured();
-    }, [noticeInset, applyObscured]);
+        settleIntoBounds();
+    }, [noticeInset, applyObscured, settleIntoBounds]);
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
     // These live in state, not refs: the overlay divs only exist once the PDF
@@ -635,14 +724,24 @@ export const PdfViewport = ({
         });
         inkRef.current = ink;
 
-        const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
-            clampScroll(
+        const clamp = (v: { scale: number; scrollX: number; scrollY: number }) => {
+            const clamped = clampScroll(
                 v,
                 layoutRef.current,
                 viewportSizeRef.current.width,
                 viewportSizeRef.current.height,
                 obscuredRef.current,
             );
+            const slack = slackTopRef.current;
+            if (slack === null || v.scrollY >= clamped.scrollY) {
+                return clamped;
+            }
+            // Above a top bound that tightened mid-gesture: free to move back
+            // in, never further out. The rest settles when the gesture ends.
+            const scrollY = Math.max(slack, v.scrollY);
+            slackTopRef.current = scrollY;
+            return { ...clamped, scrollY };
+        };
 
         const controller = new GestureController(el, {
             onPan: (dx, dy) => {
@@ -705,6 +804,7 @@ export const PdfViewport = ({
             },
         });
         controller.setInkDelegate(ink.delegate);
+        gestureRef.current = controller;
 
         // Cloud documents additionally get the sync engine + realtime channel,
         // wired to the same store and ink controller (plan §realtime).
@@ -773,6 +873,7 @@ export const PdfViewport = ({
             channelRef.current = null;
             channel?.stop();
             engine?.stop();
+            gestureRef.current = null;
             controller.destroy();
             ink.destroy();
             inkRef.current = null;

@@ -137,6 +137,11 @@ export class GestureController {
         this.inkDelegate = delegate;
     }
 
+    /** A finger, pen or mouse button is down on the score: a pan, pinch or stroke is under way. */
+    get pointerActive(): boolean {
+        return this.pointers.size > 0 || this.inkPointerId !== null;
+    }
+
     private toLocal(e: { clientX: number; clientY: number }): { x: number; y: number } {
         const rect = this.el.getBoundingClientRect();
         return { x: e.clientX - rect.left, y: e.clientY - rect.top };

@@ -252,6 +252,15 @@ const ViewerUnderNotices = ({ rejected = true }: { rejected?: boolean }) => {
 /** How far down the stack reaches with `cards` notices up (56 + cards×52 + gaps). */
 const stackBottomPx = (cards: number) => REGION_TOP_PX + cards * NOTICE_PX + (cards - 1) * NOTICE_GAP_PX;
 
+/** The region measures itself on resize, which jsdom never reports on its own. */
+const reportResizes = () => {
+    act(() => {
+        for (const callback of [...resizeCallbacks]) {
+            callback();
+        }
+    });
+};
+
 const view = () => useViewerStore.getState().view;
 
 describe('PdfViewport page turns under a tall notice stack', () => {
@@ -380,5 +389,84 @@ describe('PdfViewport zoomed out under a tall notice stack', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
         expect(view().scrollY).toBe(-stackBottomPx(3));
         expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+    });
+});
+
+describe('PdfViewport when a notice goes away', () => {
+    const PHONE = { width: 390, height: 664 };
+
+    const dismiss = () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+        expect(screen.getAllByRole('status')).toHaveLength(2);
+        reportResizes();
+    };
+
+    const openUnderStack = async () => {
+        viewport = PHONE;
+        render(<ViewerUnderNotices />);
+        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+    };
+
+    it('settles the score up into the room it leaves at once under reduced motion', async () => {
+        vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), media: query }));
+        await openUnderStack();
+        dismiss();
+        expect(view().scrollY).toBe(-stackBottomPx(2));
+    });
+
+    it('glides up into the room it leaves', async () => {
+        const frames: FrameRequestCallback[] = [];
+        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+        vi.stubGlobal('cancelAnimationFrame', () => {});
+        let now = 0;
+        vi.spyOn(performance, 'now').mockImplementation(() => now);
+        const flushFrames = () =>
+            act(() => {
+                for (const callback of frames.splice(0, frames.length)) {
+                    callback(now);
+                }
+            });
+
+        await openUnderStack();
+        dismiss();
+        flushFrames();
+        now += 90;
+        flushFrames();
+        const midway = view().scrollY;
+        expect(midway).toBeGreaterThan(-stackBottomPx(3));
+        expect(midway).toBeLessThan(-stackBottomPx(2));
+        now += 1000;
+        flushFrames();
+        expect(view().scrollY).toBe(-stackBottomPx(2));
+        expect(frames).toHaveLength(0);
+    });
+
+    it('does not move the score under a finger mid-pan, and settles when it lifts', async () => {
+        vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), media: query }));
+        await openUnderStack();
+        const surface = document.querySelector('.ink-surface')!;
+        const touch = (type: string, y: number) =>
+            surface.dispatchEvent(
+                new PointerEvent(type, { pointerId: 1, pointerType: 'touch', clientX: 200, clientY: y, bubbles: true }),
+            );
+        touch('pointerdown', 300);
+        dismiss();
+        expect(view().scrollY).toBe(-stackBottomPx(3));
+        // Dragging further down cannot take it past where it was, nor snap it up.
+        act(() => touch('pointermove', 310));
+        expect(view().scrollY).toBe(-stackBottomPx(3));
+        // Dragging back up moves it with the finger.
+        act(() => touch('pointermove', 300));
+        expect(view().scrollY).toBe(-stackBottomPx(3) + 10);
+        act(() => touch('pointerup', 300));
+        expect(view().scrollY).toBe(-stackBottomPx(2));
+    });
+
+    it('leaves a view already clear of the room alone', async () => {
+        vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), media: query }));
+        await openUnderStack();
+        act(() => useViewerStore.getState().setView({ ...view(), scrollY: 300 }));
+        dismiss();
+        expect(view().scrollY).toBe(300);
     });
 });
