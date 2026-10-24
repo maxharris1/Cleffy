@@ -7,8 +7,12 @@
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'dangerGhost';
 export type ButtonSize = 'md' | 'sm';
 
+/*
+ * Pressed buttons give a little (scale .97 over --duration-press): feedback
+ * the hand feels before the result arrives. Disabled ones do not move.
+ */
 const BUTTON_BASE =
-    'inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-colors disabled:cursor-default disabled:opacity-50';
+    'inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50 disabled:active:scale-100';
 
 const BUTTON_SIZE_CLASSES: Record<ButtonSize, string> = {
     md: 'rounded-xl px-5 py-3',

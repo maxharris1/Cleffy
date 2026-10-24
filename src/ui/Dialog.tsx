@@ -93,7 +93,7 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
     return (
         <div
             data-ui-overlay
-            className={`fixed inset-0 z-40 flex justify-center bg-scrim p-4 ${sheet ? 'items-end sm:items-center' : 'items-center'}`}
+            className={`ui-scrim-fade fixed inset-0 z-40 flex justify-center bg-scrim p-4 ${sheet ? 'items-end sm:items-center' : 'items-center'}`}
             onClick={onClose}
         >
             <div
@@ -103,7 +103,7 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
                 aria-label={label}
                 tabIndex={-1}
                 onClick={(event) => event.stopPropagation()}
-                className={`w-full max-w-md overscroll-contain rounded-2xl border border-stone-200 bg-white p-5 shadow-xl outline-none ${
+                className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} w-full max-w-md overscroll-contain rounded-2xl border border-stone-200 bg-white p-5 shadow-xl outline-none ${
                     sheet
                         ? 'max-h-[80vh] overflow-y-auto overflow-x-hidden pb-[max(1.25rem,var(--safe-bottom))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
                         : // Fits any viewport (the scrim's p-4 is the 2rem) and scrolls inside, so a

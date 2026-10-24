@@ -131,7 +131,7 @@ export const FingeringDiagramPanel = ({
             data-ui-overlay
             className="pointer-events-none absolute inset-x-0 bottom-[calc(4.5rem+var(--safe-bottom))] z-30 flex justify-center px-2 sm:bottom-6"
         >
-            <div className="chrome-glass pointer-events-auto w-full max-w-xl rounded-2xl border border-stone-200 bg-white/95 p-3 shadow-xl backdrop-blur">
+            <div className="chrome-glass pointer-events-auto w-full max-w-xl rounded-2xl border border-stone-200 bg-white/95 p-3 shadow-xl">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-semibold text-stone-800">Fingering — p. {region.page + 1}</h3>
                     <div className="flex items-center gap-1">

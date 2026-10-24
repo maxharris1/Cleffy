@@ -42,6 +42,7 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
             score,
             bpm: initialBpm,
             onStatus: (status) => useViewerStore.getState().setPlaybackStatus(status),
+            onPositionJump: () => useViewerStore.getState().notePlayheadJump(),
             onWarning: (code) => setWarning(code),
         });
         engineRef.current = engine;

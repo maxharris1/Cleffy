@@ -371,7 +371,7 @@ export const ShareExportMenu = ({
             {open ? (
                 <div
                     ref={menuRef}
-                    className={`absolute right-0 z-30 mt-1 max-w-[calc(100vw-1.5rem)] rounded-xl border border-stone-200 bg-white py-1 shadow-lg ${
+                    className={`ui-menu-pop absolute right-0 z-30 mt-1 max-w-[calc(100vw-1.5rem)] rounded-xl border border-stone-200 bg-white py-1 shadow-lg ${
                         wide ? 'w-80' : 'w-64'
                     }`}
                 >

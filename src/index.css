@@ -239,6 +239,20 @@ body {
     animation: landing-fade-in 0.6s var(--ease-out) backwards;
 }
 
+/* Auth, join and error frames: there and settled within 300ms — someone
+   signing in is waiting for the form, not watching it arrive. */
+.brand-enter {
+    animation: landing-fade-in 0.26s var(--ease-out) backwards;
+}
+
+.brand-rule {
+    width: 3rem;
+    height: 2px;
+    margin: 1.25rem auto 0;
+    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+    animation: landing-rule-in 0.24s var(--ease-out) 0.04s backwards;
+}
+
 .landing-brand {
     color: var(--color-ink);
     /* Didone displays want near-neutral tracking; the old serif ran -0.03em. */
@@ -262,10 +276,11 @@ body {
 
 .landing-cta {
     background-color: var(--color-accent);
+    /* The shadow is not in the list: it changes with the hover, but animating
+       a box-shadow repaints every frame for an effect nobody watches. */
     transition:
-        background-color 0.15s ease,
-        transform 0.15s ease,
-        box-shadow 0.15s ease;
+        background-color var(--duration-press) ease,
+        transform var(--duration-press) var(--ease-out);
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -277,7 +292,7 @@ body {
 }
 
 .landing-cta:active:not(:disabled) {
-    transform: translateY(0);
+    transform: scale(0.97);
     box-shadow: none;
 }
 
@@ -302,7 +317,7 @@ body {
 
 .hero-chip {
     opacity: 0;
-    transform: scale(0.6);
+    transform: scale(0.9);
 }
 
 :where(.is-inview) .hero-chip {
@@ -319,6 +334,59 @@ body {
     to {
         opacity: 1;
         transform: scale(1);
+    }
+}
+
+/*
+ * Dialogs and menus appear from where they came from: a quick fade plus a
+ * small scale up from 0.96. Menus grow out of their trigger
+ * (--transform-origin, which Base UI sets from the anchor; top-right, the
+ * usual trigger corner, otherwise). A phone sheet rises from the bottom edge
+ * on the drawer curve instead. Nothing animates on the way out: a dismissed
+ * thing should be gone.
+ */
+.ui-dialog-pop {
+    animation: ui-pop-in var(--duration-dialog) var(--ease-out);
+}
+
+.ui-menu-pop {
+    transform-origin: var(--transform-origin, top right);
+    animation: ui-pop-in var(--duration-menu) var(--ease-out);
+}
+
+.ui-scrim-fade {
+    animation: ui-fade-in var(--duration-dialog) var(--ease-out);
+}
+
+@media (max-width: 39.99rem) {
+    .ui-sheet-pop {
+        animation: ui-sheet-in var(--duration-enter) var(--ease-drawer);
+    }
+}
+
+@media (min-width: 40rem) {
+    .ui-sheet-pop {
+        animation: ui-pop-in var(--duration-dialog) var(--ease-out);
+    }
+}
+
+@keyframes ui-pop-in {
+    from {
+        opacity: 0;
+        transform: scale(0.96);
+    }
+}
+
+@keyframes ui-fade-in {
+    from {
+        opacity: 0;
+    }
+}
+
+@keyframes ui-sheet-in {
+    from {
+        transform: translateY(24px);
+        opacity: 0;
     }
 }
 
@@ -344,21 +412,17 @@ body {
     }
 }
 
-/* Library: list entrance + empty-state presence. */
-.library-layout {
-    animation: landing-fade-in 0.5s var(--ease-out) backwards;
-}
-
-.library-shell {
-    animation: landing-fade-in 0.45s var(--ease-out) 0.04s backwards;
-}
-
+/*
+ * Library: rows enter once per session (useEntranceDelay), short and close.
+ * The page shell itself does not animate — it is the frame every visit
+ * returns to, and a frame that fades in on each navigation reads as loading.
+ */
 .library-list-item {
-    animation: library-row-in 0.4s var(--ease-out) backwards;
+    animation: library-row-in var(--duration-enter) var(--ease-out) backwards;
 }
 
 .library-empty {
-    animation: landing-fade-in 0.55s var(--ease-out) 0.08s backwards;
+    animation: library-row-in var(--duration-enter) var(--ease-out) backwards;
 }
 
 /*
@@ -416,9 +480,10 @@ body {
     outline-offset: 2px;
 }
 
-/* Indeterminate progress: a sweeping segment for work with no byte count. */
+/* Indeterminate progress: a sweeping segment for work with no byte count.
+   Linear: a loop that eases in and out reads as stalling at each end. */
 .progress-indeterminate {
-    animation: progress-sweep 1.2s ease-in-out infinite;
+    animation: progress-sweep 1.2s linear infinite;
 }
 
 @keyframes progress-breathe {
@@ -462,7 +527,7 @@ body {
 
 /* Shelf cards: the same entrance as list rows, staggered by an inline delay. */
 .library-card {
-    animation: library-row-in 0.4s var(--ease-out) backwards;
+    animation: library-row-in var(--duration-enter) var(--ease-out) backwards;
 }
 
 /* Rows that mounted below the first screens, or arrived with a "load more"
@@ -515,9 +580,12 @@ body {
    out-specify it — a utility and its motion-reduce variant have equal
    specificity, and which one wins would come down to Tailwind's output order. */
 .library-card-cover {
-    transition:
-        transform 0.2s var(--ease-out),
-        box-shadow 0.2s var(--ease-out);
+    transition: transform var(--duration-enter) var(--ease-out);
+}
+
+/* A card pressed (touch or mouse) gives a little, like paper under a finger. */
+.library-card:active .library-card-cover {
+    transform: scale(0.98);
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -541,7 +609,7 @@ body {
 @keyframes library-row-in {
     from {
         opacity: 0;
-        transform: translateY(6px);
+        transform: translateY(4px);
     }
     to {
         opacity: 1;
@@ -604,8 +672,8 @@ body {
     .landing-hero,
     .landing-rule,
     .landing-demo-frame,
-    .library-layout,
-    .library-shell,
+    .brand-enter,
+    .brand-rule,
     .library-list-item,
     .library-empty,
     .imslp-panel-view {
@@ -617,6 +685,17 @@ body {
     .progress-indeterminate {
         width: 100%;
         animation: progress-breathe 1.6s ease-in-out infinite alternate;
+    }
+
+    /* Dialogs and menus fade in place. */
+    .ui-dialog-pop,
+    .ui-menu-pop,
+    .ui-sheet-pop {
+        animation-name: ui-fade-in;
+    }
+
+    .library-card:active .library-card-cover {
+        transform: none;
     }
 
     /* The hero demo settles to its finished, fully-annotated state. */

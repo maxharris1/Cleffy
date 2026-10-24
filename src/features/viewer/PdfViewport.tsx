@@ -8,6 +8,7 @@ import {
     useRef,
     useState,
     useSyncExternalStore,
+    type ComponentProps,
 } from 'react';
 
 import { LoopRangeOverlay } from '@/features/playback/LoopRangeOverlay';
@@ -78,6 +79,18 @@ const FingeringFlow = lazy(() =>
 
 /** Delay before re-rendering page bitmaps at a new zoom level (ms). */
 const RENDER_SETTLE_MS = 200;
+
+/**
+ * Quiet time (ms) after the last pan/zoom/follow step before React's copy of
+ * the view catches up. Until then the transform is written straight to the
+ * DOM from the store, and React only renders when the set of mounted pages
+ * changes.
+ */
+const VIEW_SETTLE_MS = 120;
+
+/** The page wrapper's transform: live scroll, plus the CSS stretch while bitmaps lag the zoom. */
+const wrapperTransform = (view: ViewState, renderScale: number): string =>
+    `translate(${-view.scrollX}px, ${-view.scrollY}px) scale(${view.scale / renderScale})`;
 
 /** Default text-note size as a fraction of page width. */
 const DEFAULT_TEXT_SIZE = 0.018;
@@ -187,7 +200,16 @@ export interface PdfViewportProps {
  */
 export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, authorId, sync }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
-    const view = useViewerStore((s) => s.view);
+    /**
+     * React's copy of the view: settled, not live. Pan, pinch, wheel and the
+     * follow glide write the store every frame; the subscription below puts
+     * each step on the page wrapper's transform directly and re-renders only
+     * when the mounted pages change or the motion stops (VIEW_SETTLE_MS).
+     * Imperative code reads the live view from the store, as before.
+     */
+    const [view, setSettledView] = useState(() => useViewerStore.getState().view);
+    const wrapperRef = useRef<HTMLDivElement | null>(null);
+    const mountedKeyRef = useRef('');
     const preferredColumns = useViewerStore((s) => s.pageColumns);
     const spreadCover = useViewerStore((s) => s.spreadCover);
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -486,6 +508,45 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
     /** Hold the first page back as a cover, so spreads pair 2|3 as printed music does. */
     const toggleSpreadCover = () => relayout(pageColumns, !spreadCover);
 
+    // Live view → DOM. Subscribed in a layout effect, before the first fit
+    // (a plain effect) writes the store, so no step is missed.
+    useLayoutEffect(() => {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const settle = () => {
+            if (timer !== null) {
+                clearTimeout(timer);
+                timer = null;
+            }
+            setSettledView(useViewerStore.getState().view);
+        };
+        const unsubscribe = useViewerStore.subscribe((state, prev) => {
+            if (state.view === prev.view) {
+                return;
+            }
+            const wrapper = wrapperRef.current;
+            if (wrapper) {
+                // The bitmaps' scale is read off the element React last rendered.
+                wrapper.style.transform = wrapperTransform(state.view, Number(wrapper.dataset.renderScale) || 1);
+            }
+            const { width, height } = viewportSizeRef.current;
+            if (mountedPageIndices(state.view, layoutRef.current, width, height).join(',') !== mountedKeyRef.current) {
+                // A page is scrolling into (or out of) the mounted window: render now.
+                settle();
+                return;
+            }
+            if (timer !== null) {
+                clearTimeout(timer);
+            }
+            timer = setTimeout(settle, VIEW_SETTLE_MS);
+        });
+        return () => {
+            unsubscribe();
+            if (timer !== null) {
+                clearTimeout(timer);
+            }
+        };
+    }, []);
+
     // Crisp bitmap re-render shortly after zoom settles (canvases CSS-stretch meanwhile).
     useEffect(() => {
         if (view.scale === renderScale) {
@@ -731,6 +792,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         };
     }, [playbackScore, playbackGetEngine, playheadLineEl, measureHighlightEl]);
 
+    // The playhead sleeps while paused; new page geometry is drawn on wake.
+    useEffect(() => {
+        playheadControllerRef.current?.wake();
+    }, [layout, renderScale]);
+
     // Presence: report the top visible page (debounced against scroll churn).
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -832,9 +898,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
         return dpr * bitmapBudgetFactor(layout, pageColumns, renderScale, dpr, viewportSize.width, viewportSize.height);
     }, [layout, pageColumns, renderScale, viewportSize.width, viewportSize.height]);
 
+    const mounted = mountedPageIndices(view, layout, viewportSize.width, viewportSize.height);
+    const mountedKey = mounted.join(',');
+    // What the live-view subscription compares against to decide it must render.
+    useLayoutEffect(() => {
+        mountedKeyRef.current = mountedKey;
+    }, [mountedKey]);
     const pages = [];
     if (doc) {
-        for (const i of mountedPageIndices(view, layout, viewportSize.width, viewportSize.height)) {
+        for (const i of mounted) {
             const pageLayout = layout.layouts[i];
             if (pageLayout) {
                 pages.push(
@@ -854,7 +926,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
 
     // Positions use the live scale; bitmaps use the settled renderScale. While they
     // differ, canvases are CSS-stretched by wrapping pages in a scaling transform.
-    const previewFactor = view.scale / renderScale;
+    // Rendered from the live view, so a render mid-gesture never steps it back.
+    const liveTransform = wrapperTransform(useViewerStore.getState().view, renderScale);
     const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
     const fingeringLayout = fingeringSel ? layout.layouts[fingeringSel.pageIndex] : undefined;
 
@@ -875,9 +948,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
             ) : (
                 <>
                     <div
+                        ref={wrapperRef}
+                        data-render-scale={renderScale}
                         className="absolute left-0 top-0"
                         style={{
-                            transform: `translate(${-view.scrollX}px, ${-view.scrollY}px) scale(${previewFactor})`,
+                            transform: liveTransform,
                             transformOrigin: '0 0',
                             width: layout.contentWidth * renderScale,
                             height: layout.contentHeight * renderScale,
@@ -923,10 +998,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
                     {effectiveReadOnly ? null : <Toolbar store={annotationStore} onObscuredChange={reportObscured} />}
                     {features.fingering && readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
                     {!effectiveReadOnly && textIntent && textIntentLayout ? (
-                        <TextEditorOverlay
+                        <LiveTextEditorOverlay
                             intent={textIntent}
                             layout={textIntentLayout}
-                            view={view}
                             store={annotationStore}
                             viewportWidth={viewportSize.width}
                             viewportHeight={viewportSize.height}
@@ -979,6 +1053,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, a
 };
 
 /**
+ * The text editor follows the live view itself: it has to move with the page
+ * wrapper during a pan, which PdfViewport no longer renders for.
+ */
+const LiveTextEditorOverlay = (props: Omit<ComponentProps<typeof TextEditorOverlay>, 'view'>) => {
+    const view = useViewerStore((s) => s.view);
+    return <TextEditorOverlay {...props} view={view} />;
+};
+
+/**
  * View-only members get no Toolbar, but the fingering diagram is FOR students —
  * this pill is their way into the (read-only, never-writes) selection tool.
  */
@@ -995,7 +1078,7 @@ const ReadOnlyFingeringToggle = () => {
                 aria-pressed={active}
                 title={active ? 'Stop selecting' : 'Fingering — drag over a chord or phrase'}
                 onClick={() => useViewerStore.getState().setTool(active ? 'pan' : 'fingering')}
-                className={`pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg backdrop-blur transition-colors ${
+                className={`chrome-glass pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg ${
                     active
                         ? 'border-accent bg-accent-soft text-accent'
                         : 'border-stone-200 bg-white/95 text-stone-600 hover:bg-white'
@@ -1067,10 +1150,14 @@ const Pager = ({
     );
 };
 
+/*
+ * Pager and zoom keys: a press dips the key (scale .97) as well as greying it.
+ * The aria-pressed toggles switch colour at once — a mode change, not a fade.
+ */
 const roundControlClassName =
-    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition-colors active:bg-stone-100';
+    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition-[scale] duration-(--duration-press) ease-out active:scale-[0.97] active:bg-stone-100';
 
-const pagerButtonClassName = `${roundControlClassName} disabled:opacity-40 disabled:active:bg-white`;
+const pagerButtonClassName = `${roundControlClassName} disabled:opacity-40 disabled:active:scale-100 disabled:active:bg-white`;
 
 const ZoomControls = ({
     onZoomBy,

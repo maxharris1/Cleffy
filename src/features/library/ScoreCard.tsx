@@ -17,12 +17,14 @@ import { TypesetCover } from '@/ui/TypesetCover';
  *
  * Never `hidden` and never conditionally rendered — a keyboard user tabbing the
  * shelf has to reach the star and the menu, and the tests find them by role.
- * Touch has no hover at all, so there they stay visible rather than sitting
- * over the cover as invisible tap targets — and so does any coarse pointer,
- * since hover only counts with a fine one (the hover variant in index.css).
+ * They appear at once, no fade: a control that is still fading in when the
+ * pointer arrives reads as lag. Touch has no hover at all, so there they stay
+ * visible rather than sitting over the cover as invisible tap targets — and
+ * so does any coarse pointer, since hover only counts with a fine one (the
+ * hover variant in index.css).
  */
 const REVEAL =
-    'opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 pointer-coarse:opacity-100';
+    'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 pointer-coarse:opacity-100';
 
 interface ScoreCardProps {
     doc: DocumentRow;
@@ -101,7 +103,7 @@ export const ScoreCard = memo(
                             title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                             onClick={() => actions.toggleFavorite(doc, !isFavorite)}
                             // The pill stays small on touch; an invisible ring takes the hit area to 44px.
-                            className={`chrome-glass relative grid place-items-center rounded-full bg-white/85 p-1.5 backdrop-blur transition-colors hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2 ${
+                            className={`chrome-glass relative grid place-items-center rounded-full bg-white/90 p-1.5 transition-colors hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2 ${
                                 isFavorite ? 'text-amber-500' : 'text-stone-500 hover:text-stone-700'
                             }`}
                         >
@@ -113,7 +115,7 @@ export const ScoreCard = memo(
                         own menu is open — otherwise moving the pointer onto the
                         menu fades out the menu with it. */}
                     <div
-                        className={`chrome-glass absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/85 backdrop-blur has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
+                        className={`chrome-glass absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/90 has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
                     >
                         {isOwner ? (
                             <RowMenu

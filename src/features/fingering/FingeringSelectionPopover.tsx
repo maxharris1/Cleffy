@@ -26,7 +26,7 @@ export const FingeringSelectionPopover = ({
     return (
         <div
             data-ui-overlay
-            className="chrome-glass absolute z-30 flex max-w-[calc(100vw-1rem)] flex-col gap-1 rounded-xl border border-stone-200 bg-white/95 p-1.5 shadow-lg backdrop-blur"
+            className="chrome-glass ui-menu-pop absolute z-30 flex max-w-[calc(100vw-1rem)] flex-col gap-1 rounded-xl border border-stone-200 bg-white/95 p-1.5 shadow-lg"
             style={{ left: anchorX, top: anchorY + 8, transform: 'translateX(-50%)' }}
             role="menu"
             aria-label="Fingering actions"

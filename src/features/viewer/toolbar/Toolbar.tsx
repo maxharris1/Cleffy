@@ -38,7 +38,7 @@ const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
  * (hit-44-y): height only, since on a phone they sit edge to edge.
  */
 const BAR_BUTTON =
-    'flex h-10 min-w-0 max-w-11 flex-1 basis-0 items-center justify-center rounded-xl text-stone-600 transition-colors pointer-coarse:hit-44-y sm:max-w-none sm:flex-none sm:basis-auto';
+    'flex h-10 min-w-0 max-w-11 flex-1 basis-0 items-center justify-center rounded-xl text-stone-600 active:bg-ink/10 pointer-coarse:hit-44-y sm:max-w-none sm:flex-none sm:basis-auto';
 
 const DIVIDER = 'mx-0.5 h-6 w-px shrink-0 bg-stone-200 sm:mx-1';
 
@@ -175,7 +175,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
             aria-label={`${sizeCaption} ${label}`}
             aria-pressed={widthKey === key}
             onClick={() => setWidthKey(key)}
-            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition-colors pointer-coarse:hit-44 ${
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl active:bg-ink/10 pointer-coarse:hit-44 ${
                 widthKey === key ? 'bg-accent-soft' : 'hover:bg-ink/5'
             }`}
         >
@@ -189,7 +189,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
             data-ui-overlay
             className="pointer-events-none absolute inset-x-2 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:inset-x-0 sm:bottom-auto sm:top-3"
         >
-            <div className="chrome-glass pointer-events-auto relative flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg backdrop-blur sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2 lg:pointer-coarse:gap-3">
+            <div className="chrome-glass pointer-events-auto relative flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2 lg:pointer-coarse:gap-3">
                 {TOOLS.map(({ tool: t, label, short, icon }) => (
                     <button
                         key={t}
@@ -247,7 +247,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                                 role="group"
                                 aria-label={styleLabel}
                                 // Above the phone's bottom bar; below the bar docked at the top from sm.
-                                className="chrome-glass absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-lg backdrop-blur sm:bottom-auto sm:top-full sm:mb-0 sm:mt-2 lg:hidden"
+                                className="chrome-glass ui-menu-pop absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-lg [--transform-origin:bottom_center] sm:bottom-auto sm:[--transform-origin:top_center] sm:top-full sm:mb-0 sm:mt-2 lg:hidden"
                             >
                                 {showColors ? (
                                     <>

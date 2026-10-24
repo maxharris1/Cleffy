@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import type { DocumentRow } from '@/types/database';
 
@@ -34,12 +34,29 @@ export interface ScoreActions {
 const ENTRANCE_ROWS = 24;
 
 /**
+ * The entrance plays once per session: the first time the shelf paints.
+ * Coming back to the library from a score, switching tabs or searching shows
+ * the rows already in place — an animation that replays on every visit stops
+ * reading as arrival and starts reading as waiting.
+ */
+let entrancePlayed = false;
+
+/** Tests only: start a fresh "session". */
+export const resetEntranceForTests = (): void => {
+    entrancePlayed = false;
+};
+
+/**
  * The entrance delay for a row first mounted at `index`, or null for none.
  * Read once at mount: a row that later moves up the list (a search narrowing
  * it) must not replay an entrance it already had.
  */
 export const useEntranceDelay = (index: number): number | null => {
-    const [delay] = useState(() => (index < ENTRANCE_ROWS ? Math.min(index, 12) * 30 : null));
+    const [delay] = useState(() => (!entrancePlayed && index < ENTRANCE_ROWS ? Math.min(index, 12) * 30 : null));
+    useEffect(() => {
+        // After the commit, so every row of that first paint still gets its turn.
+        entrancePlayed = true;
+    }, []);
     return delay;
 };
 

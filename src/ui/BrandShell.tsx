@@ -13,9 +13,9 @@ const BRAND_CLASS = 'landing-brand font-display text-3xl font-semibold leading-n
 
 const BrandFrame = ({ brand, title, subtitle, children }: BrandShellProps & { brand: ReactNode }) => (
     <main className="landing-page safe-brand-shell flex min-h-full flex-col items-center justify-center">
-        <div className="landing-hero w-full max-w-sm text-center">
+        <div className="brand-enter w-full max-w-sm text-center">
             {brand}
-            <div className="landing-rule mx-auto" aria-hidden="true" />
+            <div className="brand-rule mx-auto" aria-hidden="true" />
             <h1 className="mt-6 font-display text-2xl font-semibold tracking-tight text-stone-800">{title}</h1>
             {subtitle ? (
                 <p className="mt-2 text-sm leading-relaxed text-stone-600 [overflow-wrap:anywhere]">{subtitle}</p>

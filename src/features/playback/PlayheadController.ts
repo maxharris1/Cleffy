@@ -12,7 +12,10 @@ import type { ScoreData } from '@/types/scoreData';
  * PdfViewport's transformed wrapper (they inherit pan/zoom for free; the
  * wrapper's coordinate space is base units × renderScale). Runs its own rAF
  * loop with change detection — no React re-renders at frame rate; only the
- * measure NUMBER lands in zustand, and only when it changes.
+ * measure NUMBER lands in zustand, and only when it changes. The loop runs
+ * only while something can move: playback, a follow glide, or pages not yet
+ * measured. Paused or idle it sleeps, and wake() — a seek (playheadEpoch), a
+ * status or follow change, new page geometry from PdfViewport — draws again.
  *
  * Auto-follow: when the playhead's system drifts out of the comfortable
  * viewport band, the view glides so the system sits near the top. A user
@@ -91,6 +94,9 @@ export class PlayheadController {
 
     private unsubscribeStore: () => void;
 
+    /** Pages had not been measured on the last draw: keep polling until they are. */
+    private awaitingLayout = false;
+
     constructor(deps: PlayheadDeps) {
         this.deps = deps;
         this.frame = this.frame.bind(this);
@@ -101,7 +107,27 @@ export class PlayheadController {
             if (state.followMode === 'on' && prev.followMode !== 'on') {
                 this.forceFollow = true;
             }
+            if (
+                state.followMode !== prev.followMode ||
+                state.playbackStatus !== prev.playbackStatus ||
+                state.playheadEpoch !== prev.playheadEpoch
+            ) {
+                this.wake();
+            }
         });
+    }
+
+    /** Draw on the next frame, restarting the loop if it is asleep. */
+    wake(): void {
+        if (!this.disposed && this.rafId === null) {
+            this.rafId = requestAnimationFrame(this.frame);
+        }
+    }
+
+    /** Playing, counting in, or loading samples: the tick can move by itself. */
+    private isRunning(): boolean {
+        const status = useViewerStore.getState().playbackStatus;
+        return status === 'playing' || status === 'counting' || status === 'loading';
     }
 
     destroy(): void {
@@ -123,15 +149,19 @@ export class PlayheadController {
     }
 
     private frame(): void {
+        this.rafId = null;
         if (this.disposed) {
             return;
         }
         this.draw();
         this.stepFollowAnimation();
-        this.rafId = requestAnimationFrame(this.frame);
+        if (this.isRunning() || this.anim !== null || this.awaitingLayout) {
+            this.rafId = requestAnimationFrame(this.frame);
+        }
     }
 
     private draw(): void {
+        this.awaitingLayout = false;
         const score = this.deps.getScore();
         const { lineEl, highlightEl } = this.deps;
         if (!score) {
@@ -181,6 +211,7 @@ export class PlayheadController {
             return;
         }
         const layout = layoutNow.layouts[rect.pageIndex];
+        this.awaitingLayout = !layout;
         if (!layout) {
             // Pages have not been measured yet (the controller can outrun the
             // PDF's first layout pass). Drop the memo so the next frame retries

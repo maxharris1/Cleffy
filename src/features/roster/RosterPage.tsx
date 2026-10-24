@@ -5,6 +5,7 @@ import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { LimitReachedError, isLimitReachedError } from '@/features/billing/limitErrors';
 import { countryName } from '@/features/legal/countries';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { useEntranceDelay } from '@/features/library/scoreRow';
 import { AgeAttestationFields } from '@/features/roster/AgeAttestationFields';
 import { StudentCodeCard } from '@/features/roster/StudentCodeCard';
 import {
@@ -811,9 +812,13 @@ const StudentRow = ({
     const count = assignments.length > 0 ? assignments.length : (cachedCount ?? 0);
     /** The badge shows a snapshot count whose rows haven't arrived (yet, or at all). */
     const detailsMissing = assignments.length === 0 && (cachedCount ?? 0) > 0;
+    const entranceDelay = useEntranceDelay(index);
 
     return (
-        <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
+        <li
+            className={`library-list-item${entranceDelay === null ? ' library-card-settled' : ''}`}
+            style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
+        >
             {/* Archived rows dim their content, not the wrapper: opacity on the
                 wrapper would also wash out the ⋮ menu popover inside it. */}
             <div className="group border-b border-stone-300/50 transition-colors hover:border-accent/40">
@@ -1099,7 +1104,7 @@ const RosterRowMenu = ({
             {open ? (
                 <div
                     role="menu"
-                    className="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                    className="ui-menu-pop absolute right-0 z-20 mt-1 w-56 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     {archived ? (
                         <MenuItem label="Restore…" onClick={() => pick(onRestore)} />

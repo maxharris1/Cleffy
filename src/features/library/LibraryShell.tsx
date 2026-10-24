@@ -513,7 +513,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 ) : null}
             </header>
 
-            <div className={`library-layout ${SHELL_CONTAINER} py-8 lg:py-10`}>
+            <div className={`${SHELL_CONTAINER} py-8 lg:py-10`}>
                 <div
                     className="library-shell min-w-0"
                     style={barHeight ? ({ '--shell-bar-height': `${barHeight}px` } as CSSProperties) : undefined}
@@ -690,7 +690,7 @@ const AccountMenu = ({
                 <div
                     role="menu"
                     aria-label="Account"
-                    className="absolute right-0 z-40 mt-2 w-64 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                    className="ui-menu-pop absolute right-0 z-40 mt-2 w-64 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     <div className="px-3 py-2">
                         <p className="truncate text-sm font-medium text-stone-800">{userLabel}</p>

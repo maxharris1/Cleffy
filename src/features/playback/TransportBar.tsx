@@ -739,7 +739,7 @@ const isCompoundMeter = (score: ScoreData): boolean => {
 
 const pillButton = (active: boolean, attention = false): string =>
     [
-        'flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition-colors pointer-coarse:hit-44',
+        'flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] pointer-coarse:hit-44',
         active
             ? 'border-accent bg-accent-soft text-accent'
             : attention
@@ -749,7 +749,7 @@ const pillButton = (active: boolean, attention = false): string =>
 
 const squareButton = (active: boolean): string =>
     [
-        'flex h-8 w-8 items-center justify-center rounded-lg text-stone-600 transition-colors pointer-coarse:hit-44',
+        'flex h-8 w-8 items-center justify-center rounded-lg text-stone-600 transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] pointer-coarse:hit-44',
         active ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5',
     ].join(' ');
 
@@ -760,7 +760,7 @@ const squareButton = (active: boolean): string =>
  */
 const roundButton = (primary: boolean): string =>
     [
-        'flex h-10 w-10 items-center justify-center rounded-full transition-colors disabled:animate-pulse pointer-coarse:hit-44',
+        'flex h-10 w-10 items-center justify-center rounded-full transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] disabled:animate-pulse disabled:active:scale-100 pointer-coarse:hit-44',
         primary
             ? 'bg-accent text-white shadow-sm hover:opacity-90'
             : 'border border-stone-200 text-stone-600 hover:bg-ink/5',
@@ -768,4 +768,4 @@ const roundButton = (primary: boolean): string =>
 
 /** Loop-edge nudges: 24px on a mouse; 32px plus a 44px hit area on touch. */
 const stepperButton =
-    'flex h-6 w-6 items-center justify-center rounded-md text-stone-600 transition-colors hover:bg-ink/10 pointer-coarse:size-8 pointer-coarse:hit-44';
+    'flex h-6 w-6 items-center justify-center rounded-md text-stone-600 transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] hover:bg-ink/10 pointer-coarse:size-8 pointer-coarse:hit-44';

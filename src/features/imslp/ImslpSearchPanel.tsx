@@ -493,6 +493,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 composer={composer ? highlightMatches(composer, tokens) : null}
                 description={hit.snippet || null}
                 disabled={disabled}
+                settled
                 onClick={() => onSelectTitle(hit.title)}
             />
         );
@@ -692,7 +693,10 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
 
             {showResults && results.length > 0 ? (
                 <div
-                    key={`results-${q}-${[...composerIds]}-${[...instrumentIds]}-${[...formIds]}-${[...keyIds]}-${[...eraIds]}`}
+                    // One stable key: the list fades in when results first replace the
+                    // Popular shelf, then updates in place as the query or facets change.
+                    // Keyed on q, every keystroke remounted it and replayed the entrance.
+                    key="results"
                     aria-busy={searching}
                     className={`imslp-panel-view mt-3 transition-opacity ${searching ? 'opacity-60' : ''}`}
                 >

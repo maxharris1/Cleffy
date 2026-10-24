@@ -172,7 +172,7 @@ const MenuPopover = ({
                 <div
                     ref={menuRef}
                     role="menu"
-                    className="absolute right-0 z-20 mt-1 w-48 overflow-y-auto overscroll-contain rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                    className="ui-menu-pop absolute right-0 z-20 mt-1 w-48 overflow-y-auto overscroll-contain rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     {children(pick)}
                 </div>
