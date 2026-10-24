@@ -35,6 +35,7 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { Menu, MenuItem } from '@/ui/Menu';
 import { RosterSkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
@@ -1055,83 +1056,28 @@ const RosterRowMenu = ({
     onArchive: () => void;
     onRestore: () => void;
     onDelete: () => void;
-}) => {
-    const [open, setOpen] = useState(false);
-    const rootRef = useRef<HTMLDivElement | null>(null);
-
-    useEffect(() => {
-        if (!open) {
-            return;
-        }
-        const onPointerDown = (e: PointerEvent) => {
-            if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-                setOpen(false);
-            }
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                setOpen(false);
-            }
-        };
-        window.addEventListener('pointerdown', onPointerDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-            window.removeEventListener('pointerdown', onPointerDown);
-            window.removeEventListener('keydown', onKey);
-        };
-    }, [open]);
-
-    const pick = (action: () => void) => {
-        setOpen(false);
-        action();
-    };
-
-    return (
-        <div ref={rootRef} className="relative">
-            <button
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={open}
-                aria-label="Student actions"
-                disabled={busy}
-                onClick={() => setOpen((v) => !v)}
-                className={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
-                    archived ? 'opacity-60' : ''
-                }`}
-            >
-                <MoreVerticalIcon size={16} />
-            </button>
-            {open ? (
-                <div
-                    role="menu"
-                    className="ui-menu-pop absolute right-0 z-20 mt-1 w-56 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
-                >
-                    {archived ? (
-                        <MenuItem label="Restore…" onClick={() => pick(onRestore)} />
-                    ) : (
-                        <>
-                            <MenuItem label={resetLabel} onClick={() => pick(onReset)} />
-                            <MenuItem label="Archive…" onClick={() => pick(onArchive)} />
-                        </>
-                    )}
-                    <MenuItem label="Delete student…" danger onClick={() => pick(onDelete)} />
-                </div>
-            ) : null}
-        </div>
-    );
-};
-
-const MenuItem = ({ label, danger = false, onClick }: { label: string; danger?: boolean; onClick: () => void }) => (
-    <button
-        type="button"
-        role="menuitem"
-        onClick={onClick}
-        className={`w-full cursor-pointer px-3 py-2 text-left text-sm transition-colors hover:bg-ink/5 ${
-            danger ? 'text-danger' : 'text-stone-800'
+}) => (
+    <Menu
+        label="Student actions"
+        disabled={busy}
+        popupClassName="w-56"
+        triggerContent={<MoreVerticalIcon size={16} />}
+        triggerClassName={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
+            archived ? 'opacity-60' : ''
         }`}
     >
-        {label}
-    </button>
+        {archived ? (
+            <MenuItem onClick={onRestore}>Restore…</MenuItem>
+        ) : (
+            <>
+                <MenuItem onClick={onReset}>{resetLabel}</MenuItem>
+                <MenuItem onClick={onArchive}>Archive…</MenuItem>
+            </>
+        )}
+        <MenuItem danger onClick={onDelete}>
+            Delete student…
+        </MenuItem>
+    </Menu>
 );
 
 /**

@@ -37,7 +37,7 @@ export const ViewerHeader = ({ backTo, backLabel, title, children }: ViewerHeade
             {children ? (
                 <nav
                     aria-label="Score"
-                    className="flex min-w-0 flex-[1_1_100%] flex-wrap items-center justify-start gap-x-0.5 gap-y-1 lg:flex-[0_1_auto] lg:justify-end [&>*]:shrink-0 [&_button]:px-2 lg:[&_button]:px-3.5"
+                    className="flex min-w-0 flex-[1_1_100%] flex-wrap items-center justify-start gap-x-0.5 gap-y-1 lg:flex-[0_1_auto] lg:justify-end [&>*]:shrink-0 [&>button]:px-2 [&>div>button]:px-2 lg:[&>button]:px-3.5 lg:[&>div>button]:px-3.5"
                 >
                     {children}
                 </nav>

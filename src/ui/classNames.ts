@@ -78,3 +78,9 @@ export const fieldLabelClassName = 'block text-xs font-medium uppercase tracking
  */
 export const linkClassName =
     'relative text-sm text-accent underline decoration-accent/30 underline-offset-2 transition-colors hover:text-accent-hover hover:decoration-accent/60 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';
+
+/** One row: 44px tall on touch, highlighted by pointer or keyboard alike. */
+export const menuItemClassName = (danger = false, extra = ''): string =>
+    `flex w-full cursor-pointer items-center px-3 py-2 text-left text-sm outline-none select-none data-highlighted:bg-ink/5 data-disabled:cursor-default data-disabled:text-stone-400 pointer-coarse:min-h-11 ${
+        danger ? 'text-danger' : 'text-stone-800'
+    }${extra ? ` ${extra}` : ''}`;

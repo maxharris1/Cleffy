@@ -113,7 +113,8 @@ describe('AuthLinkErrorNotice', () => {
         );
 
         // The gate still redirects (no session) — but the reason now survives it.
-        expect(screen.getByRole('heading', { name: 'Log in' })).toBeInTheDocument();
+        // (The page is inert behind the modal, so it is out of the a11y tree.)
+        expect(screen.getByRole('heading', { name: 'Log in', hidden: true })).toBeInTheDocument();
         const dialog = screen.getByRole('dialog', { name: 'This reset link has expired or was already used' });
         expect(dialog).toBeInTheDocument();
 

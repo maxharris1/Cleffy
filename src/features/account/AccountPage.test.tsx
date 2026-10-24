@@ -418,7 +418,7 @@ describe('AccountPage', () => {
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
 
-        const dialog = await screen.findByRole('dialog', { name: 'Sign out with unsynced changes?' });
+        const dialog = await screen.findByRole('alertdialog', { name: 'Sign out with unsynced changes?' });
         expect(dialog).toHaveTextContent('You have 2 unsynced changes');
         await user.click(screen.getByRole('button', { name: 'Stay signed in' }));
         expect(signOut).not.toHaveBeenCalled();

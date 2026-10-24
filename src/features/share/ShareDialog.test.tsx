@@ -164,7 +164,7 @@ describe('ShareDialog for the owner', () => {
         await screen.findByText('Guest One');
 
         await user.click(screen.getByRole('button', { name: 'Remove Guest One' }));
-        const confirm = screen.getByRole('dialog', { name: 'Remove Guest One?' });
+        const confirm = screen.getByRole('alertdialog', { name: 'Remove Guest One?' });
         // Their link still works — the owner should know they can come back.
         expect(confirm).toHaveTextContent('The link they joined with still works');
         expect(removeMember).not.toHaveBeenCalled();
@@ -337,7 +337,7 @@ describe('ShareDialog for a member', () => {
         render(<ShareDialog docId="doc-1" userId="vi" role="viewer" onClose={vi.fn()} onLeft={onLeft} />);
 
         await user.click(screen.getByRole('button', { name: 'Leave score' }));
-        const confirm = screen.getByRole('dialog', { name: 'Leave this score?' });
+        const confirm = screen.getByRole('alertdialog', { name: 'Leave this score?' });
         expect(leaveDocument).not.toHaveBeenCalled();
         await user.click(within(confirm).getByRole('button', { name: 'Leave' }));
 
@@ -388,7 +388,7 @@ describe('ShareDialog for a share-link guest', () => {
         // Leaving one score is still on offer beside it.
         expect(screen.getByRole('button', { name: 'Leave score' })).toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Delete my guest profile' }));
-        const confirm = screen.getByRole('dialog', { name: 'Delete your guest profile?' });
+        const confirm = screen.getByRole('alertdialog', { name: 'Delete your guest profile?' });
         expect(confirm).toHaveTextContent(/removed from every score shared with you/);
         expect(confirm).toHaveTextContent(/Marks you made stay on the scores/);
         expect(deleteGuestProfile).not.toHaveBeenCalled();

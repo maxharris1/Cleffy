@@ -216,7 +216,8 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                             type="button"
                             title={styleLabel}
                             aria-label={styleLabel}
-                            aria-haspopup="true"
+                            // A disclosure, not a menu: aria-haspopup would promise menu
+                            // keys the swatches do not have. Expanded + controls says it.
                             aria-expanded={styleOpen}
                             aria-controls={styleOpen ? popoverId : undefined}
                             onClick={() => setStyleOpen((open) => !open)}

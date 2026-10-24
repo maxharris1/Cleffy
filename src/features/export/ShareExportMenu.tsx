@@ -1,4 +1,5 @@
-import { Suspense, lazy, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Popover } from '@base-ui/react/popover';
+import { Suspense, lazy, useState } from 'react';
 
 import { useSession } from '@/features/auth/session';
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
@@ -20,15 +21,13 @@ import type { DocumentRow, MemberRole } from '@/types/database';
 import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { buttonClassName } from '@/ui/classNames';
+import { onMenuKeyDown } from '@/ui/menuKeyboard';
 
 // Lazy for the same reason as the library shell's copy: pricing is a rare
 // destination, and the viewer should not carry it in its first paint.
 const PricingDialog = lazy(() =>
     import('@/features/billing/PricingDialog').then((m) => ({ default: m.PricingDialog })),
 );
-
-/** Matches the 0.75rem the menu's max width leaves on each side. */
-const MENU_GUTTER = 12;
 
 interface ShareExportMenuProps {
     docId: string;
@@ -125,8 +124,6 @@ export const ShareExportMenu = ({
      */
     const [marksNotice, setMarksNotice] = useState<string | null>(null);
     const [pricingOpen, setPricingOpen] = useState(false);
-    const rootRef = useRef<HTMLDivElement | null>(null);
-    const menuRef = useRef<HTMLDivElement | null>(null);
     const focusedPageIndex = useViewerStore((s) => s.focusedPageIndex);
     const { session } = useSession();
     /** Whose marks are baked in (see the userId prop). */
@@ -138,28 +135,6 @@ export const ShareExportMenu = ({
         setSeenSignal(openSignal);
         setOpen(true);
     }
-
-    useEffect(() => {
-        if (!open) {
-            return;
-        }
-        const onPointerDown = (e: PointerEvent) => {
-            if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-                setOpen(false);
-            }
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                setOpen(false);
-            }
-        };
-        window.addEventListener('pointerdown', onPointerDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-            window.removeEventListener('pointerdown', onPointerDown);
-            window.removeEventListener('keydown', onKey);
-        };
-    }, [open]);
 
     /**
      * The PDF to flatten. The viewer normally cached it on open, but a browser
@@ -324,132 +299,118 @@ export const ShareExportMenu = ({
     const status = refusal ?? (notSent ? EXPORT_NOT_SENT_MESSAGE : null);
     const wide = Boolean(limit || status || error || marksNotice);
 
-    // The menu hangs from the button's right edge, which on a phone sits near
-    // the middle of the toolbar: widened for a notice it would run off the
-    // left of the screen, so nudge it back inside the gutter.
-    // Placed again when the button's label changes ("Exporting…" and back),
-    // which moves that edge under a menu kept open over a notice.
-    useLayoutEffect(() => {
-        const menu = menuRef.current;
-        if (!open || !menu) {
-            return;
-        }
-        const place = () => {
-            menu.style.transform = '';
-            const { left } = menu.getBoundingClientRect();
-            if (left < MENU_GUTTER) {
-                menu.style.transform = `translateX(${MENU_GUTTER - left}px)`;
-            }
-        };
-        place();
-        window.addEventListener('resize', place);
-        return () => window.removeEventListener('resize', place);
-    }, [open, wide, busy]);
-
+    // A Base UI popover holds the menu and its notices (which are not menu
+    // items, so it cannot be a Base UI Menu): outside press and Escape close it
+    // and give focus back to the button, and collision handling keeps it inside
+    // the screen's gutter however far it widens for a notice.
     return (
-        <div ref={rootRef} className="relative">
-            <button
-                type="button"
-                disabled={busy !== null}
-                aria-expanded={open}
-                aria-haspopup="menu"
-                title="Export — this page as a photo or PDF, or the whole score as PDF"
-                onClick={() => {
+        <Popover.Root
+            open={open}
+            onOpenChange={(next) => {
+                if (next) {
                     setLimit(null);
                     setRefusal(null);
                     setNotSent(false);
                     setError(null);
                     setMarksNotice(null);
-                    setOpen((v) => !v);
-                }}
+                }
+                setOpen(next);
+            }}
+        >
+            <Popover.Trigger
+                disabled={busy !== null}
+                aria-haspopup="menu"
+                title="Export — this page as a photo or PDF, or the whole score as PDF"
                 className={buttonClassName('ghost', 'sm', 'tabular-nums')}
             >
                 {busy && download && download.total > 0
                     ? `${busy} ${Math.round((download.loaded / download.total) * 100)}%`
                     : (busy ?? 'Export')}
-            </button>
-            {open ? (
-                <div
-                    ref={menuRef}
-                    className={`ui-menu-pop absolute right-0 z-30 mt-1 max-w-[calc(100vw-1.5rem)] rounded-xl border border-stone-200 bg-white py-1 shadow-lg ${
-                        wide ? 'w-80' : 'w-64'
-                    }`}
-                >
-                    {/* The notice is a sibling of the menu, not an item in it. */}
-                    <div role="menu">
-                        <MenuItem
-                            label={`Send page ${pageLabel} as photo`}
-                            hint="PNG — send via Messages"
-                            disabled={busy !== null}
-                            onClick={() =>
-                                void runUnmetered('Exporting…', 'The export', (source, onNotice) =>
-                                    exportAnnotatedPageImage(
-                                        docId,
-                                        source,
-                                        focusedPageIndex,
-                                        title,
-                                        markOwner,
-                                        onNotice,
-                                        lostAccess,
-                                    ),
-                                )
-                            }
-                        />
-                        <MenuItem
-                            label={`Save page ${pageLabel} as PDF`}
-                            disabled={busy !== null}
-                            onClick={() => void runMetered('Exporting…', 'The export', focusedPageIndex)}
-                        />
-                        <div className="my-1 border-t border-stone-100" />
-                        <MenuItem
-                            label="Export whole score as PDF"
-                            disabled={busy !== null}
-                            onClick={() => void runMetered('Exporting…', 'The export', null)}
-                        />
-                    </div>
-                    {download ? (
-                        <ProgressBar
-                            value={download.total > 0 ? (download.loaded / download.total) * 100 : 0}
-                            indeterminate={download.total === 0}
-                            label="Downloading score for export"
-                            className="mx-3 my-2 w-auto"
-                        />
-                    ) : null}
-                    {error ? <ErrorText className="mx-3 my-2">{error}</ErrorText> : null}
-                    {marksNotice ? (
-                        <p
-                            role="status"
-                            className="m-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
-                        >
-                            {marksNotice}
-                        </p>
-                    ) : null}
-                    {limit ? (
-                        <LimitReachedNotice
-                            limit={limit}
-                            // No upgrade button when there is no checkout to send them
-                            // to — the message alone is still the honest answer.
-                            onUpgrade={
-                                isBillingConfigured()
-                                    ? () => {
-                                          setPricingOpen(true);
-                                          setOpen(false);
-                                      }
-                                    : undefined
-                            }
-                            className="m-2"
-                        />
-                    ) : null}
-                    {status ? (
-                        <p
-                            role="status"
-                            className="m-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700"
-                        >
-                            {status}
-                        </p>
-                    ) : null}
-                </div>
-            ) : null}
+            </Popover.Trigger>
+            <Popover.Portal>
+                <Popover.Positioner side="bottom" align="end" sideOffset={4} collisionPadding={12} className="z-50">
+                    <Popover.Popup
+                        aria-label="Export"
+                        className={`ui-menu-pop max-w-[calc(100vw-1.5rem)] rounded-xl border border-stone-200 bg-white py-1 shadow-lg outline-none ${
+                            wide ? 'w-80' : 'w-64'
+                        }`}
+                    >
+                        {/* The notice is a sibling of the menu, not an item in it. */}
+                        <div role="menu" aria-label="Export" onKeyDown={onMenuKeyDown}>
+                            <MenuItem
+                                label={`Send page ${pageLabel} as photo`}
+                                hint="PNG — send via Messages"
+                                disabled={busy !== null}
+                                onClick={() =>
+                                    void runUnmetered('Exporting…', 'The export', (source, onNotice) =>
+                                        exportAnnotatedPageImage(
+                                            docId,
+                                            source,
+                                            focusedPageIndex,
+                                            title,
+                                            markOwner,
+                                            onNotice,
+                                            lostAccess,
+                                        ),
+                                    )
+                                }
+                            />
+                            <MenuItem
+                                label={`Save page ${pageLabel} as PDF`}
+                                disabled={busy !== null}
+                                onClick={() => void runMetered('Exporting…', 'The export', focusedPageIndex)}
+                            />
+                            <div role="separator" className="my-1 border-t border-stone-100" />
+                            <MenuItem
+                                label="Export whole score as PDF"
+                                disabled={busy !== null}
+                                onClick={() => void runMetered('Exporting…', 'The export', null)}
+                            />
+                        </div>
+                        {download ? (
+                            <ProgressBar
+                                value={download.total > 0 ? (download.loaded / download.total) * 100 : 0}
+                                indeterminate={download.total === 0}
+                                label="Downloading score for export"
+                                className="mx-3 my-2 w-auto"
+                            />
+                        ) : null}
+                        {error ? <ErrorText className="mx-3 my-2">{error}</ErrorText> : null}
+                        {marksNotice ? (
+                            <p
+                                role="status"
+                                className="m-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+                            >
+                                {marksNotice}
+                            </p>
+                        ) : null}
+                        {limit ? (
+                            <LimitReachedNotice
+                                limit={limit}
+                                // No upgrade button when there is no checkout to send them
+                                // to — the message alone is still the honest answer.
+                                onUpgrade={
+                                    isBillingConfigured()
+                                        ? () => {
+                                              setPricingOpen(true);
+                                              setOpen(false);
+                                          }
+                                        : undefined
+                                }
+                                className="m-2"
+                            />
+                        ) : null}
+                        {status ? (
+                            <p
+                                role="status"
+                                className="m-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700"
+                            >
+                                {status}
+                            </p>
+                        ) : null}
+                    </Popover.Popup>
+                </Popover.Positioner>
+            </Popover.Portal>
             {/* Outside the menu so dismissing the menu does not take the plans with it. */}
             {pricingOpen ? (
                 <Suspense fallback={null}>
@@ -460,7 +421,7 @@ export const ShareExportMenu = ({
                     />
                 </Suspense>
             ) : null}
-        </div>
+        </Popover.Root>
     );
 };
 
@@ -480,7 +441,7 @@ const MenuItem = ({
         role="menuitem"
         disabled={disabled}
         onClick={onClick}
-        className="flex w-full flex-col items-start px-3 py-2 text-left transition-colors hover:bg-ink/5 disabled:opacity-50"
+        className="flex w-full flex-col items-start px-3 py-2 text-left outline-none transition-colors hover:bg-ink/5 focus-visible:bg-ink/5 disabled:opacity-50 pointer-coarse:min-h-11"
     >
         <span className="text-sm text-stone-800">{label}</span>
         {hint ? <span className="text-xs text-stone-500">{hint}</span> : null}

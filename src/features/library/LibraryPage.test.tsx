@@ -324,7 +324,7 @@ describe('LibraryPage', () => {
 
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
         await user.click(screen.getByRole('button', { name: 'Delete' }));
 
         expect(await screen.findByText('Network request failed')).toBeInTheDocument();
@@ -361,7 +361,7 @@ describe('LibraryPage', () => {
 
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
         await user.click(screen.getByRole('button', { name: 'Delete' }));
 
         await waitFor(() => expect(clearUploadError).toHaveBeenCalled());
@@ -608,7 +608,7 @@ describe('LibraryPage', () => {
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0] as HTMLElement);
-        await user.click(screen.getByRole('menuitem', { name: 'Rename' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Rename' }));
         const field = screen.getByLabelText('Title');
         await user.clear(field);
         await user.type(field, 'BWV 855');
@@ -623,8 +623,8 @@ describe('LibraryPage', () => {
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
-        expect(screen.getByRole('dialog', { name: 'Delete this score?' })).toBeInTheDocument();
+        await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+        expect(screen.getByRole('alertdialog', { name: 'Delete this score?' })).toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Delete' }));
         await waitFor(() => expect(deleteDocument).toHaveBeenCalledWith(expect.objectContaining({ id: 'd2' })));
         await waitFor(() => expect(screen.queryByText('An Chloe (Mozart, Wolfgang Amadeus)')).not.toBeInTheDocument());
@@ -708,7 +708,7 @@ describe('LibraryPage', () => {
             renderLibrary();
             await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
             await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-            await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+            await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
             await user.click(screen.getByRole('button', { name: 'Delete' }));
 
             await waitFor(() => expect(writeCachedLibraryList).toHaveBeenCalledTimes(1));
@@ -990,7 +990,9 @@ describe('LibraryPage', () => {
             await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
 
             await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-            expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Remove from my library']);
+            expect((await screen.findAllByRole('menuitem')).map((item) => item.textContent)).toEqual([
+                'Remove from my library',
+            ]);
         });
 
         it('leaves after confirmation, then drops the score and persists the list without it', async () => {
@@ -1000,8 +1002,8 @@ describe('LibraryPage', () => {
             await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
 
             await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-            await user.click(screen.getByRole('menuitem', { name: 'Remove from my library' }));
-            const dialog = screen.getByRole('dialog', { name: 'Remove from your library?' });
+            await user.click(await screen.findByRole('menuitem', { name: 'Remove from my library' }));
+            const dialog = screen.getByRole('alertdialog', { name: 'Remove from your library?' });
             expect(dialog).toHaveTextContent('was shared with you');
             expect(leaveSharedDocument).not.toHaveBeenCalled();
             await user.click(within(dialog).getByRole('button', { name: 'Remove' }));
@@ -1027,7 +1029,7 @@ describe('LibraryPage', () => {
             await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
 
             await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-            await user.click(screen.getByRole('menuitem', { name: 'Remove from my library' }));
+            await user.click(await screen.findByRole('menuitem', { name: 'Remove from my library' }));
             await user.click(screen.getByRole('button', { name: 'Remove' }));
 
             expect(await screen.findByText('Could not leave this score: offline')).toBeInTheDocument();
@@ -1043,7 +1045,7 @@ describe('LibraryPage', () => {
             await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
 
             await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-            await user.click(screen.getByRole('menuitem', { name: 'Remove from my library' }));
+            await user.click(await screen.findByRole('menuitem', { name: 'Remove from my library' }));
             await user.click(screen.getByRole('button', { name: 'Remove' }));
 
             await waitFor(() => expect(leaveSharedDocument).toHaveBeenCalledWith('d2'));
@@ -1055,7 +1057,7 @@ describe('LibraryPage', () => {
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0] as HTMLElement);
-        await user.click(screen.getByRole('menuitem', { name: 'Share…' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Share…' }));
         expect(screen.getByTestId('share-dialog')).toHaveTextContent('d1');
     });
 
@@ -1285,7 +1287,7 @@ describe('pagination and server search', () => {
         await user.type(screen.getByLabelText('Search scores'), 'gymno');
         await screen.findByText('Gymnopédie (Satie, Erik)');
         await user.click(screen.getByRole('button', { name: 'Score actions' }));
-        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
         await user.click(screen.getByRole('button', { name: 'Delete' }));
         await waitFor(() => expect(screen.queryByText('Gymnopédie (Satie, Erik)')).not.toBeInTheDocument());
     });
@@ -1326,7 +1328,7 @@ describe('pagination and server search', () => {
 
         // Rename the last loaded row to something that sorts first.
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
-        await user.click(screen.getByRole('menuitem', { name: 'Rename' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Rename' }));
         const field = screen.getByLabelText('Title');
         await user.clear(field);
         await user.type(field, 'Aaa');
@@ -1373,7 +1375,7 @@ describe('pagination and server search', () => {
         await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
         await user.click(screen.getByRole('button', { name: 'Load more scores' }));
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0] as HTMLElement);
-        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
         await user.click(screen.getByRole('button', { name: 'Delete' }));
         await waitFor(() =>
             expect(screen.queryByText('Prelude and Fugue (Bach, Johann Sebastian)')).not.toBeInTheDocument(),
@@ -1601,8 +1603,8 @@ describe('plans without a roster', () => {
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0]!);
 
         // The rest of the menu is untouched — only the roster action goes.
-        expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
-        expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+        expect(await screen.findByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
+        expect(await screen.findByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
         expect(screen.queryByRole('menuitem', { name: 'Assign to student…' })).not.toBeInTheDocument();
     });
 });

@@ -124,7 +124,7 @@ const ATTESTED = { country: 'DE', countryName: 'Germany', attested: true };
 /** Opens the only row's action menu and picks the item with this label. */
 const pickRowAction = async (user: ReturnType<typeof userEvent.setup>, label: string) => {
     await user.click(await screen.findByRole('button', { name: 'Student actions' }));
-    await user.click(screen.getByRole('menuitem', { name: label }));
+    await user.click(await screen.findByRole('menuitem', { name: label }));
 };
 
 beforeEach(() => {
@@ -308,7 +308,7 @@ describe('RosterPage', () => {
         renderRoster();
 
         await pickRowAction(user, 'Delete student…');
-        const dialog = await screen.findByRole('dialog', { name: 'Delete this student?' });
+        const dialog = await screen.findByRole('alertdialog', { name: 'Delete this student?' });
         expect(dialog).toHaveTextContent(/every mark they made on your scores/);
         expect(dialog).toHaveTextContent(/can’t be undone/);
         expect(deleteStudent).not.toHaveBeenCalled();
@@ -356,7 +356,7 @@ describe('RosterPage', () => {
         renderRoster();
 
         await user.click(await screen.findByRole('button', { name: 'Student actions' }));
-        expect(screen.getByRole('menuitem', { name: 'New setup code…' })).toBeInTheDocument();
+        expect(await screen.findByRole('menuitem', { name: 'New setup code…' })).toBeInTheDocument();
         expect(screen.queryByRole('menuitem', { name: 'Reset access…' })).not.toBeInTheDocument();
     });
 
@@ -370,7 +370,7 @@ describe('RosterPage', () => {
 
         await pickRowAction(user, 'Reset access…');
         // The confirmation has to say the password stops working, not just the code.
-        const confirm = await screen.findByRole('dialog', { name: 'Reset this student’s access?' });
+        const confirm = await screen.findByRole('alertdialog', { name: 'Reset this student’s access?' });
         expect(within(confirm).getByText(/password stops working straight away/)).toBeInTheDocument();
         // ...and the devices already signed in, which student-provision now ends too.
         expect(within(confirm).getByText(/any device they are signed in on is signed out/)).toBeInTheDocument();
@@ -397,7 +397,7 @@ describe('RosterPage', () => {
         renderRoster();
 
         await pickRowAction(user, 'Reset access…');
-        const confirm = await screen.findByRole('dialog', { name: 'Reset this student’s access?' });
+        const confirm = await screen.findByRole('alertdialog', { name: 'Reset this student’s access?' });
         await user.click(within(confirm).getByRole('button', { name: 'Reset access' }));
 
         expect(await screen.findByText(/held for up to 10 minutes/)).toBeInTheDocument();
@@ -421,14 +421,14 @@ describe('RosterPage', () => {
 
         await pickRowAction(user, 'New setup code…');
         await user.click(
-            within(await screen.findByRole('dialog', { name: 'Issue a new setup code?' })).getByRole('button', {
+            within(await screen.findByRole('alertdialog', { name: 'Issue a new setup code?' })).getByRole('button', {
                 name: 'New code',
             }),
         );
 
         const card = await screen.findByRole('dialog', { name: 'Setup card' });
         expect(within(card).getByText('PQRS-TUVW-XYZ2')).toBeInTheDocument();
-        expect(screen.queryByRole('dialog', { name: 'Issue a new setup code?' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('alertdialog', { name: 'Issue a new setup code?' })).not.toBeInTheDocument();
 
         // Let the held reload land rather than ending the test mid-update.
         await act(async () => {
@@ -450,7 +450,7 @@ describe('RosterPage', () => {
 
         await pickRowAction(user, 'Email a new sign-in link…');
         await user.click(
-            within(await screen.findByRole('dialog', { name: 'Email a new sign-in link?' })).getByRole('button', {
+            within(await screen.findByRole('alertdialog', { name: 'Email a new sign-in link?' })).getByRole('button', {
                 name: 'Send link',
             }),
         );
@@ -625,8 +625,9 @@ describe('RosterPage', () => {
         await user.click(screen.getByRole('button', { name: 'Archive' }));
 
         // The archive is still in flight: the form is disabled, but it is not the
-        // thing that is running.
-        const add = screen.getByRole('button', { name: 'Add student' });
+        // thing that is running. (Hidden: the confirmation stays up, modal, while
+        // the archive runs, so the page behind it is inert.)
+        const add = screen.getByRole('button', { name: 'Add student', hidden: true });
         expect(add).toBeDisabled();
         expect(screen.queryByRole('button', { name: 'Adding…' })).not.toBeInTheDocument();
 
