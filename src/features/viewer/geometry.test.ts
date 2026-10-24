@@ -17,6 +17,7 @@ import {
     pageTurnView,
     reanchorView,
     scrollForPagePoint,
+    turnFromPageIndex,
     viewportToPagePoint,
     visiblePageRange,
     zoomAt,
@@ -191,6 +192,47 @@ describe('pageTurnView', () => {
         // The row it lands on starts just below the top strip.
         const landed = ten.layouts[back!.pageIndex]!;
         expect((landed.top - PAGE_GAP) * MIN_SCALE - back!.view.scrollY).toBeCloseTo(edges.top);
+    });
+});
+
+describe('turnFromPageIndex', () => {
+    // A tall iPad zoomed out: three rows of letter pages fit at once.
+    const ten = computeDocumentLayout(Array.from({ length: 10 }, () => ({ width: 612, height: 792 })));
+    const H = 1180;
+    const scale = 0.5;
+    /** Scrolled so `px` of page 1 has gone off the top. */
+    const scrolledInto = (px: number) => ({ scale, scrollX: 0, scrollY: (ten.layouts[0]!.top - 0) * scale + px });
+
+    it('turns from the row at the top, not the one at the centre the label reads', () => {
+        const view = scrolledInto(100);
+        // The centre sits on page 2…
+        expect(focusedPageIndex(view, H, ten.layouts)).toBe(1);
+        // …but page 1 is still mostly in view, so Next brings page 2 to the top
+        // rather than skipping it for page 3.
+        const from = turnFromPageIndex(view, H, ten.layouts);
+        expect(from).toBe(0);
+        expect(pageTurnView(view, ten, from, 1, 820, H)?.pageIndex).toBe(1);
+    });
+
+    it('moves on from a row with less than half of it left in view', () => {
+        const view = scrolledInto(300);
+        expect(turnFromPageIndex(view, H, ten.layouts)).toBe(1);
+    });
+
+    it('reads the row below a strip covering the top', () => {
+        const edges = { top: 400, bottom: 0 };
+        // Page 1 is entirely under the strip.
+        expect(turnFromPageIndex(scrolledInto(0), H, ten.layouts, edges)).toBe(1);
+    });
+
+    it('agrees with the centre at fit width, where a page fills the view', () => {
+        const fit = computeDocumentLayout(Array.from({ length: 3 }, () => ({ width: 612, height: 792 })));
+        const view = { scale: 2, scrollX: 0, scrollY: 900 };
+        expect(turnFromPageIndex(view, 600, fit.layouts)).toBe(focusedPageIndex(view, 600, fit.layouts));
+    });
+
+    it('is page 1 for an empty document', () => {
+        expect(turnFromPageIndex({ scale: 1, scrollX: 0, scrollY: 0 }, H, [])).toBe(0);
     });
 });
 
