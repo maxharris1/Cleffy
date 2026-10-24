@@ -284,9 +284,15 @@ describe('PdfViewport follow under the notice stack', () => {
 });
 
 /** The notice region over the viewport, as ViewerPage arranges them; the rejected-changes card can be dismissed. */
-const ViewerUnderNotices = ({ rejected = true }: { rejected?: boolean }) => {
+const ViewerUnderNotices = ({
+    readOnly = true,
+    onStore,
+}: {
+    readOnly?: boolean;
+    onStore?: (store: AnnotationStore) => void;
+}) => {
     const [inset, setInset] = useState(0);
-    const [showRejected, setShowRejected] = useState(rejected);
+    const [showRejected, setShowRejected] = useState(true);
     return (
         <div>
             <ViewerNoticeRegion onInsetChange={setInset}>
@@ -296,9 +302,47 @@ const ViewerUnderNotices = ({ rejected = true }: { rejected?: boolean }) => {
                 {showRejected ? <SyncRejectedNotice count={2} onDismiss={() => setShowRejected(false)} /> : null}
                 <SyncHeldNotice count={3} />
             </ViewerNoticeRegion>
-            <PdfViewport docId="doc-notices" readOnly noticeInset={inset} />
+            <PdfViewport docId="doc-notices" readOnly={readOnly} noticeInset={inset} onStoreReady={onStore} />
         </div>
     );
+};
+
+/**
+ * Animation frames run by hand, at a clock the test moves. Frames get ids,
+ * and cancelling one records it, so a cancel is something a test can assert.
+ */
+const manualFrames = () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    const cancelled: number[] = [];
+    let nextId = 0;
+    // Well after 0: the gesture controller takes touches that soon after its
+    // (never-active) pen as palms.
+    let now = 10_000;
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        nextId += 1;
+        frames.set(nextId, callback);
+        return nextId;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+        cancelled.push(id);
+        frames.delete(id);
+    });
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    return {
+        cancelled,
+        pending: () => [...frames.keys()],
+        /** Move the clock on by `ms`, then run every frame requested so far. */
+        advance: (ms: number) => {
+            now += ms;
+            act(() => {
+                const due = [...frames.values()];
+                frames.clear();
+                for (const callback of due) {
+                    callback(now);
+                }
+            });
+        },
+    };
 };
 
 /** How far down the stack reaches with `cards` notices up (56 + cards×52 + gaps). */
@@ -520,5 +564,113 @@ describe('PdfViewport when a notice goes away', () => {
         act(() => useViewerStore.getState().setView({ ...view(), scrollY: 300 }));
         dismiss();
         expect(view().scrollY).toBe(300);
+    });
+
+    describe('a gesture that starts while the score glides up', () => {
+        /** A pointer on the score, at viewport px (x, y). */
+        const pointer = (type: string, pointerId: number, pointerType: string, x: number, y: number) =>
+            act(() => {
+                document
+                    .querySelector('.ink-surface')!
+                    .dispatchEvent(
+                        new PointerEvent(type, { pointerId, pointerType, clientX: x, clientY: y, bubbles: true }),
+                    );
+            });
+
+        /** Dismiss the notice and let 30 ms of the 180 ms glide run: the score is part way up. */
+        const dismissAndGlidePartway = (frames: ReturnType<typeof manualFrames>) => {
+            dismiss();
+            frames.advance(0);
+            frames.advance(30);
+            const midway = view().scrollY;
+            expect(midway).toBeGreaterThan(-stackBottomPx(3));
+            expect(midway).toBeLessThan(-stackBottomPx(2) - 10);
+            return midway;
+        };
+
+        /** The rest of the glide runs once nothing is down on the score. */
+        const expectSettlesAfterRelease = (frames: ReturnType<typeof manualFrames>) => {
+            frames.advance(0);
+            frames.advance(30);
+            expect(view().scrollY).toBeGreaterThan(-stackBottomPx(3));
+            frames.advance(1000);
+            expect(view().scrollY).toBe(-stackBottomPx(2));
+            expect(frames.pending()).toHaveLength(0);
+        };
+
+        it('holds the page still under a stroke, so its points do not drift, then settles', async () => {
+            const frames = manualFrames();
+            let store: AnnotationStore | null = null;
+            viewport = PHONE;
+            render(<ViewerUnderNotices readOnly={false} onStore={(s) => (store = s)} />);
+            await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+            await waitFor(() => expect(store).not.toBeNull());
+            const create = vi.spyOn(store as unknown as AnnotationStore, 'create');
+            act(() => useViewerStore.getState().setTool('pen'));
+
+            const midway = dismissAndGlidePartway(frames);
+            // A level line drawn across the frames the glide would have run.
+            pointer('pointerdown', 7, 'pen', 120, 300);
+            for (const x of [140, 160, 180, 200, 220]) {
+                frames.advance(30);
+                pointer('pointermove', 7, 'pen', x, 300);
+            }
+            expect(view().scrollY).toBe(midway);
+            pointer('pointerup', 7, 'pen', 220, 300);
+
+            expect(create).toHaveBeenCalledTimes(1);
+            const { pts } = create.mock.calls[0]![0].payload as { pts: number[] };
+            const ys = pts.filter((_, i) => i % 3 === 1);
+            expect(ys.length).toBeGreaterThan(1);
+            for (const y of ys) {
+                expect(y).toBeCloseTo(ys[0]!, 6);
+            }
+            expectSettlesAfterRelease(frames);
+        });
+
+        it('lets a pan move with the finger instead of snapping the rest of the way, then settles', async () => {
+            const frames = manualFrames();
+            await openUnderStack();
+            const midway = dismissAndGlidePartway(frames);
+
+            pointer('pointerdown', 1, 'touch', 200, 300);
+            frames.advance(30);
+            expect(view().scrollY).toBe(midway);
+            // The finger moves the score up by 10 px: by that much, not to the bound.
+            pointer('pointermove', 1, 'touch', 200, 290);
+            expect(view().scrollY).toBeCloseTo(midway + 10);
+            frames.advance(30);
+            expect(view().scrollY).toBeCloseTo(midway + 10);
+            pointer('pointerup', 1, 'touch', 200, 290);
+            expectSettlesAfterRelease(frames);
+        });
+
+        it('waits for the last of two fingers to lift', async () => {
+            const frames = manualFrames();
+            await openUnderStack();
+            const midway = dismissAndGlidePartway(frames);
+
+            pointer('pointerdown', 1, 'touch', 150, 300);
+            pointer('pointerdown', 2, 'touch', 250, 300);
+            frames.advance(30);
+            expect(view().scrollY).toBe(midway);
+            pointer('pointerup', 1, 'touch', 150, 300);
+            frames.advance(30);
+            expect(view().scrollY).toBe(midway);
+            pointer('pointerup', 2, 'touch', 250, 300);
+            expectSettlesAfterRelease(frames);
+        });
+
+        it('cancels a glide under way when the viewer unmounts', async () => {
+            const frames = manualFrames();
+            await openUnderStack();
+            dismiss();
+            frames.advance(0);
+            const [glide] = frames.pending();
+            expect(glide).toBeDefined();
+            cleanup();
+            expect(frames.cancelled).toContain(glide);
+            expect(frames.pending()).toHaveLength(0);
+        });
     });
 });

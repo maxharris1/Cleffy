@@ -324,6 +324,12 @@ export const PdfViewport = ({
      */
     const slackTopRef = useRef<number | null>(null);
     const settleGlideRef = useRef<number | null>(null);
+    const cancelSettleGlide = useCallback(() => {
+        if (settleGlideRef.current !== null) {
+            cancelAnimationFrame(settleGlideRef.current);
+            settleGlideRef.current = null;
+        }
+    }, []);
     /**
      * Bring a view the scroll bounds no longer allow back inside them — the
      * room a dismissed notice leaves at the top is not left blank until the
@@ -331,10 +337,7 @@ export const PdfViewport = ({
      * move of the view, and waits for a pan, pinch or stroke under way to end.
      */
     const settleIntoBounds = useCallback(() => {
-        if (settleGlideRef.current !== null) {
-            cancelAnimationFrame(settleGlideRef.current);
-            settleGlideRef.current = null;
-        }
+        cancelSettleGlide();
         const { width, height } = viewportSizeRef.current;
         if (!didFitRef.current || width === 0 || height === 0) {
             return;
@@ -360,7 +363,8 @@ export const PdfViewport = ({
         const step = () => {
             const live = useViewerStore.getState().view;
             if (live !== last) {
-                // A pan, turn or follow moved the view meanwhile: it already clamps.
+                // A pan, turn or follow moved the view meanwhile: it clamps (a
+                // follow glide re-aims at the bounds as they are now).
                 settleGlideRef.current = null;
                 return;
             }
@@ -378,24 +382,45 @@ export const PdfViewport = ({
             settleGlideRef.current = t >= 1 ? null : requestAnimationFrame(step);
         };
         settleGlideRef.current = requestAnimationFrame(step);
-    }, []);
+    }, [cancelSettleGlide]);
     useEffect(() => {
+        const el = containerRef.current;
+        // A finger, pen or mouse coming down on the score stops a settle where
+        // it is — a stroke must not start on a page gliding under the pen, nor
+        // a pan's first move snap the rest of the way — and keeps what is left
+        // as slack, to settle once the last pointer lifts (below). Ahead of
+        // the gesture controller, so the slack is in place for its first move.
+        const onPointerDown = (e: PointerEvent) => {
+            if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
+                return;
+            }
+            cancelSettleGlide();
+            const { width, height } = viewportSizeRef.current;
+            if (!didFitRef.current || width === 0 || height === 0) {
+                return;
+            }
+            const v = useViewerStore.getState().view;
+            const bound = clampScroll(v, layoutRef.current, width, height, obscuredRef.current);
+            if (v.scrollY < bound.scrollY - 0.5) {
+                slackTopRef.current ??= v.scrollY;
+            }
+        };
         // After the controller has seen the pointer go (it listens on the score).
         const onPointerEnd = () => {
             if (slackTopRef.current !== null) {
                 settleIntoBounds();
             }
         };
+        el?.addEventListener('pointerdown', onPointerDown, { capture: true });
         window.addEventListener('pointerup', onPointerEnd);
         window.addEventListener('pointercancel', onPointerEnd);
         return () => {
+            el?.removeEventListener('pointerdown', onPointerDown, { capture: true });
             window.removeEventListener('pointerup', onPointerEnd);
             window.removeEventListener('pointercancel', onPointerEnd);
-            if (settleGlideRef.current !== null) {
-                cancelAnimationFrame(settleGlideRef.current);
-            }
+            cancelSettleGlide();
         };
-    }, [settleIntoBounds]);
+    }, [settleIntoBounds, cancelSettleGlide]);
     // A notice coming moves only the edge: the view stays where it is, and the
     // next follow step or page turn lands clear of the stack. One going (or
     // shrinking) frees the room it took, and a view resting in it settles up.
