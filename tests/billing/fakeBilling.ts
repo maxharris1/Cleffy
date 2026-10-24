@@ -114,8 +114,20 @@ export class FakeBilling implements QuotaBackend {
      */
     studioSeats = new Map<string, string[]>();
     counters = new Map<string, number>();
-    /** owner id -> ids of their non-archived documents. */
+    /** owner id -> ids of their non-archived documents, least recently touched first. */
     activeScores = new Map<string, string[]>();
+    /**
+     * owner id -> their archived documents and WHY (documents.archived_reason).
+     * Only 'plan_lapse' is ever undone by a resubscribe.
+     */
+    archivedScores = new Map<string, Array<{ id: string; reason: 'plan_lapse' | 'owner' }>>();
+    /**
+     * score id -> last-touched rank, standing in for documents.updated_at. An
+     * archive change never moves it (documents_touch_updated_at), so restore
+     * brings scores back in the order the owner last used them.
+     */
+    private touched = new Map<string, number>();
+    private nextTouch = 1;
     /** teacher id -> their managed_students rows, ARCHIVED ONES INCLUDED: archiving deletes nothing. */
     roster = new Map<string, FakeRosterRow[]>();
 
@@ -220,14 +232,101 @@ export class FakeBilling implements QuotaBackend {
             };
         }
         this.activeScores.set(ownerId, [...active, scoreId]);
+        this.touched.set(scoreId, this.nextTouch++);
     }
 
-    /** Archiving frees a slot without deleting anything — the lapse behaviour. */
+    private byTouchDesc = (a: string, b: string): number => (this.touched.get(b) ?? 0) - (this.touched.get(a) ?? 0);
+
+    /**
+     * The owner archiving a score themselves (archived_reason 'owner'). Frees a
+     * slot without deleting anything, and is never undone by billing.
+     */
     archiveScore(ownerId: string, scoreId: string): void {
         this.activeScores.set(
             ownerId,
             (this.activeScores.get(ownerId) ?? []).filter((id) => id !== scoreId),
         );
+        this.archivedScores.set(ownerId, [
+            ...(this.archivedScores.get(ownerId) ?? []),
+            { id: scoreId, reason: 'owner' },
+        ]);
+    }
+
+    /**
+     * Mirrors apply_free_tier_archival(): against the plan the owner resolves to
+     * NOW, keep the most recently touched scores up to the cap and archive the
+     * rest as 'plan_lapse'. An unlimited plan (another live subscription, a
+     * seat) archives nothing. Returns how many were archived.
+     */
+    async applyFreeTierArchival(ownerId: string): Promise<number> {
+        const limit = (await this.getEntitlements(ownerId))?.limits.cloud_scores ?? 0;
+        if (isUnlimited(limit)) {
+            return 0;
+        }
+        const ordered = [...(this.activeScores.get(ownerId) ?? [])].sort(this.byTouchDesc);
+        const keep = ordered.slice(0, limit);
+        const lapse = ordered.slice(limit);
+        this.activeScores.set(ownerId, keep);
+        this.archivedScores.set(ownerId, [
+            ...(this.archivedScores.get(ownerId) ?? []),
+            ...lapse.map((id) => ({ id, reason: 'plan_lapse' as const })),
+        ]);
+        return lapse.length;
+    }
+
+    /**
+     * Mirrors restore_plan_archived_scores(): the subscriber's own restore, then
+     * one for every teacher seated in a studio the subscriber owns who now
+     * resolves to an unlimited plan -- an Academy subscription entitles those
+     * seats, and a seated teacher gets no webhook of their own. A seat holder
+     * still on a finite plan gets nothing back past it. Returns the total.
+     */
+    async restorePlanArchivedScores(ownerId: string): Promise<number> {
+        let restored = await this.restoreUserPlanArchivedScores(ownerId);
+        const seated = [...this.studioSeats.entries()]
+            .filter(([memberId, owners]) => memberId !== ownerId && owners.includes(ownerId))
+            .map(([memberId]) => memberId)
+            .sort();
+        for (const memberId of seated) {
+            const limit = (await this.getEntitlements(memberId))?.limits.cloud_scores ?? 0;
+            if (isUnlimited(limit)) {
+                restored += await this.restoreUserPlanArchivedScores(memberId);
+            }
+        }
+        return restored;
+    }
+
+    /**
+     * Mirrors restore_user_plan_archived_scores(): bring back 'plan_lapse'
+     * archives, most recently touched first, up to the free slots of the plan
+     * the owner resolves to now -- all of them on an unlimited plan. An owner's
+     * own archive stays where they put it. Returns how many were restored. Also
+     * what a new Academy seat runs for its teacher (the studio_members trigger).
+     */
+    async restoreUserPlanArchivedScores(ownerId: string): Promise<number> {
+        const archived = this.archivedScores.get(ownerId) ?? [];
+        const candidates = archived
+            .filter((row) => row.reason === 'plan_lapse')
+            .map((row) => row.id)
+            .sort(this.byTouchDesc);
+        if (candidates.length === 0) {
+            return 0;
+        }
+        const limit = (await this.getEntitlements(ownerId))?.limits.cloud_scores ?? 0;
+        const active = this.activeScores.get(ownerId) ?? [];
+        const slots = isUnlimited(limit) ? candidates.length : Math.max(0, limit - active.length);
+        const restore = candidates.slice(0, slots);
+        this.activeScores.set(ownerId, [...active, ...restore]);
+        this.archivedScores.set(
+            ownerId,
+            archived.filter((row) => !restore.includes(row.id)),
+        );
+        return restore.length;
+    }
+
+    /** Lapses every subscription the user holds, the way a cancellation does. */
+    lapse(userId: string, status = 'canceled'): void {
+        this.subscriptions = this.subscriptions.map((sub) => (sub.user_id === userId ? { ...sub, status } : sub));
     }
 
     /**

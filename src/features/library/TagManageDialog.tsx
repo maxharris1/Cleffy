@@ -83,16 +83,16 @@ export const TagManageDialog = ({
                 {tags.length === 0 ? (
                     <p className="mt-4 text-sm text-stone-500">No tags yet — create one below.</p>
                 ) : (
-                    <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto">
+                    <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto overscroll-contain">
                         {tags.map((tag) => (
                             <li
                                 key={tag.id}
-                                className="flex items-center gap-2 rounded-lg px-1 py-1.5 hover:bg-ink/5"
+                                className="flex items-center gap-2 rounded-lg px-1 py-1.5 hover:bg-ink/5 pointer-coarse:gap-1"
                             >
                                 <span className="min-w-0 flex-1 truncate text-sm text-stone-800">{tag.name}</span>
                                 <button
                                     type="button"
-                                    className="shrink-0 text-xs text-stone-500 hover:text-stone-700"
+                                    className="shrink-0 text-xs text-stone-500 hover:text-stone-700 pointer-coarse:-my-1.5 pointer-coarse:min-h-11 pointer-coarse:px-2"
                                     disabled={busy}
                                     onClick={() => {
                                         setRenameValue(tag.name);
@@ -103,7 +103,7 @@ export const TagManageDialog = ({
                                 </button>
                                 <button
                                     type="button"
-                                    className="shrink-0 text-xs text-danger hover:underline"
+                                    className="shrink-0 text-xs text-danger hover:underline pointer-coarse:-my-1.5 pointer-coarse:min-h-11 pointer-coarse:px-2"
                                     disabled={busy}
                                     onClick={() => setDeleteTarget(tag)}
                                 >

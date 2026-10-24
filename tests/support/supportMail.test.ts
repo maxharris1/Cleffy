@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { bareAddress, isOwnForward } from '../../supabase/functions/_shared/supportMail';
+import { bareAddress, forwardedSubject, inboxTagFor, isOwnForward } from '../../supabase/functions/_shared/supportMail';
 
 /**
  * The forward loop guard. We send FROM an address the catch-all also receives
@@ -37,5 +37,38 @@ describe('isOwnForward', () => {
         'notsupport@cleffy.io',
     ])('lets %s through', (from) => {
         expect(isOwnForward(from, FORWARD_FROM)).toBe(false);
+    });
+});
+
+describe('inboxTagFor', () => {
+    it.each([
+        [['privacy@cleffy.io'], [], 'privacy'],
+        [['legal@cleffy.io'], [], 'legal'],
+        [['support@cleffy.io'], [], 'support'],
+        [['Cleffy Privacy <PRIVACY@cleffy.io>'], [], 'privacy'],
+    ])('tags mail received for %s as %s', (receivedFor, to, tag) => {
+        expect(inboxTagFor(receivedFor, to)).toBe(tag);
+    });
+
+    it('falls back to the To addresses when Resend gives no received_for', () => {
+        expect(inboxTagFor([], ['someone@else.example', 'legal@cleffy.io'])).toBe('legal');
+    });
+
+    it('takes the most sensitive inbox when a message reached several', () => {
+        expect(inboxTagFor(['support@cleffy.io', 'privacy@cleffy.io', 'legal@cleffy.io'])).toBe('privacy');
+        expect(inboxTagFor(['support@cleffy.io', 'legal@cleffy.io'])).toBe('legal');
+    });
+
+    it('calls anything else support', () => {
+        expect(inboxTagFor(['billing@cleffy.io'])).toBe('support');
+        expect(inboxTagFor()).toBe('support');
+    });
+});
+
+describe('forwardedSubject', () => {
+    it('puts the tag in front of the sender’s subject', () => {
+        expect(forwardedSubject('privacy', 'Please delete my data')).toBe('[privacy] Please delete my data');
+        expect(forwardedSubject('support', '  ')).toBe('[support] (no subject)');
+        expect(forwardedSubject('legal', undefined)).toBe('[legal] (no subject)');
     });
 });

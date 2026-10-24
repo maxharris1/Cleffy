@@ -21,6 +21,10 @@ export const fetchOwnedStudio = async (ownerId: string): Promise<StudioRow | nul
         .from('studios')
         .select('*')
         .eq('owner_id', ownerId)
+        // One live studio per owner (20261022100300). A superseded one is kept
+        // for the record, and is not always the newer one: the studio a district
+        // is billed on is kept over an older one.
+        .is('superseded_at', null)
         .order('created_at', { ascending: true })
         .limit(1)
         .maybeSingle();
@@ -37,6 +41,11 @@ export const createStudio = async (ownerId: string, name: string): Promise<Studi
         .select()
         .single();
     if (error) {
+        // studios_refuse_second_live raises studio_exists; the unique index
+        // answers for it if two creates race past the trigger.
+        if (error.message.includes('studio_exists') || error.message.includes('studios_one_live_per_owner')) {
+            throw new Error('You already have an academy. Reload the page to see it.');
+        }
         throw new Error(`Could not create studio: ${error.message}`);
     }
     return data;
@@ -48,6 +57,50 @@ export const fetchStudioSeats = async (studioId: string): Promise<StudioSeat[]> 
         throw new Error(`Could not load seats: ${error.message}`);
     }
     return (data ?? []).map((row) => ({ userId: row.user_id, email: row.email }));
+};
+
+/**
+ * The seats the studio may fill, owner included: 5 on Academy, or a district's
+ * contracted count while its invoice-billed subscription is live. The count
+ * lives behind a definer RPC because the override that raises it is admin-only.
+ */
+export const fetchStudioSeatLimit = async (studioId: string): Promise<number> => {
+    const { data, error } = await getSupabase().rpc('studio_seat_limit', { p_studio: studioId });
+    if (error) {
+        throw new Error(`Could not load the seat limit: ${error.message}`);
+    }
+    return data;
+};
+
+/** One seat as the server ranks it: active, or read-only past the studio's limit. */
+export interface StudioSeatState {
+    active: boolean;
+    /** The owner chose it to stay active. */
+    kept: boolean;
+}
+
+/**
+ * Which seats are active, owner only. A studio over its limit -- a district
+ * whose override was lowered, cleared or lapsed -- has read-only seats past it.
+ */
+export const fetchStudioSeatStatus = async (studioId: string): Promise<Map<string, StudioSeatState>> => {
+    const { data, error } = await getSupabase().rpc('studio_seat_status', { p_studio: studioId });
+    if (error) {
+        throw new Error(`Could not load seat status: ${error.message}`);
+    }
+    return new Map((data ?? []).map((row) => [row.user_id, { active: row.active, kept: row.kept_active }]));
+};
+
+/** The owner's pick of seats to keep active; everyone else goes by seniority. */
+export const setActiveStudioSeats = async (studioId: string, userIds: string[]): Promise<void> => {
+    const { error } = await getSupabase().rpc('studio_set_active_seats', { p_studio: studioId, p_members: userIds });
+    if (!error) {
+        return;
+    }
+    if (error.message.includes('seats can be active')) {
+        throw new Error('That is more teachers than your seats allow. Untick some first.');
+    }
+    throw new Error(`Could not save the active seats: ${error.message}`);
 };
 
 export const inviteStudioMember = async (studioId: string, email: string): Promise<void> => {

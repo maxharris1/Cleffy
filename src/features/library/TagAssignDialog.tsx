@@ -60,7 +60,7 @@ export const TagAssignDialog = ({
             {tags.length === 0 ? (
                 <p className="mt-4 text-sm text-stone-500">No tags yet — create one below.</p>
             ) : (
-                <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto">
+                <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto overscroll-contain">
                     {tags.map((tag) => {
                         const checked = assignedTagIds.has(tag.id);
                         return (

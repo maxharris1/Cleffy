@@ -7,11 +7,11 @@ description: Operate this project's Supabase backend (project jibgwgosihadbjgxds
 
 ## Environments
 
-| Environment | Ref | Notes |
-| --- | --- | --- |
-| Production (`cleffy.io`, git `main`) | `jibgwgosihadbjgxdsfe` | do not `db push` — see divergence below |
-| Persistent `dev` branch (`dev.cleffy.io`, git `dev`) | `qdbnlrgylelelvwbkvnm` | **paused most of the time**; unpause to test a release |
-| Local | — | `npm run local:up`, API on :54421 |
+| Environment                                          | Ref                    | Notes                                                                |
+| ---------------------------------------------------- | ---------------------- | -------------------------------------------------------------------- |
+| Production (`cleffy.io`, git `main`)                 | `jibgwgosihadbjgxdsfe` | GitHub integration deploys on merge to `main`; do not also `db push` |
+| Persistent `dev` branch (`dev.cleffy.io`, git `dev`) | `qdbnlrgylelelvwbkvnm` | **paused most of the time**; unpause to test a release               |
+| Local                                                | —                      | `npm run local:up`, API on :54421                                    |
 
 Production dashboard: https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe
 
@@ -21,9 +21,28 @@ Production dashboard: https://supabase.com/dashboard/project/jibgwgosihadbjgxdsf
 npm run local:up          # Supabase + OMR worker; --no-omr to skip OMR
 npm run dev:local         # Vite :5173
 npm run functions:serve   # edge functions
+npm run imslp:seed        # load the committed IMSLP catalog (no IMSLP network)
 npm run local:status      # health check
 npm run local:down
 ```
+
+### In a Claude Code cloud session
+
+`npm run cloud:up` does the whole list above (minus `imslp:seed`) in one
+idempotent command, logging to `/tmp/cleffy-*.log`. Things that differ from a
+laptop:
+
+- **Docker is installed but its daemon is not running** in a fresh container —
+  `local:up` then fails with "start Docker Desktop". The SessionStart hook
+  (`.claude/hooks/session-start.sh`) starts it, and `cloud:up` does too; by hand
+  it is `ensure_docker_access` from `.cursor/lib/boot-common.sh` (or `dockerd &`).
+- **First boot is slow** (image pulls + every migration): several minutes. Run it
+  in the background and do other work meanwhile.
+- `cloud:up` passes `--no-omr`; boot OMR with `npm run local:up` only when the
+  task is play-along/score analysis.
+- Chromium reaches the **local** stack fine. The TLS-fingerprinting problem in
+  "Sandbox network rules" below applies only to **hosted** Supabase.
+- To drive the UI (screenshots, responsive checks), see the `ui-check` skill.
 
 `.claude/launch.json` is not a shortcut around this list: it runs `dev:local`
 alone, so the backend must already be up, and edge functions are still served by
@@ -61,6 +80,7 @@ expected. Branch config lives in `[remotes.dev]` in `config.toml`; the branch is
 **not seeded** (seed.sql's accounts have a documented password and this host is
 public), so the `scores` bucket comes from `[storage.buckets.scores]`. Edge
 function secrets do **not** inherit from production.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were hard-reset and rebuilt from
@@ -92,12 +112,12 @@ hosted. **Every new table needs an explicit grant** matching its RLS policies.
 
 ## Credentials — where they live (NEVER commit any of these)
 
-| Credential                                        | Purpose                                        | Location                                                                                                    |
-| ------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`    | app (client-safe)                              | `.env` (gitignored)                                                                                         |
-| `SUPABASE_ACCESS_TOKEN` (`sbp_…`, account-scoped) | CLI + Management API (migrations, auth config) | `.env`; ask the user to add it to the Claude **environment settings** env vars so fresh sessions inherit it |
-| `sb_secret_…` (project secret key)                | admin API (create test users, storage admin)   | ask the user; use transiently, never write to a committed file                                              |
-| `SUPABASE_DB_PASSWORD`                            | direct Postgres / `db push`                    | not available; not needed (see below)                                                                       |
+| Credential                                        | Purpose                                        | Location                                                                                                                                            |
+| ------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`    | app (client-safe)                              | `.env` (gitignored)                                                                                                                                 |
+| `SUPABASE_ACCESS_TOKEN` (`sbp_…`, account-scoped) | CLI + Management API (migrations, auth config) | `.env`; ask the user to add it to the Claude **environment settings** env vars so fresh sessions inherit it                                         |
+| `sb_secret_…` (project secret key)                | admin API (create test users, storage admin)   | ask the user; use transiently, never write to a committed file                                                                                      |
+| `SUPABASE_DB_PASSWORD`                            | direct Postgres (`psql`, `db push`, `repair`)  | not in `.env`. For a **branch**, `GET /v1/branches/{branch_id}` returns `db_pass` in plaintext; production's own branch record does not (see below) |
 
 Load them with `node --env-file=.env …` or `export $(grep -v '^#' .env | xargs)`.
 
@@ -107,9 +127,8 @@ Migrations live in `supabase/migrations/`. `scripts/apply-migrations.sql` is the
 combined file for the dashboard SQL editor — regenerate it after editing migrations.
 
 - **From a normal machine:** `npx supabase link --project-ref jibgwgosihadbjgxdsfe && npx supabase db push`.
-- **From the Claude sandbox:** `db push` is impossible (raw Postgres TCP cannot
-  traverse the HTTP-CONNECT egress proxy). Use the Management API instead —
-  HTTPS, works through the proxy:
+- **From the Claude sandbox, small DDL — the default:** the Management API.
+  HTTPS, no database password needed, one statement batch per call:
 
 ```bash
 # body: {"query": "<full SQL>"} ; token from SUPABASE_ACCESS_TOKEN
@@ -121,6 +140,36 @@ After applying, insert the version into `supabase_migrations.schema_migrations`
 (same endpoint) so a future `db push` skips it. Auth settings are
 `PATCH /v1/projects/{ref}/config/auth` (e.g. `external_anonymous_users_enabled`,
 `site_url`, `uri_allow_list`).
+
+- **From the Claude sandbox, large or transactional work: `psql` / `db push`.**
+  Raw Postgres over TCP _does_ traverse the egress proxy — `CONNECT host:5432`
+  answers `HTTP/1.1 200 Connection established`, exactly as port 443 does
+  (re-checked 2026-10-12 against both `db.<ref>.supabase.co:5432` and the
+  pooler). This file used to say the opposite, and the false claim cost the
+  Phase 1 migration rehearsal real time: a 42 MB migration first looked
+  untestable from here and was then applied over `psql` without trouble,
+  including a `--single-transaction` run that rolled back cleanly through a
+  transient connection drop.
+
+    Prefer it to the API when:
+    - **the SQL is large.** The API call is a single HTTP body; 40 MB of catalog
+      inserts wants a stream, and sandbox egress measured ~530 KB/s, so budget
+      minutes and plan a retry.
+    - **it has to be one transaction.** `psql -v ON_ERROR_STOP=1
+--single-transaction` is the only way to get all-or-nothing across
+      statements — what the rolled-back proofs in `tests/sql/` and any risky DDL
+      need.
+    - **the command only speaks Postgres.** `supabase db push` and
+      `supabase migration repair` want a direct connection and the project
+      password; an access token is not enough.
+
+    Getting the password: for the `dev` branch — and any preview branch —
+    `GET /v1/branches/{branch_id}` returns `db_pass` and `db_user` in plaintext.
+    Write it to a mode-600 file, never a committed one, and never echo it.
+    **Production is the exception**: its own branch record carries only `db_host`,
+    `db_port`, `postgres_engine`, `postgres_version`, `ref`, `release_channel` and
+    `status` — no `db_pass`, no `db_user` — so production's password comes from the
+    dashboard (Settings → Database) or a reset, and the API will not read it back.
 
 ## Sandbox network rules (hard-won — do not rediscover)
 

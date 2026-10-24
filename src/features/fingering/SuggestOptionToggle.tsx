@@ -19,10 +19,8 @@ export const SuggestOptionToggle = ({ count, value, onChange }: SuggestOptionTog
                     type="button"
                     aria-pressed={value === i}
                     onClick={() => onChange(i)}
-                    className={`rounded-md border px-1.5 py-0.5 tabular-nums transition ${
-                        value === i
-                            ? 'border-accent bg-accent-soft text-accent'
-                            : 'border-stone-200 hover:bg-stone-50'
+                    className={`rounded-md border px-1.5 py-0.5 tabular-nums transition-colors ${
+                        value === i ? 'border-accent bg-accent-soft text-accent' : 'border-stone-200 hover:bg-stone-50'
                     }`}
                 >
                     {i + 1}

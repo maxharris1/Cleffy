@@ -30,6 +30,9 @@ const student = (id: string, displayName: string, archivedAt: string | null = nu
     archived_at: archivedAt,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
+    country: null,
+    age_attested_at: null,
+    age_attested_min_age: null,
 });
 
 const rosterAssignment = (documentId: string, studentUserId: string): RosterAssignment => ({
@@ -84,7 +87,7 @@ describe('AssignDialog', () => {
 
         // The roster load has landed by now; the list must still be waiting.
         await waitFor(() => expect(listRoster).toHaveBeenCalled());
-        expect(screen.getByText('Loading your roster…')).toBeInTheDocument();
+        expect(await screen.findByText('Loading your roster…')).toBeInTheDocument();
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 
         releaseAssignments(new Map([['s1-user', [rosterAssignment('doc-1', 's1-user')]]]));
@@ -106,5 +109,23 @@ describe('AssignDialog', () => {
 
         await waitFor(() => expect(assignScore).toHaveBeenCalledTimes(1));
         expect(assignScore).toHaveBeenCalledWith('doc-1', 's2-user', 'edit', null, null);
+    });
+
+    it('says plainly that Edit reaches the teacher’s own marks too', async () => {
+        // One shared layer per score (owner decision): a student with Edit can
+        // erase the teacher's marks, so the choice must not read as "their own".
+        const user = userEvent.setup();
+        renderDialog();
+
+        await screen.findByRole('checkbox', { name: /Ada Lovelace/ });
+        expect(
+            screen.getByText('They can add, change and erase all marks on this score, including yours.'),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/their own fingerings/)).not.toBeInTheDocument();
+        // Students sign in with a username or email now; the code works once.
+        expect(screen.queryByText(/sign in with their code/)).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'View only' }));
+        expect(screen.getByText('They can read and play from it, but not mark it up.')).toBeInTheDocument();
     });
 });

@@ -1,6 +1,8 @@
-import { useSyncExternalStore, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 
-import type { AnnotationStore } from '@/sync/annotationStore';
+import { features } from '@/lib/features';
+import type { ObscuredEdges } from '@/features/viewer/geometry';
+import { settleEdit, type AnnotationStore } from '@/sync/annotationStore';
 import { STROKE_COLORS, useViewerStore } from '@/state/store';
 import type { StrokeWidthKey, Tool } from '@/types/models';
 import { PointerIcon, RedoIcon, UndoIcon } from '@/ui/icons';
@@ -11,7 +13,16 @@ const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }
     { tool: 'highlighter', label: 'Highlighter', short: 'Mark', icon: <HighlighterIcon /> },
     { tool: 'eraser', label: 'Eraser', short: 'Erase', icon: <EraserIcon /> },
     { tool: 'text', label: 'Text note', short: 'Text', icon: <TextIcon /> },
-    { tool: 'fingering', label: 'Fingering — drag over a chord or phrase', short: 'Hands', icon: <FingeringIcon /> },
+    ...(features.fingering
+        ? [
+              {
+                  tool: 'fingering' as const,
+                  label: 'Fingering — drag over a chord or phrase',
+                  short: 'Hands',
+                  icon: <FingeringIcon />,
+              },
+          ]
+        : []),
 ];
 
 const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
@@ -20,20 +31,48 @@ const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
     { key: 'thick', label: 'Thick', preview: 7 },
 ];
 
+/**
+ * Phone buttons share one row: each may shrink to fit a 320px screen and
+ * stops growing at 44px; from `sm` up they keep their natural labelled size.
+ * On touch the 40px-tall buttons reach 44px through an invisible ::after
+ * (hit-44-y): height only, since on a phone they sit edge to edge.
+ */
+const BAR_BUTTON =
+    'flex h-10 min-w-0 max-w-11 flex-1 basis-0 items-center justify-center rounded-xl text-stone-600 active:bg-ink/10 pointer-coarse:hit-44-y sm:max-w-none sm:flex-none sm:basis-auto';
+
+const DIVIDER = 'mx-0.5 h-6 w-px shrink-0 bg-stone-200 sm:mx-1';
+
 export interface ToolbarProps {
     store: AnnotationStore;
+    /**
+     * How many px of the viewport's top or bottom edge the toolbar covers, so
+     * the viewer can let the first and last page scroll clear of it.
+     */
+    onObscuredChange?: (edges: ObscuredEdges) => void;
 }
 
 /**
- * Floating tool palette. Desktop: top-center. Phones: bottom (thumb-reachable),
- * above the safe area. Hidden entirely for view-only roles (M3).
+ * Floating tool palette. Phones: one row at the bottom (thumb-reachable),
+ * above the safe area, icon buttons only, with the colours and sizes behind a
+ * single style button — inline they wrapped the bar to three rows over the
+ * page. From `sm` (tablets, a portrait iPad included): production's bar, at
+ * the top with labels; the colours and sizes stay behind the style button
+ * until `lg`, where they fit inline, one tap each (inline, a portrait iPad's
+ * bar wrapped to a mostly empty second row). Where the bar still wraps, the
+ * viewer lets the first page scroll clear of it (onObscuredChange). Hidden
+ * entirely for view-only roles (M3).
  */
-export const Toolbar = ({ store }: ToolbarProps) => {
+export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const tool = useViewerStore((s) => s.tool);
     const color = useViewerStore((s) => s.color);
     const widthKey = useViewerStore((s) => s.widthKey);
     const fingerDraws = useViewerStore((s) => s.fingerDraws);
     const { setTool, setColor, setWidthKey, setFingerDraws } = useViewerStore.getState();
+    const [styleOpen, setStyleOpen] = useState(false);
+    const overlayRef = useRef<HTMLDivElement | null>(null);
+    const styleButtonRef = useRef<HTMLButtonElement | null>(null);
+    const popoverRef = useRef<HTMLDivElement | null>(null);
+    const popoverId = useId();
 
     const undoState = useSyncExternalStore(
         (cb) => store.subscribeMeta(cb),
@@ -44,13 +83,122 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const showColors = tool === 'pen' || tool === 'highlighter' || tool === 'text';
     const showSize = tool === 'pen' || tool === 'highlighter' || tool === 'eraser';
     const sizeCaption = tool === 'eraser' ? 'Eraser size' : tool === 'highlighter' ? 'Marker size' : 'Pen size';
+    const colorCaption = tool === 'highlighter' ? 'Marker colour' : tool === 'text' ? 'Text colour' : 'Pen colour';
+    const styleLabel = showColors && showSize ? `${colorCaption} and size` : showColors ? colorCaption : sizeCaption;
+    const preview = WIDTHS.find((w) => w.key === widthKey)?.preview ?? 4;
+
+    const selectTool = (next: Tool) => {
+        setStyleOpen(false);
+        setTool(next);
+    };
+
+    // A tap outside the style popover (or Escape) puts it away.
+    useEffect(() => {
+        if (!styleOpen) {
+            return;
+        }
+        const onPointerDown = (e: PointerEvent) => {
+            const target = e.target as Node | null;
+            if (popoverRef.current?.contains(target) || styleButtonRef.current?.contains(target)) {
+                return;
+            }
+            setStyleOpen(false);
+        };
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                setStyleOpen(false);
+                styleButtonRef.current?.focus();
+            }
+        };
+        document.addEventListener('pointerdown', onPointerDown, true);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('pointerdown', onPointerDown, true);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [styleOpen]);
+
+    // Report the strip of viewport the bar covers whenever either one resizes
+    // (rotation, a tool that adds the style button, the safe area).
+    useEffect(() => {
+        const overlay = overlayRef.current;
+        const viewport = overlay?.parentElement;
+        if (!overlay || !viewport || !onObscuredChange) {
+            return;
+        }
+        const root = document.documentElement;
+        const measure = () => {
+            const bar = overlay.getBoundingClientRect();
+            const box = viewport.getBoundingClientRect();
+            const atBottom = bar.height > 0 && bar.top > box.top + box.height / 2;
+            // App-wide bars pinned to the window's bottom edge (SignedOutInkNotice)
+            // sit above a bottom toolbar rather than over its buttons.
+            root.style.setProperty(
+                '--toolbar-bottom-clearance',
+                atBottom ? `${Math.max(0, Math.round(window.innerHeight - bar.top))}px` : '0px',
+            );
+            if (bar.height === 0) {
+                onObscuredChange({ top: 0, bottom: 0 });
+            } else if (atBottom) {
+                onObscuredChange({ top: 0, bottom: Math.max(0, Math.round(box.bottom - bar.top)) });
+            } else {
+                onObscuredChange({ top: Math.max(0, Math.round(bar.bottom - box.top)), bottom: 0 });
+            }
+        };
+        const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+        observer?.observe(overlay);
+        observer?.observe(viewport);
+        window.addEventListener('resize', measure);
+        measure();
+        return () => {
+            observer?.disconnect();
+            window.removeEventListener('resize', measure);
+            root.style.removeProperty('--toolbar-bottom-clearance');
+            onObscuredChange({ top: 0, bottom: 0 });
+        };
+    }, [onObscuredChange]);
+
+    const colorButtons = STROKE_COLORS.map((c) => (
+        <button
+            key={c}
+            type="button"
+            aria-label={`Color ${c}`}
+            aria-pressed={color === c}
+            onClick={() => setColor(c)}
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full pointer-coarse:hit-44 ${
+                color === c ? 'ring-2 ring-accent ring-offset-1' : ''
+            }`}
+        >
+            <span
+                className={`h-5 w-5 rounded-full ${tool === 'highlighter' ? 'opacity-55' : ''}`}
+                style={{ backgroundColor: c }}
+            />
+        </button>
+    ));
+
+    const sizeButtons = WIDTHS.map(({ key, label, preview: dot }) => (
+        <button
+            key={key}
+            type="button"
+            title={`${sizeCaption}: ${label}`}
+            aria-label={`${sizeCaption} ${label}`}
+            aria-pressed={widthKey === key}
+            onClick={() => setWidthKey(key)}
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl active:bg-ink/10 pointer-coarse:hit-44 ${
+                widthKey === key ? 'bg-accent-soft' : 'hover:bg-ink/5'
+            }`}
+        >
+            <SizeDot tool={tool} size={dot} />
+        </button>
+    ));
 
     return (
         <div
+            ref={overlayRef}
             data-ui-overlay
-            className="pointer-events-none absolute inset-x-0 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:bottom-auto sm:top-3"
+            className="pointer-events-none absolute bottom-[calc(0.75rem+var(--safe-bottom))] left-[max(0.5rem,var(--safe-left))] right-[max(0.5rem,var(--safe-right))] z-20 flex justify-center sm:inset-x-0 sm:bottom-auto sm:top-3"
         >
-            <div className="pointer-events-auto flex max-w-[calc(100vw-1rem)] flex-wrap items-center justify-center gap-1 rounded-2xl border border-stone-200 bg-white/95 px-2 py-1.5 shadow-lg backdrop-blur">
+            <div className="chrome-glass pointer-events-auto relative flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2 lg:pointer-coarse:gap-3">
                 {TOOLS.map(({ tool: t, label, short, icon }) => (
                     <button
                         key={t}
@@ -58,8 +206,8 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                         title={label}
                         aria-label={label}
                         aria-pressed={tool === t}
-                        onClick={() => setTool(t)}
-                        className={`flex h-10 items-center justify-center gap-1 rounded-xl px-2 text-stone-600 transition sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
+                        onClick={() => selectTool(t)}
+                        className={`${BAR_BUTTON} gap-1 sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
                             tool === t ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
                         }`}
                     >
@@ -68,71 +216,109 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                     </button>
                 ))}
 
-                {showColors ? (
+                {showColors || showSize ? (
                     <>
-                        <div className="mx-1 h-6 w-px bg-stone-200" />
+                        {/* Below lg: one button that opens the colours and sizes. */}
+                        <div className={`${DIVIDER} lg:hidden`} />
+                        <button
+                            ref={styleButtonRef}
+                            type="button"
+                            title={styleLabel}
+                            aria-label={styleLabel}
+                            // A disclosure, not a menu: aria-haspopup would promise menu
+                            // keys the swatches do not have. Expanded + controls says it.
+                            aria-expanded={styleOpen}
+                            aria-controls={styleOpen ? popoverId : undefined}
+                            onClick={() => setStyleOpen((open) => !open)}
+                            className={`${BAR_BUTTON} sm:w-11 lg:hidden ${styleOpen ? 'bg-accent-soft' : 'hover:bg-ink/5'}`}
+                        >
+                            {showColors ? (
+                                <span
+                                    className={`flex h-6 w-6 items-center justify-center rounded-full ${
+                                        tool === 'highlighter' ? 'opacity-55' : ''
+                                    }`}
+                                    style={{ backgroundColor: color }}
+                                >
+                                    {showSize ? (
+                                        <span
+                                            className="rounded-full bg-white/90"
+                                            style={{ width: preview, height: preview }}
+                                        />
+                                    ) : null}
+                                </span>
+                            ) : (
+                                <SizeDot tool={tool} size={preview + 4} />
+                            )}
+                        </button>
+                        {styleOpen ? (
+                            <div
+                                ref={popoverRef}
+                                id={popoverId}
+                                role="group"
+                                aria-label={styleLabel}
+                                // Above the phone's bottom bar; below the bar docked at the top from sm.
+                                className="chrome-glass ui-menu-pop absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-lg [--transform-origin:bottom_center] sm:bottom-auto sm:[--transform-origin:top_center] sm:top-full sm:mb-0 sm:mt-2 lg:hidden"
+                            >
+                                {showColors ? (
+                                    <>
+                                        <p className="text-[10px] font-medium uppercase tracking-wide text-stone-500">
+                                            {colorCaption}
+                                        </p>
+                                        <div className="mt-1 flex flex-wrap items-center gap-1 pointer-coarse:gap-3">
+                                            {colorButtons}
+                                        </div>
+                                    </>
+                                ) : null}
+                                {showSize ? (
+                                    <>
+                                        <p
+                                            className={`text-[10px] font-medium uppercase tracking-wide text-stone-500 ${
+                                                showColors ? 'mt-2' : ''
+                                            }`}
+                                        >
+                                            {sizeCaption}
+                                        </p>
+                                        <div className="mt-1 flex items-center gap-1 pointer-coarse:gap-3">
+                                            {sizeButtons}
+                                        </div>
+                                    </>
+                                ) : null}
+                            </div>
+                        ) : null}
+                    </>
+                ) : null}
+
+                {/* From lg up: colours and sizes inline, as in production. */}
+                {showColors ? (
+                    <div className="hidden lg:contents">
+                        <div className={DIVIDER} />
                         {tool === 'highlighter' ? (
-                            <span className="hidden px-1 text-[10px] font-medium uppercase tracking-wide text-amber-700 sm:inline">
+                            <span className="px-1 text-[10px] font-medium uppercase tracking-wide text-amber-700">
                                 Marker
                             </span>
                         ) : null}
-                        {STROKE_COLORS.map((c) => (
-                            <button
-                                key={c}
-                                type="button"
-                                aria-label={`Color ${c}`}
-                                aria-pressed={color === c}
-                                onClick={() => setColor(c)}
-                                className={`flex h-8 w-8 items-center justify-center rounded-full ${
-                                    color === c ? 'ring-2 ring-accent ring-offset-1' : ''
-                                }`}
-                            >
-                                <span
-                                    className={`h-5 w-5 rounded-full ${tool === 'highlighter' ? 'opacity-55' : ''}`}
-                                    style={{ backgroundColor: c }}
-                                />
-                            </button>
-                        ))}
-                    </>
+                        {colorButtons}
+                    </div>
                 ) : null}
 
                 {showSize ? (
-                    <>
-                        <div className="mx-1 h-6 w-px bg-stone-200" />
-                        <span className="hidden px-1 text-[10px] font-medium uppercase tracking-wide text-stone-500 sm:inline">
+                    <div className="hidden lg:contents">
+                        <div className={DIVIDER} />
+                        <span className="px-1 text-[10px] font-medium uppercase tracking-wide text-stone-500">
                             {sizeCaption}
                         </span>
-                        {WIDTHS.map(({ key, label, preview }) => (
-                            <button
-                                key={key}
-                                type="button"
-                                title={`${sizeCaption}: ${label}`}
-                                aria-label={`${sizeCaption} ${label}`}
-                                aria-pressed={widthKey === key}
-                                onClick={() => setWidthKey(key)}
-                                className={`flex h-8 w-8 items-center justify-center rounded-xl transition ${
-                                    widthKey === key ? 'bg-accent-soft' : 'hover:bg-ink/5'
-                                }`}
-                            >
-                                <span
-                                    className={`rounded-full ${tool === 'highlighter' ? 'bg-amber-400/70' : 'bg-stone-700'} ${
-                                        tool === 'eraser' ? 'border-2 border-stone-500 bg-transparent' : ''
-                                    }`}
-                                    style={{ width: preview, height: preview }}
-                                />
-                            </button>
-                        ))}
-                    </>
+                        {sizeButtons}
+                    </div>
                 ) : null}
 
-                <div className="mx-1 h-6 w-px bg-stone-200" />
+                <div className={DIVIDER} />
                 <button
                     type="button"
                     title="Undo"
                     aria-label="Undo"
                     disabled={!canUndo}
-                    onClick={() => void store.undoLast()}
-                    className="flex h-10 w-10 items-center justify-center rounded-xl text-stone-600 transition hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent"
+                    onClick={() => settleEdit(store.undoLast())}
+                    className={`${BAR_BUTTON} hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent sm:w-11`}
                 >
                     <UndoIcon size={20} />
                 </button>
@@ -141,13 +327,13 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                     title="Redo"
                     aria-label="Redo"
                     disabled={!canRedo}
-                    onClick={() => void store.redoLast()}
-                    className="flex h-10 w-10 items-center justify-center rounded-xl text-stone-600 transition hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent"
+                    onClick={() => settleEdit(store.redoLast())}
+                    className={`${BAR_BUTTON} hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent sm:w-11`}
                 >
                     <RedoIcon size={20} />
                 </button>
 
-                <div className="mx-1 h-6 w-px bg-stone-200" />
+                <div className={DIVIDER} />
                 <button
                     type="button"
                     title={
@@ -156,7 +342,7 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                     aria-label="Draw with finger"
                     aria-pressed={fingerDraws}
                     onClick={() => setFingerDraws(!fingerDraws)}
-                    className={`flex h-10 items-center justify-center gap-1 rounded-xl px-2 text-stone-600 transition sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
+                    className={`${BAR_BUTTON} gap-1 sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
                         fingerDraws ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
                     }`}
                 >
@@ -169,6 +355,18 @@ export const Toolbar = ({ store }: ToolbarProps) => {
         </div>
     );
 };
+
+/** A stroke-width preview: an ink dot, a marker dot, or the eraser's ring. */
+function SizeDot({ tool, size }: { tool: Tool; size: number }) {
+    return (
+        <span
+            className={`rounded-full ${tool === 'highlighter' ? 'bg-amber-400/70' : 'bg-stone-700'} ${
+                tool === 'eraser' ? 'border-2 border-stone-500 bg-transparent' : ''
+            }`}
+            style={{ width: size, height: size }}
+        />
+    );
+}
 
 function PanIcon() {
     return (

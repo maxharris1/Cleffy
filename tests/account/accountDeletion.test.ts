@@ -1,0 +1,1263 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import { describe, expect, it } from 'vitest';
+
+import {
+    cancelBilling,
+    deleteAccount,
+    MAX_SWEEP_PASSES,
+    provisionIntentFromRow,
+    type DeletionCaller,
+    type DeletionPorts,
+    type ProvisionIntentRow,
+    type StoredSubscriptionRef,
+    type StripeCustomerRef,
+    type StripeMode,
+    type StripePort,
+    type StripeSubscriptionRef,
+    type StudentAccountRef,
+} from '../../supabase/functions/_shared/accountDeletion';
+
+/**
+ * Self-serve account deletion, driven through the exact module the
+ * delete-account Edge Function runs, against an in-memory world.
+ *
+ * What these pin down is the safety argument in accountDeletion.ts: money is
+ * stopped before anything is deleted (and a failure to stop it deletes
+ * nothing), files go before the rows that find them, only this teacher's own
+ * flagged students are taken with them, and every step can be re-run.
+ */
+
+const TEACHER = 'teacher-1';
+
+/** One Stripe account (live or test) as the deletion sees it. */
+class FakeStripe implements StripePort {
+    subscriptions = new Map<string, StripeSubscriptionRef & { customerId: string }>();
+    openSessions = new Map<string, string[]>();
+    searchable = new Map<string, string[]>();
+    failCancel = false;
+    failSearch = false;
+    calls: string[] = [];
+
+    constructor(private readonly log: string[]) {}
+
+    listSubscriptions = async (customerId: string) => {
+        this.log.push(`stripe.list:${customerId}`);
+        return [...this.subscriptions.values()]
+            .filter((sub) => sub.customerId === customerId)
+            .map(({ id, status }) => ({ id, status }));
+    };
+    retrieveSubscription = async (id: string) => {
+        const sub = this.subscriptions.get(id);
+        return sub ? { id: sub.id, status: sub.status } : null;
+    };
+    cancelSubscription = async (id: string): Promise<'canceled' | 'missing'> => {
+        if (this.failCancel) {
+            throw new Error('stripe is down');
+        }
+        const sub = this.subscriptions.get(id);
+        if (!sub) {
+            return 'missing';
+        }
+        this.log.push(`stripe.cancel:${id}`);
+        sub.status = 'canceled';
+        return 'canceled';
+    };
+    expireOpenCheckoutSessions = async (customerId: string) => {
+        const open = this.openSessions.get(customerId) ?? [];
+        this.openSessions.set(customerId, []);
+        if (open.length > 0) {
+            this.log.push(`stripe.expire:${customerId}`);
+        }
+        return open.length;
+    };
+    findCustomersByUserId = async (userId: string) => {
+        if (this.failSearch) {
+            throw new Error('search unavailable');
+        }
+        return this.searchable.get(userId) ?? [];
+    };
+}
+
+interface FakeUser {
+    userType: 'student' | null;
+    teacherId: string | null;
+}
+
+/** The database, Storage and auth as the deletion's ports reach them. */
+class FakeWorld {
+    log: string[] = [];
+    users = new Map<string, FakeUser>([[TEACHER, { userType: null, teacherId: null }]]);
+    documents = new Map<string, string>(); // id -> owner
+    /** document_storage_cleanup: id -> former owner, written by every documents delete. */
+    tombstones = new Map<string, string>();
+    objects = new Set<string>(); // `${bucket}/${documentId}/${name}`
+    roster = new Map<string, string>(); // student -> teacher
+    memberships = new Set<string>(); // `${documentId}:${userId}`
+    studios = new Map<string, string>(); // studio -> owner
+    seats = new Set<string>(); // `${studioId}:${userId}`
+    customers: Array<StripeCustomerRef & { userId: string }> = [];
+    /**
+     * account_deletions and account_deletion_attempts, as 20261022110100 and
+     * 20261022110400 keep them: `attempts` is the history; `active` holds the
+     * attempts that have not ended, by lease expiry (on `now`).
+     */
+    pending = new Map<
+        string,
+        { attempts: number; lastError: string | null; destructive: boolean; active: Map<string, number> }
+    >();
+    /** The database clock, in ms, for attempt leases. */
+    now = 0;
+    static readonly LEASE_MS = 600_000;
+    private attemptIds = 0;
+    failBeginDeletion = false;
+    failMarkDestructive = false;
+    /** checkout_attempts: a live lease another tab took before the marker. */
+    checkoutLeaseLive = false;
+    failCheckoutCheck = false;
+    /** student_provision_intents: provisionings with no roster row (yet). */
+    /** proven: the intent recorded the account, made inside its window; defaults to a recorded one. */
+    intents: Array<{
+        rosterId: string;
+        teacherId: string;
+        studentUserId: string | null;
+        live: boolean;
+        proven?: boolean;
+        /** Nothing named, but an unrostered account sits at the intent's address (student_provision_intents_proven's 'unproven_match'). */
+        unprovenMatch?: boolean;
+    }> = [];
+    stored: Array<StoredSubscriptionRef & { userId: string }> = [];
+    stripe: Record<StripeMode, FakeStripe | null> = { live: new FakeStripe(this.log), test: new FakeStripe(this.log) };
+
+    /**
+     * score_analyses.created_by, by document. A row authored by a user being
+     * deleted makes the auth delete fail, as guard_score_analyses_client_write
+     * refuses GoTrue's JWT-less ON DELETE SET NULL; only releaseAuthorship (the
+     * service role) clears it.
+     */
+    analysisAuthors = new Map<string, string | null>();
+    /** Runs once, right after the first releaseAuthorship — "another tab" again. */
+    onFirstRelease: (() => void) | null = null;
+
+    failStorageFor: string | null = null;
+    failAuthDelete = false;
+    failBillingRead = false;
+    /** Runs once, the first time a document listing happens — "another tab". */
+    onFirstDocumentListing: (() => void) | null = null;
+
+    /** account_deletion_pending(): an active attempt, or destructive cleanup begun. */
+    isPending(owner: string): boolean {
+        const marker = this.pending.get(owner);
+        if (!marker) {
+            return false;
+        }
+        return marker.destructive || [...marker.active.values()].some((leaseUntil) => leaseUntil > this.now);
+    }
+
+    /** documents_refuse_during_account_deletion / managed_students_refuse_during_account_deletion. */
+    private refuseWhilePending(owner: string) {
+        if (this.isPending(owner)) {
+            this.log.push(`refused:${owner}`);
+            throw new Error('account_deletion_pending');
+        }
+    }
+
+    addDocument(id: string, owner: string, withThumbnail = true) {
+        this.refuseWhilePending(owner);
+        this.documents.set(id, owner);
+        this.memberships.add(`${id}:${owner}`);
+        this.objects.add(`scores/${id}/original.pdf`);
+        if (withThumbnail) {
+            this.objects.add(`thumbnails/${id}/0.jpg`);
+        }
+    }
+
+    addStudent(id: string, teacher: string, user: Partial<FakeUser> = {}) {
+        this.refuseWhilePending(teacher);
+        this.users.set(id, { userType: 'student', teacherId: teacher, ...user });
+        this.roster.set(id, teacher);
+    }
+
+    /** ON DELETE CASCADE / SET NULL, as the schema declares them. */
+    private cascadeUser(userId: string) {
+        this.users.delete(userId);
+        this.pending.delete(userId);
+        for (const [student, teacher] of this.roster) {
+            if (student === userId || teacher === userId) {
+                this.roster.delete(student);
+            }
+        }
+        for (const [id, owner] of this.documents) {
+            if (owner === userId) {
+                // A row the deletion missed: cascaded, but its objects remain.
+                this.documents.delete(id);
+            }
+        }
+        for (const key of this.memberships) {
+            if (key.endsWith(`:${userId}`)) {
+                this.memberships.delete(key);
+            }
+        }
+        this.customers = this.customers.filter((c) => c.userId !== userId);
+        this.stored = this.stored.filter((s) => s.userId !== userId);
+    }
+
+    ports(): DeletionPorts {
+        return {
+            beginDeletion: async (userId) => {
+                if (this.failBeginDeletion) {
+                    throw new Error('db down');
+                }
+                if (!this.users.has(userId)) {
+                    return null;
+                }
+                const marker = this.pending.get(userId) ?? {
+                    attempts: 0,
+                    lastError: null,
+                    destructive: false,
+                    active: new Map<string, number>(),
+                };
+                marker.attempts += 1;
+                const attempt = `attempt-${(this.attemptIds += 1)}`;
+                marker.active.set(attempt, this.now + FakeWorld.LEASE_MS);
+                this.pending.set(userId, marker);
+                this.log.push(`pending:${userId}`);
+                return attempt;
+            },
+            markDestructive: async (userId, attempt) => {
+                if (this.failMarkDestructive) {
+                    throw new Error('db down');
+                }
+                const marker = this.pending.get(userId);
+                const leaseUntil = marker?.active.get(attempt);
+                if (!marker || leaseUntil === undefined || leaseUntil <= this.now) {
+                    return false;
+                }
+                marker.destructive = true;
+                this.log.push(`destructive:${userId}`);
+                return true;
+            },
+            settleDeletion: async (userId, attempt, outcome, code) => {
+                this.log.push(`settle:${outcome}:${code}`);
+                const marker = this.pending.get(userId);
+                if (!marker) {
+                    return;
+                }
+                marker.active.delete(attempt);
+                if (outcome === 'failed') {
+                    marker.lastError = code;
+                }
+                // settle_account_deletion_attempt: gone once no attempt is
+                // active and no cleanup ever began.
+                if (!marker.destructive && ![...marker.active.values()].some((until) => until > this.now)) {
+                    this.pending.delete(userId);
+                }
+            },
+            checkoutInFlight: async () => {
+                if (this.failCheckoutCheck) {
+                    throw new Error('db down');
+                }
+                this.log.push('checkout-check');
+                return this.checkoutLeaseLive;
+            },
+            provisionIntents: async (teacherId) =>
+                this.intents
+                    .filter((intent) => intent.teacherId === teacherId)
+                    .map(({ rosterId, studentUserId, live, proven, unprovenMatch }) => ({
+                        rosterId,
+                        studentUserId,
+                        live,
+                        proven: proven ?? studentUserId !== null,
+                        unprovenMatch: unprovenMatch ?? false,
+                    })),
+            clearProvisionIntent: async (rosterId) => {
+                this.log.push(`intent-cleared:${rosterId}`);
+                this.intents = this.intents.filter((intent) => intent.rosterId !== rosterId);
+            },
+            billingCustomers: async (userId) => {
+                if (this.failBillingRead) {
+                    throw new Error('db down');
+                }
+                return this.customers.filter((c) => c.userId === userId);
+            },
+            storedSubscriptions: async (userId) => this.stored.filter((s) => s.userId === userId),
+            stripeFor: (mode) => this.stripe[mode],
+            managedStudents: async (teacherId) =>
+                [...this.roster].filter(([, teacher]) => teacher === teacherId).map(([student]) => student),
+            studentAccount: async (id): Promise<StudentAccountRef | null> => this.users.get(id) ?? null,
+            ownedDocuments: async (userId) => {
+                const ids = [...this.documents].filter(([, owner]) => owner === userId).map(([id]) => id);
+                const hook = this.onFirstDocumentListing;
+                this.onFirstDocumentListing = null;
+                hook?.();
+                return ids;
+            },
+            removeStorageFolder: async (bucket, documentId) => {
+                if (this.failStorageFor === documentId) {
+                    throw new Error('storage unavailable');
+                }
+                let removed = 0;
+                for (const key of this.objects) {
+                    if (key.startsWith(`${bucket}/${documentId}/`)) {
+                        this.objects.delete(key);
+                        removed += 1;
+                    }
+                }
+                this.log.push(`storage:${bucket}/${documentId}`);
+                return removed;
+            },
+            deleteDocument: async (documentId) => {
+                this.log.push(`row:${documentId}`);
+                const owner = this.documents.get(documentId);
+                if (owner !== undefined) {
+                    // documents_record_storage_cleanup (AFTER DELETE).
+                    this.tombstones.set(documentId, owner);
+                }
+                this.documents.delete(documentId);
+                for (const key of this.memberships) {
+                    if (key.startsWith(`${documentId}:`)) {
+                        this.memberships.delete(key);
+                    }
+                }
+            },
+            storageCleanups: async (ownerId) =>
+                [...this.tombstones]
+                    .filter(([id, owner]) => owner === ownerId && !this.documents.has(id))
+                    .map(([id]) => id),
+            clearStorageCleanup: async (documentId, ownerId) => {
+                if (this.tombstones.get(documentId) === ownerId) {
+                    this.log.push(`tombstone:${documentId}`);
+                    this.tombstones.delete(documentId);
+                }
+            },
+            deleteStudiosAndMemberships: async (userId) => {
+                this.log.push(`memberships:${userId}`);
+                for (const [studio, owner] of this.studios) {
+                    if (owner === userId) {
+                        this.studios.delete(studio);
+                        for (const seat of this.seats) {
+                            if (seat.startsWith(`${studio}:`)) {
+                                this.seats.delete(seat);
+                            }
+                        }
+                    }
+                }
+                for (const seat of this.seats) {
+                    if (seat.endsWith(`:${userId}`)) {
+                        this.seats.delete(seat);
+                    }
+                }
+                for (const key of this.memberships) {
+                    if (key.endsWith(`:${userId}`)) {
+                        this.memberships.delete(key);
+                    }
+                }
+            },
+            releaseAuthorship: async (userId) => {
+                this.log.push(`release:${userId}`);
+                for (const [doc, author] of this.analysisAuthors) {
+                    if (author === userId) {
+                        this.analysisAuthors.set(doc, null);
+                    }
+                }
+                const hook = this.onFirstRelease;
+                this.onFirstRelease = null;
+                hook?.();
+            },
+            deleteAuthUser: async (userId) => {
+                if (this.failAuthDelete) {
+                    throw new Error('gotrue down');
+                }
+                if ([...this.analysisAuthors.values()].includes(userId)) {
+                    throw new Error('score_analyses: clients may only set pending or failed');
+                }
+                if (!this.users.has(userId)) {
+                    return 'not_found';
+                }
+                this.log.push(`auth:${userId}`);
+                this.cascadeUser(userId);
+                return 'deleted';
+            },
+            log: (message) => this.log.push(`log:${message}`),
+        };
+    }
+
+    /** True when nothing about any of these users or their scores remains. */
+    holdsNothingFor(...userIds: string[]) {
+        return (
+            userIds.every((id) => !this.users.has(id)) &&
+            [...this.documents.values()].every((owner) => !userIds.includes(owner)) &&
+            [...this.tombstones.values()].every((owner) => !userIds.includes(owner)) &&
+            this.objects.size === 0
+        );
+    }
+}
+
+const teacher = (overrides: Partial<DeletionCaller> = {}): DeletionCaller => ({
+    userId: TEACHER,
+    isAnonymous: false,
+    userType: null,
+    ...overrides,
+});
+
+/** A teacher paying in live mode, with one score and an open checkout tab. */
+const payingTeacher = () => {
+    const world = new FakeWorld();
+    world.customers.push({ userId: TEACHER, customerId: 'cus_live', mode: 'live' });
+    world.stored.push({ userId: TEACHER, subscriptionId: 'sub_live', mode: 'live', status: 'active' });
+    world.stripe.live?.subscriptions.set('sub_live', { id: 'sub_live', status: 'active', customerId: 'cus_live' });
+    world.stripe.live?.openSessions.set('cus_live', ['cs_open']);
+    world.addDocument('doc-1', TEACHER);
+    return world;
+};
+
+describe('who may delete', () => {
+    it('deletes a share-link guest: their memberships and the anonymous auth user, nothing else', async () => {
+        const world = new FakeWorld();
+        world.addDocument('doc-1', TEACHER);
+        world.addDocument('doc-2', TEACHER);
+        world.users.set('guest-1', { userType: null, teacherId: null });
+        world.memberships.add('doc-1:guest-1');
+        world.memberships.add('doc-2:guest-1');
+        world.analysisAuthors.set('doc-1', 'guest-1');
+
+        const result = await deleteAccount({ userId: 'guest-1', isAnonymous: true, userType: null }, world.ports());
+
+        expect(result).toMatchObject({
+            ok: true,
+            summary: { authUser: 'deleted', subscriptionsCanceled: 0, studentsDeleted: 0, documentsDeleted: 0 },
+        });
+        expect(world.users.has('guest-1')).toBe(false);
+        expect([...world.memberships].filter((key) => key.endsWith(':guest-1'))).toEqual([]);
+        // The owner's scores, files and access are untouched.
+        expect(world.documents.size).toBe(2);
+        expect(world.memberships.has('doc-1:teacher-1')).toBe(true);
+        expect(world.objects.size).toBe(4);
+        // Nothing about billing is asked: a guest cannot have checked out.
+        expect(world.log.some((line) => line.startsWith('stripe.'))).toBe(false);
+        expect(world.log).toEqual(['memberships:guest-1', 'release:guest-1', 'auth:guest-1']);
+    });
+
+    it('never touches Stripe for a guest, even with no Stripe key configured', async () => {
+        const world = new FakeWorld();
+        world.stripe = { live: null, test: null };
+        world.users.set('guest-1', { userType: null, teacherId: null });
+        const result = await deleteAccount({ userId: 'guest-1', isAnonymous: true, userType: null }, world.ports());
+        expect(result).toMatchObject({ ok: true });
+        expect(world.users.has('guest-1')).toBe(false);
+    });
+
+    it('answers a guest retry after success as done', async () => {
+        const world = new FakeWorld();
+        const result = await deleteAccount({ userId: 'guest-1', isAnonymous: true, userType: null }, world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { authUser: 'not_found' } });
+    });
+
+    it('reports a guest deletion that could not remove the auth user', async () => {
+        const world = new FakeWorld();
+        world.users.set('guest-1', { userType: null, teacherId: null });
+        world.failAuthDelete = true;
+        const result = await deleteAccount({ userId: 'guest-1', isAnonymous: true, userType: null }, world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'auth_delete_failed' });
+    });
+
+    it('refuses a provisioned student: their teacher controls the account', async () => {
+        const world = new FakeWorld();
+        world.addStudent('student-1', TEACHER);
+        const result = await deleteAccount(
+            { userId: 'student-1', isAnonymous: false, userType: 'student' },
+            world.ports(),
+        );
+        expect(result).toMatchObject({ ok: false, status: 403, code: 'managed_student' });
+        expect(world.users.has('student-1')).toBe(true);
+        expect(world.log).toEqual([]);
+    });
+});
+
+describe('billing comes first', () => {
+    it('cancels the subscription and expires open checkouts before deleting any data', async () => {
+        const world = payingTeacher();
+        const result = await deleteAccount(teacher(), world.ports());
+
+        expect(result).toMatchObject({
+            ok: true,
+            summary: { subscriptionsCanceled: 1, checkoutSessionsExpired: 1, documentsDeleted: 1, authUser: 'deleted' },
+        });
+        expect(world.stripe.live?.subscriptions.get('sub_live')?.status).toBe('canceled');
+        const firstDeletion = world.log.findIndex((entry) => entry.startsWith('storage:'));
+        expect(world.log.indexOf('stripe.cancel:sub_live')).toBeLessThan(firstDeletion);
+        // Expired before the subscriptions were listed, so a checkout completing
+        // in between cannot leave a subscription behind.
+        expect(world.log.indexOf('stripe.expire:cus_live')).toBeLessThan(world.log.indexOf('stripe.list:cus_live'));
+        expect(world.holdsNothingFor(TEACHER)).toBe(true);
+    });
+
+    it('deletes nothing when the subscription cannot be cancelled', async () => {
+        const world = payingTeacher();
+        if (world.stripe.live) {
+            world.stripe.live.failCancel = true;
+        }
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'billing_cancel_failed' });
+        expect(world.documents.has('doc-1')).toBe(true);
+        expect(world.objects.size).toBe(2);
+        expect(world.users.has(TEACHER)).toBe(true);
+    });
+
+    it('deletes nothing when the billing tables cannot be read', async () => {
+        const world = payingTeacher();
+        world.failBillingRead = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(world.documents.has('doc-1')).toBe(true);
+    });
+
+    it('refuses rather than strand a live subscription when the live key is missing', async () => {
+        const world = payingTeacher();
+        world.stripe.live = null;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 503, code: 'billing_unavailable' });
+        expect(world.documents.has('doc-1')).toBe(true);
+        expect(world.users.has(TEACHER)).toBe(true);
+    });
+
+    it('does not let a missing sandbox key keep someone’s data', async () => {
+        const world = new FakeWorld();
+        world.customers.push({ userId: TEACHER, customerId: 'cus_test', mode: 'test' });
+        world.stripe.test = null;
+        world.addDocument('doc-1', TEACHER);
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result.ok).toBe(true);
+        expect(world.log.some((entry) => entry.includes('no test-mode key'))).toBe(true);
+    });
+
+    it('leaves terminal subscriptions alone and cancels everything that can still bill', async () => {
+        const world = new FakeWorld();
+        const live = world.stripe.live as FakeStripe;
+        world.customers.push({ userId: TEACHER, customerId: 'cus_live', mode: 'live' });
+        for (const [id, status] of [
+            ['sub_old', 'canceled'],
+            ['sub_expired', 'incomplete_expired'],
+            ['sub_due', 'past_due'],
+            ['sub_trial', 'trialing'],
+            ['sub_unpaid', 'unpaid'],
+        ] as const) {
+            live.subscriptions.set(id, { id, status, customerId: 'cus_live' });
+        }
+        const result = await cancelBilling(TEACHER, world.ports());
+        expect(result).toMatchObject({ ok: true, canceled: 3 });
+        expect(world.log.filter((entry) => entry.startsWith('stripe.cancel:')).sort()).toEqual([
+            'stripe.cancel:sub_due',
+            'stripe.cancel:sub_trial',
+            'stripe.cancel:sub_unpaid',
+        ]);
+    });
+
+    it('cancels a recorded subscription whose customer row is missing, after asking Stripe', async () => {
+        const world = new FakeWorld();
+        const live = world.stripe.live as FakeStripe;
+        world.stored.push({ userId: TEACHER, subscriptionId: 'sub_orphan', mode: 'live', status: 'active' });
+        world.stored.push({ userId: TEACHER, subscriptionId: 'sub_gone', mode: 'live', status: 'active' });
+        live.subscriptions.set('sub_orphan', { id: 'sub_orphan', status: 'active', customerId: 'cus_x' });
+        // sub_gone: our row says active, Stripe has never heard of it.
+        const result = await cancelBilling(TEACHER, world.ports());
+        expect(result).toMatchObject({ ok: true, canceled: 1 });
+        expect(live.subscriptions.get('sub_orphan')?.status).toBe('canceled');
+    });
+
+    it('finds a customer the checkout created but never recorded', async () => {
+        const world = new FakeWorld();
+        const live = world.stripe.live as FakeStripe;
+        live.searchable.set(TEACHER, ['cus_unrecorded']);
+        live.subscriptions.set('sub_x', { id: 'sub_x', status: 'active', customerId: 'cus_unrecorded' });
+        const result = await cancelBilling(TEACHER, world.ports());
+        expect(result).toMatchObject({ ok: true, canceled: 1 });
+    });
+
+    it('tolerates an unavailable customer search when the tables already describe everything', async () => {
+        const world = payingTeacher();
+        (world.stripe.live as FakeStripe).failSearch = true;
+        (world.stripe.test as FakeStripe).failSearch = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { subscriptionsCanceled: 1 } });
+    });
+});
+
+describe('what goes with the account', () => {
+    it('removes both buckets’ objects before the row that finds them', async () => {
+        const world = new FakeWorld();
+        world.addDocument('doc-1', TEACHER);
+        await deleteAccount(teacher(), world.ports());
+        const order = world.log.filter((entry) => entry.includes('doc-1'));
+        expect(order.slice(0, 3)).toEqual(['storage:scores/doc-1', 'storage:thumbnails/doc-1', 'row:doc-1']);
+    });
+
+    it('keeps a score’s row when its files could not be removed, so a retry can still find them', async () => {
+        const world = new FakeWorld();
+        world.addDocument('doc-1', TEACHER);
+        world.addDocument('doc-2', TEACHER);
+        world.failStorageFor = 'doc-2';
+        const first = await deleteAccount(teacher(), world.ports());
+        expect(first).toMatchObject({ ok: false, code: 'document_delete_failed' });
+        expect(world.documents.has('doc-2')).toBe(true);
+        expect(world.users.has(TEACHER)).toBe(true);
+
+        world.failStorageFor = null;
+        const retry = await deleteAccount(teacher(), world.ports());
+        expect(retry.ok).toBe(true);
+        expect(world.holdsNothingFor(TEACHER)).toBe(true);
+    });
+
+    it('does not touch scores owned by someone else, only the membership in them', async () => {
+        const world = new FakeWorld();
+        world.users.set('colleague', { userType: null, teacherId: null });
+        world.addDocument('theirs', 'colleague');
+        world.memberships.add(`theirs:${TEACHER}`);
+        await deleteAccount(teacher(), world.ports());
+        expect(world.documents.get('theirs')).toBe('colleague');
+        expect(world.objects.has('scores/theirs/original.pdf')).toBe(true);
+        expect(world.memberships.has(`theirs:${TEACHER}`)).toBe(false);
+        expect(world.memberships.has('theirs:colleague')).toBe(true);
+    });
+
+    it('dissolves a studio the teacher owns and frees its seats', async () => {
+        const world = new FakeWorld();
+        world.studios.set('studio-1', TEACHER);
+        world.seats.add(`studio-1:${TEACHER}`);
+        world.seats.add('studio-1:colleague');
+        world.studios.set('studio-2', 'someone-else');
+        world.seats.add(`studio-2:${TEACHER}`);
+        await deleteAccount(teacher(), world.ports());
+        expect([...world.studios.keys()]).toEqual(['studio-2']);
+        expect(world.seats.size).toBe(0);
+        expect(world.log.indexOf(`memberships:${TEACHER}`)).toBeLessThan(world.log.indexOf(`auth:${TEACHER}`));
+    });
+
+    it('deletes the teacher’s provisioned students, and only accounts that really are theirs', async () => {
+        const world = new FakeWorld();
+        world.addStudent('student-1', TEACHER);
+        world.addStudent('student-2', TEACHER);
+        // A roster row pointing at an ordinary account, or at another teacher's
+        // student, must never cost that account its existence.
+        world.addStudent('not-a-student', TEACHER, { userType: null, teacherId: null });
+        world.addStudent('someone-elses', TEACHER, { teacherId: 'teacher-2' });
+
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 2 } });
+        expect(world.users.has('student-1')).toBe(false);
+        expect(world.users.has('student-2')).toBe(false);
+        expect(world.users.has('not-a-student')).toBe(true);
+        expect(world.users.has('someone-elses')).toBe(true);
+        // Students go before their teacher, whose cascade would otherwise take
+        // the roster rows and leave the student accounts unreachable.
+        expect(world.log.indexOf('auth:student-1')).toBeLessThan(world.log.indexOf(`auth:${TEACHER}`));
+    });
+
+    it('refuses a score uploaded from another tab while the deletion runs, so nothing is left behind', async () => {
+        const world = new FakeWorld();
+        world.addDocument('doc-1', TEACHER);
+        let refused: unknown = null;
+        world.onFirstDocumentListing = () => {
+            try {
+                world.addDocument('late-upload', TEACHER);
+            } catch (err) {
+                refused = err;
+            }
+        };
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(String(refused)).toContain('account_deletion_pending');
+        expect(result).toMatchObject({ ok: true, summary: { documentsDeleted: 1 } });
+        expect(world.holdsNothingFor(TEACHER)).toBe(true);
+    });
+});
+
+describe('deleted scores’ leftover folders (document_storage_cleanup)', () => {
+    it('drops the tombstones its own score deletes write, after their folders are empty', async () => {
+        const world = payingTeacher();
+        const result = await deleteAccount(teacher(), world.ports());
+
+        expect(result).toMatchObject({ ok: true, summary: { documentsDeleted: 1, storageCleanupsCleared: 1 } });
+        expect(world.tombstones.size).toBe(0);
+        expect(world.log.indexOf('row:doc-1')).toBeLessThan(world.log.indexOf('tombstone:doc-1'));
+        expect(world.log.indexOf('tombstone:doc-1')).toBeLessThan(world.log.indexOf(`auth:${TEACHER}`));
+        expect(world.holdsNothingFor(TEACHER)).toBe(true);
+    });
+
+    it('empties the folders of a score deleted earlier whose library cleanup never finished', async () => {
+        const world = payingTeacher();
+        // Deleted from the library row-first; its detached Storage purge died.
+        world.tombstones.set('old-doc', TEACHER);
+        world.objects.add('scores/old-doc/original.pdf');
+        world.objects.add('scores/old-doc/pre-import-original.pdf');
+        world.objects.add('thumbnails/old-doc/2.jpg');
+
+        const result = await deleteAccount(teacher(), world.ports());
+
+        expect(result).toMatchObject({ ok: true, summary: { storageCleanupsCleared: 2 } });
+        expect(world.objects.size).toBe(0);
+        expect(world.tombstones.size).toBe(0);
+        // Files first, record after: a failure in between leaves the record to retry from.
+        expect(world.log.indexOf('storage:thumbnails/old-doc')).toBeLessThan(world.log.indexOf('tombstone:old-doc'));
+    });
+
+    it('keeps the account, and the record, when a leftover folder cannot be emptied', async () => {
+        const world = payingTeacher();
+        world.tombstones.set('old-doc', TEACHER);
+        world.objects.add('scores/old-doc/original.pdf');
+        world.failStorageFor = 'old-doc';
+
+        const result = await deleteAccount(teacher(), world.ports());
+
+        expect(result).toMatchObject({ ok: false, code: 'document_delete_failed' });
+        expect(world.users.has(TEACHER)).toBe(true);
+        expect(world.tombstones.get('old-doc')).toBe(TEACHER);
+
+        world.failStorageFor = null;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.holdsNothingFor(TEACHER)).toBe(true);
+    });
+
+    it('leaves a folder alone once a live score has reclaimed its id, and other owners’ records', async () => {
+        const world = payingTeacher();
+        world.tombstones.set('reused', TEACHER);
+        world.addDocument('reused', 'someone-else');
+        world.tombstones.set('theirs', 'someone-else');
+        world.objects.add('scores/theirs/original.pdf');
+
+        await deleteAccount(teacher(), world.ports());
+
+        expect(world.objects.has('scores/reused/original.pdf')).toBe(true);
+        expect(world.objects.has('scores/theirs/original.pdf')).toBe(true);
+        expect(world.tombstones.get('theirs')).toBe('someone-else');
+    });
+
+    it('drains a provisioned student’s records too', async () => {
+        const world = payingTeacher();
+        world.addStudent('student-1', TEACHER);
+        world.tombstones.set('student-old', 'student-1');
+        world.objects.add('scores/student-old/original.pdf');
+
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.holdsNothingFor(TEACHER, 'student-1')).toBe(true);
+    });
+});
+
+describe('retries', () => {
+    it('finishes on a retry after the auth delete failed, with nothing done twice', async () => {
+        const world = payingTeacher();
+        world.failAuthDelete = true;
+        const first = await deleteAccount(teacher(), world.ports());
+        expect(first).toMatchObject({ ok: false, code: 'auth_delete_failed' });
+        expect(world.documents.size).toBe(0);
+
+        world.failAuthDelete = false;
+        world.log.length = 0;
+        const retry = await deleteAccount(teacher(), world.ports());
+        expect(retry).toMatchObject({
+            ok: true,
+            summary: { subscriptionsCanceled: 0, documentsDeleted: 0, authUser: 'deleted' },
+        });
+        expect(world.log.some((entry) => entry.startsWith('stripe.cancel:'))).toBe(false);
+    });
+
+    it('treats an account that is already gone as deleted', async () => {
+        const world = payingTeacher();
+        await deleteAccount(teacher(), world.ports());
+        const again = await deleteAccount(teacher(), world.ports());
+        expect(again).toMatchObject({ ok: true, summary: { authUser: 'not_found' } });
+    });
+});
+
+describe('authorship that would block the auth delete', () => {
+    it('releases a play-along analysis the user requested on someone else’s score before deleting them', async () => {
+        const world = new FakeWorld();
+        world.users.set('colleague', { userType: null, teacherId: null });
+        world.addDocument('theirs', 'colleague');
+        world.analysisAuthors.set('theirs', TEACHER);
+
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { authUser: 'deleted' } });
+        // The analysis belongs to the colleague's score: it stays, unattributed.
+        expect(world.analysisAuthors.get('theirs')).toBeNull();
+        expect(world.documents.get('theirs')).toBe('colleague');
+        expect(world.log.indexOf(`release:${TEACHER}`)).toBeLessThan(world.log.indexOf(`auth:${TEACHER}`));
+    });
+
+    it('releases a student’s authorship before deleting the student too', async () => {
+        const world = new FakeWorld();
+        world.users.set('colleague', { userType: null, teacherId: null });
+        world.addDocument('theirs', 'colleague');
+        world.addStudent('student-1', TEACHER);
+        world.analysisAuthors.set('theirs', 'student-1');
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 1 } });
+        expect(world.users.has('student-1')).toBe(false);
+    });
+
+    it('retries once when a row authored by the user lands between the release and the delete', async () => {
+        const world = new FakeWorld();
+        world.users.set('colleague', { userType: null, teacherId: null });
+        world.addDocument('theirs', 'colleague');
+        world.onFirstRelease = () => world.analysisAuthors.set('theirs', TEACHER);
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { authUser: 'deleted' } });
+        expect(world.log.filter((entry) => entry === `release:${TEACHER}`)).toHaveLength(2);
+    });
+
+    it('reports auth_delete_failed, with the data already gone, when the delete keeps failing', async () => {
+        const world = payingTeacher();
+        world.failAuthDelete = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'auth_delete_failed' });
+        expect(world.users.has(TEACHER)).toBe(true);
+        expect(world.log.filter((entry) => entry === `release:${TEACHER}`)).toHaveLength(2);
+    });
+});
+
+describe('billing after the account is gone', () => {
+    it('cancels a subscription a checkout in another tab started mid-deletion', async () => {
+        const world = payingTeacher();
+        const live = world.stripe.live as FakeStripe;
+        // After step 2 has run: the customer completes a Checkout that was
+        // opened (on the existing customer) while the deletion was under way.
+        world.onFirstDocumentListing = () =>
+            live.subscriptions.set('sub_late', { id: 'sub_late', status: 'active', customerId: 'cus_live' });
+
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({
+            ok: true,
+            summary: { lateBillingSweep: 'done', lateSubscriptionsCanceled: 1, subscriptionsCanceled: 2 },
+        });
+        expect(live.subscriptions.get('sub_late')?.status).toBe('canceled');
+        // Swept after the auth user was deleted, when no new Checkout can be opened.
+        expect(world.log.indexOf('stripe.cancel:sub_late')).toBeGreaterThan(world.log.indexOf(`auth:${TEACHER}`));
+    });
+
+    it('expires a checkout opened mid-deletion, from the customers step 2 knew', async () => {
+        const world = payingTeacher();
+        const live = world.stripe.live as FakeStripe;
+        world.onFirstDocumentListing = () => live.openSessions.set('cus_live', ['cs_late']);
+        const result = await deleteAccount(teacher(), world.ports());
+        // billing_customers cascaded with the user; the customer was carried over.
+        expect(world.customers).toEqual([]);
+        expect(result).toMatchObject({ ok: true, summary: { checkoutSessionsExpired: 2 } });
+        expect(live.openSessions.get('cus_live')).toEqual([]);
+    });
+
+    it('still reports success when the late sweep fails, with the failure handed back to be logged', async () => {
+        const world = payingTeacher();
+        const live = world.stripe.live as FakeStripe;
+        world.onFirstDocumentListing = () => {
+            live.subscriptions.set('sub_late', { id: 'sub_late', status: 'active', customerId: 'cus_live' });
+            live.failCancel = true;
+        };
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { lateBillingSweep: 'failed', authUser: 'deleted' } });
+        expect(result.ok && result.lateBillingFailure).toBeTruthy();
+        expect(world.users.has(TEACHER)).toBe(false);
+    });
+
+    it('leaves a clean deletion’s late sweep with nothing to do', async () => {
+        const world = payingTeacher();
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({
+            ok: true,
+            summary: { lateBillingSweep: 'done', lateSubscriptionsCanceled: 0, subscriptionsCanceled: 1 },
+        });
+        expect(result.ok && 'lateBillingFailure' in result).toBe(false);
+    });
+});
+
+describe('the pending marker (account_deletions)', () => {
+    it('is written before billing is touched or anything is deleted', async () => {
+        const world = payingTeacher();
+        await deleteAccount(teacher(), world.ports());
+        const pending = world.log.indexOf(`pending:${TEACHER}`);
+        expect(pending).toBe(0);
+        expect(pending).toBeLessThan(world.log.findIndex((entry) => entry.startsWith('stripe.')));
+        expect(pending).toBeLessThan(world.log.indexOf('row:doc-1'));
+    });
+
+    it('refuses a student provisioned mid-delete, and the sweep still closes every account', async () => {
+        const world = new FakeWorld();
+        world.addStudent('student-1', TEACHER);
+        let refused: unknown = null;
+        world.onFirstDocumentListing = () => {
+            try {
+                world.addStudent('student-late', TEACHER);
+            } catch (err) {
+                refused = err;
+            }
+        };
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(String(refused)).toContain('account_deletion_pending');
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 1 } });
+        expect(world.users.has('student-late')).toBe(false);
+        expect(world.roster.size).toBe(0);
+    });
+
+    it('sweeps until a pass finds nothing: the second pass confirms, there is no third', async () => {
+        const world = payingTeacher();
+        const listings: number[] = [];
+        const ports = world.ports();
+        const ownedDocuments = ports.ownedDocuments;
+        ports.ownedDocuments = async (userId) => {
+            const ids = await ownedDocuments(userId);
+            if (userId === TEACHER) {
+                listings.push(ids.length);
+            }
+            return ids;
+        };
+        expect(await deleteAccount(teacher(), ports)).toMatchObject({ ok: true });
+        expect(listings).toEqual([1, 0]);
+        expect(MAX_SWEEP_PASSES).toBeGreaterThanOrEqual(2);
+    });
+
+    it('stops at the bound if rows keep appearing (a bug), and still closes the account', async () => {
+        const world = new FakeWorld();
+        let n = 0;
+        const ports = world.ports();
+        ports.ownedDocuments = async () => [`ghost-${(n += 1)}`];
+        const result = await deleteAccount(teacher(), ports);
+        expect(result).toMatchObject({ ok: true, summary: { documentsDeleted: MAX_SWEEP_PASSES } });
+        expect(world.log.some((entry) => entry.includes(`after ${MAX_SWEEP_PASSES} sweeps`))).toBe(true);
+    });
+
+    it('is cleared when billing cannot be stopped: nothing was deleted, and the account works as before', async () => {
+        const world = payingTeacher();
+        world.failBillingRead = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(world.pending.has(TEACHER)).toBe(false);
+        expect(world.log).toContain('settle:abandoned:billing_cancel_failed');
+        expect(() => world.addDocument('new-score', TEACHER)).not.toThrow();
+    });
+
+    it('is kept, with the error, when the deletion stops part-way; the retry finishes and it goes with the account', async () => {
+        const world = payingTeacher();
+        world.failAuthDelete = true;
+        const first = await deleteAccount(teacher(), world.ports());
+        expect(first).toMatchObject({ ok: false, code: 'auth_delete_failed' });
+        expect(world.pending.get(TEACHER)).toMatchObject({
+            attempts: 1,
+            lastError: 'auth_delete_failed',
+            destructive: true,
+        });
+        expect(world.pending.get(TEACHER)?.active.size).toBe(0);
+        expect(() => world.addDocument('while-half-deleted', TEACHER)).toThrow('account_deletion_pending');
+
+        world.failAuthDelete = false;
+        const retry = await deleteAccount(teacher(), world.ports());
+        expect(retry).toMatchObject({ ok: true, summary: { authUser: 'deleted' } });
+        expect(world.pending.has(TEACHER)).toBe(false);
+    });
+
+    it('a marker that cannot be written stops the deletion before anything else', async () => {
+        const world = payingTeacher();
+        world.failBeginDeletion = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'deletion_unavailable' });
+        expect(world.log.some((entry) => entry.startsWith('stripe.'))).toBe(false);
+        expect(world.documents.has('doc-1')).toBe(true);
+    });
+
+    it('a retry that deletes nothing does not clear the marker an earlier part-way attempt left', async () => {
+        const world = payingTeacher();
+        world.failAuthDelete = true;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: false, code: 'auth_delete_failed' });
+        world.failAuthDelete = false;
+        world.failBillingRead = true;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({
+            ok: false,
+            code: 'billing_cancel_failed',
+        });
+        expect(world.pending.get(TEACHER)).toMatchObject({ attempts: 2, lastError: 'auth_delete_failed' });
+        expect(() => world.addDocument('after-abandoned-retry', TEACHER)).toThrow('account_deletion_pending');
+    });
+
+    it('records that cleanup began after billing is stopped and before the first thing is deleted', async () => {
+        const world = payingTeacher();
+        world.addStudent('student-1', TEACHER);
+        await deleteAccount(teacher(), world.ports());
+        const destructive = world.log.indexOf(`destructive:${TEACHER}`);
+        expect(destructive).toBeGreaterThan(world.log.findIndex((entry) => entry.startsWith('stripe.')));
+        expect(destructive).toBeLessThan(world.log.indexOf('row:doc-1'));
+        expect(destructive).toBeLessThan(world.log.indexOf('storage:scores/doc-1'));
+        expect(destructive).toBeLessThan(world.log.indexOf('auth:student-1'));
+    });
+
+    it('does not start deleting when it cannot record that cleanup began: abandoned, nothing deleted', async () => {
+        const world = payingTeacher();
+        world.failMarkDestructive = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'deletion_unavailable' });
+        expect(world.documents.has('doc-1')).toBe(true);
+        expect(world.pending.has(TEACHER)).toBe(false);
+        expect(() => world.addDocument('still-mine', TEACHER)).not.toThrow();
+    });
+
+    it('two attempts that both abandon clear the marker: the account works as before (Codex r1 finding 1)', async () => {
+        const world = payingTeacher();
+        world.failBillingRead = true;
+        // Two tabs, both started before either gave up.
+        const ports = world.ports();
+        const first = deleteAccount(teacher(), ports);
+        const second = deleteAccount(teacher(), ports);
+        expect(await first).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(await second).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(world.pending.has(TEACHER)).toBe(false);
+        expect(world.isPending(TEACHER)).toBe(false);
+        expect(() => world.addDocument('after-two-abandoned', TEACHER)).not.toThrow();
+
+        // A third abandoned attempt later on is no different: history is not a gate.
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: false });
+        expect(world.isPending(TEACHER)).toBe(false);
+    });
+
+    it('one tab abandoning while another is still working keeps the restriction until that one ends', async () => {
+        const world = payingTeacher();
+        const ports = world.ports();
+        const working = await ports.beginDeletion(TEACHER);
+        world.failBillingRead = true;
+        expect(await deleteAccount(teacher(), ports)).toMatchObject({ ok: false, code: 'billing_cancel_failed' });
+        expect(world.isPending(TEACHER)).toBe(true);
+        expect(() => world.addDocument('mid-other-tab', TEACHER)).toThrow('account_deletion_pending');
+        await ports.settleDeletion(TEACHER, working as string, 'abandoned', 'billing_cancel_failed');
+        expect(world.isPending(TEACHER)).toBe(false);
+    });
+
+    it('a crashed attempt that deleted nothing stops restricting once its lease runs out', async () => {
+        const world = payingTeacher();
+        const ports = world.ports();
+        // The request dies right after begin: it never settles.
+        await ports.beginDeletion(TEACHER);
+        expect(() => world.addDocument('during-crash', TEACHER)).toThrow('account_deletion_pending');
+        world.now += FakeWorld.LEASE_MS + 1;
+        expect(world.isPending(TEACHER)).toBe(false);
+        expect(() => world.addDocument('after-lease', TEACHER)).not.toThrow();
+
+        // And a later deletion still works from the leftover row.
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.pending.has(TEACHER)).toBe(false);
+    });
+
+    it('an attempt that crashes after cleanup began keeps the restriction, and a retry finishes it', async () => {
+        const world = payingTeacher();
+        world.addDocument('doc-2', TEACHER);
+        const ports = world.ports();
+        // The request dies inside the sweep, after deleting one score.
+        ports.deleteDocument = async (documentId) => {
+            world.documents.delete(documentId);
+            throw new Error('isolate killed');
+        };
+        expect(await deleteAccount(teacher(), ports)).toMatchObject({ ok: false, code: 'document_delete_failed' });
+        // Model the crash fully: the attempt's lease runs out unsettled.
+        world.now += FakeWorld.LEASE_MS + 1;
+        expect(world.pending.get(TEACHER)).toMatchObject({ destructive: true });
+        expect(world.isPending(TEACHER)).toBe(true);
+        expect(() => world.addDocument('into-half-deleted', TEACHER)).toThrow('account_deletion_pending');
+
+        // A retry that deletes nothing cannot lift it either.
+        world.failBillingRead = true;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: false });
+        expect(world.isPending(TEACHER)).toBe(true);
+
+        // A retry that completes takes the marker away with the account.
+        world.failBillingRead = false;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.pending.has(TEACHER)).toBe(false);
+        expect(world.users.has(TEACHER)).toBe(false);
+    });
+});
+
+describe('the barrier beyond scores and roster rows (20261022110600)', () => {
+    it('refuses while a checkout from another tab is in flight: nothing deleted, marker cleared', async () => {
+        const world = payingTeacher();
+        world.checkoutLeaseLive = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 409, code: 'checkout_in_progress' });
+        // Decision 58(3): the 409 is fine only with a clear try-again message,
+        // which the Account page shows as given (DeleteAccountSection.test.tsx).
+        expect((result as { error: string }).error).toMatch(
+            /wait a few minutes, and try again\. Nothing has been deleted\./,
+        );
+        expect(world.log.some((entry) => entry.startsWith('stripe.'))).toBe(false);
+        expect(world.documents.has('doc-1')).toBe(true);
+        expect(world.pending.has(TEACHER)).toBe(false);
+        // The check comes after the marker, so no new lease could have started meanwhile.
+        expect(world.log.indexOf(`pending:${TEACHER}`)).toBeLessThan(world.log.indexOf('checkout-check'));
+
+        world.checkoutLeaseLive = false;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+    });
+
+    it('a checkout check that fails stops the deletion before billing, as abandoned', async () => {
+        const world = payingTeacher();
+        world.failCheckoutCheck = true;
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({
+            ok: false,
+            code: 'billing_cancel_failed',
+        });
+        expect(world.log.some((entry) => entry.startsWith('stripe.'))).toBe(false);
+        expect(world.pending.has(TEACHER)).toBe(false);
+    });
+
+    it('deletes the account a crashed provisioning made before its roster row, and clears the intent', async () => {
+        const world = new FakeWorld();
+        // createUser landed; the request died before the roster insert.
+        world.users.set('orphan', { userType: 'student', teacherId: TEACHER });
+        world.intents.push({ rosterId: 'roster-orphan', teacherId: TEACHER, studentUserId: 'orphan', live: false });
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 1 } });
+        expect(world.users.has('orphan')).toBe(false);
+        expect(world.intents).toEqual([]);
+    });
+
+    it('keeps a live intent with no account yet (its provisioning undoes itself), and clears a stale one', async () => {
+        const world = new FakeWorld();
+        world.intents.push(
+            { rosterId: 'in-flight', teacherId: TEACHER, studentUserId: null, live: true },
+            { rosterId: 'long-dead', teacherId: TEACHER, studentUserId: null, live: false },
+        );
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['in-flight']);
+    });
+
+    it('leaves an intent naming an account that is not flagged as this teacher’s student, for review', async () => {
+        const world = new FakeWorld();
+        world.users.set('unflagged', { userType: null, teacherId: null });
+        world.intents.push({ rosterId: 'invite-1', teacherId: TEACHER, studentUserId: 'unflagged', live: false });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.users.has('unflagged')).toBe(true);
+        expect(world.intents).toHaveLength(1);
+        expect(world.log.some((entry) => entry.includes('not flagged as their student'))).toBe(true);
+    });
+
+    it('never deletes an account an intent names by address only, even flagged as this teacher’s student (item 18)', async () => {
+        const world = new FakeWorld();
+        // Another intent's account at the same address, or a separate signup
+        // inside the window: flagged, unrostered, and not this intent's.
+        world.users.set('same-address', { userType: 'student', teacherId: TEACHER });
+        world.intents.push(
+            { rosterId: 'crashed', teacherId: TEACHER, studentUserId: 'same-address', live: false, proven: false },
+            { rosterId: 'crashed-live', teacherId: TEACHER, studentUserId: 'same-address', live: true, proven: false },
+        );
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 0 } });
+        expect(world.users.has('same-address')).toBe(true);
+        // Both intents stay on record for the runbook.
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['crashed', 'crashed-live']);
+        expect(world.log.filter((entry) => entry.includes('without proof that it made it'))).toHaveLength(2);
+    });
+
+    it('a recorded account made outside the intent’s window is not proof either: left for review', async () => {
+        const world = new FakeWorld();
+        world.users.set('old-account', { userType: 'student', teacherId: TEACHER });
+        world.intents.push({
+            rosterId: 'recorded-late',
+            teacherId: TEACHER,
+            studentUserId: 'old-account',
+            live: false,
+            proven: false,
+        });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.users.has('old-account')).toBe(true);
+        expect(world.intents).toHaveLength(1);
+    });
+
+    it('keeps an expired intent that names nothing while an account sits at its address outside the window, for review (PR #72 fix 3)', async () => {
+        const world = new FakeWorld();
+        // A separate signup at the address after the window, or an account
+        // from before it: not named, and not proof that nothing was created.
+        world.users.set('outside-window', { userType: 'student', teacherId: TEACHER });
+        world.intents.push(
+            { rosterId: 'unproven', teacherId: TEACHER, studentUserId: null, live: false, unprovenMatch: true },
+            { rosterId: 'nothing-made', teacherId: TEACHER, studentUserId: null, live: false },
+        );
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 0 } });
+        expect(world.users.has('outside-window')).toBe(true);
+        // DEPLOY.md case 5: the intent stays open, and the log says why; the
+        // one with no account at its address at all (case 1) is cleared.
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['unproven']);
+        expect(world.log.filter((entry) => entry.includes('unproven'))).toEqual([
+            expect.stringContaining('names no account, but an account at its address'),
+        ]);
+    });
+
+    it('clears an intent whose account is already gone', async () => {
+        const world = new FakeWorld();
+        world.intents.push({ rosterId: 'undone', teacherId: TEACHER, studentUserId: 'already-deleted', live: false });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.intents).toEqual([]);
+    });
+});
+
+describe('the student_provision_intents_proven() row mapper (PR #72 fix round 2, 2)', () => {
+    const row = (over: Partial<ProvisionIntentRow>): ProvisionIntentRow => ({
+        roster_id: 'roster-1',
+        student_user_id: null,
+        live: false,
+        ...over,
+    });
+
+    it('maps each status the RPC returns', () => {
+        expect(
+            provisionIntentFromRow(row({ student_user_id: 'made', live: true, proven: true, status: 'proven' })),
+        ).toEqual({ rosterId: 'roster-1', studentUserId: 'made', live: true, proven: true, unprovenMatch: false });
+        expect(provisionIntentFromRow(row({ student_user_id: 'named', proven: false, status: 'unproven' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: 'named',
+            live: false,
+            proven: false,
+            unprovenMatch: false,
+        });
+        // DEPLOY.md case 5: nothing named, but an account at the address.
+        expect(provisionIntentFromRow(row({ proven: false, status: 'unproven_match' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: null,
+            live: false,
+            proven: false,
+            unprovenMatch: true,
+        });
+        // Cases 1–2: nothing to resolve.
+        expect(provisionIntentFromRow(row({ proven: false, status: 'none' }))).toEqual({
+            rosterId: 'roster-1',
+            studentUserId: null,
+            live: false,
+            proven: false,
+            unprovenMatch: false,
+        });
+    });
+
+    it('never reads a missing or unknown column as proof, nor as a match', () => {
+        expect(provisionIntentFromRow(row({ student_user_id: 'named' }))).toMatchObject({
+            proven: false,
+            unprovenMatch: false,
+        });
+        expect(
+            provisionIntentFromRow({
+                ...row({ status: 'UNPROVEN_MATCH' }),
+                proven: 'true' as unknown as boolean,
+                live: 1 as unknown as boolean,
+            }),
+        ).toMatchObject({ live: false, proven: false, unprovenMatch: false });
+    });
+
+    it('an unproven_match row, mapped, keeps its intent through the deletion', async () => {
+        const world = new FakeWorld();
+        world.users.set('outside-window', { userType: 'student', teacherId: TEACHER });
+        const mapped = provisionIntentFromRow(row({ roster_id: 'unproven', proven: false, status: 'unproven_match' }));
+        world.intents.push({ ...mapped, teacherId: TEACHER });
+        expect(await deleteAccount(teacher(), world.ports())).toMatchObject({ ok: true });
+        expect(world.intents.map((intent) => intent.rosterId)).toEqual(['unproven']);
+    });
+
+    it('is what delete-account maps the RPC rows with', () => {
+        const adapter = readFileSync(resolve(process.cwd(), 'supabase/functions/delete-account/index.ts'), 'utf8');
+        const port = adapter.match(/provisionIntents: async [\s\S]*?\n {4}},\n/)?.[0] ?? '';
+        expect(port).toContain(`rpc('student_provision_intents_proven'`);
+        expect(port).toContain('.map(provisionIntentFromRow)');
+    });
+});

@@ -4,6 +4,7 @@ import { snapToPalette } from '@/features/import/colorSnap';
 import { MAX_TEXT_SIZE, MIN_TEXT_SIZE } from '@/features/import/textFit';
 import { MAX_STROKE_W, MIN_STROKE_W } from '@/features/import/vectorize';
 import type { ProposedItem } from '@/features/import/importTypes';
+import { clampTextNote, MAX_PAGE_COORD, MIN_PAGE_COORD } from '@/types/models';
 import type { Annotation, StrokePayload } from '@/types/models';
 
 /**
@@ -30,6 +31,8 @@ interface RawPdfAnnotation {
     hidden?: boolean;
     noView?: boolean;
 }
+
+const clampCoord = (v: number): number => Math.min(MAX_PAGE_COORD, Math.max(MIN_PAGE_COORD, v));
 
 const colorHexOf = (raw: RawPdfAnnotation): string => {
     const c = raw.color;
@@ -129,15 +132,18 @@ export const extractBornDigital = async (
             continue;
         }
         if (raw.subtype === 'FreeText') {
-            const text = (raw.contentsObj?.str ?? raw.contents ?? '').trim();
+            const text = clampTextNote((raw.contentsObj?.str ?? raw.contents ?? '').trim());
             const rect = raw.rect;
             if (!text || !rect || rect.length < 4) {
                 continue;
             }
             const [ax, ay] = toNorm(rect[0] ?? 0, rect[1] ?? 0);
             const [bx, by] = toNorm(rect[2] ?? 0, rect[3] ?? 0);
-            const x = Math.min(ax, bx);
-            const y = Math.min(ay, by);
+            // On the page, as textFit places recognized text: a box a PDF put
+            // beyond the crop box would otherwise land outside what the server
+            // stores and be refused after the review counted it as imported.
+            const x = Math.min(1, Math.max(0, Math.min(ax, bx)));
+            const y = Math.min(1, Math.max(0, Math.min(ay, by)));
             const boxH = Math.abs(by - ay);
             // Font size in PDF points = viewport units at scale 1; fall back to 80% of the box height.
             const fontPt = raw.defaultAppearanceData?.fontSize;
@@ -172,11 +178,17 @@ export const extractBornDigital = async (
                     continue;
                 }
                 const flat: number[] = [];
+                let onPage = false;
                 for (const [px, py] of pts) {
                     const [nx, ny] = toNorm(px, py);
-                    flat.push(nx, ny, 0.5);
+                    onPage ||= nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1;
+                    flat.push(clampCoord(nx), clampCoord(ny), 0.5);
                 }
-                strokes.push({ pts: flat, w });
+                // Ink wholly off the page shows nowhere; the server's bounds
+                // apply to the rest (a point clamped there is off the page).
+                if (onPage) {
+                    strokes.push({ pts: flat, w });
+                }
             }
             if (strokes.length === 0) {
                 continue;

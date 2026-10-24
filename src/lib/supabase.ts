@@ -1,5 +1,8 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
+import { createAuthStorage } from '@/features/auth/authStorage';
+import { fetchNotingRetryAfter } from '@/lib/retryAfter';
+import { supabaseEnvPrefixFor } from '@/lib/supabasePreconnectOrigins';
 import type { Database } from '@/types/database';
 
 export type TypedSupabaseClient = SupabaseClient<Database>;
@@ -10,13 +13,6 @@ const env = (key: string): string | undefined => {
     const value = import.meta.env[key] as string | undefined;
     return value && value.length > 0 ? value : undefined;
 };
-
-/**
- * Only cleffy.io talks to the production project. Every other host —
- * dev.cleffy.io, the Vercel preview URLs, localhost — talks to the `dev` branch
- * project, so nothing but the real storefront can write production rows.
- */
-const PRODUCTION_HOSTS = ['cleffy.io', 'www.cleffy.io'];
 
 export interface SupabaseConfig {
     url: string | undefined;
@@ -43,8 +39,9 @@ export const supabaseConfig = (): SupabaseConfig => {
         return { url, anonKey };
     }
 
-    const host = typeof location === 'undefined' ? '' : location.hostname.toLowerCase();
-    const prefix = PRODUCTION_HOSTS.includes(host) ? 'VITE_SUPABASE_PROD' : 'VITE_SUPABASE_DEV';
+    // The rule (PRODUCTION_HOSTS) is shared with index.html's preconnect, so
+    // the page warms the same backend it then talks to.
+    const prefix = supabaseEnvPrefixFor(typeof location === 'undefined' ? '' : location.hostname);
     return { url: env(`${prefix}_URL`), anonKey: env(`${prefix}_ANON_KEY`) };
 };
 
@@ -84,6 +81,16 @@ export const getSupabase = (): TypedSupabaseClient => {
     const { url, anonKey } = requireSupabaseConfig();
 
     client = createClient<Database>(url, anonKey, {
+        auth: {
+            persistSession: true,
+            autoRefreshToken: true,
+            // localStorage plus a SameSite cookie so iOS Home Screen apps can
+            // recover a Safari session. See authStorage.ts.
+            storage: createAuthStorage(),
+        },
+        // Keeps the Retry-After of a throttled response for the sync engine's
+        // backoff; supabase-js does not surface response headers itself.
+        global: { fetch: fetchNotingRetryAfter },
         realtime: {
             // Live ink streams at up to ~20 events/s per writer; the realtime-js
             // default client-side throttle (10/s) would silently degrade it.

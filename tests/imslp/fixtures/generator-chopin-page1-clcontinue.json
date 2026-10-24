@@ -1,0 +1,92 @@
+{
+    "query-continue": {
+        "categorymembers": {
+            "gcmcontinue": "page|414e44414e54494e4f2c20422e303131377e7e43484f50494e2c2046524544455249430a414e44414e54494e4f2c20422e313137202843484f50494e2c204652c38944c38952494329|153953"
+        }
+    },
+    "query": {
+        "pages": {
+            "836231": {
+                "pageid": 836231,
+                "ns": 0,
+                "title": "Allegretto and Mazurka (Chopin, Frédéric)",
+                "categories": [
+                    {
+                        "ns": 14,
+                        "title": "Category:Chopin, Frédéric"
+                    },
+                    {
+                        "ns": 14,
+                        "title": "Category:For piano"
+                    },
+                    {
+                        "ns": 14,
+                        "title": "Category:Romantic"
+                    }
+                ],
+                "touched": "2026-09-07T00:23:12Z",
+                "lastrevid": 4580190,
+                "counter": "",
+                "length": 2916
+            },
+            "1434249": {
+                "pageid": 1434249,
+                "ns": 0,
+                "title": "Allegretto in F-sharp major (Chopin, Frédéric)",
+                "categories": [
+                    {
+                        "ns": 14,
+                        "title": "Category:Chopin, Frédéric"
+                    },
+                    {
+                        "ns": 14,
+                        "title": "Category:For piano"
+                    },
+                    {
+                        "ns": 14,
+                        "title": "Category:Romantic"
+                    }
+                ],
+                "touched": "2026-09-07T00:23:12Z",
+                "lastrevid": 4286235,
+                "counter": "",
+                "length": 1862
+            },
+            "2628": {
+                "pageid": 2628,
+                "ns": 0,
+                "title": "Allegro de concert, Op.46 (Chopin, Frédéric)",
+                "touched": "2026-09-07T00:23:12Z",
+                "lastrevid": 4620831,
+                "counter": "",
+                "length": 9525
+            },
+            "3809": {
+                "pageid": 3809,
+                "ns": 0,
+                "title": "Andante spianato et Grande polonaise brillante, Op.22 (Chopin, Frédéric)",
+                "categories": [
+                    {
+                        "ns": 14,
+                        "title": "Category:Chopin, Frédéric"
+                    },
+                    {
+                        "ns": 14,
+                        "title": "Category:For piano"
+                    },
+                    {
+                        "ns": 14,
+                        "title": "Category:Romantic"
+                    }
+                ],
+                "touched": "2026-09-07T00:23:12Z",
+                "lastrevid": 4774862,
+                "counter": "",
+                "length": 14792
+            }
+        }
+    },
+    "limits": {
+        "categories": 500
+    }
+}

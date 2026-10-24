@@ -1,12 +1,27 @@
 import { describe, expect, it } from 'vitest';
 
+import { FREE_LIMITS } from '@/features/billing/entitlementsService';
+import type { Entitlements } from '@/types/database';
+
 import {
+    cloudScoreCapReached,
+    cloudScoresLimitError,
     isLimitReachedError,
     limitAction,
     limitHeadline,
     parseLimitResponse,
+    parseLooseLimitError,
     parsePostgrestLimitError,
 } from '@/features/billing/limitErrors';
+
+const entitlementsOf = (tier: Entitlements['tier'], cloudScores: number): Entitlements => ({
+    user_id: 'user-1',
+    tier,
+    status: tier === 'free' ? null : 'active',
+    source: tier === 'free' ? 'none' : 'subscription',
+    current_period_end: null,
+    limits: { ...FREE_LIMITS, cloud_scores: cloudScores },
+});
 
 const jsonResponse = (body: unknown, status: number): Response =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -91,9 +106,115 @@ describe('parsePostgrestLimitError (the cloud-score cap trigger)', () => {
         expect(parsePostgrestLimitError(null)).toBeNull();
     });
 
-    it('ignores a limit_reached with no usable detail', () => {
-        expect(parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: null })).toBeNull();
-        expect(parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: 'not json' })).toBeNull();
+    it('uses the caller’s own finite cap when DETAIL is missing', () => {
+        const free = entitlementsOf('free', 3);
+        const error = parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: null }, free);
+        expect(error?.metric).toBe('cloud_scores');
+        expect(error?.limit).toBe(3);
+        expect(error?.tier).toBe('free');
+        expect(
+            parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: 'not json' }, free)?.limit,
+        ).toBe(3);
+        expect(parsePostgrestLimitError({ code: 'P0001', message: 'Limit reached', details: null }, free)?.limit).toBe(
+            3,
+        );
+    });
+
+    it('never tells a paying teacher about the free 3-score cap when DETAIL is missing', () => {
+        // The cached plan says unlimited and the server refused anyway, so the
+        // cache is stale and nobody can vouch for the number: neutral copy, on
+        // the plan the teacher last knew they were on.
+        const error = parsePostgrestLimitError(
+            { code: 'P0001', message: 'limit_reached', details: null },
+            entitlementsOf('teacher', -1),
+        );
+        expect(error?.metric).toBe('cloud_scores');
+        expect(error?.limit).toBeNull();
+        expect(error?.tier).toBe('teacher');
+        expect(error && limitHeadline(error)).toBe('You have reached your plan’s cloud-score limit');
+        expect(error?.message).not.toMatch(/\b3\b|free/i);
+    });
+
+    it('uses neutral copy when the caller’s plan is not known at all', () => {
+        const error = parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: null });
+        expect(error?.limit).toBeNull();
+        expect(error?.message).not.toMatch(/\b3\b|free cloud/i);
+        // A provisioned student's 0 is not a cap worth quoting either.
+        expect(
+            parsePostgrestLimitError(
+                { code: 'P0001', message: 'limit_reached', details: null },
+                entitlementsOf('student', 0),
+            )?.limit,
+        ).toBeNull();
+    });
+
+    it('still prefers DETAIL over anything the caller knows', () => {
+        const error = parsePostgrestLimitError(triggerError, entitlementsOf('teacher', -1));
+        expect(error?.limit).toBe(3);
+        expect(error?.tier).toBe('free');
+    });
+});
+
+describe('client-side cloud-score cap', () => {
+    it('is reached when unarchived owned rows meet the limit', () => {
+        const me = 'user-1';
+        expect(
+            cloudScoreCapReached(
+                3,
+                [
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: null },
+                ],
+                me,
+            ),
+        ).toBe(true);
+        expect(
+            cloudScoreCapReached(
+                3,
+                [
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: '2026-01-01' },
+                ],
+                me,
+            ),
+        ).toBe(false);
+        expect(cloudScoreCapReached(-1, [{ owner_id: me, archived_at: null }], me)).toBe(false);
+    });
+
+    it('does not count shared documents toward the owner cap', () => {
+        const me = 'user-1';
+        const shared = { owner_id: 'someone-else', archived_at: null };
+        expect(cloudScoreCapReached(3, [shared, shared, shared], me)).toBe(false);
+        expect(
+            cloudScoreCapReached(
+                3,
+                [{ owner_id: me, archived_at: null }, { owner_id: me, archived_at: null }, shared],
+                me,
+            ),
+        ).toBe(false);
+        expect(
+            cloudScoreCapReached(
+                3,
+                [
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: null },
+                    shared,
+                ],
+                me,
+            ),
+        ).toBe(true);
+    });
+
+    it('maps a bare Limit reached Error onto the amber cloud-score payload', () => {
+        const error = parseLooseLimitError(new Error('Limit reached'), entitlementsOf('free', 3));
+        expect(error?.metric).toBe('cloud_scores');
+        expect(error?.limit).toBe(3);
+        expect(parseLooseLimitError(new Error('Limit reached'), entitlementsOf('personal', -1))?.limit).toBeNull();
+        expect(parseLooseLimitError(new Error('Limit reached'))?.limit).toBeNull();
+        expect(isLimitReachedError(cloudScoresLimitError(3, 'free'))).toBe(true);
+        expect(parseLooseLimitError(new Error('seat_limit_reached'))).toBeNull();
     });
 });
 
@@ -105,16 +226,36 @@ describe('limit copy', () => {
         expect(limitAction({ code: 'limit_reached', metric: 'omr_runs', limit: 3, tier: 'free' })).toContain('Upgrade');
     });
 
+    it('names the IMSLP import and AI page-read budgets for what spends them', () => {
+        // smart_imports is spent by an IMSLP import and vision_reads by Import
+        // marks' AI pass — neither may read as a fingering feature this release
+        // does not ship.
+        const imports = { code: 'limit_reached', metric: 'smart_imports', limit: 2, tier: 'free' } as const;
+        expect(limitHeadline(imports)).toContain('2 free IMSLP imports');
+        expect(limitAction(imports)).toContain('Upgrade for unlimited IMSLP imports');
+        const reads = { code: 'limit_reached', metric: 'vision_reads', limit: 5, tier: 'free' } as const;
+        expect(limitHeadline(reads)).toContain('5 free AI page reads');
+        expect(`${limitHeadline(reads)} ${limitAction(reads)}`).not.toMatch(/fingering/i);
+    });
+
     it('points a paying teacher at support rather than at an upsell', () => {
         const payload = { code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'teacher' } as const;
         expect(limitAction(payload)).not.toContain('Upgrade');
         expect(limitAction(payload)).toContain('get in touch');
     });
 
-    it('suggests archiving as well as upgrading for the score cap', () => {
-        expect(limitAction({ code: 'limit_reached', metric: 'cloud_scores', limit: 3, tier: 'free' })).toContain(
-            'archive',
+    it('words a refusal of unknown size without a number', () => {
+        expect(limitHeadline({ code: 'limit_reached', metric: 'pdf_exports', limit: null, tier: 'free' })).toBe(
+            'You have used this month’s PDF exports',
         );
+    });
+
+    it('suggests deleting as well as upgrading for the score cap', () => {
+        // Deleting is the action the library offers (RowMenu); there is no
+        // archive action, so suggesting one sent people looking for nothing.
+        const action = limitAction({ code: 'limit_reached', metric: 'cloud_scores', limit: 3, tier: 'free' });
+        expect(action).toContain('delete one to make room');
+        expect(action).not.toMatch(/archive/i);
     });
 
     it('names the roster and points at Teacher when the plan has none', () => {

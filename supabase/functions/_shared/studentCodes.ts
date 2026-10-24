@@ -1,5 +1,7 @@
 /**
- * Student credentials: setup codes, usernames, passwords.
+ * Student credentials: setup codes, usernames, and the provisioning scramble.
+ *
+ * Passwords themselves are passwordPolicy.ts's: one policy for every account.
  *
  * NO imports — like entitlements.ts, this file is loaded by Deno (with the
  * `.ts` extension), by vitest (without it), and by the browser bundle (the
@@ -31,8 +33,7 @@ export const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export const CODE_LENGTH = 12;
 
 /** Rendered as XXXX-XXXX-XXXX on cards; separators are cosmetic only. */
-export const formatLoginCode = (code: string): string =>
-    code.replace(/(.{4})(?=.)/g, '$1-');
+export const formatLoginCode = (code: string): string => code.replace(/(.{4})(?=.)/g, '$1-');
 
 /** Uppercases and strips everything outside the alphabet (dashes, spaces, dots). */
 export const normalizeLoginCode = (input: string): string => {
@@ -159,50 +160,9 @@ export const isValidUsername = (username: string): boolean => {
     return USERNAME_RE.test(normalized) && !RESERVED_USERNAMES.includes(normalized);
 };
 
-/** Minimum, counted in characters — the unit the student is told they typed. */
-export const STUDENT_PASSWORD_MIN = 8;
-
-/**
- * Maximum, counted in BYTES, because bytes are the unit bcrypt limits: it
- * hashes at most 72 of them and Supabase Auth REJECTS anything longer outright
- * (supabase/auth#1368, released 2.132.3). Older builds truncated silently
- * instead, which was the worse failure — two different passwords hashing alike.
- *
- * The two bounds deliberately count different things, because they are about
- * different things: the minimum is a policy on how much the student typed, the
- * maximum is a ceiling their password has to physically fit under. An emoji is
- * one character against the first and four bytes against the second, and
- * measuring both with `.length` (UTF-16 code units) would get each one wrong in
- * a different direction.
- */
-export const STUDENT_PASSWORD_MAX_BYTES = 72;
-
-/** Code points, not UTF-16 units: '🎹' is one character, and `.length` says two. */
-const characterCount = (value: string): number => [...value].length;
-
-const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).length;
-
-/**
- * Which bound a password missed, or null when it clears both.
- *
- * Split out of the predicate because the two bounds count different things (see
- * above) and so cannot share one sentence. A refusal that names the minimum for
- * a password that was too LONG contradicts the field the student is looking at,
- * and the claim form is spent once — there is no second attempt to work it out
- * on. Both callers word their own refusal from this; the bounds themselves stay
- * in exactly one place.
- */
-export const studentPasswordProblem = (password: string): 'too_short' | 'too_long' | null => {
-    if (characterCount(password) < STUDENT_PASSWORD_MIN) {
-        return 'too_short';
-    }
-    if (utf8ByteLength(password) > STUDENT_PASSWORD_MAX_BYTES) {
-        return 'too_long';
-    }
-    return null;
-};
-
-export const isValidStudentPassword = (password: string): boolean => studentPasswordProblem(password) === null;
+// The password a student CHOOSES (student-claim, the welcome page) follows the
+// account-wide policy in passwordPolicy.ts — one rule for every account,
+// because one GoTrue setting enforces it for all of them.
 
 /**
  * The scramble set as an Invited account's auth password: 32 random bytes as
@@ -220,7 +180,17 @@ export const isValidStudentPassword = (password: string): boolean => studentPass
  * the note above it in student-provision.
  */
 export const generateProvisionPassword = (): string => {
-    const bytes = new Uint8Array(32);
-    crypto.getRandomValues(bytes);
-    return toHex(bytes);
+    // GoTrue's letters_digits requirement applies to the admin API too, so the
+    // scramble must hold a hex letter and a digit, or provisioning fails. A
+    // draw of 64 hex characters lacking either is ~1e-13 likely; redrawing
+    // makes it never, without biasing anything that matters for a value
+    // nobody will ever type.
+    for (;;) {
+        const bytes = new Uint8Array(32);
+        crypto.getRandomValues(bytes);
+        const hex = toHex(bytes);
+        if (/[a-f]/.test(hex) && /[0-9]/.test(hex)) {
+            return hex;
+        }
+    }
 };

@@ -1,27 +1,48 @@
-import { useReducer, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
 
-import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/features/imslp/imslpApi';
-import { recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
+import {
+    fetchImslpWork,
+    type ImslpDownloadStage,
+    type ImslpEdition,
+    type ImslpWorkDetail,
+} from '@/features/imslp/imslpApi';
+import { isEditionImportable, recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
+import type { LimitReachedError } from '@/features/billing/limitErrors';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
-import { buttonClassName } from '@/ui/classNames';
 
 export interface ImslpBrowserProps {
     /** Local PDF hand-off (manual file pick / hybrid fallback upload). */
     onImportFile: (file: File) => Promise<void>;
     /**
      * Automated IMSLP import: Edge writes Storage; returns fallback info when
-     * the proxy cannot fetch (bot check / disclaimer).
+     * the proxy cannot fetch (bot check / disclaimer / restricted license).
+     * Real failures are recorded by the shell (captureFailure) before the
+     * rethrow, so this component reports only its own load errors.
+     * `onStage` reports a pacing queue (IMSLP downloads are paced
+     * deployment-wide) and the retry that ends it. `signal` is aborted when
+     * the user cancels the queued import or this panel unmounts.
      */
     onImportImslp: (
         filename: string,
         workTitle: string,
+        acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
+        signal?: AbortSignal,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     /** True while the library is uploading / importing. */
     busy?: boolean;
-    autoFocus?: boolean;
+    /** Free cloud-score quota is exhausted — disable the primary Add. */
+    quotaExhausted?: boolean;
+    /** This month's IMSLP imports are spent — disable the primary Add and say so. */
+    importLimit?: LimitReachedError | null;
+    /** False on student (limit 0): disabled copy, no upgrade CTA. */
+    quotaUpgradeHint?: boolean;
+    /** Opens the plans; the disabled Add's hint links to it. */
+    onUpgrade?: () => void;
     /** When false, omit the panel title (e.g. page already has a heading). */
     showHeading?: boolean;
     className?: string;
@@ -62,7 +83,7 @@ const reduce = (state: Flow, action: Action): Flow => {
             };
         }
         case 'select':
-            if (state.phase !== 'work') {
+            if (state.phase !== 'work' || state.download.kind === 'downloading' || state.download.kind === 'queued') {
                 return state;
             }
             return { ...state, selected: action.edition, download: { kind: 'idle' } };
@@ -82,33 +103,95 @@ export const ImslpBrowser = ({
     onImportFile,
     onImportImslp,
     busy = false,
-    autoFocus = true,
+    quotaExhausted = false,
+    importLimit = null,
+    quotaUpgradeHint = true,
+    onUpgrade,
     showHeading = true,
-    className = 'mt-6 rounded-xl border border-stone-300/60 bg-white/50 p-4 sm:p-5',
+    className = 'mt-6',
 }: ImslpBrowserProps) => {
     const [flow, dispatch] = useReducer(reduce, initial);
     const [error, setError] = useState<string | null>(null);
+    // The open work lives in the URL so the browser back button closes it
+    // instead of leaving /search, and reloads restore it.
+    const [searchParams, setSearchParams] = useSearchParams();
+    const workParam = searchParams.get('work');
+    const workSeqRef = useRef(0);
+    const loadedTitleRef = useRef<string | null>(null);
+    const importInFlightRef = useRef(false);
+    // The running import's cancel handle. Leaving the page cancels a queued
+    // import so it does not wait, retry and land after the user has moved on
+    // (a request already sent still completes into the library).
+    const importAbortRef = useRef<AbortController | null>(null);
+    useEffect(() => () => importAbortRef.current?.abort(), []);
 
-    const openByTitle = async (title: string) => {
+    useEffect(() => {
+        if (!workParam) {
+            workSeqRef.current++;
+            loadedTitleRef.current = null;
+            dispatch({ type: 'search' });
+            return;
+        }
+        if (loadedTitleRef.current === workParam) {
+            return;
+        }
+        const seq = ++workSeqRef.current;
         setError(null);
         dispatch({ type: 'loadingWork' });
-        try {
-            dispatch({ type: 'workLoaded', work: await fetchImslpWork(title) });
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Could not load work');
-            dispatch({ type: 'search' });
-        }
+        fetchImslpWork(workParam).then(
+            (work) => {
+                if (seq !== workSeqRef.current) {
+                    return;
+                }
+                loadedTitleRef.current = workParam;
+                dispatch({ type: 'workLoaded', work });
+            },
+            (err: unknown) => {
+                if (seq !== workSeqRef.current) {
+                    return;
+                }
+                setError(err instanceof Error ? err.message : 'Could not load work');
+                setSearchParams({}, { replace: true });
+            },
+        );
+    }, [workParam, setSearchParams]);
+
+    const closeWork = () => {
+        setError(null);
+        // Replace rather than push: the UI Back lands where browser back would.
+        setSearchParams({}, { replace: true });
     };
 
-    const importEdition = async () => {
+    // Primary Add imports the selected edition. The IMSLP notice stays on
+    // screen as static text, so the click is the acknowledgment the edge
+    // function's `acceptedDisclaimer` flag records — no checkbox.
+    const importSelected = async () => {
         if (flow.phase !== 'work' || !flow.selected) {
             return;
         }
+        if (quotaExhausted || importLimit) {
+            return;
+        }
+        if (flow.download.kind === 'downloading' || flow.download.kind === 'queued' || importInFlightRef.current) {
+            return;
+        }
+        if (!isEditionImportable(flow.selected)) {
+            return;
+        }
+        importInFlightRef.current = true;
         const { work, selected } = flow;
+        const controller = new AbortController();
+        importAbortRef.current = controller;
         setError(null);
         dispatch({ type: 'download', download: { kind: 'downloading' } });
         try {
-            const result = await onImportImslp(selected.filename, work.title);
+            const result = await onImportImslp(
+                selected.filename,
+                work.title,
+                true,
+                (stage) => dispatch({ type: 'download', download: { kind: stage } }),
+                controller.signal,
+            );
             if (!result.ok) {
                 dispatch({
                     type: 'download',
@@ -117,10 +200,21 @@ export const ImslpBrowser = ({
                 return;
             }
             dispatch({ type: 'download', download: { kind: 'idle' } });
-        } catch (err) {
+        } catch {
+            // Recorded by the shell as uploadError/uploadLimit — reporting it
+            // here too rendered the same message twice on /search. A cancelled
+            // queue wait lands here too, and is simply back to idle.
             dispatch({ type: 'download', download: { kind: 'idle' } });
-            setError(err instanceof Error ? err.message : 'Import failed');
+        } finally {
+            importInFlightRef.current = false;
+            if (importAbortRef.current === controller) {
+                importAbortRef.current = null;
+            }
         }
+    };
+
+    const cancelQueuedImport = () => {
+        importAbortRef.current?.abort();
     };
 
     const importLocalPdf = async (file: File) => {
@@ -132,53 +226,37 @@ export const ImslpBrowser = ({
             await onImportFile(
                 new File([file], suggestedPdfName(flow.work.title, file.name), { type: 'application/pdf' }),
             );
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Upload failed');
+        } catch {
+            // Same contract as importEdition: the shell already recorded it.
         }
     };
 
     const blocked =
-        busy || flow.phase === 'loadingWork' || (flow.phase === 'work' && flow.download.kind === 'downloading');
+        busy ||
+        flow.phase === 'loadingWork' ||
+        (flow.phase === 'work' && (flow.download.kind === 'downloading' || flow.download.kind === 'queued'));
 
     return (
         <section className={className}>
-            {showHeading || flow.phase === 'work' ? (
-                <div className={`flex items-start gap-3 ${showHeading ? 'justify-between' : 'justify-end'}`}>
-                    {showHeading ? (
-                        <div>
-                            <h2 className="text-sm font-medium text-stone-800">Find on IMSLP</h2>
-                            <p className="mt-0.5 text-xs text-stone-500">
-                                Search or browse popular scores, then add a PDF to your library.
-                            </p>
-                        </div>
-                    ) : null}
-                    {flow.phase === 'work' ? (
-                        <button
-                            type="button"
-                            onClick={() => {
-                                setError(null);
-                                dispatch({ type: 'search' });
-                            }}
-                            className={buttonClassName('ghost', 'sm', 'shrink-0')}
-                        >
-                            Back
-                        </button>
-                    ) : null}
+            {showHeading ? (
+                <div>
+                    <h2 className="text-sm font-medium text-stone-800">Find on IMSLP</h2>
+                    <p className="mt-0.5 text-xs text-stone-500">
+                        Search or browse popular scores, then add a PDF to your library.
+                    </p>
                 </div>
             ) : null}
+
+            {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
 
             {flow.phase === 'loadingWork' ? (
                 <LoadingText className="mt-4 text-xs">Loading editions…</LoadingText>
             ) : null}
 
-            {flow.phase === 'search' ? (
-                <ImslpSearchPanel
-                    disabled={blocked}
-                    autoFocus={autoFocus}
-                    onSelectTitle={(title) => void openByTitle(title)}
-                    onError={setError}
-                />
-            ) : null}
+            {/* Kept mounted so query, facets and results survive opening a work. */}
+            <div hidden={flow.phase !== 'search'}>
+                <ImslpSearchPanel disabled={blocked} onSelectTitle={(title) => setSearchParams({ work: title })} />
+            </div>
 
             {flow.phase === 'work' ? (
                 <ImslpWorkPanel
@@ -188,13 +266,17 @@ export const ImslpBrowser = ({
                     download={flow.download}
                     busy={busy}
                     importing={blocked}
+                    quotaExhausted={quotaExhausted}
+                    importLimit={importLimit}
+                    quotaUpgradeHint={quotaUpgradeHint}
+                    onUpgrade={onUpgrade}
+                    onBack={closeWork}
                     onSelect={(edition) => dispatch({ type: 'select', edition })}
-                    onImportSelected={() => void importEdition()}
+                    onImportSelected={() => void importSelected()}
+                    onCancelQueued={cancelQueuedImport}
                     onImportLocalPdf={(file) => void importLocalPdf(file)}
                 />
             ) : null}
-
-            {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
         </section>
     );
 };

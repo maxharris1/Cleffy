@@ -22,11 +22,52 @@ export type DocumentRow = {
     page_count: number | null;
     /** Bumped when the stored PDF bytes are replaced (smart import cleanup). */
     content_rev: number;
+    /**
+     * content_rev of the cover published to the `thumbnails` bucket at
+     * `{id}/{thumb_rev}.jpg`; null until the owner's browser has rendered one
+     * (a fresh upload is content_rev 0, so 0 is a real revision, not "none").
+     */
+    thumb_rev: number | null;
     created_at: string;
     updated_at: string;
     /** Non-null once the score is over the free cap: read-only, still viewable and exportable. */
     archived_at: string | null;
+    /**
+     * Why it is archived: 'plan_lapse' (apply_free_tier_archival, undone by
+     * restore_plan_archived_scores on resubscribe or an Academy seat) or
+     * 'owner'. Null exactly when
+     * archived_at is. Server-stamped by the documents_archived_reason trigger --
+     * a client value is overwritten -- and optional here because the client's
+     * column lists do not select it.
+     */
+    archived_reason?: ArchivedReason | null;
+    // Provenance of an imported score (IMSLP), written only by imslp-download
+    // under the service role — clients can neither set nor change it
+    // (documents_guard_provenance). Present on a full-row read (`select('*')`,
+    // fetchDocument); optional because the library list, library_bootstrap and
+    // a cache-synthesized offline row don't carry it. Null for an uploaded PDF
+    // and for imports made before provenance was recorded.
+    /** The IMSLP work page, e.g. https://imslp.org/wiki/Piano_Sonata_No.14… */
+    source_url?: string | null;
+    /** The IMSLP file the PDF came from. */
+    source_filename?: string | null;
+    /** IMSLP's license tag, verbatim, e.g. "Creative Commons Attribution 4.0". */
+    source_license?: string | null;
+    source_attribution?: DocumentSourceAttribution | null;
 };
+
+/** documents.source_attribution — who IMSLP credits for the file (mirrors _shared/imslpProvenance.ts). */
+export type DocumentSourceAttribution = {
+    source: 'imslp';
+    work: string;
+    composer: string | null;
+    editor: string | null;
+    arranger: string | null;
+    publisher: string | null;
+    year: number | null;
+};
+
+export type ArchivedReason = 'plan_lapse' | 'owner';
 
 export type DocumentInsert = {
     id: string;
@@ -35,7 +76,43 @@ export type DocumentInsert = {
     storage_path: string;
     page_count?: number | null;
     content_rev?: number;
+    thumb_rev?: number | null;
     archived_at?: string | null;
+};
+
+/**
+ * What an owner may change on a score. id, owner_id, storage_path and
+ * created_at are immutable for clients (documents_guard_columns, migration
+ * 20261007120100); updated_at is stamped by documents_touch.
+ */
+export type DocumentUpdate = Partial<
+    Pick<DocumentRow, 'title' | 'page_count' | 'content_rev' | 'thumb_rev' | 'archived_at'>
+>;
+
+/**
+ * A deleted score whose Storage folder may still hold bytes. Written only by
+ * the documents AFTER DELETE trigger; the former owner reads it to finish the
+ * cleanup and deletes it once the folder is empty.
+ */
+export type DocumentStorageCleanupRow = {
+    document_id: string;
+    owner_id: string;
+    storage_path: string;
+    thumb_rev: number | null;
+    deleted_at: string;
+};
+
+/**
+ * A thumbnail a newer revision of the same score replaced. Written and removed
+ * only by triggers on storage.objects; the owner reads it to remove the object.
+ */
+export type ThumbnailStorageCleanupRow = {
+    object_name: string;
+    document_id: string;
+    owner_id: string;
+    superseded_at: string;
+    /** Set once a client was told to remove it; a claimed cover is never published. */
+    claimed_at: string | null;
 };
 
 export type ImportStatusValue = 'prompted' | 'declined' | 'imported';
@@ -50,19 +127,22 @@ export type DocumentImportRow = {
     updated_at: string;
 };
 
+/**
+ * created_by / created_at / updated_at are stamped by the server
+ * (document_imports_guard_columns); backup_path may only be null or
+ * '{document_id}/pre-import-original.pdf' (CHECK constraint).
+ */
 export type DocumentImportInsert = {
     document_id: string;
     status: ImportStatusValue;
     backup_path?: string | null;
     pages_cleaned?: number[];
-    created_by?: string | null;
 };
 
 export type DocumentImportUpdate = {
     status?: ImportStatusValue;
     backup_path?: string | null;
     pages_cleaned?: number[];
-    updated_at?: string;
 };
 
 export type DocumentMemberRow = {
@@ -117,6 +197,30 @@ export type ShareLinkRow = {
     revoked_at: string | null;
 };
 
+/**
+ * One row of list_document_members(). Labels are resolved server-side because
+ * auth.users is not client-readable; `email`, `joined_via_link` and
+ * `is_assigned` are only ever filled for the score's owner (an editor may be a
+ * link guest).
+ */
+export type DocumentMemberListing = {
+    user_id: string;
+    role: MemberRole;
+    /**
+     * The caller's own roster name for a student on their roster, else the
+     * account's display_name (what presence shows); null when neither is set.
+     */
+    display_name: string | null;
+    email: string | null;
+    is_anonymous: boolean;
+    /** The member has an assignment on THIS score (owner only; false for everyone else). */
+    is_assigned: boolean;
+    /** Token of the share link that granted this access, when one did. */
+    joined_via_link: string | null;
+    joined_at: string;
+};
+
+/** The token is always minted by the server (share_links_guard_columns). */
 export type ShareLinkInsert = {
     document_id: string;
     role: ShareRole;
@@ -131,13 +235,23 @@ export type AnnotationRow = {
     kind: AnnotationKind;
     color: string;
     payload: AnnotationPayload;
-    created_by: string;
+    /**
+     * Null once the author's account has been deleted: the mark stays on the
+     * score it was drawn on (20261007120600_account_deletion.sql). Inserts still
+     * always carry the caller's id — RLS requires created_by = auth.uid().
+     */
+    created_by: string | null;
     created_at: string;
     updated_at: string;
     deleted_at: string | null;
     seq: number;
 };
 
+/**
+ * created_by must be the caller (annotations_insert); created_at is clamped
+ * into [the score's created_at, server clock] (annotations_guard_columns).
+ * seq / updated_at are server-stamped.
+ */
 export type AnnotationInsert = {
     id: string;
     document_id: string;
@@ -150,6 +264,10 @@ export type AnnotationInsert = {
     deleted_at?: string | null;
 };
 
+/**
+ * Everything an editor may change on a mark. id, document_id, page, kind,
+ * created_by and created_at are refused by annotations_guard_columns.
+ */
 export type AnnotationUpdate = {
     color?: string;
     payload?: AnnotationPayload;
@@ -172,6 +290,10 @@ export type AnnotationSnapshotInsert = {
     captured_on: string;
     label?: string | null;
     payload: Annotation[];
+    /**
+     * Ignored: the server stamps the caller (annotation_snapshots_guard_columns),
+     * so whatever is sent here — the client sends null — never becomes the author.
+     */
     created_by?: string | null;
 };
 
@@ -207,12 +329,45 @@ export type EntitlementLimits = Record<UsageMetric, number>;
  */
 export type EntitlementSource = 'subscription' | 'studio_member' | 'managed' | 'none';
 
+/** What claim_pdf_export() answers. */
+export type PdfExportClaim = {
+    ok: boolean;
+    count?: number;
+    /** -1 on an unlimited plan; absent for an exempt caller. */
+    limit?: number;
+    /** True when nothing was counted: an unlimited plan, or an exempt caller. */
+    unlimited?: boolean;
+    tier?: EffectiveTier;
+    /** 'anonymous' only from servers predating the guest metering; kept so their answer still types. */
+    exempt?: 'anonymous' | 'student';
+    /** Set on a share-link guest's claim: the unit, if any, came from the score owner's allowance. */
+    billed_to?: 'owner';
+    /**
+     * The claim id was already answered ok (a retry of the same export), so this
+     * answer counted nothing. Since 20261009120100.
+     */
+    replayed?: boolean;
+};
+
 export type Entitlements = {
     user_id: string;
     tier: EffectiveTier;
     status: string | null;
     source: EntitlementSource;
     current_period_end: string | null;
+    /**
+     * The plan stops at current_period_end instead of renewing (the subscriber
+     * cancelled; for an Academy seat, the owner did). Optional because servers
+     * before 20261009120101, and entitlements cached from them, do not carry it.
+     */
+    cancel_at_period_end?: boolean;
+    /**
+     * An Academy seat past its studio's limit -- a district override lowered,
+     * cleared or lapsed: tier 'free', source 'studio_member', and limits that
+     * allow viewing and exporting only. Optional because servers before
+     * 20261020180500, and entitlements cached from them, do not carry it.
+     */
+    seat_read_only?: boolean;
     limits: EntitlementLimits;
 };
 
@@ -239,6 +394,30 @@ export type SubscriptionRow = {
     price_id: string | null;
     current_period_end: string | null;
     cancel_at_period_end: boolean;
+    /**
+     * The `created` stamp of the Stripe event this row was last written from.
+     * The subscriptions_refuse_stale_event trigger drops a write carrying an
+     * older one, so two webhook deliveries racing cannot leave the row showing
+     * whichever of them happened to write second.
+     */
+    last_event_created_at: string | null;
+    /**
+     * How Stripe collects it. `send_invoice` is Stripe Invoicing -- a district
+     * contract -- and is what a studio's seat override is tied to. Null on rows
+     * written before the webhook recorded it.
+     */
+    collection_method: 'charge_automatically' | 'send_invoice' | null;
+    /**
+     * When the status went past_due/unpaid (server-stamped). A send_invoice
+     * subscription keeps full access for a grace period counted from it.
+     */
+    past_due_since: string | null;
+    /**
+     * When Stripe says it actually ended (ended_at, or the cancel_at a terminal
+     * status confirms). Null while it has not. A district's contract end is
+     * derived from this, never from a scheduled or period date.
+     */
+    ended_at: string | null;
     created_at: string;
     updated_at: string;
 };
@@ -264,8 +443,18 @@ export type StudioRow = {
     id: string;
     owner_id: string;
     name: string;
+    /**
+     * The Academy cap (5). A district's larger count is an admin override that
+     * clients never read directly: studio_seat_limit() answers the effective one.
+     */
     seat_limit: number;
     created_at: string;
+    /**
+     * Set on all but one of an owner's studios when 20261022100300 made it one
+     * live studio per owner. Server-written only; a superseded studio grants no
+     * seat and takes no invite.
+     */
+    superseded_at: string | null;
 };
 
 export type StudioInsert = {
@@ -278,6 +467,8 @@ export type StudioMemberRow = {
     studio_id: string;
     user_id: string;
     created_at: string;
+    /** The owner chose this seat to stay active if the studio is ever over its limit. */
+    kept_active: boolean;
 };
 
 /**
@@ -297,7 +488,10 @@ export type StudioMemberRow = {
  * the select policy has a student branch and the hash is of the one-time token
  * that claims the account. Only the student-facing functions read it, under the
  * service role. That is also why the queries below name their columns instead
- * of `*`.
+ * of `*`. `access_revoked_at` (20261010120300) is absent for the same reason:
+ * no client is granted it; only student_access_revoked() reads it.
+ * `district_studio_id` (20261021120800) likewise: the district a student was
+ * provisioned under, read only by the district retention purge.
  */
 export type ManagedStudentRow = {
     id: string;
@@ -315,6 +509,14 @@ export type ManagedStudentRow = {
     archived_at: string | null;
     created_at: string;
     updated_at: string;
+    /**
+     * The teacher's latest age attestation (20261021120100): the student's
+     * country, when it was given, and the age it vouched for. All null on rows
+     * from before attestations, until their next restore.
+     */
+    country: string | null;
+    age_attested_at: string | null;
+    age_attested_min_age: number | null;
 };
 
 /** 'edit' makes the student an editor on the score; 'view' makes them a viewer. */
@@ -392,7 +594,7 @@ export type Database = {
             documents: {
                 Row: DocumentRow;
                 Insert: DocumentInsert;
-                Update: Partial<DocumentInsert>;
+                Update: DocumentUpdate;
                 Relationships: [];
             };
             document_members: {
@@ -419,6 +621,21 @@ export type Database = {
             document_tags: {
                 Row: DocumentTagRow;
                 Insert: DocumentTagInsert;
+                Update: never;
+                Relationships: [];
+            };
+            document_storage_cleanup: {
+                // Trigger-written tombstones; clients only read them, and the
+                // server clears them (finish_document_storage_cleanup).
+                Row: DocumentStorageCleanupRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
+            thumbnail_storage_cleanup: {
+                // Trigger-written and trigger-cleared; clients only read them.
+                Row: ThumbnailStorageCleanupRow;
+                Insert: never;
                 Update: never;
                 Relationships: [];
             };
@@ -521,21 +738,167 @@ export type Database = {
                 Args: { doc: string };
                 Returns: MemberRole | null;
             };
+            // Takedown topic generation (20261020150100): null when the caller
+            // may not open the score.
+            realtime_topic_epoch: {
+                Args: { p_document: string };
+                Returns: number | null;
+            };
+            // The same, with a reason (20261022120200): null when the caller may
+            // not open the score; 'archived' while a member waits for a restore.
+            realtime_topic_access: {
+                Args: { p_document: string };
+                Returns: { status: 'open'; epoch: number } | { status: 'archived' } | null;
+            };
+            // Notice and action (20261020150000). The browser only asks and reads;
+            // every write is the content-report / content-moderation functions'.
+            is_content_moderator: {
+                Args: Record<string, never>;
+                Returns: boolean;
+            };
+            // Moderators only (42501 otherwise), a page at a time; parsed in
+            // moderationApi.ts.
+            moderation_reports: {
+                Args: {
+                    p_status?: 'open' | 'decided' | 'all';
+                    p_after_created_at?: string;
+                    p_after_id?: string;
+                    p_limit?: number;
+                };
+                Returns: unknown;
+            };
+            moderation_takedowns: {
+                Args: {
+                    p_state?: 'active' | 'lifted' | 'all';
+                    p_after_created_at?: string;
+                    p_after_id?: string;
+                    p_limit?: number;
+                };
+                Returns: unknown;
+            };
+            moderation_log: {
+                Args: { p_before_id?: number; p_limit?: number };
+                Returns: unknown;
+            };
+            // Storage-policy helper: the caller owned this deleted score's folder
+            // and has not finished cleaning it up.
+            document_storage_cleanup_pending: {
+                Args: { folder: string };
+                Returns: boolean;
+            };
+            // Clears the caller's tombstone once both folders are empty (or the
+            // score is live again); false while anything is still stored.
+            finish_document_storage_cleanup: {
+                Args: { p_document_id: string };
+                Returns: boolean;
+            };
+            // Claims (and names) the covers the caller may remove now: the
+            // superseded ones, or with p_writing_rev every one but the
+            // published revision and that one. At most 100 scores.
+            claim_superseded_thumbnails: {
+                Args: { p_document_ids: string[]; p_writing_rev?: number };
+                Returns: string[];
+            };
             redeem_share_link: {
                 Args: { p_token: string };
                 Returns: Array<{ document_id: string; granted_role: MemberRole }>;
+            };
+            // Anon-callable; exactly one row, role null unless valid (20261009120200).
+            peek_share_link: {
+                Args: { p_token: string };
+                Returns: Array<{ valid: boolean; role: ShareRole | null }>;
+            };
+            // Owners and editors only; see DocumentMemberListing for what each sees.
+            list_document_members: {
+                Args: { p_document: string };
+                Returns: DocumentMemberListing[];
+            };
+            // Owner only. The owner's own row can be neither changed nor removed.
+            set_document_member_role: {
+                Args: { p_document: string; p_user: string; p_role: ShareRole };
+                Returns: undefined;
+            };
+            remove_document_member: {
+                Args: { p_document: string; p_user: string };
+                Returns: undefined;
+            };
+            // Any non-owner, for themselves. Refused for a score assigned to a
+            // roster student (detail code 'assigned_score').
+            leave_document: {
+                Args: { p_document: string };
+                Returns: undefined;
+            };
+            // Owner only. Returns how many members' link-granted access was
+            // withdrawn (always 0 unless p_remove_members).
+            revoke_share_link: {
+                Args: { p_token: string; p_remove_members?: boolean };
+                Returns: number;
             };
             insert_annotations_batch: {
                 Args: { p_rows: AnnotationInsert[] };
                 Returns: undefined;
             };
+            // Ids of the rows actually updated — a patch RLS filtered out (or
+            // whose row does not exist) is missing. Null only from the void
+            // function that predates 20261007120200.
             patch_annotations_batch: {
                 Args: { p_patches: Array<{ id: string; document_id: string } & AnnotationUpdate> };
-                Returns: undefined;
+                Returns: string[] | null;
             };
             check_edge_rate_limit: {
                 Args: { p_key: string; p_limit: number; p_window_ms: number };
                 Returns: { ok: boolean; retryAfterSec?: number };
+            };
+            // Service role only: hands back one use of a bucket inside its
+            // window (guest-email-start, when no mail went out).
+            refund_edge_rate_limit: {
+                Args: { p_key: string };
+                Returns: undefined;
+            };
+            // Service role only (student-login's per-username limiter, see
+            // supabase/functions/_shared/loginThrottle.ts); clients get no EXECUTE.
+            // Its table, edge_login_attempts, is service-only like edge_rate_buckets
+            // and so not listed under Tables.
+            begin_login_attempt: {
+                Args: {
+                    p_account_key: string;
+                    p_source_key: string;
+                    p_free_attempts: number;
+                    p_base_lock_ms: number;
+                    p_max_lock_ms: number;
+                    p_decay_ms: number;
+                    p_account_limit: number;
+                    p_account_window_ms: number;
+                };
+                Returns:
+                    | { ok: true; attempts: number; accountAttempts: number }
+                    | { ok: false; retryAfterSec: number; scope: 'source' | 'account' };
+            };
+            clear_login_attempts: {
+                Args: { p_key: string };
+                Returns: undefined;
+            };
+            clear_login_account: {
+                Args: { p_account_key: string };
+                Returns: number;
+            };
+            // Service role only (guest-email-start / guest-email-confirm, see
+            // supabase/functions/_shared/guestEmail.ts); clients get no EXECUTE.
+            // Their table, guest_email_verifications, is service-only and so
+            // not listed under Tables.
+            check_guest_email_code: {
+                Args: { p_user_id: string; p_email: string; p_code_hash: string; p_max_attempts: number };
+                Returns: 'ok' | 'mismatch' | 'locked' | 'expired' | 'missing';
+            };
+            guest_email_taken: {
+                Args: { p_email: string };
+                Returns: boolean;
+            };
+            // Service role only: imslp-download closes the shared IMSLP pacing
+            // key for IMSLP's Retry-After after a 429.
+            edge_rate_block: {
+                Args: { p_key: string; p_seconds: number };
+                Returns: undefined;
             };
             // p_user is omitted by clients — the function resolves auth.uid() and
             // rejects any attempt to read another user's entitlements.
@@ -543,16 +906,69 @@ export type Database = {
                 Args: { p_user?: string };
                 Returns: Entitlements;
             };
+            /** One round-trip for library page + shell entitlements. */
+            library_bootstrap: {
+                Args: Record<string, never>;
+                Returns: {
+                    documents: DocumentRow[];
+                    has_more: boolean;
+                    favorite_ids: string[];
+                    tags: LibraryTagRow[];
+                    document_tags: Array<{ document_id: string; tag_id: string }>;
+                    entitlements: Entitlements;
+                };
+            };
+            /**
+             * One keyset page of the caller's visible scores. The cursor is the
+             * last row the client holds: (updated_at, id) for 'recent',
+             * (title, id) for 'title' — passed back exactly as received.
+             */
+            library_documents: {
+                Args: {
+                    p_sort?: 'recent' | 'title';
+                    p_after_updated_at?: string | null;
+                    p_after_title?: string | null;
+                    p_after_id?: string | null;
+                    p_query?: string | null;
+                    p_tag_id?: string | null;
+                    p_favorites_only?: boolean;
+                    p_limit?: number;
+                };
+                Returns: {
+                    documents: DocumentRow[];
+                    has_more: boolean;
+                };
+            };
             tier_limits: {
                 // Answers for 'student' too, which is why this is EffectiveTier.
                 Args: { p_tier: EffectiveTier };
                 Returns: EntitlementLimits;
             };
-            // The honest-UI export counter. The export runs on-device, so this is
-            // called before it starts and never blocks anything by itself.
+            // Claims one pdf_exports unit before the on-device export is built:
+            // check and increment in one statement. The client builds nothing
+            // unless this answers ok:true (see features/export/exportClaim.ts).
+            // A share-link guest must pass p_document: their export is drawn from
+            // that score's owner's allowance. Ignored for a signed-in account.
+            claim_pdf_export: {
+                /**
+                 * p_claim (since 20261009120100) names one export attempt: asked
+                 * again by the same caller within the hour it answers ok without
+                 * counting again.
+                 */
+                Args: { p_document?: string; p_claim?: string };
+                Returns: PdfExportClaim;
+            };
+            // The caller's own storage use and cap (20261022140600), for the
+            // storage-full message.
+            my_storage_usage: {
+                Args: Record<string, never>;
+                Returns: { used_bytes: number; limit_bytes: number };
+            };
+            // Legacy name for claim_pdf_export, kept for bundles already in the
+            // field; same body, same answer.
             consume_pdf_export: {
                 Args: Record<string, never>;
-                Returns: { ok: boolean; count?: number; limit?: number; exempt?: 'anonymous' | 'student' };
+                Returns: PdfExportClaim;
             };
             // Upserts the assignment AND the document_members row that carries the
             // access, returning the assignment id.
@@ -578,6 +994,49 @@ export type Database = {
                 Args: Record<string, never>;
                 Returns: undefined;
             };
+            // True when the caller is a roster student whose access the teacher
+            // withdrew: archived, or their token issued before the teacher's
+            // last reset or archive ended their sessions. Not after their own
+            // sign-out elsewhere. How the student app tells "nothing assigned"
+            // from "signed out by your teacher", and the sync engine a refused
+            // change from a sign-in that ended (it keeps the change).
+            student_access_revoked: {
+                Args: Record<string, never>;
+                Returns: boolean;
+            };
+            // The highest seq tombstone compaction removed on the score (0 when
+            // none; null when the caller cannot read it). A sync watermark below
+            // it means the device must resync in full (20261021120600).
+            annotation_resync_floor: {
+                Args: { p_document: string };
+                Returns: number | null;
+            };
+            // True when the caller holds a read-only Academy seat (past its
+            // academy's limit): RLS refuses every write it makes, on any score.
+            // The sync engine keeps such a change rather than undoing it.
+            caller_seat_read_only: {
+                Args: Record<string, never>;
+                Returns: boolean;
+            };
+            // Service role only: student-provision ends a student's sessions on
+            // archive and reset, and returns how many it ended.
+            end_student_sessions: {
+                Args: { p_student: string };
+                Returns: number;
+            };
+            // Service role only: student-login checks an archived student's
+            // password itself (GoTrue refuses a banned account before it
+            // looks), so it can tell them they were archived — and nobody else.
+            archived_student_password_matches: {
+                Args: { p_username: string; p_password: string };
+                Returns: boolean;
+            };
+            // The server's annotation payload check (the annotations_payload_shape
+            // CHECK). Exposed for completeness; the client never needs to ask.
+            annotation_payload_valid: {
+                Args: { p_kind: AnnotationKind; p_payload: AnnotationPayload };
+                Returns: boolean;
+            };
             document_is_archived: {
                 Args: { doc: string };
                 Returns: boolean;
@@ -593,6 +1052,18 @@ export type Database = {
             studio_roster: {
                 Args: { p_studio: string };
                 Returns: Array<{ user_id: string; email: string }>;
+            };
+            studio_seat_limit: {
+                Args: { p_studio: string };
+                Returns: number;
+            };
+            studio_seat_status: {
+                Args: { p_studio: string };
+                Returns: Array<{ user_id: string; kept_active: boolean; active: boolean }>;
+            };
+            studio_set_active_seats: {
+                Args: { p_studio: string; p_members: string[] };
+                Returns: number;
             };
             set_document_page_count: {
                 Args: { doc: string; pages: number };

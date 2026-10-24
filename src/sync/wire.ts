@@ -1,5 +1,4 @@
-import { z } from 'zod';
-
+import { z } from '@/lib/zod';
 import type { AnnotationRow } from '@/types/database';
 
 /**
@@ -9,17 +8,35 @@ import type { AnnotationRow } from '@/types/database';
  * a crash.
  */
 
+/**
+ * Bounds on one live-ink message. A peer's websocket is not trusted: without
+ * these a single broadcast could carry millions of points or a megabyte id.
+ * The sender's largest batch is a pen-up flush of 1500 points
+ * (PEN_UP_MAX_POINTS in realtimeChannel.ts), well inside `maxBatchPoints`.
+ * remoteInkBuffers.ts bounds what accumulates across batches.
+ */
+export const INK_LIMITS = {
+    /** Points (x, y, p triples) in one batch. */
+    maxBatchPoints: 2048,
+    /** Points one live stroke may accumulate across its batches. */
+    maxStrokePoints: 10_000,
+    /** strokeId / userId length; both are UUIDs (36 characters) in practice. */
+    maxIdLength: 64,
+    /** A CSS colour string. */
+    maxColorLength: 64,
+} as const;
+
 /** Live in-progress ink: streamed point batches, never persisted. */
 export const inkProgressSchema = z.object({
-    strokeId: z.string().min(1),
-    userId: z.string().min(1),
+    strokeId: z.string().min(1).max(INK_LIMITS.maxIdLength),
+    userId: z.string().min(1).max(INK_LIMITS.maxIdLength),
     page: z.number().int().nonnegative(),
     kind: z.enum(['stroke', 'highlight']),
-    color: z.string().min(1),
+    color: z.string().min(1).max(INK_LIMITS.maxColorLength),
     /** Base width / page width. */
     w: z.number().positive(),
     /** Flat [x,y,p,…] batch to APPEND to the stroke. */
-    pts: z.array(z.number()),
+    pts: z.array(z.number()).max(INK_LIMITS.maxBatchPoints * 3),
     /** Present on the final batch. */
     done: z.literal(true).optional(),
     /** Present when the stroke was abandoned (pointercancel). */
@@ -44,7 +61,8 @@ export const parseDocumentChange = (payload: unknown): { id: string; content_rev
     return parsed.success ? parsed.data.record : null;
 };
 
-// Provenance flags (`src` smart-import, `sf` suggested fingering) MUST be
+// Provenance flags (`src` smart-import, `sf` suggested fingering, `hw`
+// converted handwriting) and prose style (`font`, `bold`, `italic`) MUST be
 // declared here: zod strips unknown keys, so omitting one would silently
 // diverge peer payloads from the writer's.
 const strokePayloadSchema = z.object({
@@ -61,6 +79,10 @@ const textPayloadSchema = z.object({
     size: z.number().positive(),
     src: z.literal(1).optional(),
     sf: z.literal(1).optional(),
+    hw: z.literal(1).optional(),
+    font: z.enum(['sans', 'serif']).optional(),
+    bold: z.literal(1).optional(),
+    italic: z.union([z.literal(0), z.literal(1)]).optional(),
 });
 
 /** Envelope produced by realtime.broadcast_changes() for annotation writes. */
@@ -71,7 +93,8 @@ const annotationRowSchema = z.object({
     kind: z.enum(['stroke', 'highlight', 'text']),
     color: z.string(),
     payload: z.union([strokePayloadSchema, textPayloadSchema]),
-    created_by: z.string(),
+    // Null after the author deleted their account; the mark itself stays.
+    created_by: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),
     deleted_at: z.string().nullable(),
@@ -126,6 +149,47 @@ export const parseScoreAnalysisBroadcast = (payload: unknown): ScoreAnalysisBroa
         return null;
     }
     return parsed.data;
+};
+
+/**
+ * A member's role changed or their membership ended (document_members_broadcast
+ * trigger). `role` null means removed. Treated as a hint only: the receiver
+ * re-reads its own role over PostgREST rather than trusting the payload.
+ */
+export const MEMBERSHIP_EVENT = 'membership';
+
+const membershipChangeSchema = z.object({
+    table: z.literal('document_members'),
+    document_id: z.string().min(1),
+    user_id: z.string().min(1),
+    role: z.enum(['owner', 'editor', 'viewer']).nullable(),
+});
+
+export type MembershipChange = z.infer<typeof membershipChangeSchema>;
+
+export const parseMembershipChange = (payload: unknown): MembershipChange | null => {
+    const parsed = membershipChangeSchema.safeParse(payload);
+    if (!parsed.success) {
+        console.warn('Ignoring malformed membership broadcast', parsed.error.issues[0]?.message);
+        return null;
+    }
+    return parsed.data;
+};
+
+/**
+ * The score moved to its next topic generation (a takedown,
+ * 20261020150100_takedown_realtime_topics): sent on the old doc:{id} and
+ * doc-db:{id}. A hint only, like the membership event — the receiver re-reads
+ * the generation over PostgREST (realtime_topic_epoch) and never acts on the
+ * payload beyond checking it names this score.
+ */
+export const TOPIC_ROTATED_EVENT = 'topic_rotated';
+
+const topicRotatedSchema = z.object({ document_id: z.string().min(1) });
+
+export const parseTopicRotated = (payload: unknown): { document_id: string } | null => {
+    const parsed = topicRotatedSchema.safeParse(payload);
+    return parsed.success ? parsed.data : null;
 };
 
 /** Presence payload tracked per user. */
