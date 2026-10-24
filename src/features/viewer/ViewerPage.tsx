@@ -45,6 +45,7 @@ import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { features } from '@/lib/features';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
+import { useDelayedFlag } from '@/lib/useDelayedFlag';
 import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { rememberScoreSource } from '@/sync/inkRecovery';
@@ -56,6 +57,7 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { SwapLabel } from '@/ui/SwapLabel';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 import { MusicIcon } from '@/ui/icons';
 
@@ -1174,35 +1176,83 @@ const CloudViewer = ({ docId }: { docId: string }) => {
  * 'waiting': no engine yet because the server has not confirmed this score
  * (and no role was stored to edit under meanwhile); it is being asked again.
  */
-export const SyncDot = ({ status }: { status: SyncStatus | 'waiting' }) => {
-    // Red is kept for what needs the user's attention: a refusal, or failures
-    // that have gone on for minutes. A throttled or briefly unreachable server
-    // is "retrying" — the marks are safe on this device either way.
-    const styles: Record<SyncStatus | 'waiting', { dot: string; short: string; label: string }> = {
-        synced: { dot: 'bg-emerald-500', short: 'Synced', label: 'Synced' },
-        syncing: { dot: 'bg-amber-400 animate-pulse', short: 'Syncing…', label: 'Syncing…' },
-        offline: { dot: 'bg-stone-400', short: 'Offline', label: 'Offline — changes saved on this device' },
-        retrying: {
-            dot: 'bg-amber-400',
-            short: 'Retrying…',
-            label: 'Sync delayed — retrying. Changes are saved on this device.',
-        },
-        error: {
-            dot: 'bg-red-500',
-            short: 'Not syncing',
-            label: 'Changes aren’t reaching the server yet. They’re saved on this device.',
-        },
-        waiting: {
-            dot: 'bg-stone-400',
-            short: 'Waiting for server',
-            label: 'Waiting for the server to confirm this score — asking again shortly.',
-        },
-    };
-    const { dot, short, label } = styles[status];
+type SyncDotStatus = SyncStatus | 'waiting';
+
+// Red is kept for what needs the user's attention: a refusal, or failures
+// that have gone on for minutes. A throttled or briefly unreachable server
+// is "retrying" — the marks are safe on this device either way.
+const SYNC_DOT_STYLES: Record<SyncDotStatus, { dot: string; short: string; label: string }> = {
+    synced: { dot: 'bg-emerald-500', short: 'Synced', label: 'Synced' },
+    // Static, not pulsing: a loop in the corner of the eye all lesson, while
+    // the teacher writes, is the wrong kind of motion.
+    syncing: { dot: 'bg-amber-400', short: 'Syncing…', label: 'Syncing…' },
+    offline: { dot: 'bg-stone-400', short: 'Offline', label: 'Offline — changes saved on this device' },
+    retrying: {
+        dot: 'bg-amber-400',
+        short: 'Retrying…',
+        label: 'Sync delayed — retrying. Changes are saved on this device.',
+    },
+    error: {
+        dot: 'bg-red-500',
+        short: 'Not syncing',
+        label: 'Changes aren’t reaching the server yet. They’re saved on this device.',
+    },
+    waiting: {
+        dot: 'bg-stone-400',
+        short: 'Waiting for server',
+        label: 'Waiting for the server to confirm this score — asking again shortly.',
+    },
+};
+const SYNC_DOT_ORDER = Object.keys(SYNC_DOT_STYLES) as SyncDotStatus[];
+const SYNC_DOT_SHORTS = Object.fromEntries(SYNC_DOT_ORDER.map((key) => [key, SYNC_DOT_STYLES[key].short])) as Record<
+    SyncDotStatus,
+    string
+>;
+
+/**
+ * How long a sync has to last before the header says so. The engine flips to
+ * syncing after every stroke and back within a few hundred ms; shown each
+ * time, the corner of the header blinked amber all lesson.
+ */
+const SYNCING_SHOWN_AFTER_MS = 600;
+
+/**
+ * The header's sync state: a dot, and from md up a word.
+ *
+ * Calm on purpose, because it changes on every stroke (100+ a lesson).
+ * "Syncing" only shows once a sync has lasted 600ms: a quick round trip
+ * never leaves "Synced". Offline, retrying and error show at once. A
+ * change of colour is a 200ms opacity crossfade between stacked dots
+ * (compositor-only, rather than transitioning one dot's background), instant
+ * under reduced motion; the word swaps in place at the width of the widest
+ * ("Waiting for server", SwapLabel), so the header never reflows.
+ */
+export const SyncDot = ({ status }: { status: SyncDotStatus }) => {
+    // The last state that was not "syncing": what a quick round trip keeps
+    // showing. Null until there has been one (a first sync shows as itself).
+    const [settled, setSettled] = useState<SyncDotStatus | null>(status === 'syncing' ? null : status);
+    if (status !== 'syncing' && status !== settled) {
+        setSettled(status);
+    }
+    const longSync = useDelayedFlag(status === 'syncing', SYNCING_SHOWN_AFTER_MS);
+    const shown: SyncDotStatus = status === 'syncing' && !longSync && settled !== null ? settled : status;
     return (
-        <span title={label} className="flex items-center gap-1.5">
-            <span aria-hidden="true" className={`h-2.5 w-2.5 rounded-full ${dot}`} />
-            <span className="sr-only whitespace-nowrap text-xs text-stone-500 md:not-sr-only">{short}</span>
+        <span title={SYNC_DOT_STYLES[shown].label} className="flex items-center gap-1.5">
+            <span aria-hidden="true" className="grid h-2.5 w-2.5">
+                {SYNC_DOT_ORDER.map((key) => (
+                    <span
+                        key={key}
+                        data-sync-dot={key}
+                        data-active={key === shown || undefined}
+                        className={`h-2.5 w-2.5 rounded-full [grid-area:1/1] transition-opacity duration-200 ease-out motion-reduce:transition-none ${
+                            SYNC_DOT_STYLES[key].dot
+                        } ${key === shown ? 'opacity-100' : 'opacity-0'}`}
+                    />
+                ))}
+            </span>
+            <span className="sr-only text-xs text-stone-500 md:not-sr-only">
+                <SwapLabel labels={SYNC_DOT_SHORTS} active={shown} live={false} align="start" />
+            </span>
         </span>
     );
 };
