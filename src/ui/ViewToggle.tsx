@@ -1,36 +1,18 @@
 import { LayoutGridIcon, ListIcon } from '@/ui/icons';
+import { Segmented } from '@/ui/Segmented';
 
 export type ToggleView = 'grid' | 'list';
 
+const OPTIONS = [
+    { value: 'grid', label: 'Grid view', icon: <LayoutGridIcon size={15} /> },
+    { value: 'list', label: 'List view', icon: <ListIcon size={15} /> },
+] as const;
+
 /**
  * Shelf or list. Two icon buttons rather than a select: it is a two-state
- * choice made rarely, and the icons say what the words would.
+ * choice made rarely, and the icons say what the words would. The selection
+ * slides across (Segmented), so the switch reads as one choice moving.
  */
 export const ViewToggle = ({ view, onChange }: { view: ToggleView; onChange: (v: ToggleView) => void }) => (
-    <div
-        role="group"
-        aria-label="View"
-        className="flex h-8 shrink-0 items-center rounded-lg border border-stone-200 p-0.5"
-    >
-        {(
-            [
-                ['grid', 'Grid view', LayoutGridIcon],
-                ['list', 'List view', ListIcon],
-            ] as const
-        ).map(([value, label, Icon]) => (
-            <button
-                key={value}
-                type="button"
-                aria-pressed={view === value}
-                aria-label={label}
-                title={label}
-                onClick={() => onChange(value)}
-                className={`relative flex h-full items-center rounded-md px-2 transition-colors pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2.5 ${
-                    view === value ? 'bg-accent-soft text-accent' : 'text-stone-500 hover:text-stone-800'
-                }`}
-            >
-                <Icon size={15} />
-            </button>
-        ))}
-    </div>
+    <Segmented label="View" value={view} options={OPTIONS} onChange={onChange} />
 );
