@@ -26,7 +26,9 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { SwapLabel } from '@/ui/SwapLabel';
 import { fieldClassName } from '@/ui/classNames';
+import { CheckIcon } from '@/ui/icons';
 
 export interface ShareDialogProps {
     docId: string;
@@ -314,24 +316,26 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                         <button
                                             type="button"
                                             disabled={expired}
-                                            aria-label={copiedToken === link.token ? 'Copied!' : 'Copy'}
                                             onClick={() => void copy(link.token)}
                                             className="rounded px-2 py-1 text-xs text-accent transition-colors hover:bg-accent-soft disabled:opacity-40 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                                         >
                                             {/* Both labels share one grid cell, so the button keeps
-                                                the wider one's width and Revoke never shifts. */}
-                                            <span aria-hidden="true" className="grid">
-                                                <span
-                                                    className={`col-start-1 row-start-1 ${copiedToken === link.token ? 'invisible' : ''}`}
-                                                >
-                                                    Copy
-                                                </span>
-                                                <span
-                                                    className={`col-start-1 row-start-1 ${copiedToken === link.token ? '' : 'invisible'}`}
-                                                >
-                                                    Copied!
-                                                </span>
-                                            </span>
+                                                the wider one's width and Revoke never shifts; Copied!
+                                                blurs and grows in as Copy blurs out (SwapLabel), and a
+                                                second tap mid-swap retargets rather than restarts. */}
+                                            <SwapLabel
+                                                scale
+                                                labels={{
+                                                    copy: 'Copy',
+                                                    copied: (
+                                                        <span className="inline-flex items-center gap-1">
+                                                            <CheckIcon size={12} aria-hidden="true" />
+                                                            Copied!
+                                                        </span>
+                                                    ),
+                                                }}
+                                                active={copiedToken === link.token ? 'copied' : 'copy'}
+                                            />
                                         </button>
                                         {/* On touch, extra room between Copy and the destructive Revoke. */}
                                         <button

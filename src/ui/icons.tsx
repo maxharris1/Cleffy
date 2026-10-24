@@ -1,6 +1,7 @@
 import {
     ArrowLeft,
     BookOpen,
+    Check,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
@@ -48,6 +49,7 @@ const withBrandStroke = (Icon: LucideIcon) => {
 
 export const ArrowLeftIcon = withBrandStroke(ArrowLeft);
 export const CloseIcon = withBrandStroke(X);
+export const CheckIcon = withBrandStroke(Check);
 export const UndoIcon = withBrandStroke(Undo2);
 export const RedoIcon = withBrandStroke(Redo2);
 export const ZoomInIcon = withBrandStroke(Plus);
