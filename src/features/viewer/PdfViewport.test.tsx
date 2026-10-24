@@ -12,6 +12,7 @@ import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice
 import { useViewerStore } from '@/state/store';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
+import { Dialog } from '@/ui/Dialog';
 
 const PAGE_SIZES = [
     { width: 612, height: 792 },
@@ -145,6 +146,57 @@ describe('PdfViewport keyboard shortcuts under a confirmation', () => {
         await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
         fireEvent.keyDown(document.body, { key: 'ArrowRight' });
         expect(scrollY()).toBeGreaterThan(start);
+    });
+
+    it('keeps the keys off when a confirm opened over another dialog closes and the dialog stays', async () => {
+        const ViewerWithNestedConfirm = ({ onStore }: { onStore: (store: AnnotationStore) => void }) => {
+            const [dialog, setDialog] = useState(false);
+            const [confirming, setConfirming] = useState(false);
+            return (
+                <>
+                    <button type="button" onClick={() => setDialog(true)}>
+                        Settings
+                    </button>
+                    <PdfViewport docId="doc-keys-nested" onStoreReady={onStore} />
+                    {dialog ? (
+                        <Dialog label="Score settings" onClose={() => setDialog(false)}>
+                            <button type="button" onClick={() => setConfirming(true)}>
+                                Remove score
+                            </button>
+                        </Dialog>
+                    ) : null}
+                    {confirming ? (
+                        <ConfirmDialog
+                            title="Remove this score?"
+                            body="It cannot be undone."
+                            confirmLabel="Remove"
+                            onConfirm={() => setConfirming(false)}
+                            onCancel={() => setConfirming(false)}
+                        />
+                    ) : null}
+                </>
+            );
+        };
+        let store: AnnotationStore | null = null;
+        render(<ViewerWithNestedConfirm onStore={(s) => (store = s)} />);
+        await waitFor(() => expect(store).not.toBeNull());
+        const undoLast = vi.spyOn(store as unknown as AnnotationStore, 'undoLast');
+
+        fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+        await screen.findByRole('dialog', { name: 'Score settings' });
+        fireEvent.click(screen.getByRole('button', { name: 'Remove score' }));
+        await screen.findByRole('alertdialog', { name: 'Remove this score?' });
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+        expect(screen.getByRole('dialog', { name: 'Score settings' })).toBeInTheDocument();
+
+        // The confirm is gone but its parent is still open: the keys still stand down.
+        const start = scrollY();
+        fireEvent.keyDown(document.body, { key: 'ArrowRight' });
+        fireEvent.keyDown(document.body, { key: ' ' });
+        fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true });
+        expect(scrollY()).toBe(start);
+        expect(undoLast).not.toHaveBeenCalled();
     });
 });
 
