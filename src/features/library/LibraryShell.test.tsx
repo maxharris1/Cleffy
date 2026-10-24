@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate, useOutletContext } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,6 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LibraryShell, type LibraryOutletContext } from '@/features/library/LibraryShell';
 import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import type { Entitlements } from '@/types/database';
+
+const toast = vi.hoisted(() => ({
+    success: vi.fn(),
+    saved: vi.fn(),
+    shared: vi.fn(),
+    error: vi.fn(),
+    promise: vi.fn(<T,>(promise: Promise<T>) => promise),
+}));
+vi.mock('@/ui/toast', async (importOriginal) => ({ ...(await importOriginal<object>()), toast }));
 
 // The shell is chrome around an Outlet: everything it reaches for at import
 // time is stubbed, because none of it is what these cases are about.
@@ -112,12 +121,11 @@ const Page = ({ name }: { name: string }) => {
 };
 
 const ShellPage = ({ name }: { name: string }) => {
-    const { limitNotice, quotaUpgradeHint, openPricing, uploadError } = useOutletContext<LibraryOutletContext>();
+    const { limitNotice, quotaUpgradeHint, openPricing } = useOutletContext<LibraryOutletContext>();
     return (
         <div>
             <Page name={name} />
             <ScoreLimitNotice limit={limitNotice} upgradeHint={quotaUpgradeHint !== false} onUpgrade={openPricing} />
-            {uploadError ? <p>error: {uploadError}</p> : null}
         </div>
     );
 };
@@ -125,7 +133,7 @@ const ShellPage = ({ name }: { name: string }) => {
 /** Drives onImportImslp the way ImslpBrowser does, with a cancel handle. */
 const importControl = { controller: new AbortController() };
 const ImportPage = () => {
-    const { onImportImslp, uploadError, limitNotice, importLimit, quotaExhausted, quotaUpgradeHint, openPricing } =
+    const { onImportImslp, limitNotice, importLimit, quotaExhausted, quotaUpgradeHint, openPricing } =
         useOutletContext<LibraryOutletContext>();
     return (
         <div>
@@ -141,7 +149,6 @@ const ImportPage = () => {
             >
                 import
             </button>
-            {uploadError ? <p>error: {uploadError}</p> : null}
             <ScoreLimitNotice limit={limitNotice} upgradeHint={quotaUpgradeHint !== false} onUpgrade={openPricing} />
             {importLimit ? <p>imports spent</p> : null}
             {quotaExhausted ? <p>uploads blocked</p> : null}
@@ -283,11 +290,12 @@ describe('LibraryShell', () => {
 
         await user.click(screen.getByRole('button', { name: 'import' }));
         await waitFor(() => expect(importDocumentFromImslp).toHaveBeenCalledTimes(1));
-        expect(screen.queryByText(/^error:/)).not.toBeInTheDocument();
+        expect(toast.error).not.toHaveBeenCalled();
 
         importDocumentFromImslp.mockRejectedValueOnce(new Error('IMSLP is down'));
         await user.click(screen.getByRole('button', { name: 'import' }));
-        expect(await screen.findByText('error: IMSLP is down')).toBeInTheDocument();
+        // A toast: the import is over, and nothing on the page waits on it.
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('IMSLP is down'));
     });
 
     it('keeps the account menu closed after coming back to the route it was opened on', async () => {
@@ -460,5 +468,144 @@ describe('LibraryShell', () => {
         expect(screen.queryByText(/^error:/)).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
         expect(importDocumentFromImslp).not.toHaveBeenCalled();
+    });
+});
+
+describe('LibraryShell upload bar', () => {
+    beforeEach(() => {
+        entitlementsState.current = entitlementsState.unlimited;
+        fetchLibraryBootstrap.mockResolvedValue(listSnapshot([]));
+        readCachedLibraryList.mockResolvedValue(null);
+        prependCachedLibraryDocument.mockResolvedValue(undefined);
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+    });
+
+    const reduceMotion = () =>
+        vi.stubGlobal(
+            'matchMedia',
+            vi.fn((query: string) => ({
+                matches: query.includes('reduce'),
+                media: query,
+                addEventListener: () => undefined,
+                removeEventListener: () => undefined,
+            })),
+        );
+    const pickFile = () =>
+        fireEvent.change(screen.getByLabelText('Upload score', { selector: 'input' }), {
+            target: { files: [new File(['%PDF-1.4'], 'nocturne.pdf', { type: 'application/pdf' })] },
+        });
+    const elapse = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+    const bar = (name = 'Uploading score') => screen.getByRole('progressbar', { name });
+    const uploadReaching = (pct: number) =>
+        uploadDocument.mockImplementation(
+            async (_file: File, _user: string, onProgress: (p: { loaded: number; total: number }) => void) => {
+                onProgress({ loaded: pct, total: 100 });
+                return { document: { id: 'd9', title: 'Nocturne' } };
+            },
+        );
+
+    it('fills to 100%, holds, fades, then opens the score with a toast', async () => {
+        uploadReaching(40);
+        renderShell();
+        pickFile();
+        await elapse(0);
+
+        // Done, whatever the last progress event said.
+        expect(bar()).toHaveAttribute('aria-valuenow', '100');
+        expect(bar()).not.toHaveAttribute('data-done');
+
+        // The 200ms fill, then the 120ms hold.
+        await elapse(319);
+        expect(bar()).not.toHaveAttribute('data-done');
+        await elapse(1);
+        expect(bar()).toHaveAttribute('data-done');
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).not.toHaveBeenCalled();
+
+        // The 150ms fade, then the viewer and the toast together.
+        await elapse(150);
+        expect(screen.getByText('viewer page')).toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    it('does not wait on a fill that already happened', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(120);
+        expect(bar()).toHaveAttribute('data-done');
+    });
+
+    it('jumps to full under reduced motion, keeping the hold and the fade', async () => {
+        reduceMotion();
+        uploadReaching(40);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(119);
+        expect(bar()).not.toHaveAttribute('data-done');
+        await elapse(1);
+        expect(bar()).toHaveAttribute('data-done');
+        await elapse(150);
+        expect(screen.getByText('viewer page')).toBeInTheDocument();
+    });
+
+    it('fades a failed upload where it stopped and says why in a toast', async () => {
+        uploadDocument.mockImplementation(
+            async (_file: File, _user: string, onProgress: (p: { loaded: number; total: number }) => void) => {
+                onProgress({ loaded: 40, total: 100 });
+                throw new Error('The connection dropped');
+            },
+        );
+        renderShell();
+        pickFile();
+        await elapse(0);
+
+        expect(bar()).toHaveAttribute('aria-valuenow', '40');
+        expect(bar()).toHaveAttribute('data-done');
+        expect(toast.error).toHaveBeenCalledWith('The connection dropped');
+        await elapse(150);
+        expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+        expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(toast.success).not.toHaveBeenCalled();
+    });
+
+    it('skips the hold for a teacher who has moved to another page', async () => {
+        let finish: (value: unknown) => void = () => undefined;
+        uploadDocument.mockReturnValue(
+            new Promise((resolve) => {
+                finish = resolve;
+            }),
+        );
+        renderShell();
+        pickFile();
+        await elapse(0);
+        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        expect(screen.getByText('search page')).toBeInTheDocument();
+
+        finish({ document: { id: 'd9', title: 'Nocturne' } });
+        await elapse(0);
+        expect(screen.getByText('viewer page')).toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    it('turns the IMSLP sweep into a full bar for the same beat before opening the score', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+
+        expect(bar('Importing from IMSLP')).toHaveAttribute('aria-valuenow', '100');
+        await elapse(120);
+        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+        await elapse(150);
+        expect(screen.getByText('viewer page')).toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
     });
 });

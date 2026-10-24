@@ -112,7 +112,7 @@ export const LibraryPage = () => {
         uploading,
         uploadPct,
         onUpload,
-        uploadError,
+        uploadFading = false,
         limitNotice,
         clearUploadError,
         canManageStudents,
@@ -669,7 +669,7 @@ export const LibraryPage = () => {
             clearTimeout(latest);
         };
     }, [hasScores]);
-    const statusError = uploadError ?? error;
+    const statusError = error;
     const useTagSelect = tags.length > TAG_CHIP_LIMIT;
     /**
      * The upload tile is the last cell of the shelf, so it only makes sense
@@ -981,7 +981,12 @@ export const LibraryPage = () => {
 
                 {hasScores ? (
                     uploading && uploadPct !== null ? (
-                        <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
+                        <ProgressBar
+                            value={uploadPct}
+                            label="Uploading score"
+                            done={uploadFading}
+                            className="mt-4 max-w-xs"
+                        />
                     ) : null
                 ) : loadFailure ? (
                     <LibraryUnavailable reason={loadFailure} onRetry={retryLoad} />
@@ -990,6 +995,7 @@ export const LibraryPage = () => {
                         uploading={uploading}
                         quotaExhausted={quotaExhausted}
                         uploadPct={uploadPct}
+                        uploadFading={uploadFading}
                         onUpload={onUpload}
                     />
                 ) : null}
@@ -1010,7 +1016,7 @@ export const LibraryPage = () => {
                     className="mt-5"
                 />
                 {statusError ? (
-                    isCachedListNotice && !uploadError ? (
+                    isCachedListNotice ? (
                         <p className="mt-5 text-sm text-amber-800" role="status">
                             {statusError}
                         </p>
@@ -1691,11 +1697,13 @@ const EmptyLibrary = ({
     uploading,
     quotaExhausted,
     uploadPct,
+    uploadFading,
     onUpload,
 }: {
     uploading: boolean;
     quotaExhausted: boolean;
     uploadPct: number | null;
+    uploadFading: boolean;
     onUpload: (file: File) => Promise<void>;
 }) => (
     <EmptyState
@@ -1710,7 +1718,7 @@ const EmptyLibrary = ({
             <UploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
         </div>
         {uploading && uploadPct !== null ? (
-            <ProgressBar value={uploadPct} label="Uploading score" className="w-full max-w-xs" />
+            <ProgressBar value={uploadPct} label="Uploading score" done={uploadFading} className="w-full max-w-xs" />
         ) : null}
         <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
     </EmptyState>

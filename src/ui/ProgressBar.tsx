@@ -4,6 +4,11 @@ export interface ProgressBarProps {
     label: string;
     /** No known total (e.g. server-side IMSLP fetch) — animated sweep, no aria-valuenow. */
     indeterminate?: boolean;
+    /**
+     * The work is over: the bar fades out (150ms, opacity only, so reduced
+     * motion keeps it) before its owner takes it down, rather than vanishing.
+     */
+    done?: boolean;
     className?: string;
 }
 
@@ -13,8 +18,15 @@ export interface ProgressBarProps {
  * compositor, a width would relayout the bar every frame. The track's
  * overflow-hidden and rounding clip it. Under reduced motion the fill jumps to
  * each value: a bar that slides there is decoration, the number is the point.
+ * A finished bar fades out (`done`) instead of blinking away.
  */
-export const ProgressBar = ({ value = 0, label, indeterminate = false, className = '' }: ProgressBarProps) => {
+export const ProgressBar = ({
+    value = 0,
+    label,
+    indeterminate = false,
+    done = false,
+    className = '',
+}: ProgressBarProps) => {
     const clamped = Math.max(0, Math.min(100, Math.round(value)));
     return (
         <div
@@ -24,7 +36,10 @@ export const ProgressBar = ({ value = 0, label, indeterminate = false, className
             aria-valuenow={indeterminate ? undefined : clamped}
             aria-valuemin={0}
             aria-valuemax={100}
-            className={`h-1.5 w-full overflow-hidden rounded-full bg-stone-200${className ? ` ${className}` : ''}`}
+            data-done={done || undefined}
+            className={`h-1.5 w-full overflow-hidden rounded-full bg-stone-200 transition-opacity duration-(--duration-exit) ease-out data-done:opacity-0${
+                className ? ` ${className}` : ''
+            }`}
         >
             {indeterminate ? (
                 <div className="progress-indeterminate h-full w-1/3 rounded-full bg-accent" />

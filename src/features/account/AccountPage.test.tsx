@@ -125,7 +125,6 @@ const outletContext: LibraryOutletContext = {
     uploading: false,
     onUpload: vi.fn(),
     onImportImslp: vi.fn(),
-    uploadError: null,
     clearUploadError: vi.fn(),
     uploadLimit: null,
     tier: 'free',
