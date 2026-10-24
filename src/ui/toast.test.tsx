@@ -99,11 +99,10 @@ describe('toast', () => {
 
     it('keeps the fade and drops the travel under reduced motion', () => {
         const css = readFileSync(`${process.cwd()}/src/index.css`, 'utf8');
-        const reduced = css.slice(css.lastIndexOf('@media (prefers-reduced-motion: reduce)'));
         // Sonner's own reduced-motion rule is `transition: none !important` on
         // [data-sonner-toast]; this one is more specific, so it wins.
-        expect(reduced).toMatch(
-            /\[data-sonner-toaster\] \[data-sonner-toast\] \{\s*transition: opacity 200ms ease !important;/,
+        expect(css).toMatch(
+            /@media \(prefers-reduced-motion: reduce\) \{\s*\[data-sonner-toaster\] \[data-sonner-toast\] \{\s*transition: opacity 200ms ease !important;/,
         );
     });
 });
