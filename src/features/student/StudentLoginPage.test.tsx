@@ -157,6 +157,21 @@ describe('StudentLoginPage', () => {
             expect(password).not.toHaveAttribute('aria-invalid');
         });
 
+        it('keys the error line apart from the robot check beside it', async () => {
+            motion = stubAnimate();
+            const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            const user = userEvent.setup();
+            // Before any refusal both would be key 0.
+            loginStudent.mockRejectedValue(new Error('Could not reach Cleffy.'));
+            renderLogin();
+
+            await signIn(user);
+
+            expect(await screen.findByText('Could not reach Cleffy.')).toBeInTheDocument();
+            expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/);
+            errors.mockRestore();
+        });
+
         it('does not shake for a failure that is not the credential', async () => {
             motion = stubAnimate();
             const user = userEvent.setup();

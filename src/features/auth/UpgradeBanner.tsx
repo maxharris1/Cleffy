@@ -164,7 +164,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     };
 
     const errorLine = error ? (
-        <span key={codeRefusals} role="alert" className="ui-error-in text-danger">
+        <span key={`refusal-${codeRefusals}`} role="alert" className="ui-error-in text-danger">
             {error.message}{' '}
             {error.signIn ? (
                 <Link to="/login" className="font-medium underline">

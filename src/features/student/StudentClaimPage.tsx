@@ -335,7 +335,7 @@ const ClaimFlow = () => {
                     </>
                 )}
                 {error ? (
-                    <ErrorText key={codeRefusals} className="mt-2.5">
+                    <ErrorText key={`refusal-${codeRefusals}`} className="mt-2.5">
                         {error}
                     </ErrorText>
                 ) : null}

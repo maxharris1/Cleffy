@@ -201,7 +201,7 @@ const CredentialEntry = () => {
                     {busy ? 'Opening…' : 'Open my music'}
                 </Button>
                 {error ? (
-                    <ErrorText key={refusals} className="mt-2.5">
+                    <ErrorText key={`refusal-${refusals}`} className="mt-2.5">
                         {error}
                     </ErrorText>
                 ) : null}
