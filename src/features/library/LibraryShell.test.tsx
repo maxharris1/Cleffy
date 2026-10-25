@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LibraryShell, type LibraryOutletContext } from '@/features/library/LibraryShell';
 import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
+import { features } from '@/lib/features';
+import { dialogPanelModule } from '@/ui/lazyPrimitives';
 import type { Entitlements } from '@/types/database';
 
 const toast = vi.hoisted(() => ({
@@ -104,8 +106,9 @@ vi.mock('@/features/import/importPromptService', () => ({
     shouldOfferImport: (...args: unknown[]) => shouldOfferImport(...args),
 }));
 
+const prescanDocument = vi.hoisted(() => vi.fn());
 vi.mock('@/features/import/prescan', () => ({
-    prescanDocument: vi.fn(),
+    prescanDocument: (...args: unknown[]) => prescanDocument(...args),
 }));
 
 /** A routed page with the one thing the tests need from it: browser Back. */
@@ -581,7 +584,7 @@ describe('LibraryShell upload bar', () => {
         expect(toast.success).not.toHaveBeenCalled();
     });
 
-    it('skips the hold for a teacher who has moved to another page', async () => {
+    it('skips the hold, and stays put, for a teacher who has moved to another page', async () => {
         let finish: (value: unknown) => void = () => undefined;
         uploadDocument.mockReturnValue(
             new Promise((resolve) => {
@@ -596,8 +599,107 @@ describe('LibraryShell upload bar', () => {
 
         finish({ document: { id: 'd9', title: 'Nocturne' } });
         await elapse(0);
-        expect(screen.getByText('viewer page')).toBeInTheDocument();
+        // No hold: the toast is up at once, and the teacher is not pulled back.
         expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+        await elapse(500);
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', null, {
+            id: 'd9',
+            title: 'Nocturne',
+        });
+    });
+
+    it('stays on the page a teacher goes to during the upload hold', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(60);
+        expect(bar()).not.toHaveAttribute('data-done');
+
+        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        await elapse(500);
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        // Saved and cached all the same, and the toast says where it went.
+        expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', null, {
+            id: 'd9',
+            title: 'Nocturne',
+        });
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    it('stays on the page a teacher goes to during the upload fade', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(120);
+        expect(bar()).toHaveAttribute('data-done');
+
+        await elapse(75);
+        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        await elapse(500);
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    describe('with smart import on', () => {
+        beforeEach(async () => {
+            // Loaded up front, so the offer renders the moment it is made.
+            await dialogPanelModule.load();
+            (features as { smartImport: boolean }).smartImport = true;
+            prescanDocument.mockResolvedValue(true);
+            shouldOfferImport.mockResolvedValue(true);
+        });
+
+        afterEach(() => {
+            (features as { smartImport: boolean }).smartImport = false;
+        });
+
+        const offer = () => screen.queryByRole('alertdialog', { name: 'Existing marks found' });
+
+        it('offers the import after the finish to a teacher still on the page', async () => {
+            uploadReaching(100);
+            renderShell();
+            pickFile();
+            await elapse(0);
+            expect(offer()).not.toBeInTheDocument();
+            await elapse(270);
+            expect(offer()).toBeInTheDocument();
+            expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+        });
+
+        it('does not put the offer to a teacher who left during the hold', async () => {
+            uploadReaching(100);
+            renderShell();
+            pickFile();
+            await elapse(0);
+            await elapse(60);
+
+            fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+            await elapse(500);
+            expect(offer()).not.toBeInTheDocument();
+            expect(screen.getByText('search page')).toBeInTheDocument();
+            expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+        });
+
+        it('does not put the offer to a teacher who left during the fade', async () => {
+            uploadReaching(100);
+            renderShell();
+            pickFile();
+            await elapse(0);
+            await elapse(120);
+            expect(bar()).toHaveAttribute('data-done');
+
+            await elapse(75);
+            fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+            await elapse(500);
+            expect(offer()).not.toBeInTheDocument();
+            expect(screen.getByText('search page')).toBeInTheDocument();
+        });
     });
 
     it('turns the IMSLP sweep into a full bar for the same beat before opening the score', async () => {
@@ -642,6 +744,41 @@ describe('LibraryShell upload bar', () => {
         await elapse(75);
         fireEvent.click(screen.getByRole('link', { name: 'Library' }));
         expect(importControl.controller.signal.aborted).toBe(true);
+        await elapse(500);
+        expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    // The two cases above leave Search and abort at once. These pull the two
+    // apart, so each check after the finish is shown to matter on its own.
+    it('does not open an IMSLP score cancelled during the finish, on the same page', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(60);
+
+        importControl.controller.abort();
+        await elapse(500);
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    it('does not open an IMSLP score from another page, even when the import was not cancelled', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(60);
+
+        // Detach the import's cancel handle, so leaving Search changes the
+        // page without aborting it.
+        const { signal } = importControl.controller;
+        importControl.controller = new AbortController();
+        fireEvent.click(screen.getByRole('link', { name: 'Library' }));
+        expect(signal.aborted).toBe(false);
         await elapse(500);
         expect(screen.getByText('library page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();

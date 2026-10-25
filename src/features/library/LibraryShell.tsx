@@ -396,7 +396,11 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     if ((await prescanDocument(bytes)) && (await shouldOfferImport(document.id))) {
                         await settleBar(startedAt, { fillMs: 0, hold: true });
                         toast.success('Score uploaded', { description: document.title });
-                        setImportOffer(document);
+                        // The dialog navigates either way, so it is only put
+                        // to a teacher still on the page they uploaded from.
+                        if (pathnameRef.current === startedAt) {
+                            setImportOffer(document);
+                        }
                         return; // the dialog decides where to navigate
                     }
                 } catch {
@@ -404,8 +408,12 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 }
             }
             await settleBar(startedAt, { fillMs: lastPct === 100 ? 0 : BAR_FILL_MS, hold: true });
-            // Together, so the toast lands on the viewer as it opens.
-            navigate(`/doc/${document.id}`);
+            // Together, so the toast lands on the viewer as it opens. A teacher
+            // who moved on, before or during the hold or the fade, stays where
+            // they went: the score is saved and the toast says where it went.
+            if (pathnameRef.current === startedAt) {
+                navigate(`/doc/${document.id}`);
+            }
             toast.success('Score uploaded', { description: document.title });
         } catch (err) {
             const quota = captureFailure(err, 'Upload failed.');
