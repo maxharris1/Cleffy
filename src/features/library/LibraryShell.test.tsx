@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect } from 'react';
-import { MemoryRouter, Route, Routes, useNavigate, useOutletContext } from 'react-router';
+import { MemoryRouter, Route, Routes, useNavigate, useOutletContext, useParams } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LibraryShell, type LibraryOutletContext } from '@/features/library/LibraryShell';
@@ -124,11 +124,38 @@ const Page = ({ name }: { name: string }) => {
     );
 };
 
+/** The viewer, saying which score it opened. */
+const DocPage = () => {
+    const { id } = useParams();
+    return (
+        <div>
+            <Page name="viewer page" />
+            <p>score {id}</p>
+        </div>
+    );
+};
+
+/** Ways out of the shell altogether, which unmount it rather than change its page. */
+const LeaveShell = () => {
+    const navigate = useNavigate();
+    return (
+        <div>
+            <button type="button" onClick={() => navigate('/doc/d1')}>
+                open another score
+            </button>
+            <button type="button" onClick={() => navigate('/terms')}>
+                read the terms
+            </button>
+        </div>
+    );
+};
+
 const ShellPage = ({ name }: { name: string }) => {
     const { limitNotice, quotaUpgradeHint, openPricing } = useOutletContext<LibraryOutletContext>();
     return (
         <div>
             <Page name={name} />
+            <LeaveShell />
             <ScoreLimitNotice limit={limitNotice} upgradeHint={quotaUpgradeHint !== false} onUpgrade={openPricing} />
         </div>
     );
@@ -146,6 +173,7 @@ const ImportPage = () => {
     return (
         <div>
             <p>search page</p>
+            <LeaveShell />
             <button
                 type="button"
                 onClick={() => {
@@ -185,7 +213,8 @@ const renderShell = (initialEntry = '/library') =>
                     <Route path="/students" element={<ShellPage name="students page" />} />
                     <Route path="/search" element={<ImportPage />} />
                 </Route>
-                <Route path="/doc/:id" element={<Page name="viewer page" />} />
+                <Route path="/doc/:id" element={<DocPage />} />
+                <Route path="/terms" element={<Page name="terms page" />} />
             </Routes>
         </MemoryRouter>,
     );
@@ -646,6 +675,41 @@ describe('LibraryShell upload bar', () => {
         expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
     });
 
+    it('stays on the score a teacher opens, leaving the shell, during the upload hold', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(60);
+        expect(bar()).not.toHaveAttribute('data-done');
+
+        fireEvent.click(screen.getByRole('button', { name: 'open another score' }));
+        await elapse(500);
+        expect(screen.getByText('score d1')).toBeInTheDocument();
+        expect(screen.queryByText('score d9')).not.toBeInTheDocument();
+        expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', null, {
+            id: 'd9',
+            title: 'Nocturne',
+        });
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    it('stays on the legal page a teacher opens, leaving the shell, during the upload fade', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(120);
+        expect(bar()).toHaveAttribute('data-done');
+
+        await elapse(75);
+        fireEvent.click(screen.getByRole('button', { name: 'read the terms' }));
+        await elapse(500);
+        expect(screen.getByText('terms page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
     describe('with smart import on', () => {
         beforeEach(async () => {
             // Loaded up front, so the offer renders the moment it is made.
@@ -781,6 +845,45 @@ describe('LibraryShell upload bar', () => {
         expect(signal.aborted).toBe(false);
         await elapse(500);
         expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    // Leaving the shell unmounts Search, which aborts the import too; these
+    // detach the cancel handle as above, so the shell's own check is shown
+    // to hold for an import with nothing to abort it.
+    it('does not open an IMSLP score past a teacher who leaves the shell during the hold', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(60);
+
+        const { signal } = importControl.controller;
+        importControl.controller = new AbortController();
+        fireEvent.click(screen.getByRole('button', { name: 'open another score' }));
+        expect(signal.aborted).toBe(false);
+        await elapse(500);
+        expect(screen.getByText('score d1')).toBeInTheDocument();
+        expect(screen.queryByText('score d3')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    it('does not open an IMSLP score past a teacher who leaves the shell during the fade', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(120);
+        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+
+        await elapse(75);
+        const { signal } = importControl.controller;
+        importControl.controller = new AbortController();
+        fireEvent.click(screen.getByRole('button', { name: 'read the terms' }));
+        expect(signal.aborted).toBe(false);
+        await elapse(500);
+        expect(screen.getByText('terms page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
         expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
     });

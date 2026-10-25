@@ -200,6 +200,17 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     useEffect(() => {
         pathnameRef.current = pathname;
     }, [pathname]);
+    // Leaving the shell altogether (a score opened from elsewhere, a legal
+    // page) unmounts it before pathnameRef can see the new page.
+    const mountedRef = useRef(true);
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+        };
+    }, []);
+    /** The teacher is still on the page an upload or import started from. */
+    const stillOn = (startedAt: string) => mountedRef.current && pathnameRef.current === startedAt;
     const uploading = uploadPct !== null || importingImslp;
     const cloudScoreLimit = entitlements?.limits.cloud_scores;
     const quotaUpgradeHint = cloudScoreLimit !== 0;
@@ -254,11 +265,10 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
      * waiting on a bar that is no longer in front of them.
      */
     const settleBar = async (startedAt: string, { fillMs, hold }: { fillMs: number; hold: boolean }) => {
-        const stillHere = () => pathnameRef.current === startedAt;
-        if (hold && stillHere()) {
+        if (hold && stillOn(startedAt)) {
             await wait((prefersReducedMotion() ? 0 : fillMs) + BAR_HOLD_MS);
         }
-        if (!stillHere()) {
+        if (!stillOn(startedAt)) {
             return;
         }
         setBarFading(true);
@@ -398,7 +408,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         toast.success('Score uploaded', { description: document.title });
                         // The dialog navigates either way, so it is only put
                         // to a teacher still on the page they uploaded from.
-                        if (pathnameRef.current === startedAt) {
+                        if (stillOn(startedAt)) {
                             setImportOffer(document);
                         }
                         return; // the dialog decides where to navigate
@@ -411,7 +421,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             // Together, so the toast lands on the viewer as it opens. A teacher
             // who moved on, before or during the hold or the fade, stays where
             // they went: the score is saved and the toast says where it went.
-            if (pathnameRef.current === startedAt) {
+            if (stillOn(startedAt)) {
                 navigate(`/doc/${document.id}`);
             }
             toast.success('Score uploaded', { description: document.title });
@@ -477,8 +487,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 await settleBar(startedAt, { fillMs: 0, hold: true });
                 // Leaving during the hold or the fade is moving on too: Search
                 // unmounting aborts the import, and this is no longer the page
-                // it started on.
-                if (!signal?.aborted && pathnameRef.current === startedAt) {
+                // it started on (nor, past the shell, a page of it at all).
+                if (!signal?.aborted && stillOn(startedAt)) {
                     navigate(`/doc/${result.document.id}`);
                 }
             }
