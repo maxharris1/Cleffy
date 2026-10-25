@@ -6,6 +6,7 @@ import { TurnstileField } from '@/features/auth/TurnstileField';
 import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import { StudentAuthError, claimStudentAccount } from '@/features/student/studentApi';
+import { refuseInput } from '@/lib/shake';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
@@ -90,6 +91,17 @@ const ClaimFlow = () => {
     const [captchaRound, setCaptchaRound] = useState(0);
     const captchaRequired = isTurnstileEnabled();
     const usernameRef = useRef<HTMLInputElement | null>(null);
+    /**
+     * How many times the server has refused the code. Each refusal shakes the
+     * code field once it is back on screen, and keys the error line so it
+     * fades in again even when the words are the same.
+     */
+    const [codeRefusals, setCodeRefusals] = useState(0);
+    /** The code as typed was refused, until it is edited. */
+    const [codeRefused, setCodeRefused] = useState(false);
+    const codeWrapRef = useRef<HTMLDivElement | null>(null);
+    const codeInputRef = useRef<HTMLInputElement | null>(null);
+    const shakenRefusals = useRef(0);
 
     // Focus follows the complaint, but only once the field is enabled again —
     // the input is still disabled in the render that carries the failure.
@@ -98,6 +110,16 @@ const ClaimFlow = () => {
             usernameRef.current?.focus();
         }
     }, [usernameError]);
+
+    // The refusal sends them back to step one; the field it shakes mounts with
+    // that render, so this runs after it. Then the caret goes back in with the
+    // code selected, so a child can type it again straight away.
+    useEffect(() => {
+        if (step === 1 && codeRefusals > shakenRefusals.current) {
+            shakenRefusals.current = codeRefusals;
+            refuseInput(codeWrapRef.current, codeInputRef.current);
+        }
+    }, [step, codeRefusals]);
 
     const normalizedUsername = normalizeUsername(username);
 
@@ -161,6 +183,8 @@ const ClaimFlow = () => {
                 if (err.code === 'invalid_code') {
                     setStep(1);
                     setError(err.message);
+                    setCodeRefused(true);
+                    setCodeRefusals((n) => n + 1);
                     return;
                 }
                 if (err.code === 'username_taken' || err.code === 'invalid_username') {
@@ -223,21 +247,30 @@ const ClaimFlow = () => {
                         <label htmlFor="claim-code" className={fieldLabelClassName}>
                             Setup code
                         </label>
-                        <input
-                            id="claim-code"
-                            value={code}
-                            onChange={(e) => setCode(e.target.value)}
-                            autoFocus
-                            // The code lives on paper, not in a keychain: autofill
-                            // has nothing useful to offer, and a suggestion strip
-                            // over the field only gets in the way.
-                            autoComplete="off"
-                            autoCapitalize="characters"
-                            autoCorrect="off"
-                            spellCheck={false}
-                            placeholder="ABCD-EFGH-JKLM"
-                            className={CODE_INPUT_CLASS}
-                        />
+                        {/* The server's "no" shakes this wrapper (never a shape
+                            check while typing): only a refusal from student-claim. */}
+                        <div ref={codeWrapRef}>
+                            <input
+                                id="claim-code"
+                                ref={codeInputRef}
+                                value={code}
+                                onChange={(e) => {
+                                    setCode(e.target.value);
+                                    setCodeRefused(false);
+                                }}
+                                aria-invalid={codeRefused || undefined}
+                                autoFocus
+                                // The code lives on paper, not in a keychain: autofill
+                                // has nothing useful to offer, and a suggestion strip
+                                // over the field only gets in the way.
+                                autoComplete="off"
+                                autoCapitalize="characters"
+                                autoCorrect="off"
+                                spellCheck={false}
+                                placeholder="ABCD-EFGH-JKLM"
+                                className={CODE_INPUT_CLASS}
+                            />
+                        </div>
                         <Button type="submit" className="mt-4 w-full">
                             Next
                         </Button>
@@ -301,7 +334,11 @@ const ClaimFlow = () => {
                         <AgreementNote action="creating your account" className="mt-3 text-center" />
                     </>
                 )}
-                {error ? <ErrorText className="mt-2.5">{error}</ErrorText> : null}
+                {error ? (
+                    <ErrorText key={`refusal-${codeRefusals}`} className="mt-2.5">
+                        {error}
+                    </ErrorText>
+                ) : null}
             </form>
             <p className="mt-6 text-center text-sm text-stone-600">
                 {step === 2 ? (

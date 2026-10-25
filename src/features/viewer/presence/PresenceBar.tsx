@@ -27,7 +27,14 @@ export const PresenceBar = ({ peers, selfUserId }: PresenceBarProps) => {
     const overflow = others.length - shown.length;
 
     return (
-        <div className="flex items-center -space-x-1.5" aria-label={`${others.length} collaborators viewing`}>
+        // Overlapped on a fine pointer. On touch each chip's 44px hit area
+        // (hit-44) would overlap its neighbour's and the later chip would win
+        // every tap meant for the one before, so the chips stand apart there,
+        // 28px + a 16px gap: 44px from centre to centre, no overlap.
+        <div
+            className="flex items-center -space-x-1.5 pointer-coarse:gap-4 pointer-coarse:space-x-0"
+            aria-label={`${others.length} collaborators viewing`}
+        >
             {shown.map((peer) => {
                 const who = `${peer.name}${peer.isAnonymous ? ' (guest)' : ''}`;
                 return (

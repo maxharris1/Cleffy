@@ -67,6 +67,7 @@ import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { LibrarySkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
+import { toast } from '@/ui/toast';
 import { ViewToggle } from '@/ui/ViewToggle';
 import { buttonClassName, chipClassName, fieldClassName } from '@/ui/classNames';
 import { SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
@@ -111,7 +112,7 @@ export const LibraryPage = () => {
         uploading,
         uploadPct,
         onUpload,
-        uploadError,
+        uploadFading = false,
         limitNotice,
         clearUploadError,
         canManageStudents,
@@ -135,7 +136,6 @@ export const LibraryPage = () => {
     const [reloadKey, setReloadKey] = useState(0);
     /** Automatic retries since the list last loaded, for their backoff. */
     const autoRetriesRef = useRef(0);
-    const [actionError, setActionError] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     // Read once on mount: a stored preference that throws (private mode) falls
     // back to the shelf rather than taking the page down with it.
@@ -669,7 +669,7 @@ export const LibraryPage = () => {
             clearTimeout(latest);
         };
     }, [hasScores]);
-    const statusError = uploadError ?? actionError ?? error;
+    const statusError = error;
     const useTagSelect = tags.length > TAG_CHIP_LIMIT;
     /**
      * The upload tile is the last cell of the shelf, so it only makes sense
@@ -712,7 +712,6 @@ export const LibraryPage = () => {
     // actions built from it never change and memoized rows stay put.
     const toggleFavorite = useCallback(
         (doc: DocumentRow, next: boolean) => {
-            setActionError(null);
             setFavorites((prev) => {
                 if (prev.has(doc.id) === next) {
                     return prev;
@@ -737,7 +736,7 @@ export const LibraryPage = () => {
                         }
                         return set;
                     });
-                    setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
+                    toast.error(err instanceof Error ? err.message : 'Could not update favorites.');
                 });
         },
         [userId, persistSnapshot],
@@ -878,7 +877,6 @@ export const LibraryPage = () => {
         }
         const target = deleteTarget;
         setBusyAction(true);
-        setActionError(null);
         try {
             await deleteDocument(target);
             setDocuments((docs) => docs?.filter((d) => d.id !== target.id) ?? docs);
@@ -895,7 +893,9 @@ export const LibraryPage = () => {
             clearUploadError();
             persistSnapshot();
         } catch (err) {
-            setActionError(err instanceof Error ? err.message : 'Could not delete the score.');
+            // A toast, not a line in the page: the score is still there, and
+            // nothing waits on the teacher to dismiss the failure.
+            toast.error(err instanceof Error ? err.message : 'Could not delete the score.');
         } finally {
             setBusyAction(false);
             setDeleteTarget(null);
@@ -931,13 +931,12 @@ export const LibraryPage = () => {
         }
         const target = leaveTarget;
         setBusyAction(true);
-        setActionError(null);
         try {
             await leaveSharedDocument(target.id);
             forgetLocally(target.id);
             persistSnapshot();
         } catch (err) {
-            setActionError(err instanceof Error ? err.message : 'Could not remove the score from your library.');
+            toast.error(err instanceof Error ? err.message : 'Could not remove the score from your library.');
         } finally {
             setBusyAction(false);
             setLeaveTarget(null);
@@ -982,7 +981,12 @@ export const LibraryPage = () => {
 
                 {hasScores ? (
                     uploading && uploadPct !== null ? (
-                        <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
+                        <ProgressBar
+                            value={uploadPct}
+                            label="Uploading score"
+                            done={uploadFading}
+                            className="mt-4 max-w-xs"
+                        />
                     ) : null
                 ) : loadFailure ? (
                     <LibraryUnavailable reason={loadFailure} onRetry={retryLoad} />
@@ -991,6 +995,7 @@ export const LibraryPage = () => {
                         uploading={uploading}
                         quotaExhausted={quotaExhausted}
                         uploadPct={uploadPct}
+                        uploadFading={uploadFading}
                         onUpload={onUpload}
                     />
                 ) : null}
@@ -999,9 +1004,10 @@ export const LibraryPage = () => {
               Both, never one instead of the other. The limit notice outlives the
               upload that raised it — and at the cap it is there before any
               upload, explaining the greyed-out button — so rendering it in place
-              of statusError would swallow every later failure: a delete that
+              of statusError would swallow every later failure: an upload that
               errored, a listDocuments that failed, the offline notice. Two
-              different things, and the teacher needs both.
+              different things, and the teacher needs both. (A row action that
+              fails — favorite, delete, leave — is a toast: nothing waits on it.)
             */}
                 <ScoreLimitNotice
                     limit={limitNotice}
@@ -1010,7 +1016,7 @@ export const LibraryPage = () => {
                     className="mt-5"
                 />
                 {statusError ? (
-                    isCachedListNotice && !uploadError && !actionError ? (
+                    isCachedListNotice ? (
                         <p className="mt-5 text-sm text-amber-800" role="status">
                             {statusError}
                         </p>
@@ -1691,11 +1697,13 @@ const EmptyLibrary = ({
     uploading,
     quotaExhausted,
     uploadPct,
+    uploadFading,
     onUpload,
 }: {
     uploading: boolean;
     quotaExhausted: boolean;
     uploadPct: number | null;
+    uploadFading: boolean;
     onUpload: (file: File) => Promise<void>;
 }) => (
     <EmptyState
@@ -1710,7 +1718,7 @@ const EmptyLibrary = ({
             <UploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
         </div>
         {uploading && uploadPct !== null ? (
-            <ProgressBar value={uploadPct} label="Uploading score" className="w-full max-w-xs" />
+            <ProgressBar value={uploadPct} label="Uploading score" done={uploadFading} className="w-full max-w-xs" />
         ) : null}
         <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
     </EmptyState>

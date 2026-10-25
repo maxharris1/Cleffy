@@ -28,6 +28,7 @@ import {
     mountedPageIndices,
     pageTurnView,
     reanchorView,
+    turnFromPageIndex,
     viewportToPagePoint,
     visiblePageRange,
     zoomAt,
@@ -612,13 +613,14 @@ export const PdfViewport = ({
      * Turn one row of pages. Reads live refs so the once-bound gesture
      * controller and the keyboard listener always run the current geometry.
      * Counts as a user gesture for auto-follow, exactly like a manual pan.
-     * The page it turns from is the one in the uncovered part of the viewport,
-     * as the pager reads it: a tall notice stack must not pin it to page 1.
+     * The page it turns from is the row at the top of the uncovered part of
+     * the viewport (turnFromPageIndex): a tall notice stack must not pin it to
+     * page 1, and zoomed out it must not be the centre row, which skipped one.
      */
     const turnPage = useCallback((direction: -1 | 1) => {
         const { view: v, setView } = useViewerStore.getState();
         const { width, height } = viewportSizeRef.current;
-        const current = focusedPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current);
+        const current = turnFromPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current);
         const next = pageTurnView(v, layoutRef.current, current, direction, width, height, obscuredRef.current);
         if (!next) {
             return;
@@ -1291,8 +1293,10 @@ const Pager = ({
     const view = useViewerStore((s) => s.view);
     const pageIndex = focusedPageIndex(view, viewportSize.height, layout.layouts, obscured);
     const pageCount = layout.layouts.length;
+    // Turns step from the row at the top (see turnPage), not the labelled one.
+    const turnFrom = turnFromPageIndex(view, viewportSize.height, layout.layouts, obscured);
     const canTurn = (direction: -1 | 1) =>
-        pageTurnView(view, layout, pageIndex, direction, viewportSize.width, viewportSize.height, obscured) !== null;
+        pageTurnView(view, layout, turnFrom, direction, viewportSize.width, viewportSize.height, obscured) !== null;
     return (
         <div
             data-ui-overlay

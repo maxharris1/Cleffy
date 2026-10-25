@@ -35,6 +35,7 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
+import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
 
 import {
@@ -385,7 +386,10 @@ export const AccountPage = () => {
                     </p>
                     <div className="mt-3 flex flex-wrap items-center gap-3">
                         <Button type="submit" size="sm" disabled={!nameDirty || nameBusy}>
-                            {nameBusy ? 'Saving…' : 'Save name'}
+                            <SwapLabel
+                                labels={{ idle: 'Save name', busy: 'Saving…' }}
+                                active={nameBusy ? 'busy' : 'idle'}
+                            />
                         </Button>
                         {nameSaved ? (
                             <p role="status" className={CONFIRMATION}>
@@ -423,7 +427,10 @@ export const AccountPage = () => {
                     </div>
                     <div className="mt-3 flex flex-wrap items-center gap-3">
                         <Button type="submit" size="sm" variant="secondary" disabled={passwordBusy}>
-                            {passwordBusy ? 'Changing…' : 'Change password'}
+                            <SwapLabel
+                                labels={{ idle: 'Change password', busy: 'Changing…' }}
+                                active={passwordBusy ? 'busy' : 'idle'}
+                            />
                         </Button>
                         {passwordSaved ? (
                             <p role="status" className={CONFIRMATION}>

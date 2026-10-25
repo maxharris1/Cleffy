@@ -9,6 +9,15 @@ import { LibraryPage } from '@/features/library/LibraryPage';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
 
+const toast = vi.hoisted(() => ({
+    success: vi.fn(),
+    saved: vi.fn(),
+    shared: vi.fn(),
+    error: vi.fn(),
+    promise: vi.fn(<T,>(promise: Promise<T>) => promise),
+}));
+vi.mock('@/ui/toast', async (importOriginal) => ({ ...(await importOriginal<object>()), toast }));
+
 const listDocuments = vi.fn();
 const listFavoriteDocumentIds = vi.fn();
 const setDocumentFavorite = vi.fn();
@@ -141,7 +150,6 @@ const outletContext: LibraryOutletContext = {
     uploading: false,
     onUpload: vi.fn(),
     onImportImslp: vi.fn(),
-    uploadError: null,
     clearUploadError: vi.fn(),
     uploadLimit: null,
     tier: 'free',
@@ -339,7 +347,8 @@ describe('LibraryPage', () => {
         await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
         await user.click(await screen.findByRole('button', { name: 'Delete' }));
 
-        expect(await screen.findByText('Network request failed')).toBeInTheDocument();
+        // A toast: the failure blocks nothing, and the limit notice stays put.
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Network request failed'));
         expect(screen.getByText(/reached your 3 free cloud scores/)).toBeInTheDocument();
         // The score is still there, which is the thing the error has to explain.
         expect(screen.getByText('An Chloe (Mozart, Wolfgang Amadeus)')).toBeInTheDocument();
@@ -710,7 +719,9 @@ describe('LibraryPage', () => {
 
             await user.click(screen.getAllByRole('button', { name: 'Add to favorites' })[0] as HTMLElement);
 
-            await screen.findByText('offline');
+            await waitFor(() => expect(toast.error).toHaveBeenCalledWith('offline'));
+            // Rolled back, and nothing written.
+            expect(screen.getAllByRole('button', { name: 'Add to favorites' })).toHaveLength(2);
             expect(writeCachedLibraryList).not.toHaveBeenCalled();
         });
 
@@ -1044,7 +1055,7 @@ describe('LibraryPage', () => {
             await user.click(await screen.findByRole('menuitem', { name: 'Remove from my library' }));
             await user.click(await screen.findByRole('button', { name: 'Remove' }));
 
-            expect(await screen.findByText('Could not leave this score: offline')).toBeInTheDocument();
+            await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not leave this score: offline'));
             expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toBeInTheDocument();
             expect(writeCachedLibraryList).not.toHaveBeenCalled();
         });

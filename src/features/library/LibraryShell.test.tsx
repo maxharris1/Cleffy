@@ -1,11 +1,23 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useNavigate, useOutletContext } from 'react-router';
+import { useEffect } from 'react';
+import { MemoryRouter, Route, Routes, useNavigate, useOutletContext, useParams } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LibraryShell, type LibraryOutletContext } from '@/features/library/LibraryShell';
 import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
+import { features } from '@/lib/features';
+import { dialogPanelModule } from '@/ui/lazyPrimitives';
 import type { Entitlements } from '@/types/database';
+
+const toast = vi.hoisted(() => ({
+    success: vi.fn(),
+    saved: vi.fn(),
+    shared: vi.fn(),
+    error: vi.fn(),
+    promise: vi.fn(<T,>(promise: Promise<T>) => promise),
+}));
+vi.mock('@/ui/toast', async (importOriginal) => ({ ...(await importOriginal<object>()), toast }));
 
 // The shell is chrome around an Outlet: everything it reaches for at import
 // time is stubbed, because none of it is what these cases are about.
@@ -94,8 +106,9 @@ vi.mock('@/features/import/importPromptService', () => ({
     shouldOfferImport: (...args: unknown[]) => shouldOfferImport(...args),
 }));
 
+const prescanDocument = vi.hoisted(() => vi.fn());
 vi.mock('@/features/import/prescan', () => ({
-    prescanDocument: vi.fn(),
+    prescanDocument: (...args: unknown[]) => prescanDocument(...args),
 }));
 
 /** A routed page with the one thing the tests need from it: browser Back. */
@@ -111,25 +124,56 @@ const Page = ({ name }: { name: string }) => {
     );
 };
 
-const ShellPage = ({ name }: { name: string }) => {
-    const { limitNotice, quotaUpgradeHint, openPricing, uploadError } = useOutletContext<LibraryOutletContext>();
+/** The viewer, saying which score it opened. */
+const DocPage = () => {
+    const { id } = useParams();
     return (
         <div>
-            <Page name={name} />
-            <ScoreLimitNotice limit={limitNotice} upgradeHint={quotaUpgradeHint !== false} onUpgrade={openPricing} />
-            {uploadError ? <p>error: {uploadError}</p> : null}
+            <Page name="viewer page" />
+            <p>score {id}</p>
         </div>
     );
 };
 
-/** Drives onImportImslp the way ImslpBrowser does, with a cancel handle. */
+/** Ways out of the shell altogether, which unmount it rather than change its page. */
+const LeaveShell = () => {
+    const navigate = useNavigate();
+    return (
+        <div>
+            <button type="button" onClick={() => navigate('/doc/d1')}>
+                open another score
+            </button>
+            <button type="button" onClick={() => navigate('/terms')}>
+                read the terms
+            </button>
+        </div>
+    );
+};
+
+const ShellPage = ({ name }: { name: string }) => {
+    const { limitNotice, quotaUpgradeHint, openPricing } = useOutletContext<LibraryOutletContext>();
+    return (
+        <div>
+            <Page name={name} />
+            <LeaveShell />
+            <ScoreLimitNotice limit={limitNotice} upgradeHint={quotaUpgradeHint !== false} onUpgrade={openPricing} />
+        </div>
+    );
+};
+
+/**
+ * Drives onImportImslp the way ImslpBrowser does, with a cancel handle that
+ * leaving the page aborts.
+ */
 const importControl = { controller: new AbortController() };
 const ImportPage = () => {
-    const { onImportImslp, uploadError, limitNotice, importLimit, quotaExhausted, quotaUpgradeHint, openPricing } =
+    const { onImportImslp, limitNotice, importLimit, quotaExhausted, quotaUpgradeHint, openPricing } =
         useOutletContext<LibraryOutletContext>();
+    useEffect(() => () => importControl.controller.abort(), []);
     return (
         <div>
             <p>search page</p>
+            <LeaveShell />
             <button
                 type="button"
                 onClick={() => {
@@ -141,7 +185,6 @@ const ImportPage = () => {
             >
                 import
             </button>
-            {uploadError ? <p>error: {uploadError}</p> : null}
             <ScoreLimitNotice limit={limitNotice} upgradeHint={quotaUpgradeHint !== false} onUpgrade={openPricing} />
             {importLimit ? <p>imports spent</p> : null}
             {quotaExhausted ? <p>uploads blocked</p> : null}
@@ -170,7 +213,8 @@ const renderShell = (initialEntry = '/library') =>
                     <Route path="/students" element={<ShellPage name="students page" />} />
                     <Route path="/search" element={<ImportPage />} />
                 </Route>
-                <Route path="/doc/:id" element={<Page name="viewer page" />} />
+                <Route path="/doc/:id" element={<DocPage />} />
+                <Route path="/terms" element={<Page name="terms page" />} />
             </Routes>
         </MemoryRouter>,
     );
@@ -207,6 +251,21 @@ describe('LibraryShell', () => {
         expect(await screen.findByText('viewer page')).toBeInTheDocument();
         expect(readCachedLibraryList).toHaveBeenCalledWith('teacher-1');
         expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', before, document);
+    });
+
+    it('swaps the upload caption in place while a score uploads', async () => {
+        const user = userEvent.setup();
+        readCachedLibraryList.mockResolvedValue(null);
+        uploadDocument.mockReturnValue(new Promise(() => undefined));
+        renderShell();
+
+        const input = screen.getByLabelText('Upload score', { selector: 'input' });
+        await user.upload(input, new File(['%PDF-1.4'], 'new.pdf', { type: 'application/pdf' }));
+
+        expect(await screen.findByLabelText('Uploading…', { selector: 'input' })).toBeDisabled();
+        const caption = screen.getByText('Uploading…', { selector: '[data-swap-active]' });
+        expect(caption.parentElement).toHaveClass('swap-label');
+        expect(screen.getByText('Upload score', { selector: 'span' })).toHaveAttribute('aria-hidden', 'true');
     });
 
     it('never offers smart import after an upload while the feature is off', async () => {
@@ -268,11 +327,12 @@ describe('LibraryShell', () => {
 
         await user.click(screen.getByRole('button', { name: 'import' }));
         await waitFor(() => expect(importDocumentFromImslp).toHaveBeenCalledTimes(1));
-        expect(screen.queryByText(/^error:/)).not.toBeInTheDocument();
+        expect(toast.error).not.toHaveBeenCalled();
 
         importDocumentFromImslp.mockRejectedValueOnce(new Error('IMSLP is down'));
         await user.click(screen.getByRole('button', { name: 'import' }));
-        expect(await screen.findByText('error: IMSLP is down')).toBeInTheDocument();
+        // A toast: the import is over, and nothing on the page waits on it.
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('IMSLP is down'));
     });
 
     it('keeps the account menu closed after coming back to the route it was opened on', async () => {
@@ -445,5 +505,386 @@ describe('LibraryShell', () => {
         expect(screen.queryByText(/^error:/)).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
         expect(importDocumentFromImslp).not.toHaveBeenCalled();
+    });
+});
+
+describe('LibraryShell upload bar', () => {
+    beforeEach(() => {
+        entitlementsState.current = entitlementsState.unlimited;
+        fetchLibraryBootstrap.mockResolvedValue(listSnapshot([]));
+        readCachedLibraryList.mockResolvedValue(null);
+        prependCachedLibraryDocument.mockResolvedValue(undefined);
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+    });
+
+    const reduceMotion = () =>
+        vi.stubGlobal(
+            'matchMedia',
+            vi.fn((query: string) => ({
+                matches: query.includes('reduce'),
+                media: query,
+                addEventListener: () => undefined,
+                removeEventListener: () => undefined,
+            })),
+        );
+    const pickFile = () =>
+        fireEvent.change(screen.getByLabelText('Upload score', { selector: 'input' }), {
+            target: { files: [new File(['%PDF-1.4'], 'nocturne.pdf', { type: 'application/pdf' })] },
+        });
+    const elapse = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+    const bar = (name = 'Uploading score') => screen.getByRole('progressbar', { name });
+    const uploadReaching = (pct: number) =>
+        uploadDocument.mockImplementation(
+            async (_file: File, _user: string, onProgress: (p: { loaded: number; total: number }) => void) => {
+                onProgress({ loaded: pct, total: 100 });
+                return { document: { id: 'd9', title: 'Nocturne' } };
+            },
+        );
+
+    it('fills to 100%, holds, fades, then opens the score with a toast', async () => {
+        uploadReaching(40);
+        renderShell();
+        pickFile();
+        await elapse(0);
+
+        // Done, whatever the last progress event said.
+        expect(bar()).toHaveAttribute('aria-valuenow', '100');
+        expect(bar()).not.toHaveAttribute('data-done');
+
+        // The 200ms fill, then the 120ms hold.
+        await elapse(319);
+        expect(bar()).not.toHaveAttribute('data-done');
+        await elapse(1);
+        expect(bar()).toHaveAttribute('data-done');
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).not.toHaveBeenCalled();
+
+        // The 150ms fade, then the viewer and the toast together.
+        await elapse(150);
+        expect(screen.getByText('viewer page')).toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    it('does not wait on a fill that already happened', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(120);
+        expect(bar()).toHaveAttribute('data-done');
+    });
+
+    it('jumps to full under reduced motion, keeping the hold and the fade', async () => {
+        reduceMotion();
+        uploadReaching(40);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(119);
+        expect(bar()).not.toHaveAttribute('data-done');
+        await elapse(1);
+        expect(bar()).toHaveAttribute('data-done');
+        await elapse(150);
+        expect(screen.getByText('viewer page')).toBeInTheDocument();
+    });
+
+    it('fades a failed upload where it stopped and says why in a toast', async () => {
+        uploadDocument.mockImplementation(
+            async (_file: File, _user: string, onProgress: (p: { loaded: number; total: number }) => void) => {
+                onProgress({ loaded: 40, total: 100 });
+                throw new Error('The connection dropped');
+            },
+        );
+        renderShell();
+        pickFile();
+        await elapse(0);
+
+        expect(bar()).toHaveAttribute('aria-valuenow', '40');
+        expect(bar()).toHaveAttribute('data-done');
+        expect(toast.error).toHaveBeenCalledWith('The connection dropped');
+        await elapse(150);
+        expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+        expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(toast.success).not.toHaveBeenCalled();
+    });
+
+    it('skips the hold, and stays put, for a teacher who has moved to another page', async () => {
+        let finish: (value: unknown) => void = () => undefined;
+        uploadDocument.mockReturnValue(
+            new Promise((resolve) => {
+                finish = resolve;
+            }),
+        );
+        renderShell();
+        pickFile();
+        await elapse(0);
+        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        expect(screen.getByText('search page')).toBeInTheDocument();
+
+        finish({ document: { id: 'd9', title: 'Nocturne' } });
+        await elapse(0);
+        // No hold: the toast is up at once, and the teacher is not pulled back.
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+        await elapse(500);
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', null, {
+            id: 'd9',
+            title: 'Nocturne',
+        });
+    });
+
+    it('stays on the page a teacher goes to during the upload hold', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(60);
+        expect(bar()).not.toHaveAttribute('data-done');
+
+        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        await elapse(500);
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        // Saved and cached all the same, and the toast says where it went.
+        expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', null, {
+            id: 'd9',
+            title: 'Nocturne',
+        });
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    it('stays on the page a teacher goes to during the upload fade', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(120);
+        expect(bar()).toHaveAttribute('data-done');
+
+        await elapse(75);
+        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        await elapse(500);
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    it('stays on the score a teacher opens, leaving the shell, during the upload hold', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(60);
+        expect(bar()).not.toHaveAttribute('data-done');
+
+        fireEvent.click(screen.getByRole('button', { name: 'open another score' }));
+        await elapse(500);
+        expect(screen.getByText('score d1')).toBeInTheDocument();
+        expect(screen.queryByText('score d9')).not.toBeInTheDocument();
+        expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', null, {
+            id: 'd9',
+            title: 'Nocturne',
+        });
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    it('stays on the legal page a teacher opens, leaving the shell, during the upload fade', async () => {
+        uploadReaching(100);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        await elapse(120);
+        expect(bar()).toHaveAttribute('data-done');
+
+        await elapse(75);
+        fireEvent.click(screen.getByRole('button', { name: 'read the terms' }));
+        await elapse(500);
+        expect(screen.getByText('terms page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+    });
+
+    describe('with smart import on', () => {
+        beforeEach(async () => {
+            // Loaded up front, so the offer renders the moment it is made.
+            await dialogPanelModule.load();
+            (features as { smartImport: boolean }).smartImport = true;
+            prescanDocument.mockResolvedValue(true);
+            shouldOfferImport.mockResolvedValue(true);
+        });
+
+        afterEach(() => {
+            (features as { smartImport: boolean }).smartImport = false;
+        });
+
+        const offer = () => screen.queryByRole('alertdialog', { name: 'Existing marks found' });
+
+        it('offers the import after the finish to a teacher still on the page', async () => {
+            uploadReaching(100);
+            renderShell();
+            pickFile();
+            await elapse(0);
+            expect(offer()).not.toBeInTheDocument();
+            await elapse(270);
+            expect(offer()).toBeInTheDocument();
+            expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+        });
+
+        it('does not put the offer to a teacher who left during the hold', async () => {
+            uploadReaching(100);
+            renderShell();
+            pickFile();
+            await elapse(0);
+            await elapse(60);
+
+            fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+            await elapse(500);
+            expect(offer()).not.toBeInTheDocument();
+            expect(screen.getByText('search page')).toBeInTheDocument();
+            expect(toast.success).toHaveBeenCalledWith('Score uploaded', { description: 'Nocturne' });
+        });
+
+        it('does not put the offer to a teacher who left during the fade', async () => {
+            uploadReaching(100);
+            renderShell();
+            pickFile();
+            await elapse(0);
+            await elapse(120);
+            expect(bar()).toHaveAttribute('data-done');
+
+            await elapse(75);
+            fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+            await elapse(500);
+            expect(offer()).not.toBeInTheDocument();
+            expect(screen.getByText('search page')).toBeInTheDocument();
+        });
+    });
+
+    it('turns the IMSLP sweep into a full bar for the same beat before opening the score', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+
+        expect(bar('Importing from IMSLP')).toHaveAttribute('aria-valuenow', '100');
+        await elapse(120);
+        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+        await elapse(150);
+        expect(screen.getByText('viewer page')).toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    it('stays on the Library for a teacher who leaves Search during the hold', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(60);
+        expect(bar('Importing from IMSLP')).not.toHaveAttribute('data-done');
+
+        fireEvent.click(screen.getByRole('link', { name: 'Library' }));
+        expect(importControl.controller.signal.aborted).toBe(true);
+        await elapse(500);
+        expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        // The score is still theirs: the toast says where it went.
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    it('stays on the Library for a teacher who leaves Search during the fade', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(120);
+        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+
+        await elapse(75);
+        fireEvent.click(screen.getByRole('link', { name: 'Library' }));
+        expect(importControl.controller.signal.aborted).toBe(true);
+        await elapse(500);
+        expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    // The two cases above leave Search and abort at once. These pull the two
+    // apart, so each check after the finish is shown to matter on its own.
+    it('does not open an IMSLP score cancelled during the finish, on the same page', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(60);
+
+        importControl.controller.abort();
+        await elapse(500);
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    it('does not open an IMSLP score from another page, even when the import was not cancelled', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(60);
+
+        // Detach the import's cancel handle, so leaving Search changes the
+        // page without aborting it.
+        const { signal } = importControl.controller;
+        importControl.controller = new AbortController();
+        fireEvent.click(screen.getByRole('link', { name: 'Library' }));
+        expect(signal.aborted).toBe(false);
+        await elapse(500);
+        expect(screen.getByText('library page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    // Leaving the shell unmounts Search, which aborts the import too; these
+    // detach the cancel handle as above, so the shell's own check is shown
+    // to hold for an import with nothing to abort it.
+    it('does not open an IMSLP score past a teacher who leaves the shell during the hold', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(60);
+
+        const { signal } = importControl.controller;
+        importControl.controller = new AbortController();
+        fireEvent.click(screen.getByRole('button', { name: 'open another score' }));
+        expect(signal.aborted).toBe(false);
+        await elapse(500);
+        expect(screen.getByText('score d1')).toBeInTheDocument();
+        expect(screen.queryByText('score d3')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+    });
+
+    it('does not open an IMSLP score past a teacher who leaves the shell during the fade', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        await elapse(120);
+        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+
+        await elapse(75);
+        const { signal } = importControl.controller;
+        importControl.controller = new AbortController();
+        fireEvent.click(screen.getByRole('button', { name: 'read the terms' }));
+        expect(signal.aborted).toBe(false);
+        await elapse(500);
+        expect(screen.getByText('terms page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
     });
 });

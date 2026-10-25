@@ -85,9 +85,38 @@ const uncoveredCenterPx = (viewportHeight: number, obscured: ObscuredEdges): num
 const BOUND_EPSILON_PX = 0.5;
 
 /**
- * The view after turning one row of pages forward or back from `pageIndex`:
- * the adjacent row's top edge sits at the top of the viewport (with the usual
- * page gap as margin), scale and horizontal position untouched. Rows are the
+ * The page a turn steps from: the first row being read in the part of the
+ * viewport no strip covers — the first with at least half of itself in view,
+ * or (a page taller than that part) with half of that part to itself. Not
+ * the page at the centre, which the pager's label reads: zoomed out on a
+ * tall iPad two or three rows fit at once, the centre sits on the second,
+ * and a turn from there skipped the row below the one at the top — the label
+ * jumped from p. 2 to p. 4. At fit width, where a page fills the view, the
+ * two agree.
+ */
+export const turnFromPageIndex = (
+    view: ViewState,
+    viewportHeight: number,
+    layouts: readonly PageLayout[],
+    obscured: ObscuredEdges = NO_OBSCURED,
+): number => {
+    const top = Math.max(0, obscured.top);
+    const bottom = viewportHeight - Math.max(0, obscured.bottom);
+    const uncovered = Math.max(0, bottom - top);
+    const index = layouts.findIndex((l) => {
+        const rowTop = l.top * view.scale - view.scrollY;
+        const rowHeight = l.height * view.scale;
+        const inView = Math.min(rowTop + rowHeight, bottom) - Math.max(rowTop, top);
+        return inView > 0 && inView >= Math.min(rowHeight, uncovered) / 2;
+    });
+    return index >= 0 ? index : focusedPageIndex(view, viewportHeight, layouts, obscured);
+};
+
+/**
+ * The view after turning one row of pages forward or back from `pageIndex`
+ * (turnFromPageIndex, the row at the top of the view): the adjacent row's top
+ * edge sits at the top of the viewport (with the usual page gap as margin),
+ * scale and horizontal position untouched. Rows are the
  * pages sharing a `top`, so in a two-column layout a turn moves a whole
  * spread. The top edge is the one below any strip covering it (`obscured`).
  *

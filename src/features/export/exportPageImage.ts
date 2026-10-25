@@ -1,7 +1,7 @@
 import { getDocument } from 'pdfjs-dist';
 
 import { exportNotice, loadExportMarks } from '@/features/export/exportAnnotations';
-import { safeFileBase, shareOrDownloadFile } from '@/features/export/shareFile';
+import { safeFileBase, shareOrDownloadFile, type ShareOutcome } from '@/features/export/shareFile';
 import { drawAnnotation, StrokePathCache } from '@/features/viewer/ink/strokeRenderer';
 import { createPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import { pdfDocumentOptions } from '@/features/viewer/pdf/pdfDocumentOptions';
@@ -21,9 +21,9 @@ export const exportAnnotatedPageImage = async (
     userId: string | null,
     onNotice?: (notice: string) => void,
     lostAccess = false,
-): Promise<void> => {
+): Promise<ShareOutcome> => {
     const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title, userId, onNotice, lostAccess);
-    await shareOrDownloadFile(file, file.name);
+    return shareOrDownloadFile(file, file.name);
 };
 
 export const buildAnnotatedPagePng = async (

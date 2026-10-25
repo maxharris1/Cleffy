@@ -204,6 +204,35 @@ const deferredModules = async () => {
 const missingChunk = () =>
     new TypeError('Failed to fetch dynamically imported module: https://dev.cleffy.io/assets/MenuBase-old.js');
 
+describe('Menu, opened from outside before its chunk is in', () => {
+    it('fetches the chunk for a controlled open and mounts open', async () => {
+        const { Menu, MenuItem, menuBaseModule } = await coldModules();
+        const load = vi.spyOn(menuBaseModule, 'load');
+        const onOpenChange = vi.fn();
+        const { rerender } = render(
+            <Menu
+                label="Export"
+                triggerClassName="trigger"
+                triggerContent="Export"
+                open={false}
+                onOpenChange={onOpenChange}
+            >
+                <MenuItem>Export whole score as PDF</MenuItem>
+            </Menu>,
+        );
+        expect(load).not.toHaveBeenCalled();
+
+        rerender(
+            <Menu label="Export" triggerClassName="trigger" triggerContent="Export" open onOpenChange={onOpenChange}>
+                <MenuItem>Export whole score as PDF</MenuItem>
+            </Menu>,
+        );
+        expect(load).toHaveBeenCalledTimes(1);
+        expect(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
+        expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    });
+});
+
 describe('Menu, when its chunk will not load', () => {
     afterEach(() => {
         window.sessionStorage.clear();

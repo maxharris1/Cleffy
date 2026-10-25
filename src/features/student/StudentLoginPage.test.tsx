@@ -7,10 +7,16 @@ import type * as sessionModule from '@/features/auth/session';
 import { resetTurnstileLoaderForTests, type TurnstileRenderOptions } from '@/features/auth/turnstile';
 import { discardedChangesNotice, keptChangesNotice } from '@/features/student/keptChangesNotice';
 import { ACCOUNT_DELETED, SIGNED_OUT_BY_TEACHER, StudentLoginPage } from '@/features/student/StudentLoginPage';
+import { StudentAuthError } from '@/features/student/studentApi';
+import type * as studentApiModule from '@/features/student/studentApi';
+import { stubAnimate } from '@/test/animate';
 
 const loginStudent = vi.fn();
 
-vi.mock('@/features/student/studentApi', () => ({
+// The real module spread, so the StudentAuthError the tests throw is the class
+// the page checks with instanceof.
+vi.mock('@/features/student/studentApi', async (importOriginal) => ({
+    ...(await importOriginal<typeof studentApiModule>()),
     loginStudent: (...args: unknown[]) => loginStudent(...args),
 }));
 
@@ -115,6 +121,84 @@ describe('StudentLoginPage', () => {
         expect(await screen.findByText('That username and password did not work')).toBeInTheDocument();
         expect(screen.queryByText('your pieces')).not.toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Open my music' })).toBeEnabled();
+    });
+
+    describe('a refused sign-in', () => {
+        let motion: ReturnType<typeof stubAnimate>;
+        afterEach(() => motion.restore());
+
+        const signIn = async (user: ReturnType<typeof userEvent.setup>) => {
+            await user.type(screen.getByLabelText('Username or email'), 'ada');
+            await user.type(screen.getByLabelText('Password'), 'wrong-password');
+            await user.click(screen.getByRole('button', { name: 'Open my music' }));
+        };
+
+        it('shakes the fields and selects the password for retyping', async () => {
+            motion = stubAnimate();
+            const user = userEvent.setup();
+            loginStudent.mockRejectedValue(
+                new StudentAuthError('That username and password did not work', 'invalid_credentials'),
+            );
+            renderLogin();
+
+            await signIn(user);
+
+            const password = screen.getByLabelText('Password') as HTMLInputElement;
+            await waitFor(() => expect(password).toHaveFocus());
+            expect(motion.animate).toHaveBeenCalledTimes(1);
+            expect(motion.animate.mock.contexts[0]).toContainElement(password);
+            expect(motion.animate.mock.contexts[0]).toContainElement(screen.getByLabelText('Username or email'));
+            expect(password.selectionStart).toBe(0);
+            expect(password.selectionEnd).toBe('wrong-password'.length);
+            expect(password).toHaveAttribute('aria-invalid', 'true');
+            expect(screen.getByLabelText('Username or email')).toHaveAttribute('aria-invalid', 'true');
+
+            await user.type(password, 'x');
+            expect(password).not.toHaveAttribute('aria-invalid');
+        });
+
+        it('keys the error line apart from the robot check beside it', async () => {
+            motion = stubAnimate();
+            const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            const user = userEvent.setup();
+            // Before any refusal both would be key 0.
+            loginStudent.mockRejectedValue(new Error('Could not reach Cleffy.'));
+            renderLogin();
+
+            await signIn(user);
+
+            expect(await screen.findByText('Could not reach Cleffy.')).toBeInTheDocument();
+            expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/);
+            errors.mockRestore();
+        });
+
+        it('does not shake for a failure that is not the credential', async () => {
+            motion = stubAnimate();
+            const user = userEvent.setup();
+            loginStudent.mockRejectedValue(new Error('Could not reach Cleffy.'));
+            renderLogin();
+
+            await signIn(user);
+
+            expect(await screen.findByText('Could not reach Cleffy.')).toBeInTheDocument();
+            expect(motion.animate).not.toHaveBeenCalled();
+            expect(screen.getByLabelText('Password')).not.toHaveAttribute('aria-invalid');
+        });
+
+        it('keeps still under reduced motion, still marking and selecting', async () => {
+            motion = stubAnimate({ reducedMotion: true });
+            const user = userEvent.setup();
+            loginStudent.mockRejectedValue(
+                new StudentAuthError('That username and password did not work', 'invalid_credentials'),
+            );
+            renderLogin();
+
+            await signIn(user);
+
+            await waitFor(() => expect(screen.getByLabelText('Password')).toHaveFocus());
+            expect(motion.animate).not.toHaveBeenCalled();
+            expect(screen.getByLabelText('Password')).toHaveAttribute('aria-invalid', 'true');
+        });
     });
 
     it('disables the form while the sign-in is in flight', async () => {

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type * as guestUpgradeModule from '@/features/auth/guestUpgrade';
 import { GuestUpgradeError } from '@/features/auth/guestUpgrade';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
+import { stubAnimate } from '@/test/animate';
 
 const startGuestEmailUpgrade = vi.hoisted(() => vi.fn());
 const confirmGuestEmailUpgrade = vi.hoisted(() => vi.fn());
@@ -44,6 +45,79 @@ const fillDetails = async (user: ReturnType<typeof userEvent.setup>, email = 'ad
 };
 
 describe('UpgradeBanner', () => {
+    describe('a refused code', () => {
+        let motion: ReturnType<typeof stubAnimate>;
+        afterEach(() => motion.restore());
+
+        const toCodeStep = async (user: ReturnType<typeof userEvent.setup>) => {
+            startGuestEmailUpgrade.mockResolvedValue(undefined);
+            renderBanner();
+            await fillDetails(user);
+            await user.type(screen.getByRole('textbox', { name: 'Code from the email' }), '111111');
+        };
+
+        it('shakes the code field and selects the code when the server says it is wrong', async () => {
+            motion = stubAnimate();
+            const user = userEvent.setup();
+            confirmGuestEmailUpgrade.mockRejectedValue(
+                new GuestUpgradeError('That code didn’t work. Check the email and try again.', 'invalid_code'),
+            );
+            await toCodeStep(user);
+            await user.click(screen.getByRole('button', { name: 'Save my work' }));
+
+            const field = screen.getByRole('textbox', { name: 'Code from the email' }) as HTMLInputElement;
+            await waitFor(() => expect(motion.animate).toHaveBeenCalledTimes(1));
+            expect(motion.animate.mock.contexts[0]).toBe(field);
+            expect(field).toHaveFocus();
+            expect(field.selectionEnd).toBe(6);
+            expect(field).toHaveAttribute('aria-invalid', 'true');
+            expect(screen.getByRole('alert')).toHaveClass('ui-error-in');
+        });
+
+        it('does not shake for an expired code or the six-digit shape check', async () => {
+            motion = stubAnimate();
+            const user = userEvent.setup();
+            confirmGuestEmailUpgrade.mockRejectedValue(
+                new GuestUpgradeError('That code has expired. Send a new one.', 'code_expired'),
+            );
+            await toCodeStep(user);
+            await user.click(screen.getByRole('button', { name: 'Save my work' }));
+            expect(await screen.findByText(/That code has expired/)).toBeInTheDocument();
+
+            await user.clear(screen.getByRole('textbox', { name: 'Code from the email' }));
+            await user.type(screen.getByRole('textbox', { name: 'Code from the email' }), '12');
+            await user.click(screen.getByRole('button', { name: 'Save my work' }));
+            expect(await screen.findByText('Enter the 6-digit code from the email.')).toBeInTheDocument();
+
+            expect(motion.animate).not.toHaveBeenCalled();
+        });
+
+        it('keeps still under reduced motion, still marking and selecting the code', async () => {
+            motion = stubAnimate({ reducedMotion: true });
+            const user = userEvent.setup();
+            confirmGuestEmailUpgrade.mockRejectedValue(new GuestUpgradeError('That code didn’t work.', 'invalid_code'));
+            await toCodeStep(user);
+            await user.click(screen.getByRole('button', { name: 'Save my work' }));
+
+            const field = screen.getByRole('textbox', { name: 'Code from the email' });
+            await waitFor(() => expect(field).toHaveAttribute('aria-invalid', 'true'));
+            expect(field).toHaveFocus();
+            expect(motion.animate).not.toHaveBeenCalled();
+        });
+    });
+
+    it('swaps the code request label in place while the code is sent', async () => {
+        startGuestEmailUpgrade.mockReturnValue(new Promise(() => undefined));
+        const user = userEvent.setup();
+        renderBanner();
+
+        await fillDetails(user);
+
+        const sending = screen.getByRole('button', { name: 'Sending…' });
+        expect(sending).toBeDisabled();
+        expect(within(sending).getByText('Email me a code')).toHaveAttribute('aria-hidden', 'true');
+    });
+
     it('attaches the email only after the mailed code comes back — never with updateUser', async () => {
         startGuestEmailUpgrade.mockResolvedValue(undefined);
         confirmGuestEmailUpgrade.mockResolvedValue('signed_in');

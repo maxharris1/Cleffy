@@ -3,6 +3,7 @@ import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent, RefObject } from 'react';
 
+import { prefersReducedMotion } from '@/lib/motion';
 import { CloseButton } from '@/ui/CloseButton';
 import type { DialogProps } from '@/ui/Dialog';
 import { dialogStack } from '@/ui/dialogStack';
@@ -14,7 +15,7 @@ const SHEET_CLOSE_VELOCITY = 0.5;
 /**
  * Drag a phone sheet down by its grab bar to dismiss it. The sheet follows the
  * finger 1:1 (transform only, no layout), and on release either closes or
- * springs back on the drawer curve. Only the bar starts a drag, so the sheet's
+ * springs back on the drawer curve (jumps back, under reduced motion). Only the bar starts a drag, so the sheet's
  * own content still scrolls normally. Pointer capture keeps the drag alive
  * when the finger leaves the bar.
  */
@@ -23,7 +24,10 @@ const useSheetDrag = (popupRef: RefObject<HTMLDivElement | null>, onClose: () =>
     const setOffset = (dy: number, animate: boolean) => {
         const popup = popupRef.current;
         if (popup) {
-            popup.style.transition = animate ? 'transform var(--duration-enter) var(--ease-drawer)' : 'none';
+            // The spring back is movement for its own sake: under reduced
+            // motion the sheet returns to rest at once.
+            popup.style.transition =
+                animate && !prefersReducedMotion() ? 'transform var(--duration-enter) var(--ease-drawer)' : 'none';
             popup.style.transform = dy > 0 ? `translateY(${dy}px)` : '';
         }
     };

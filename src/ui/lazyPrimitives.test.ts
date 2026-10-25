@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { prefetchWhenIdle } from '@/lib/idlePrefetch';
 import { dialogPanelModule, installPrimitivesPrefetch, menuBaseModule } from '@/ui/lazyPrimitives';
+import { toasterModule } from '@/ui/toast';
 
 afterEach(() => {
     vi.restoreAllMocks();
@@ -9,7 +10,7 @@ afterEach(() => {
 });
 
 describe('installPrimitivesPrefetch', () => {
-    it('warms the dialog and menu chunks when the page goes idle', () => {
+    it('warms the dialog, menu and toast chunks when the page goes idle', () => {
         const stop = installPrimitivesPrefetch();
         expect(prefetchWhenIdle).toHaveBeenCalledWith('ui-primitives', expect.any(Function));
         stop();
@@ -18,6 +19,7 @@ describe('installPrimitivesPrefetch', () => {
     it('warms them on the first hover or focus of a button, once', () => {
         const dialog = vi.spyOn(dialogPanelModule, 'prefetch').mockImplementation(() => {});
         const menu = vi.spyOn(menuBaseModule, 'prefetch').mockImplementation(() => {});
+        const toaster = vi.spyOn(toasterModule, 'prefetch').mockImplementation(() => {});
         document.body.innerHTML = '<p>Text</p><button type="button"><span>Share</span></button>';
         const stop = installPrimitivesPrefetch();
 
@@ -28,6 +30,7 @@ describe('installPrimitivesPrefetch', () => {
         document.querySelector('span')!.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
         expect(dialog).toHaveBeenCalledTimes(1);
         expect(menu).toHaveBeenCalledTimes(1);
+        expect(toaster).toHaveBeenCalledTimes(1);
 
         document.querySelector('button')!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
         expect(dialog).toHaveBeenCalledTimes(1);

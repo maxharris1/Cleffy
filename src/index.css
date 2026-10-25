@@ -43,6 +43,10 @@
     --duration-menu: 150ms;
     --duration-dialog: 180ms;
     --duration-enter: 220ms;
+    /* A state changing in place (a label, a colour), and something leaving:
+       exits are quicker than entrances. */
+    --duration-ui: 180ms;
+    --duration-exit: 150ms;
 }
 
 /*
@@ -308,6 +312,18 @@ body {
 .landing-input:focus {
     border-color: var(--color-accent);
     box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+/* A field the server just refused (a wrong code, a wrong password): the border
+   says so, focused or not, until it is edited. Colour only, so it is the whole
+   signal under reduced motion, where the field does not shake (lib/shake). */
+.landing-input[aria-invalid='true'] {
+    border-color: var(--color-danger);
+}
+
+.landing-input[aria-invalid='true']:focus {
+    border-color: var(--color-danger);
+    box-shadow: 0 0 0 3px rgb(185 28 28 / 0.12);
 }
 
 /* Hero demo: ink strokes draw themselves (pathLength=100), presence chips pop in.
@@ -773,5 +789,91 @@ body {
         -webkit-backdrop-filter: none;
         backdrop-filter: none;
         background-color: #fff;
+    }
+}
+
+/*
+ * Toasts keep Sonner's own motion (ui/AppToaster). Under reduced motion Sonner
+ * drops every transition, so a toast would pop in and out: keep the fade, drop
+ * the travel. Transforms (which also lay the stack out) land at once, opacity
+ * eases over 200ms. More specific than Sonner's own `transition: none
+ * !important`, so it wins.
+ */
+@media (prefers-reduced-motion: reduce) {
+    [data-sonner-toaster] [data-sonner-toast] {
+        transition: opacity 200ms ease !important;
+    }
+}
+
+/*
+ * A label that changes in place (ui/SwapLabel): every variant in one grid
+ * cell, so the control keeps the widest one's width. The outgoing label fades
+ * and blurs out while the incoming one fades and sharpens in. Transitions, not
+ * keyframes, so a second swap mid-way (a double-tapped Copy) retargets from
+ * where it is instead of starting over.
+ */
+.swap-label {
+    display: inline-grid;
+}
+
+.swap-label > * {
+    grid-area: 1 / 1;
+    transition:
+        opacity var(--duration-exit) var(--ease-out),
+        filter var(--duration-exit) var(--ease-out),
+        transform var(--duration-exit) var(--ease-out);
+}
+
+.swap-label > :not([data-swap-active]) {
+    opacity: 0;
+    filter: blur(2px);
+}
+
+.swap-label[data-scale] > :not([data-swap-active]) {
+    transform: scale(0.96);
+}
+
+/* Under reduced motion the swap is a plain, quicker crossfade: no blur, no scale. */
+@media (prefers-reduced-motion: reduce) {
+    .swap-label > * {
+        transition: opacity var(--duration-press) var(--ease-out);
+    }
+
+    .swap-label > :not([data-swap-active]),
+    .swap-label[data-scale] > :not([data-swap-active]) {
+        filter: none;
+        transform: none;
+    }
+}
+
+/* An inline error arrives as a fade, not a pop (ui/ErrorText): paired with a
+   refused code's shake, the shake says "no" and the line says why. Opacity
+   only, so it stays under reduced motion. */
+.ui-error-in {
+    animation: ui-fade-in var(--duration-exit) var(--ease-out);
+}
+
+/*
+ * A cover's engraving fading in over its placeholder once it has decoded
+ * (library/CoverImage). Opacity only: a scale would shimmer across a shelf of
+ * two hundred. A cover this page has already shown is settled: no fade.
+ */
+.cover-fade {
+    opacity: 0;
+    transition: opacity 200ms var(--ease-out);
+}
+
+.cover-fade[data-loaded] {
+    opacity: 1;
+}
+
+.cover-fade[data-settled] {
+    transition: none;
+}
+
+/* Opacity is allowed under reduced motion; it is only quicker. */
+@media (prefers-reduced-motion: reduce) {
+    .cover-fade {
+        transition-duration: var(--duration-exit);
     }
 }

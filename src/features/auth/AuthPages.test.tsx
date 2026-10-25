@@ -1,5 +1,5 @@
 import { AuthApiError } from '@supabase/supabase-js';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -77,6 +77,27 @@ describe('Auth pages', () => {
         // the request on the wire is the one it has always been.
         expect(signInWithPassword).toHaveBeenCalledWith('teacher@cleffy.local', 'cleffy-local-test', null);
         expect(await screen.findByText('library')).toBeInTheDocument();
+    });
+
+    it('swaps the submit label in place while it signs in', async () => {
+        signInWithPassword.mockReturnValue(new Promise(() => undefined));
+        const user = userEvent.setup();
+        render(
+            <MemoryRouter initialEntries={['/login']}>
+                <Routes>
+                    <Route path="/login" element={<LoginPage />} />
+                </Routes>
+            </MemoryRouter>,
+        );
+        await user.type(screen.getByLabelText('Email'), 'teacher@cleffy.local');
+        await user.type(screen.getByLabelText('Password'), 'cleffy-local-test');
+        await user.click(screen.getByRole('button', { name: 'Log in' }));
+
+        // Both captions stay in the button (SwapLabel), so it keeps the wider
+        // one's width; only the active one names it.
+        const busy = screen.getByRole('button', { name: 'Signing in…' });
+        expect(busy).toBeDisabled();
+        expect(within(busy).getByText('Log in')).toHaveAttribute('aria-hidden', 'true');
     });
 
     it('rejects an open-redirect next and still lands on the library', async () => {

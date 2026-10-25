@@ -271,6 +271,28 @@ describe('ShareDialog for the owner', () => {
         expect(screen.queryByText(/Could not create the link/)).not.toBeInTheDocument();
     });
 
+    it('swaps Copy for Copied! in place, as one button of fixed width', async () => {
+        const user = userEvent.setup();
+        listShareLinks.mockResolvedValue([link('tok-a')]);
+        renderOwner();
+        const copy = await screen.findByRole('button', { name: 'Copy' });
+        // Both captions are always there; only the active one names the button.
+        const item = (text: string) => within(copy).getByText(text).closest('.swap-label > *');
+        expect(item('Copied!')).toHaveAttribute('aria-hidden', 'true');
+
+        await user.click(copy);
+        expect(copy).toHaveAccessibleName('Copied!');
+        const label = within(copy).getByText('Copied!').closest('.swap-label');
+        expect(label).toHaveAttribute('data-scale', 'true');
+        expect(item('Copy')).toHaveAttribute('aria-hidden', 'true');
+        expect(item('Copied!')).toHaveAttribute('data-swap-active');
+
+        // A second tap mid-swap keeps the same nodes, so the transition retargets.
+        const copied = within(copy).getByText('Copied!');
+        await user.click(copy);
+        expect(within(copy).getByText('Copied!')).toBe(copied);
+    });
+
     it('warns, and offers to revoke, when a demoted member’s edit link still works', async () => {
         const user = userEvent.setup();
         setMemberRole.mockResolvedValue(undefined);

@@ -36,10 +36,69 @@ export type BillingInterval = 'monthly' | 'annual';
 
 export type StripeMode = 'live' | 'test';
 
-const env = (key: string): string | null => {
-    const value = import.meta.env[key] as string | undefined;
-    return value && value.length > 0 ? value : null;
-};
+type PriceSuffix =
+    | 'PERSONAL_MONTHLY'
+    | 'PERSONAL_ANNUAL'
+    | 'TEACHER_MONTHLY'
+    | 'TEACHER_ANNUAL'
+    | 'ACADEMY_MONTHLY'
+    | 'ACADEMY_ANNUAL'
+    | 'FOUNDING_ANNUAL';
+
+interface PriceVars {
+    /** `VITE_STRIPE_PRICE_*`: an explicit price for this build. */
+    explicit: string | undefined;
+    /** `VITE_STRIPE_LIVE_PRICE_*`, for the production storefront. */
+    live: string | undefined;
+    /** `VITE_STRIPE_TEST_PRICE_*`, for previews and localhost. */
+    test: string | undefined;
+}
+
+/**
+ * Every price variable, each named outright. Vite inlines an
+ * `import.meta.env.VITE_X` read as that one value; a read by computed key made
+ * it inline the whole env object — every VITE_ variable the build had —
+ * instead. Built per call so tests can `vi.stubEnv`.
+ */
+const priceVars = (): Record<PriceSuffix, PriceVars> => ({
+    PERSONAL_MONTHLY: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_PERSONAL_MONTHLY,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_PERSONAL_MONTHLY,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_PERSONAL_MONTHLY,
+    },
+    PERSONAL_ANNUAL: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_PERSONAL_ANNUAL,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_PERSONAL_ANNUAL,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_PERSONAL_ANNUAL,
+    },
+    TEACHER_MONTHLY: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_TEACHER_MONTHLY,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_TEACHER_MONTHLY,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_TEACHER_MONTHLY,
+    },
+    TEACHER_ANNUAL: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_TEACHER_ANNUAL,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_TEACHER_ANNUAL,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_TEACHER_ANNUAL,
+    },
+    ACADEMY_MONTHLY: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_ACADEMY_MONTHLY,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_ACADEMY_MONTHLY,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_ACADEMY_MONTHLY,
+    },
+    ACADEMY_ANNUAL: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_ACADEMY_ANNUAL,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_ACADEMY_ANNUAL,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_ACADEMY_ANNUAL,
+    },
+    FOUNDING_ANNUAL: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_FOUNDING_ANNUAL,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_FOUNDING_ANNUAL,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_FOUNDING_ANNUAL,
+    },
+});
+
+const nonEmpty = (value: string | undefined): string | null => (value && value.length > 0 ? value : null);
 
 /** Only the production storefront is live; previews and localhost are sandbox. */
 const LIVE_HOSTS = ['cleffy.io', 'www.cleffy.io'];
@@ -55,9 +114,10 @@ export const stripeMode = (): StripeMode => {
  * An explicit `VITE_STRIPE_PRICE_*` wins — that is what a local `.env` sets, and
  * what the tests stub. Otherwise the per-mode catalogue decides.
  */
-const priceEnv = (suffix: string): string | null =>
-    env(`VITE_STRIPE_PRICE_${suffix}`) ??
-    env(stripeMode() === 'live' ? `VITE_STRIPE_LIVE_PRICE_${suffix}` : `VITE_STRIPE_TEST_PRICE_${suffix}`);
+const priceEnv = (suffix: PriceSuffix): string | null => {
+    const vars = priceVars()[suffix];
+    return nonEmpty(vars.explicit) ?? nonEmpty(stripeMode() === 'live' ? vars.live : vars.test);
+};
 
 export const stripePrices = () => ({
     personalMonthly: priceEnv('PERSONAL_MONTHLY'),

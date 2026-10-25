@@ -1,5 +1,5 @@
 import type { Session } from '@supabase/supabase-js';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as SessionModule from '@/features/auth/session';
@@ -118,6 +118,24 @@ describe('ShareExportMenu export allowance', () => {
         expect(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
     });
 
+    it('is a Base UI menu: arrow keys move through the items, Escape closes it', async () => {
+        const user = await openMenu();
+        const menu = await screen.findByRole('menu', { name: 'Export' });
+        const items = within(menu).getAllByRole('menuitem');
+        expect(items.map((item) => item.textContent)).toEqual([
+            'Send page 1 as photoPNG — send via Messages',
+            'Save page 1 as PDF',
+            'Export whole score as PDF',
+        ]);
+        await user.keyboard('{ArrowDown}');
+        await waitFor(() => expect(items[0]).toHaveFocus());
+        await user.keyboard('{ArrowDown}');
+        await waitFor(() => expect(items[1]).toHaveFocus());
+        await user.keyboard('{Escape}');
+        await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Export' })).toHaveFocus();
+    });
+
     it('builds the PDF, then claims, then hands it over only once the claim is granted', async () => {
         rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
         const user = await openMenu();
@@ -145,7 +163,7 @@ describe('ShareExportMenu export allowance', () => {
         expect(deliverPdf).not.toHaveBeenCalled();
 
         // The retry the message invites is the account's first claim, not a second.
-        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(screen.getByRole('button', { name: 'Try again' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
         expect(rpc).toHaveBeenCalledTimes(1);
     });
@@ -157,7 +175,7 @@ describe('ShareExportMenu export allowance', () => {
 
         await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
         expect(await screen.findByText(EXPORT_NOT_SENT_MESSAGE)).toBeInTheDocument();
-        await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
+        await user.click(screen.getByRole('button', { name: 'Try again' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
 
         const [first, second] = claimIds();
@@ -182,6 +200,7 @@ describe('ShareExportMenu export allowance', () => {
 
         await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
         expect(await screen.findByText(EXPORT_NOT_SENT_MESSAGE)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Export' }));
         await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
@@ -202,7 +221,7 @@ describe('ShareExportMenu export allowance', () => {
         expect(await screen.findByText(EXPORT_OFFLINE_MESSAGE)).toBeInTheDocument();
         expect(deliverPdf).not.toHaveBeenCalled();
 
-        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await user.click(screen.getByRole('button', { name: 'Try again' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
         const [first, second] = claimIds();
         expect(second).toBe(first);
@@ -285,7 +304,7 @@ describe('ShareExportMenu export allowance', () => {
         expect(rpc).not.toHaveBeenCalled();
     });
 
-    it('shows what an incomplete export is missing, and stays open over it, not just a console warning (MAJOR 3)', async () => {
+    it('shows what an incomplete export is missing in a panel under the button, not just a console warning (MAJOR 3)', async () => {
         const missing = 'This export is missing marks. This device’s storage couldn’t be read.';
         buildAnnotatedPdf.mockImplementation(
             (_doc: string, _bytes: ArrayBuffer, _title: string, options: { onNotice?: (notice: string) => void }) => {
@@ -299,8 +318,12 @@ describe('ShareExportMenu export allowance', () => {
         await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledWith(builtPdf));
-        expect(await screen.findByText(missing)).toBeInTheDocument();
-        expect(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' })).toBeInTheDocument();
+        // Not a menu item: its own panel, which the menu closes into.
+        const panel = await screen.findByRole('dialog', { name: 'Export' });
+        expect(panel).toHaveTextContent(missing);
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+        // A finished export has nothing to try again.
+        expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
     });
 
     it('shows the same notice for a page sent as a photo', async () => {

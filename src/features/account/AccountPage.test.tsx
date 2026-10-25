@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -125,7 +125,6 @@ const outletContext: LibraryOutletContext = {
     uploading: false,
     onUpload: vi.fn(),
     onImportImslp: vi.fn(),
-    uploadError: null,
     clearUploadError: vi.fn(),
     uploadLimit: null,
     tier: 'free',
@@ -204,6 +203,19 @@ describe('AccountPage', () => {
 
         expect(updateDisplayName).toHaveBeenCalledExactlyOnceWith('Ada Lovelace');
         expect(await screen.findByText('Name saved.')).toBeInTheDocument();
+    });
+
+    it('swaps Save name for Saving… in place while the name saves', async () => {
+        const user = userEvent.setup();
+        updateDisplayName.mockReturnValue(new Promise(() => undefined));
+        await renderSettled();
+
+        await user.type(screen.getByLabelText('Display name'), 'Ada Lovelace');
+        await user.click(screen.getByRole('button', { name: 'Save name' }));
+
+        const saving = screen.getByRole('button', { name: 'Saving…' });
+        expect(saving).toBeDisabled();
+        expect(within(saving).getByText('Save name')).toHaveAttribute('aria-hidden', 'true');
     });
 
     it('refuses a mismatched password without calling the session helper', async () => {

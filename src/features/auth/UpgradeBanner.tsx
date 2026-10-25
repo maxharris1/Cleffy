@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 
 import { passwordProblem, passwordProblemMessage } from '../../../supabase/functions/_shared/passwordPolicy';
@@ -6,8 +6,10 @@ import { confirmGuestEmailUpgrade, GuestUpgradeError, startGuestEmailUpgrade } f
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { ViewerNotice } from '@/features/viewer/ViewerNotice';
+import { refuseInput } from '@/lib/shake';
 import { fieldClassName } from '@/ui/classNames';
 import { CloseButton } from '@/ui/CloseButton';
+import { SwapLabel } from '@/ui/SwapLabel';
 
 type BannerState = 'collapsed' | 'details' | 'code' | 'done' | 'signInNeeded' | 'dismissed';
 
@@ -61,6 +63,22 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     const [captchaToken, setCaptchaToken] = useState<string | null>(null);
     const [captchaRound, setCaptchaRound] = useState(0);
     const captchaRequired = isTurnstileEnabled();
+    /**
+     * Each time guest-email-confirm refuses the code as wrong: the code field
+     * shakes and comes back focused with the code selected, ready to retype,
+     * and the error line fades in again. Not for an expired code (nothing to
+     * retype) and never for the six-digit shape check.
+     */
+    const [codeRefusals, setCodeRefusals] = useState(0);
+    const [codeRefused, setCodeRefused] = useState(false);
+    const codeRef = useRef<HTMLInputElement | null>(null);
+    const shakenRefusals = useRef(0);
+    useEffect(() => {
+        if (state === 'code' && codeRefusals > shakenRefusals.current) {
+            shakenRefusals.current = codeRefusals;
+            refuseInput(codeRef.current, codeRef.current);
+        }
+    }, [state, codeRefusals]);
 
     if (state === 'dismissed' || (!isGuest && state !== 'done' && state !== 'signInNeeded')) {
         return null;
@@ -89,6 +107,10 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                 message: err instanceof Error ? err.message : 'Something went wrong. Try again.',
                 signIn: err instanceof GuestUpgradeError && err.code === 'email_in_use',
             });
+            if (err instanceof GuestUpgradeError && err.code === 'invalid_code') {
+                setCodeRefused(true);
+                setCodeRefusals((n) => n + 1);
+            }
             if (captchaRequired) {
                 freshChallenge();
             }
@@ -118,6 +140,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
         void run(async () => {
             await startGuestEmailUpgrade(email, captchaToken);
             setCode('');
+            setCodeRefused(false);
             // A new challenge for the sign-in the next step ends in: the token
             // just spent on the code request cannot be redeemed twice.
             goTo('code');
@@ -141,7 +164,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     };
 
     const errorLine = error ? (
-        <span role="alert" className="text-danger">
+        <span key={`refusal-${codeRefusals}`} role="alert" className="ui-error-in text-danger">
             {error.message}{' '}
             {error.signIn ? (
                 <Link to="/login" className="font-medium underline">
@@ -199,16 +222,21 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                         inputMode="numeric"
                         autoComplete="one-time-code"
                         aria-label="Code from the email"
+                        ref={codeRef}
                         value={code}
                         autoFocus
                         placeholder="123456"
                         maxLength={9}
-                        onChange={(e) => setCode(e.target.value)}
+                        aria-invalid={codeRefused || undefined}
+                        onChange={(e) => {
+                            setCode(e.target.value);
+                            setCodeRefused(false);
+                        }}
                         className={`${INPUT_CLASS} max-w-32 tracking-widest`}
                     />
                     {captchaField}
                     <button type="submit" disabled={busy} className={PRIMARY_CLASS}>
-                        {busy ? 'Saving…' : 'Save my work'}
+                        <SwapLabel labels={{ idle: 'Save my work', busy: 'Saving…' }} active={busy ? 'busy' : 'idle'} />
                     </button>
                     <button type="button" disabled={busy} onClick={sendCode} className={LINK_BUTTON_CLASS}>
                         Send a new code
@@ -247,7 +275,10 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     />
                     {captchaField}
                     <button type="submit" disabled={busy} className={PRIMARY_CLASS}>
-                        {busy ? 'Sending…' : 'Email me a code'}
+                        <SwapLabel
+                            labels={{ idle: 'Email me a code', busy: 'Sending…' }}
+                            active={busy ? 'busy' : 'idle'}
+                        />
                     </button>
                     <button type="button" onClick={() => goTo('collapsed')} className={LINK_BUTTON_CLASS}>
                         Cancel

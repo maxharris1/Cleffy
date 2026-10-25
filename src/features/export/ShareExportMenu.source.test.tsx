@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,6 +8,15 @@ import type { DocumentRow } from '@/types/database';
 // Where the PDF comes from (cache, download, row fetch) and how failures are
 // shown. The allowance claim itself is exportClaim's, tested in
 // exportClaim.test.ts and ShareExportMenu.test.tsx; here it is a stub.
+const toast = vi.hoisted(() => ({
+    success: vi.fn(),
+    saved: vi.fn(),
+    shared: vi.fn(),
+    error: vi.fn(),
+    promise: vi.fn(<T,>(promise: Promise<T>) => promise),
+}));
+vi.mock('@/ui/toast', async (importOriginal) => ({ ...(await importOriginal<object>()), toast }));
+
 const buildAnnotatedPdf = vi.fn();
 const deliverPdf = vi.fn();
 const exportAnnotatedPageImage = vi.fn();
@@ -34,6 +43,7 @@ vi.mock('@/sync/pdfCache', () => ({
 }));
 vi.mock('@/features/export/exportClaim', () => ({
     claimPdfExport: (...args: unknown[]) => claimPdfExport(...args),
+    EXPORT_NOT_SENT_MESSAGE: 'Not sent.',
     exportAttemptKey: () => 'attempt',
     markExportDelivered: () => undefined,
 }));
@@ -70,7 +80,7 @@ beforeEach(() => {
     vi.clearAllMocks();
     buildAnnotatedPdf.mockResolvedValue(new File([], 'Sonata (annotated).pdf'));
     deliverPdf.mockResolvedValue('downloaded');
-    exportAnnotatedPageImage.mockResolvedValue(undefined);
+    exportAnnotatedPageImage.mockResolvedValue('downloaded');
     claimPdfExport.mockResolvedValue({ ok: true });
     getCachedPdf.mockResolvedValue(null);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -97,8 +107,26 @@ describe('ShareExportMenu', () => {
         render(<ShareExportMenu docId={DOC_ID} doc={row()} title="Sonata" />);
         await openAndExport(user);
 
+        // No size yet: the percentage's slot is held empty, so the button
+        // does not widen when the number arrives.
+        report({ loaded: 10, total: 0 });
+        const slot = (await screen.findByRole('button', { name: 'Downloading…' })).querySelector('[data-download-pct]');
+        expect(slot).toHaveClass('inline-block', 'w-[4ch]');
+        expect(slot).toBeEmptyDOMElement();
+
         report({ loaded: 25, total: 100 });
-        expect(await screen.findByRole('button', { name: 'Downloading… 25%' })).toBeDisabled();
+        const trigger = await screen.findByRole('button', { name: 'Downloading… 25%' });
+        expect(trigger.querySelector('[data-download-pct]')).toBe(slot);
+        expect(slot).toHaveTextContent('25%');
+        // Every caption is in the button (SwapLabel), so it never changes width.
+        expect(within(trigger).getByText('Export')).toHaveAttribute('aria-hidden', 'true');
+        // The menu closed on the press; opened again mid-export, it offers nothing to start.
+        await user.click(trigger);
+        expect(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' })).toHaveAttribute(
+            'aria-disabled',
+            'true',
+        );
+        await user.keyboard('{Escape}');
         expect(screen.getByRole('progressbar', { name: 'Downloading score for export' })).toHaveAttribute(
             'aria-valuenow',
             '25',
@@ -117,6 +145,49 @@ describe('ShareExportMenu', () => {
         expect(loadDocumentBytes).toHaveBeenCalledWith(row(), expect.objectContaining({ userId: 'teacher-1' }));
         expect(claimPdfExport).toHaveBeenCalledWith(expect.anything(), DOC_ID, 'attempt');
         await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    });
+
+    it('confirms a finished export with a toast naming what went where', async () => {
+        const user = userEvent.setup();
+        getCachedPdf.mockResolvedValue({ bytes: new ArrayBuffer(8) });
+        render(<ShareExportMenu docId={DOC_ID} doc={row()} bytes={new ArrayBuffer(8)} title="Sonata" />);
+
+        await openAndExport(user);
+        await waitFor(() =>
+            expect(toast.saved).toHaveBeenCalledWith('Score saved as a PDF', { description: 'Sonata' }),
+        );
+
+        deliverPdf.mockResolvedValue('shared');
+        await user.click(screen.getByRole('button', { name: 'Export' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Save page 1 as PDF' }));
+        await waitFor(() =>
+            expect(toast.shared).toHaveBeenCalledWith('Page 1 shared as a PDF', { description: 'Sonata' }),
+        );
+
+        exportAnnotatedPageImage.mockResolvedValue('shared');
+        await user.click(screen.getByRole('button', { name: 'Export' }));
+        await user.click(await screen.findByRole('menuitem', { name: /Send page 1 as photo/ }));
+        await waitFor(() =>
+            expect(toast.shared).toHaveBeenCalledWith('Page 1 shared as a photo', { description: 'Sonata' }),
+        );
+    });
+
+    it('does not toast a share sheet that was dismissed, or an export that failed', async () => {
+        const user = userEvent.setup();
+        deliverPdf.mockResolvedValue('cancelled');
+        render(<ShareExportMenu docId={DOC_ID} doc={row()} bytes={new ArrayBuffer(8)} title="Sonata" />);
+        await openAndExport(user);
+        // The menu comes back to say the PDF was not sent.
+        expect(await screen.findByText('Not sent.')).toBeInTheDocument();
+        await user.keyboard('{Escape}');
+
+        buildAnnotatedPdf.mockRejectedValue(new Error('pdf-lib blew up'));
+        await user.click(screen.getByRole('button', { name: 'Export' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Export whole score as PDF' }));
+        expect(await screen.findByText(/pdf-lib blew up/)).toBeInTheDocument();
+
+        expect(toast.saved).not.toHaveBeenCalled();
+        expect(toast.shared).not.toHaveBeenCalled();
     });
 
     it('tells the teacher when the PDF could not be fetched, without spending an export', async () => {
@@ -149,7 +220,7 @@ describe('ShareExportMenu', () => {
         expect(await screen.findByText('The export failed (Worker crashed). Please try again.')).toBeInTheDocument();
     });
 
-    it('re-opens the menu to show a failure that landed after it was dismissed', async () => {
+    it('shows a failure that landed after the menu was dismissed', async () => {
         const user = userEvent.setup();
         let fail: (err: Error) => void = () => undefined;
         exportAnnotatedPageImage.mockImplementation(

@@ -141,6 +141,39 @@ describe('Dialog', () => {
         fireEvent.pointerUp(grabber, { pointerId: 2, clientY: 260 });
         expect(onClose).toHaveBeenCalledTimes(1);
     });
+
+    it('springs a short drag back on the drawer curve, and jumps back under reduced motion', async () => {
+        const reduce = { current: false };
+        vi.stubGlobal(
+            'matchMedia',
+            vi.fn((query: string) => ({ matches: reduce.current && query.includes('reduce'), media: query })),
+        );
+        render(
+            <Dialog label="Lesson history" onClose={vi.fn()} sheet>
+                <p>Body</p>
+            </Dialog>,
+        );
+        const dialog = await screen.findByRole('dialog', { name: 'Lesson history' });
+        const grabber = document.querySelector('[data-sheet-grabber]') as HTMLElement;
+        const drag = (pointerId: number) => {
+            fireEvent.pointerDown(grabber, { pointerId, button: 0, clientY: 100 });
+            fireEvent.pointerMove(grabber, { pointerId, clientY: 118 });
+            fireEvent.pointerUp(grabber, { pointerId, clientY: 118 });
+        };
+        // The sheet's own panel carries the drag offset.
+        const sheet = () =>
+            [dialog, ...dialog.querySelectorAll<HTMLElement>('*')].find((el) => el.style.transition !== '') ?? dialog;
+
+        drag(1);
+        expect(sheet().style.transition).toBe('transform var(--duration-enter) var(--ease-drawer)');
+        expect(sheet().style.transform).toBe('');
+
+        reduce.current = true;
+        drag(2);
+        expect(sheet().style.transition).toBe('none');
+        expect(sheet().style.transform).toBe('');
+        vi.unstubAllGlobals();
+    });
 });
 
 describe('Dialog, lazily loaded', () => {

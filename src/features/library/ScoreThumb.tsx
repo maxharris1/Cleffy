@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 
+import { CoverImage } from '@/features/library/CoverImage';
 import { StaffPlaceholder } from '@/features/library/StaffPlaceholder';
 import { useNearViewport, useScoreThumbnail } from '@/features/library/useScoreThumbnail';
 
@@ -31,9 +32,18 @@ export const ScoreThumb = ({
         <span
             ref={ref}
             aria-hidden="true"
-            className="block h-12 w-9 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-white"
+            className="relative block h-12 w-9 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-white"
         >
-            {url ? <img src={url} alt="" className="h-full w-full object-cover object-top" /> : <StaffPlaceholder />}
+            {url ? (
+                <CoverImage
+                    src={url}
+                    cacheKey={`${docId}:${contentRev}:${thumbRev ?? ''}`}
+                    placeholder={<StaffPlaceholder />}
+                    className="absolute inset-0 h-full w-full object-cover object-top"
+                />
+            ) : (
+                <StaffPlaceholder />
+            )}
         </span>
     );
 };

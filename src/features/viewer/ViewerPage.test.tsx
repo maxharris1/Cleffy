@@ -849,7 +849,7 @@ describe('CloudViewer when the server cannot be reached while online', () => {
                 screen.getByTitle('Waiting for the server to confirm this score — asking again shortly.'),
             ).toBeInTheDocument(),
         );
-        expect(screen.queryByText('Syncing…')).not.toBeInTheDocument();
+        expect(screen.queryByText('Syncing…', { selector: '[data-swap-active]' })).not.toBeInTheDocument();
 
         // The retry is armed by a passive effect, which React may flush in a
         // later task than the commit that showed the title.
@@ -870,13 +870,20 @@ describe('CloudViewer when the server cannot be reached while online', () => {
 });
 
 describe('SyncDot', () => {
+    const activeDot = () => document.querySelector('[data-sync-dot][data-active]');
+    const activeLabel = () => document.querySelector('[data-swap-active]')?.textContent;
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it('shows a retryable failure calmly and keeps red for errors', () => {
         const { rerender } = render(<SyncDot status="retrying" />);
-        expect(screen.getByText('Retrying…')).toBeInTheDocument();
-        expect(document.querySelector('.bg-red-500')).toBeNull();
+        expect(activeLabel()).toBe('Retrying…');
+        expect(activeDot()).not.toHaveClass('bg-red-500');
 
         rerender(<SyncDot status="error" />);
-        expect(document.querySelector('.bg-red-500')).not.toBeNull();
+        expect(activeDot()).toHaveClass('bg-red-500');
     });
 
     it('words a delay without claiming the server was unreachable, or that it will recover by itself', () => {
@@ -887,6 +894,68 @@ describe('SyncDot', () => {
         expect(
             screen.getByTitle('Changes aren’t reaching the server yet. They’re saved on this device.'),
         ).toBeInTheDocument();
+    });
+
+    it('never leaves Synced for a round trip quicker than 600ms', () => {
+        vi.useFakeTimers();
+        const { rerender } = render(<SyncDot status="synced" />);
+        rerender(<SyncDot status="syncing" />);
+        act(() => vi.advanceTimersByTime(599));
+        expect(activeLabel()).toBe('Synced');
+        expect(activeDot()).toHaveAttribute('data-sync-dot', 'synced');
+        rerender(<SyncDot status="synced" />);
+        act(() => vi.advanceTimersByTime(1000));
+        expect(activeLabel()).toBe('Synced');
+    });
+
+    it('says Syncing once a sync has lasted 600ms, with a static dot', () => {
+        vi.useFakeTimers();
+        const { rerender } = render(<SyncDot status="synced" />);
+        rerender(<SyncDot status="syncing" />);
+        act(() => vi.advanceTimersByTime(600));
+        expect(activeLabel()).toBe('Syncing…');
+        expect(activeDot()).toHaveAttribute('data-sync-dot', 'syncing');
+        expect(document.querySelector('.animate-pulse')).toBeNull();
+    });
+
+    it('shows offline, retrying and errors at once', () => {
+        vi.useFakeTimers();
+        const { rerender } = render(<SyncDot status="synced" />);
+        rerender(<SyncDot status="offline" />);
+        expect(activeLabel()).toBe('Offline');
+        rerender(<SyncDot status="error" />);
+        expect(activeLabel()).toBe('Not syncing');
+    });
+
+    it('shows a first sync as itself', () => {
+        render(<SyncDot status="syncing" />);
+        expect(activeLabel()).toBe('Syncing…');
+    });
+
+    it('crossfades stacked dots on opacity, instantly under reduced motion', () => {
+        const { rerender } = render(<SyncDot status="synced" />);
+        const synced = document.querySelector('[data-sync-dot="synced"]');
+        const offline = document.querySelector('[data-sync-dot="offline"]');
+        expect(synced).toHaveClass(
+            'opacity-100',
+            'transition-opacity',
+            'duration-200',
+            'motion-reduce:transition-none',
+        );
+        expect(offline).toHaveClass('opacity-0');
+        rerender(<SyncDot status="offline" />);
+        // The same nodes, so a quick flip back retargets mid-fade.
+        expect(document.querySelector('[data-sync-dot="synced"]')).toBe(synced);
+        expect(synced).toHaveClass('opacity-0');
+        expect(offline).toHaveClass('opacity-100');
+    });
+
+    it('keeps the label at the widest wording, without announcing every change', () => {
+        render(<SyncDot status="synced" />);
+        const label = document.querySelector('.swap-label');
+        expect(label).not.toBeNull();
+        expect(label).not.toHaveAttribute('aria-live');
+        expect(screen.getByText('Waiting for server')).toHaveAttribute('aria-hidden', 'true');
     });
 });
 

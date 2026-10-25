@@ -18,6 +18,7 @@ import {
     type LibraryListSnapshot,
 } from '@/features/library/libraryBootstrap';
 import { features } from '@/lib/features';
+import { prefersReducedMotion } from '@/lib/motion';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -36,6 +37,8 @@ import { buttonClassName } from '@/ui/classNames';
 import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
 import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
 import { ProgressBar } from '@/ui/ProgressBar';
+import { SwapLabel } from '@/ui/SwapLabel';
+import { toast } from '@/ui/toast';
 
 /** The legal documents, as the account menu's last row lists them. */
 const LEGAL_MENU_LINKS = [
@@ -67,7 +70,8 @@ export type LibraryOutletContext = {
          */
         signal?: AbortSignal,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
-    uploadError: string | null;
+    /** The finished upload's bar is fading out, just before the viewer opens. */
+    uploadFading?: boolean;
     clearUploadError: () => void;
     /** Set when the server refused for quota reasons rather than a real failure. */
     uploadLimit: LimitReachedError | null;
@@ -103,6 +107,18 @@ export type LibraryOutletContext = {
     canManageStudents: boolean;
     openPricing: () => void;
 };
+
+/**
+ * A finished upload's bar, on its way out: the fill slides to 100% (the
+ * ProgressBar's 200ms transform), holds there a beat so the eye sees it
+ * complete, then fades (150ms) — and only then does the viewer open. Without
+ * it the bar was taken down wherever the last progress event had left it.
+ */
+const BAR_FILL_MS = 200;
+const BAR_HOLD_MS = 120;
+const BAR_FADE_MS = 150;
+
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean; needsStudents?: boolean }[] = [
     { to: '/library', label: 'Library', end: true },
@@ -143,7 +159,10 @@ export const LibraryShell = () => {
 const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLabel: string; userEmail: string }) => {
     const [uploadPct, setUploadPct] = useState<number | null>(null);
     const [importingImslp, setImportingImslp] = useState(false);
-    const [uploadError, setUploadError] = useState<string | null>(null);
+    /** The IMSLP import landed: its sweep becomes a full bar for the finishing beat. */
+    const [imslpFilled, setImslpFilled] = useState(false);
+    /** The top bar's progress is fading out (settleBar). */
+    const [barFading, setBarFading] = useState(false);
     const [importOffer, setImportOffer] = useState<DocumentRow | null>(null);
     const [uploadLimit, setUploadLimit] = useState<LimitReachedError | null>(null);
     const [capReached, setCapReached] = useState(false);
@@ -174,6 +193,24 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const canManageStudents = entitlements !== null && entitlements.limits.students !== 0;
     const navItems = NAV_ITEMS.filter((item) => !item.needsStudents || canManageStudents);
     const navigate = useNavigate();
+    // Where the teacher is, read by an upload that finishes later: a bar they
+    // have navigated away from has no one to finish in front of.
+    const { pathname } = useLocation();
+    const pathnameRef = useRef(pathname);
+    useEffect(() => {
+        pathnameRef.current = pathname;
+    }, [pathname]);
+    // Leaving the shell altogether (a score opened from elsewhere, a legal
+    // page) unmounts it before pathnameRef can see the new page.
+    const mountedRef = useRef(true);
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+        };
+    }, []);
+    /** The teacher is still on the page an upload or import started from. */
+    const stillOn = (startedAt: string) => mountedRef.current && pathnameRef.current === startedAt;
     const uploading = uploadPct !== null || importingImslp;
     const cloudScoreLimit = entitlements?.limits.cloud_scores;
     const quotaUpgradeHint = cloudScoreLimit !== 0;
@@ -190,7 +227,6 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             : null);
 
     const clearErrors = () => {
-        setUploadError(null);
         setUploadLimit(null);
     };
 
@@ -204,19 +240,39 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
 
     /**
      * A quota refusal is not a failure to report as one: it gets its own state so
-     * the library can offer an upgrade instead of showing red error text.
+     * the library can offer an upgrade, inline, where it stays. Anything else is
+     * a toast — the upload is over, and nothing on the page waits on the error.
+     * True for a quota refusal.
      */
-    const captureFailure = (err: unknown, fallback: string) => {
+    const captureFailure = (err: unknown, fallback: string): boolean => {
         if (isLimitReachedError(err)) {
             setUploadLimit(err);
-            return;
+            return true;
         }
         const loose = parseLooseLimitError(err, entitlements);
         if (loose) {
             setUploadLimit(loose);
+            return true;
+        }
+        toast.error(err instanceof Error && err.message ? err.message : fallback);
+        return false;
+    };
+
+    /**
+     * See the bar out before the page moves on (BAR_FILL_MS): wait out the
+     * fill (unless it is already there, or jumps under reduced motion) and the
+     * hold, then fade. A teacher who has navigated away meanwhile is not kept
+     * waiting on a bar that is no longer in front of them.
+     */
+    const settleBar = async (startedAt: string, { fillMs, hold }: { fillMs: number; hold: boolean }) => {
+        if (hold && stillOn(startedAt)) {
+            await wait((prefersReducedMotion() ? 0 : fillMs) + BAR_HOLD_MS);
+        }
+        if (!stillOn(startedAt)) {
             return;
         }
-        setUploadError(err instanceof Error ? err.message : fallback);
+        setBarFading(true);
+        await wait(BAR_FADE_MS);
     };
 
     /**
@@ -318,14 +374,20 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
 
     const onUpload = async (file: File) => {
         const before = snapshotBefore();
+        const startedAt = pathnameRef.current;
+        let barShown = false;
+        let lastPct = 0;
         try {
             const beforeSnap = await refuseIfCloudScoreCap(before);
             clearErrors();
             setUploadPct(0);
+            barShown = true;
             const { document } = await uploadDocument(file, userId, ({ loaded, total }) => {
-                const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
-                setUploadPct(pct);
+                lastPct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+                setUploadPct(lastPct);
             });
+            // Done, whatever the last progress event said: fill the bar.
+            setUploadPct(100);
             rememberNewScore(before, document);
             refreshCap([document, ...(beforeSnap?.documents ?? [])]);
             // Play-along analysis is never started here: it costs an OMR run,
@@ -342,19 +404,37 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         import('@/features/import/prescan'),
                     ]);
                     if ((await prescanDocument(bytes)) && (await shouldOfferImport(document.id))) {
-                        setImportOffer(document);
+                        await settleBar(startedAt, { fillMs: 0, hold: true });
+                        toast.success('Score uploaded', { description: document.title });
+                        // The dialog navigates either way, so it is only put
+                        // to a teacher still on the page they uploaded from.
+                        if (stillOn(startedAt)) {
+                            setImportOffer(document);
+                        }
                         return; // the dialog decides where to navigate
                     }
                 } catch {
                     // Best-effort — never block the upload flow.
                 }
             }
-            navigate(`/doc/${document.id}`);
+            await settleBar(startedAt, { fillMs: lastPct === 100 ? 0 : BAR_FILL_MS, hold: true });
+            // Together, so the toast lands on the viewer as it opens. A teacher
+            // who moved on, before or during the hold or the fade, stays where
+            // they went: the score is saved and the toast says where it went.
+            if (stillOn(startedAt)) {
+                navigate(`/doc/${document.id}`);
+            }
+            toast.success('Score uploaded', { description: document.title });
         } catch (err) {
-            captureFailure(err, 'Upload failed.');
+            const quota = captureFailure(err, 'Upload failed.');
+            // A failure does not fill: the bar fades where it stopped.
+            if (barShown && !quota) {
+                await settleBar(startedAt, { fillMs: 0, hold: false });
+            }
             throw err;
         } finally {
             setUploadPct(null);
+            setBarFading(false);
         }
     };
 
@@ -376,12 +456,15 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         signal?: AbortSignal,
     ) => {
         const before = snapshotBefore();
+        const startedAt = pathnameRef.current;
+        let barShown = false;
         try {
             const beforeSnap = await refuseIfCloudScoreCap(before);
             clearErrors();
             // The Edge function fetches server-side, so there is no byte progress
             // to report — show the indeterminate bar instead of a stuck 0%.
             setImportingImslp(true);
+            barShown = true;
             const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer, {
                 onStage,
                 signal,
@@ -396,19 +479,34 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             rememberNewScore(before, result.document);
             refreshCap([result.document, ...(beforeSnap?.documents ?? [])]);
             // The user cancelled or moved on while this was in flight: the
-            // score is in their library, but they are not pulled back to it.
+            // score is in their library, but they are not pulled back to it
+            // (nor kept waiting on the bar) — the toast says where it went.
             if (!signal?.aborted) {
-                navigate(`/doc/${result.document.id}`);
+                // The sweep becomes a full bar for the same finishing beat.
+                setImslpFilled(true);
+                await settleBar(startedAt, { fillMs: 0, hold: true });
+                // Leaving during the hold or the fade is moving on too: Search
+                // unmounting aborts the import, and this is no longer the page
+                // it started on (nor, past the shell, a page of it at all).
+                if (!signal?.aborted && stillOn(startedAt)) {
+                    navigate(`/doc/${result.document.id}`);
+                }
             }
+            toast.success('Imported from IMSLP', { description: result.document.title });
             return { ok: true as const };
         } catch (err) {
             // A cancelled queue wait created nothing and is not a failure.
             if (!isImslpImportCancelled(err)) {
-                captureFailure(err, 'Import failed.');
+                const quota = captureFailure(err, 'Import failed.');
+                if (barShown && !quota) {
+                    await settleBar(startedAt, { fillMs: 0, hold: false });
+                }
             }
             throw err;
         } finally {
             setImportingImslp(false);
+            setImslpFilled(false);
+            setBarFading(false);
         }
     };
 
@@ -418,7 +516,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         uploading,
         onUpload,
         onImportImslp,
-        uploadError,
+        uploadFading: barFading,
         clearUploadError,
         uploadLimit,
         limitNotice,
@@ -498,12 +596,15 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     <ProgressBar
                         value={uploadPct}
                         label="Uploading score"
+                        done={barFading}
                         className="shell-progress absolute inset-x-0 bottom-0"
                     />
                 ) : importingImslp ? (
                     <ProgressBar
-                        indeterminate
+                        indeterminate={!imslpFilled}
+                        value={100}
                         label="Importing from IMSLP"
+                        done={barFading}
                         className="shell-progress absolute inset-x-0 bottom-0"
                     />
                 ) : savingBeforeSignOut ? (
@@ -575,10 +676,17 @@ const ShellUploadButton = ({
         )}
     >
         <UploadIcon size={16} />
-        <span className="sr-only sm:not-sr-only">{uploading ? 'Uploading…' : 'Upload score'}</span>
+        <SwapLabel
+            labels={{ idle: 'Upload score', busy: 'Uploading…' }}
+            active={uploading ? 'busy' : 'idle'}
+            className="sr-only sm:not-sr-only"
+        />
         <input
             type="file"
             accept={UPLOAD_ACCEPT}
+            // Named outright: the wrapping label carries the inactive caption
+            // too (aria-hidden), which a plain text match would read as one.
+            aria-label={uploading ? 'Uploading…' : 'Upload score'}
             className="sr-only"
             disabled={uploading || quotaExhausted}
             onChange={(e) => {

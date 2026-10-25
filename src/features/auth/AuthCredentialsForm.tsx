@@ -10,6 +10,7 @@ import {
 } from '../../../supabase/functions/_shared/passwordPolicy';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
+import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
 
 export interface AuthCredentials {
@@ -185,7 +186,7 @@ export const AuthCredentialsForm = ({
                     <TurnstileField key={captchaRound} action={captchaAction} onToken={setCaptchaToken} />
                 ) : null}
                 <Button type="submit" disabled={busy} className="mt-4 w-full">
-                    {busy ? busyLabel : submitLabel}
+                    <SwapLabel labels={{ idle: submitLabel, busy: busyLabel }} active={busy ? 'busy' : 'idle'} />
                 </Button>
                 {error ? <ErrorText className="mt-2.5">{error}</ErrorText> : null}
             </form>
