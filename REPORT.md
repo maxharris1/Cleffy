@@ -13,10 +13,10 @@
 
 - The shell now keeps a ref that is set false when it unmounts (`mountedRef`). It also has a new check, `stillOn(startedAt)`, which passes only if the shell is still mounted and the page is the one the upload started on.
 - `stillOn` is now used by:
-  - `settleBar`: someone who left the shell isn't kept waiting through the hold and fade.
-  - The upload's `navigate`.
-  - The smart-import `setImportOffer`.
-  - The IMSLP open.
+    - `settleBar`: someone who left the shell isn't kept waiting through the hold and fade.
+    - The upload's `navigate`.
+    - The smart-import `setImportOffer`.
+    - The IMSLP open.
 - Save, cache and toast are unchanged.
 - **IMSLP:** in the app it was already covered. Leaving the shell unmounts Search, which cancels the import, so the existing check caught it. I added the check to its continuation anyway, because `signal` is optional in the code and an import started without one would have had the bug.
 
@@ -46,11 +46,11 @@ The first full run failed in `src/ui/toast.test.tsx` with "Cannot find module 's
 
 ## Bundle (gzip, Node zlib default level, files listed in `dist/index.html`)
 
-| | dev (3c0e8cb) | head (4f2ee72) | change |
-| --- | --- | --- | --- |
-| Entry chunk | 93,553 B | 94,606 B | **+1,053 B** |
-| Entry + modulepreloads | 234,979 B | 236,382 B | +1,403 B |
-| Entry + modulepreloads + CSS | 250,783 B | 252,703 B | +1,920 B |
+|                              | dev (3c0e8cb) | head (4f2ee72) | change       |
+| ---------------------------- | ------------- | -------------- | ------------ |
+| Entry chunk                  | 93,553 B      | 94,606 B       | **+1,053 B** |
+| Entry + modulepreloads       | 234,979 B     | 236,382 B      | +1,403 B     |
+| Entry + modulepreloads + CSS | 250,783 B     | 252,703 B      | +1,920 B     |
 
 All three are under the 3 kB limit. Dev was built the same way in a separate worktree.
 
