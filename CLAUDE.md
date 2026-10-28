@@ -1,5 +1,7 @@
 # Cleffy — agent notes
 
+Factory settings and agent notes: see the Factory section of AGENTS.md.
+
 React 19 + Vite + Tailwind front end (`src/`), Supabase backend (`supabase/`:
 migrations, RLS, Edge Functions). Routes: `src/app/routes.tsx`.
 
