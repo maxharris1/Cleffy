@@ -24,7 +24,8 @@ import { CheckIcon, CloseIcon, MoreVerticalIcon } from '@/ui/icons';
  * After a wipe that failed: is any of the old ink still there for a store to
  * hydrate? The same read the store's hydration makes (rows by doc id).
  * Rejects when the read itself fails (async, so a throw from getDb() or the
- * query chain rejects too): a read that failed has not shown nothing is left.
+ * query chain rejects too): a read that failed has not shown nothing is left,
+ * nor that anything is.
  */
 const demoInkRemains = async (): Promise<boolean> =>
     (await getDb()
@@ -34,28 +35,49 @@ const demoInkRemains = async (): Promise<boolean> =>
         .count()) > 0;
 
 /**
+ * A wipe that failed, and what the check after it found. remains: the read
+ * worked and found ink. unknown: the read failed too, so nothing is known
+ * either way (a browser refusing IndexedDB outright lands here). The delete's
+ * own error is the cause.
+ */
+class DemoWipeFailedError extends Error {
+    constructor(
+        readonly inkState: 'remains' | 'unknown',
+        options: { cause: unknown },
+    ) {
+        super('Could not clear the demo’s markings', options);
+        this.name = 'DemoWipeFailedError';
+    }
+}
+
+/**
  * Every stored trace of the demo's ink goes: rows, ops, snapshots, and any
  * ink held in this tab because it could not be written (discarded, not kept
  * for an Export the demo does not have).
  *
- * Rejects, with the delete's own error, when the delete failed and old ink
- * may still be there to show: a visitor must never land on someone's leftover
- * marks, nor watch theirs come back after Start over. Only a delete that
- * failed and a read that then worked and found nothing (a browser that keeps
- * no site data but can read its empty store) counts as done. A read that
- * fails too counts as ink left, so a browser where IndexedDB fails outright
- * gets Try again rather than the demo: failing closed wins.
+ * Rejects with a DemoWipeFailedError, the delete's own error as its cause,
+ * when the delete failed and old ink may still be there to show: a visitor
+ * must never land on someone's leftover marks, nor watch theirs come back
+ * after Start over. Only a delete that failed and a read that then worked and
+ * found nothing (a browser that keeps no site data but can read its empty
+ * store) counts as done. A read that fails too rejects as well ('unknown'),
+ * so a browser where IndexedDB fails outright gets Try again rather than the
+ * demo: failing closed wins.
  */
 const wipeDemoInk = async (): Promise<void> => {
     try {
         await purgeLocalDocument(DEMO_DOC_ID, { heldInk: 'discard' });
     } catch (err) {
-        if (await demoInkRemains().catch(() => true)) {
-            throw err;
+        const remains = await demoInkRemains().catch(() => null);
+        if (remains !== false) {
+            throw new DemoWipeFailedError(remains ? 'remains' : 'unknown', { cause: err });
         }
         console.warn('Could not clear the demo’s storage, and no markings are left in it', err);
     }
 };
+
+/** Which copy a failed wipe gets: only a check that found ink may say it is still saved. */
+const wipeFailure = (err: unknown): WipeFailure => (err instanceof DemoWipeFailedError ? err.inkState : 'unknown');
 
 /**
  * preparing: the session rules are still deciding, and maybe wiping, before
@@ -63,6 +85,8 @@ const wipeDemoInk = async (): Promise<void> => {
  * Either can be stuck (wipeFailed), the viewport still held back.
  */
 type Phase = 'preparing' | 'ready' | 'clearing';
+
+type WipeFailure = DemoWipeFailedError['inkState'];
 
 /**
  * Why the keep choice will not hold, when storage refused it. keep: the
@@ -74,6 +98,11 @@ type StorageRefused = 'keep' | 'session';
 
 /** The header's small controls are 36px tall: an invisible ring takes them to 44px on touch. */
 const HIT_Y = 'pointer-coarse:hit-44-y';
+
+const WIPE_FAILED_BODY: Record<WipeFailure, string> = {
+    remains: 'Your markings are still saved in this browser. Try again to start on a blank score.',
+    unknown: 'This browser isn’t letting the demo use its storage right now. Try again, or come back in a minute.',
+};
 
 const STORAGE_REFUSED_HELP: Record<StorageRefused, string> = {
     keep: 'This browser isn’t keeping site data, so your markings clear when you close it.',
@@ -91,8 +120,8 @@ const STORAGE_REFUSED_HELP: Record<StorageRefused, string> = {
  */
 export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
     const [phase, setPhase] = useState<Phase>('preparing');
-    /** The wipe of the current phase failed with old ink still stored: Try again bumps `attempt`. */
-    const [wipeFailed, setWipeFailed] = useState(false);
+    /** The wipe of the current phase failed, with old ink still stored or unknown: Try again bumps `attempt`. */
+    const [wipeFailed, setWipeFailed] = useState<WipeFailure | null>(null);
     const [attempt, setAttempt] = useState(0);
     /** A new key mounts a new viewport, whose new store hydrates the (now empty) mirror. */
     const [viewportKey, setViewportKey] = useState(0);
@@ -138,7 +167,7 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
             (err: unknown) => {
                 console.warn('Could not clear the demo’s earlier markings', err);
                 if (!cancelled) {
-                    setWipeFailed(true);
+                    setWipeFailed(wipeFailure(err));
                 }
             },
         );
@@ -167,7 +196,7 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
             (err: unknown) => {
                 console.warn('Could not clear the demo’s markings', err);
                 if (!cancelled) {
-                    setWipeFailed(true);
+                    setWipeFailed(wipeFailure(err));
                 }
             },
         );
@@ -230,7 +259,7 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
     const cancelClear = useCallback(() => setConfirmingClear(false), []);
 
     const retryWipe = () => {
-        setWipeFailed(false);
+        setWipeFailed(null);
         setAttempt((n) => n + 1);
     };
 
@@ -254,10 +283,7 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
             placeholder={
                 <div className="flex h-full items-center justify-center p-8">
                     {wipeFailed ? (
-                        <EmptyState
-                            title="Couldn’t clear your markings"
-                            body="Your markings are still saved in this browser. Try again to start on a blank score."
-                        >
+                        <EmptyState title="Couldn’t clear your markings" body={WIPE_FAILED_BODY[wipeFailed]}>
                             {/* Secondary: Start free in the header stays the one primary. */}
                             <Button variant="secondary" onClick={retryWipe}>
                                 Try again

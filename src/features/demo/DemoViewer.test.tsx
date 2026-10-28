@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import Dexie from 'dexie';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -119,6 +120,9 @@ const latestStore = () => h.stores[h.stores.length - 1]!;
 
 const hint = () => screen.queryByText('Draw anywhere — Pencil, finger or mouse.');
 
+/** The failed-wipe body that claims old ink is still there: only a check that found some may show it. */
+const stillSaved = () => screen.queryByText(/still saved/);
+
 beforeEach(() => {
     h.db = new ScribblerDb(`demo-viewer-${crypto.randomUUID()}`);
     h.events = [];
@@ -164,6 +168,7 @@ describe('DemoViewer, opening a session', () => {
         renderDemo();
 
         expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+        expect(stillSaved()).toBeInTheDocument();
         expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
         expect(h.events).not.toContain('mount');
         // Not marked started, so a reload tries the wipe again too.
@@ -186,6 +191,8 @@ describe('DemoViewer, opening a session', () => {
         renderDemo();
 
         expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+        // Nothing was read, so nothing may be claimed saved.
+        expect(stillSaved()).not.toBeInTheDocument();
         expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
         expect(h.events).not.toContain('mount');
         expect(window.sessionStorage.getItem(DEMO_SESSION_KEY)).toBeNull();
@@ -199,13 +206,29 @@ describe('DemoViewer, opening a session', () => {
         expect(latestStore().annotatedPages()).toEqual([]);
     });
 
-    it('a failed wipe with nothing stored to show still opens the demo (a browser that keeps no site data)', async () => {
+    it('a failed wipe whose check reads no ink left still opens the demo', async () => {
         refuseDeletes();
 
         renderDemo();
 
         expect(await screen.findByTestId('viewport')).toBeInTheDocument();
         expect(screen.queryByText('Couldn’t clear your markings')).not.toBeInTheDocument();
+    });
+
+    it('a browser refusing IndexedDB outright is told storage is refused, not that markings are still saved', async () => {
+        // A first visit with nothing stored, in a browser that blocks site data.
+        const open = vi.spyOn(Dexie.dependencies.indexedDB!, 'open').mockImplementation(() => {
+            throw new DOMException('The operation is insecure.', 'SecurityError');
+        });
+
+        renderDemo();
+
+        expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+        expect(screen.getByText(/isn’t letting the demo use its storage/)).toBeInTheDocument();
+        expect(stillSaved()).not.toBeInTheDocument();
+        expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
+        expect(window.sessionStorage.getItem(DEMO_SESSION_KEY)).toBeNull();
+        open.mockRestore();
     });
 
     it('opens on kept ink without wiping, and the hint stays hidden for it', async () => {
@@ -277,6 +300,7 @@ describe('DemoViewer, Start over', () => {
         await drawThenStartOver(refuseDeletes);
 
         expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+        expect(stillSaved()).toBeInTheDocument();
         expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
         expect(h.events).toEqual(['unmount', 'purge']);
         expect(screen.getByRole('button', { name: 'Start over' })).toBeDisabled();
@@ -297,6 +321,7 @@ describe('DemoViewer, Start over', () => {
         });
 
         expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+        expect(stillSaved()).not.toBeInTheDocument();
         expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
         expect(h.events).toEqual(['unmount', 'purge']);
 
