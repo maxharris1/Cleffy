@@ -33,18 +33,23 @@ export const readKeepMarkings = (): boolean => {
 };
 
 /**
- * Persists the keep choice, best-effort. Turning it off deletes nothing now:
- * it only means the next new session starts blank.
+ * Persists the keep choice. Turning it off deletes nothing now: it only means
+ * the next new session starts blank.
+ *
+ * False when the choice did not stick (storage disabled or full): the next
+ * session starts blank, the safe default, and the toggle must not say
+ * otherwise.
  */
-export const writeKeepMarkings = (keep: boolean): void => {
+export const writeKeepMarkings = (keep: boolean): boolean => {
     try {
         if (keep) {
             window.localStorage.setItem(DEMO_KEEP_KEY, '1');
         } else {
             window.localStorage.removeItem(DEMO_KEEP_KEY);
         }
+        return true;
     } catch {
-        // Storage disabled or full: the next session starts blank, the safe default.
+        return false;
     }
 };
 
@@ -57,11 +62,13 @@ const readSessionStarted = (): boolean => {
     }
 };
 
-const markSessionStarted = (): void => {
+/** False when it did not stick: every load then counts as a new session and wipes, the safe default. */
+const markSessionStarted = (): boolean => {
     try {
         window.sessionStorage.setItem(DEMO_SESSION_KEY, '1');
+        return true;
     } catch {
-        // Every load then counts as a new session and wipes: the safe default.
+        return false;
     }
 };
 
@@ -74,12 +81,14 @@ export const shouldWipeDemo = ({ keep, sessionStarted }: { keep: boolean; sessio
  * is a new session that did not ask to keep it, then marks the session
  * started. The marker goes on only after the wipe has finished, so a wipe
  * that fails (rejects) is tried again on the next load rather than skipped.
+ *
+ * `remembered` is false when the marker could not be stored: a reload will
+ * count as a new session and wipe, which the visitor should hear about.
  */
-export const startDemoSession = async (wipe: () => Promise<void>): Promise<{ wiped: boolean }> => {
+export const startDemoSession = async (wipe: () => Promise<void>): Promise<{ wiped: boolean; remembered: boolean }> => {
     const wiped = shouldWipeDemo({ keep: readKeepMarkings(), sessionStarted: readSessionStarted() });
     if (wiped) {
         await wipe();
     }
-    markSessionStarted();
-    return { wiped };
+    return { wiped, remembered: markSessionStarted() };
 };

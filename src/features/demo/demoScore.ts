@@ -32,6 +32,15 @@ const isPdf = (bytes: ArrayBuffer): boolean => {
     return head.length === PDF_MAGIC.length && PDF_MAGIC.every((b, i) => head[i] === b);
 };
 
+/**
+ * The server answered, but not with the score: a 404, or the SPA rewrite's
+ * index.html. A deploy fault the visitor cannot fix, so the demo does not
+ * tell them to check their connection (DemoPage).
+ */
+export class DemoScoreMissingError extends Error {
+    override name = 'DemoScoreMissingError';
+}
+
 /** One download however many callers ask at once (a StrictMode remount, a quick Try again). */
 let inflight: Promise<ArrayBuffer> | null = null;
 
@@ -52,11 +61,11 @@ export const loadDemoScore = (): Promise<ArrayBuffer> => {
     inflight ??= (async () => {
         const response = await fetch(DEMO_PDF_REQUEST_URL);
         if (!response.ok) {
-            throw new Error(`The demo score could not be fetched (HTTP ${response.status}).`);
+            throw new DemoScoreMissingError(`The demo score could not be fetched (HTTP ${response.status}).`);
         }
         const bytes = await response.arrayBuffer();
         if (!isPdf(bytes)) {
-            throw new Error('The demo score is not a PDF.');
+            throw new DemoScoreMissingError('The demo score is not a PDF.');
         }
         putLocalDoc(DEMO_DOC_ID, bytes);
         return bytes;

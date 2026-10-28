@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router';
 
-import { DEMO_DOC_ID, loadDemoScore } from '@/features/demo/demoScore';
+import { DEMO_DOC_ID, DemoScoreMissingError, loadDemoScore } from '@/features/demo/demoScore';
 import { getLocalDoc } from '@/lib/localDocs';
 import { isChunkLoadError, reloadForStaleChunk } from '@/lib/staleChunk';
 import { Button } from '@/ui/Button';
@@ -20,6 +20,23 @@ const demoViewerModule = lazyModule(() => import('@/features/demo/DemoViewer'));
 
 const DEMO_DOCUMENT_TITLE = 'Try Cleffy';
 
+/**
+ * Why the demo could not open. missing: the server answered without the score
+ * (a 404, or the SPA's index.html), a fault on our side that no check of the
+ * visitor's connection will fix. connection: everything else — offline, a
+ * dropped request, the viewer's chunk.
+ */
+type Failure = 'connection' | 'missing';
+
+const failureBody = (failure: Failure): string => {
+    if (failure === 'missing') {
+        return 'The demo score didn’t load. Try again, or come back in a minute.';
+    }
+    return navigator.onLine === false
+        ? 'You’re offline. Reconnect, then try again.'
+        : 'Check your connection, then try again.';
+};
+
 const DemoLoading = () => (
     <main className="flex min-h-full items-center justify-center p-8">
         <LoadingText>Loading demo…</LoadingText>
@@ -36,7 +53,7 @@ export const DemoPage = () => {
     // A return to /try in the same page load already has the bytes.
     const [bytes, setBytes] = useState<ArrayBuffer | null>(() => getLocalDoc(DEMO_DOC_ID) ?? null);
     const viewer = useSyncExternalStore(demoViewerModule.subscribe, demoViewerModule.get);
-    const [failed, setFailed] = useState(false);
+    const [failed, setFailed] = useState<Failure | null>(null);
     /**
      * The viewer's chunk failed, not only the score. The browser keeps a failed
      * module import for the life of the page, so importing it again cannot
@@ -59,7 +76,9 @@ export const DemoPage = () => {
         const fail = (err: unknown) => {
             console.warn('Could not load the demo', err);
             if (!cancelled) {
-                setFailed(true);
+                // Both can fail at once: a connection problem is the one the visitor can act on.
+                const failure: Failure = err instanceof DemoScoreMissingError ? 'missing' : 'connection';
+                setFailed((previous) => (previous === 'connection' ? previous : failure));
             }
         };
         // Both at once, either failing shows the same state, and Try again retries whichever is missing.
@@ -89,21 +108,14 @@ export const DemoPage = () => {
     if (failed) {
         return (
             <main className="landing-page flex min-h-full flex-col items-center justify-center p-8">
-                <EmptyState
-                    title="Couldn’t load the demo score"
-                    body={
-                        navigator.onLine === false
-                            ? 'You’re offline. Reconnect, then try again — it takes a second.'
-                            : 'Check your connection, then try again — it takes a second.'
-                    }
-                >
+                <EmptyState title="Couldn’t load the demo score" body={failureBody(failed)}>
                     <Button
                         onClick={() => {
                             if (viewerFailed) {
                                 window.location.reload();
                                 return;
                             }
-                            setFailed(false);
+                            setFailed(null);
                             setAttempt((n) => n + 1);
                         }}
                     >

@@ -275,3 +275,83 @@ describe('InkSaveFailedNotice', () => {
         expect(screen.getByRole('button', { name: 'Discard' })).toBeInTheDocument();
     });
 });
+
+/**
+ * Where there is no Export to open (the /try demo for good, the cloud viewer
+ * until it is confirmed): no button, and no copy sending the reader to one.
+ */
+describe('InkSaveFailedNotice with no Export', () => {
+    const DEMO = 'local-demo-v1';
+    const demoStroke = (id: string): Annotation => ({ ...stroke(id), docId: DEMO });
+    const mountDemoStore = async (db: ScribblerDb) => {
+        const store = new AnnotationStore(db, DEMO);
+        await store.load();
+        return store;
+    };
+    const mentionsExport = (container: HTMLElement) => /export/i.test(container.textContent ?? '');
+
+    it('says to free up storage, not to export, when Retry has failed', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
+        const store = await mountDemoStore(db);
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(demoStroke('a1')).catch(() => undefined);
+        const { container } = render(<InkSaveFailedNotice store={store} />);
+
+        await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+        expect(await screen.findByText('Still not saved. Storage may be full.')).toHaveClass('sm:hidden');
+        expect(
+            screen.getByText(
+                'Some marks couldn’t be saved on this device, and retrying didn’t work. Free up storage, then Retry.',
+            ),
+        ).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Export' })).not.toBeInTheDocument();
+        expect(mentionsExport(container)).toBe(false);
+        full.mockRestore();
+    });
+
+    it('at the memory bound with marks of its own held: says to free up storage, not to export', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
+        const store = await mountDemoStore(db);
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(demoStroke('a1')).catch(() => undefined);
+        holdOps(
+            db,
+            'local-filler',
+            Array.from({ length: MAX_HELD_OPS - 1 }, (_, i) => ({
+                op: { type: 'create' as const, annotation: { ...stroke(`f${i}`), docId: 'local-filler' } },
+                author: null,
+            })),
+        );
+        await store.create(demoStroke('a2')).catch(() => undefined);
+        full.mockRestore();
+        const { container } = render(<InkSaveFailedNotice store={store} />);
+
+        expect(screen.getByText('Too many unsaved marks: new ones weren’t made.')).toBeInTheDocument();
+        expect(
+            screen.getByText(
+                'This device can’t keep any more unsaved marks, so your latest changes weren’t made. Free up storage, then Retry.',
+            ),
+        ).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Export' })).not.toBeInTheDocument();
+        expect(mentionsExport(container)).toBe(false);
+    });
+
+    it('when a newer version overtook the held marks: no Export in the copy or the Dismiss title', async () => {
+        const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
+        await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });
+        const store = await mountStore(db);
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.update('a1', { color: '#ff0000' }).catch(() => undefined);
+        full.mockRestore();
+        await db.annotations.put({ ...stroke('a1'), seq: 9, color: '#0000ff', pending: 0 });
+        await store.retryFailedPersist();
+        const { container } = render(<InkSaveFailedNotice store={store} />);
+
+        expect(screen.getByText('Some changes were overtaken elsewhere.')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Dismiss' })).toHaveAttribute('title', 'Dismiss');
+        expect(mentionsExport(container)).toBe(false);
+    });
+});

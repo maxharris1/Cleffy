@@ -8,6 +8,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+import { DEMO_SCORE_URL_PATTERN } from './src/features/demo/demoScoreCache';
 import { PDFJS_ASSET_DIRS, type PdfjsAssetDir } from './src/features/viewer/pdf/pdfjsAssets';
 import {
     SUPABASE_PRECONNECT_SCRIPT_PATH,
@@ -300,7 +301,7 @@ export default defineConfig({
                         // (features/demo/demoScore.ts), so a new edition is a new entry.
                         // PDFs only: vercel.json answers a missing file with index.html
                         // and a 200, which must not be kept in its place.
-                        urlPattern: /\/demo\/[^/?]+\.pdf(?:\?|$)/,
+                        urlPattern: DEMO_SCORE_URL_PATTERN,
                         handler: 'CacheFirst',
                         options: {
                             cacheName: 'demo-score',
