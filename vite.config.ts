@@ -294,6 +294,21 @@ export default defineConfig({
                         },
                     },
                     {
+                        // The /try demo's score: PDFs are not precached (globPatterns),
+                        // so it is fetched on the first visit and kept, and a returning
+                        // visitor can open the demo offline. Requested as ?v=<doc id>
+                        // (features/demo/demoScore.ts), so a new edition is a new entry.
+                        // PDFs only: vercel.json answers a missing file with index.html
+                        // and a 200, which must not be kept in its place.
+                        urlPattern: /\/demo\/[^/?]+\.pdf(?:\?|$)/,
+                        handler: 'CacheFirst',
+                        options: {
+                            cacheName: 'demo-score',
+                            expiration: { maxEntries: 2 },
+                            cacheableResponse: { statuses: [200], headers: { 'content-type': 'application/pdf' } },
+                        },
+                    },
+                    {
                         urlPattern: /\/fonts\/BravuraText\.woff2$/,
                         handler: 'CacheFirst',
                         options: {
