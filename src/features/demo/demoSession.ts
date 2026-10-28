@@ -33,10 +33,13 @@ export const readKeepMarkings = (): boolean => {
 };
 
 /**
- * Persists the keep choice, best-effort. Turning it off deletes nothing now:
- * it only means the next new session starts blank.
+ * Persists the keep choice and says whether it stuck: the stored value is read
+ * back, so a browser that refuses or drops the write (private mode, site data
+ * blocked, full) reports false rather than a toggle showing a promise the next
+ * session would break. Turning it off deletes nothing now: it only means the
+ * next new session starts blank.
  */
-export const writeKeepMarkings = (keep: boolean): void => {
+export const writeKeepMarkings = (keep: boolean): boolean => {
     try {
         if (keep) {
             window.localStorage.setItem(DEMO_KEEP_KEY, '1');
@@ -44,8 +47,9 @@ export const writeKeepMarkings = (keep: boolean): void => {
             window.localStorage.removeItem(DEMO_KEEP_KEY);
         }
     } catch {
-        // Storage disabled or full: the next session starts blank, the safe default.
+        // Storage disabled or full: the read below says what actually holds.
     }
+    return readKeepMarkings() === keep;
 };
 
 /** A refresh or an in-app return in this tab. Unreadable storage reads as a new session. */

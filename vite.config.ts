@@ -8,6 +8,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+import { DEMO_SCORE_CACHE_PATTERN } from './src/features/demo/demoScore';
 import { PDFJS_ASSET_DIRS, type PdfjsAssetDir } from './src/features/viewer/pdf/pdfjsAssets';
 import {
     SUPABASE_PRECONNECT_SCRIPT_PATH,
@@ -294,13 +295,15 @@ export default defineConfig({
                         },
                     },
                     {
-                        // The /try demo's score: PDFs are not precached (globPatterns),
-                        // so it is fetched on the first visit and kept, and a returning
-                        // visitor can open the demo offline. Requested as ?v=<doc id>
-                        // (features/demo/demoScore.ts), so a new edition is a new entry.
-                        // PDFs only: vercel.json answers a missing file with index.html
-                        // and a 200, which must not be kept in its place.
-                        urlPattern: /\/demo\/[^/?]+\.pdf(?:\?|$)/,
+                        // The /try demo's score: PDFs are not precached (globPatterns).
+                        // Kept from the first load the worker controls — a device's
+                        // first visit registers it late (lib/serviceWorker.ts), so that
+                        // is usually the second — and from then on the demo opens
+                        // offline. Requested as ?v=<doc id> (features/demo/demoScore.ts),
+                        // so a new edition is a new entry. PDFs only: vercel.json answers
+                        // a missing file with index.html and a 200, which must not be
+                        // kept in its place.
+                        urlPattern: DEMO_SCORE_CACHE_PATTERN,
                         handler: 'CacheFirst',
                         options: {
                             cacheName: 'demo-score',

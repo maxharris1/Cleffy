@@ -1,4 +1,8 @@
-import { getLocalDoc, putLocalDoc } from '@/lib/localDocs';
+/**
+ * The demo score's constants. A leaf with no imports on purpose: vite.config.ts
+ * reads the service worker's cache pattern from here, and the config is
+ * bundled without the app's `@/` alias.
+ */
 
 /** The demo's score: Für Elise, a US public-domain edition, served from public/demo. */
 export const DEMO_PDF_URL = '/demo/fur-elise.pdf';
@@ -24,44 +28,5 @@ export const DEMO_TITLE = 'Für Elise — demo';
  */
 export const DEMO_PDF_REQUEST_URL = `${DEMO_PDF_URL}?v=${DEMO_DOC_ID}`;
 
-/** `%PDF-`: every PDF opens with it. */
-const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d];
-
-const isPdf = (bytes: ArrayBuffer): boolean => {
-    const head = new Uint8Array(bytes, 0, Math.min(bytes.byteLength, PDF_MAGIC.length));
-    return head.length === PDF_MAGIC.length && PDF_MAGIC.every((b, i) => head[i] === b);
-};
-
-/** One download however many callers ask at once (a StrictMode remount, a quick Try again). */
-let inflight: Promise<ArrayBuffer> | null = null;
-
-/**
- * The demo PDF's bytes, registered in the in-memory local-doc registry under
- * DEMO_DOC_ID. Skips the download when the registry already has them — a
- * return to /try within the same page load.
- *
- * The bytes are checked, not only the status: vercel.json rewrites every path
- * to index.html, so a missing file comes back as a 200 of HTML, which pdf.js
- * would report as a broken score rather than the demo's own error state.
- */
-export const loadDemoScore = (): Promise<ArrayBuffer> => {
-    const cached = getLocalDoc(DEMO_DOC_ID);
-    if (cached) {
-        return Promise.resolve(cached);
-    }
-    inflight ??= (async () => {
-        const response = await fetch(DEMO_PDF_REQUEST_URL);
-        if (!response.ok) {
-            throw new Error(`The demo score could not be fetched (HTTP ${response.status}).`);
-        }
-        const bytes = await response.arrayBuffer();
-        if (!isPdf(bytes)) {
-            throw new Error('The demo score is not a PDF.');
-        }
-        putLocalDoc(DEMO_DOC_ID, bytes);
-        return bytes;
-    })().finally(() => {
-        inflight = null;
-    });
-    return inflight;
-};
+/** The service worker's runtime-cache route for the demo score, query string and all. */
+export const DEMO_SCORE_CACHE_PATTERN = /\/demo\/[^/?]+\.pdf(?:\?|$)/;

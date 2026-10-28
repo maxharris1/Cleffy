@@ -155,11 +155,34 @@ describe('AppRoutes /try demo, score unavailable', () => {
         expect(
             await screen.findByRole('heading', { level: 2, name: 'Couldn’t load the demo score' }),
         ).toBeInTheDocument();
+        expect(screen.getByText('Check your connection, then try again.')).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Back to home' })).toHaveAttribute('href', '/');
 
         fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
 
         expect(await screen.findByText(/demo-viewer:/)).toBeInTheDocument();
         expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not blame the connection when the score itself is missing', async () => {
+        vi.resetModules();
+        const { AppRoutes: FreshRoutes } = await import('@/app/routes');
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async () => new Response('Not found', { status: 404 })),
+        );
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        render(
+            <MemoryRouter initialEntries={['/try']}>
+                <FreshRoutes />
+            </MemoryRouter>,
+        );
+
+        expect(
+            await screen.findByText('The demo score didn’t load. Try again, or come back in a minute.'),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/connection|offline/i)).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
     });
 });

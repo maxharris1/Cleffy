@@ -137,9 +137,22 @@ describe('keep my markings', () => {
         expect(wipe).toHaveBeenCalledTimes(1);
     });
 
-    it('never throws when localStorage refuses the write', () => {
+    it('says whether the choice stuck', () => {
+        expect(writeKeepMarkings(true)).toBe(true);
+        expect(writeKeepMarkings(false)).toBe(true);
+    });
+
+    it('reports a refused write, without throwing, when localStorage is blocked', () => {
         blockStorage('localStorage');
-        expect(() => writeKeepMarkings(true)).not.toThrow();
-        expect(() => writeKeepMarkings(false)).not.toThrow();
+        expect(writeKeepMarkings(true)).toBe(false);
+        expect(readKeepMarkings()).toBe(false);
+    });
+
+    it('reports a write that ran out of quota', () => {
+        vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+            throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+        });
+        expect(writeKeepMarkings(true)).toBe(false);
+        expect(readKeepMarkings()).toBe(false);
     });
 });

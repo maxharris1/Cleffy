@@ -254,6 +254,54 @@ describe('InkSaveFailedNotice', () => {
         expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
     });
 
+    it('with no Export in this viewer (the /try demo): a failed Retry says to free up storage, not to export', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
+        const store = await mountStore(db);
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(stroke('a1')).catch(() => undefined);
+        render(<InkSaveFailedNotice store={store} />);
+
+        await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+        expect(
+            await screen.findByText(
+                'Some marks couldn’t be saved on this device, and retrying didn’t work. Free up storage, then Retry.',
+            ),
+        ).toBeInTheDocument();
+        expect(screen.getByText('Still not saved. Free up storage, then Retry.')).toHaveClass('sm:hidden');
+        expect(screen.queryByText(/export/i)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Export' })).not.toBeInTheDocument();
+        full.mockRestore();
+    });
+
+    it('with no Export in this viewer: at the memory bound, says to free up storage though marks are held', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
+        const store = await mountStore(db);
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.create(stroke('a1')).catch(() => undefined);
+        holdOps(
+            db,
+            'local-filler',
+            Array.from({ length: MAX_HELD_OPS - 1 }, (_, i) => ({
+                op: { type: 'create' as const, annotation: { ...stroke(`f${i}`), docId: 'local-filler' } },
+                author: null,
+            })),
+        );
+        await store.create(stroke('a2')).catch(() => undefined);
+        full.mockRestore();
+        render(<InkSaveFailedNotice store={store} />);
+
+        expect(
+            screen.getByText(
+                'This device can’t keep any more unsaved marks, so your latest changes weren’t made. Free up storage, then Retry.',
+            ),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/export/i)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Export' })).not.toBeInTheDocument();
+    });
+
     it('when the overtaken change was an erase: says so, and offers Export too (round 3, item 1)', async () => {
         const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
         await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });
