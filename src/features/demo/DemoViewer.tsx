@@ -22,37 +22,35 @@ import { CheckIcon, CloseIcon, MoreVerticalIcon } from '@/ui/icons';
 
 /**
  * After a wipe that failed: is any of the old ink still there for a store to
- * hydrate? The same read the store's hydration makes (rows by doc id). One
- * that cannot read either finds nothing, and neither would the store: a
- * browser that keeps no site data at all fails every wipe, and must still get
- * the demo.
+ * hydrate? The same read the store's hydration makes (rows by doc id).
+ * Rejects when the read itself fails (async, so a throw from getDb() or the
+ * query chain rejects too): a read that failed has not shown nothing is left.
  */
-const demoInkRemains = (): Promise<boolean> =>
-    getDb()
+const demoInkRemains = async (): Promise<boolean> =>
+    (await getDb()
         .annotations.where('docId')
         .equals(DEMO_DOC_ID)
         .filter((row) => !row.deletedAt)
-        .count()
-        .then(
-            (count) => count > 0,
-            () => false,
-        );
+        .count()) > 0;
 
 /**
  * Every stored trace of the demo's ink goes: rows, ops, snapshots, and any
  * ink held in this tab because it could not be written (discarded, not kept
  * for an Export the demo does not have).
  *
- * Rejects only when the delete failed and old ink is still there to show: a
- * visitor must never land on someone's leftover marks, nor watch theirs come
- * back after Start over. A delete that failed with nothing left behind (no
- * site data kept at all) counts as done.
+ * Rejects, with the delete's own error, when the delete failed and old ink
+ * may still be there to show: a visitor must never land on someone's leftover
+ * marks, nor watch theirs come back after Start over. Only a delete that
+ * failed and a read that then worked and found nothing (a browser that keeps
+ * no site data but can read its empty store) counts as done. A read that
+ * fails too counts as ink left, so a browser where IndexedDB fails outright
+ * gets Try again rather than the demo: failing closed wins.
  */
 const wipeDemoInk = async (): Promise<void> => {
     try {
         await purgeLocalDocument(DEMO_DOC_ID, { heldInk: 'discard' });
     } catch (err) {
-        if (await demoInkRemains()) {
+        if (await demoInkRemains().catch(() => true)) {
             throw err;
         }
         console.warn('Could not clear the demo’s storage, and no markings are left in it', err);

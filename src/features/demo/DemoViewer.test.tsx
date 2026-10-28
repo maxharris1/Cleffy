@@ -177,6 +177,28 @@ describe('DemoViewer, opening a session', () => {
         expect(latestStore().annotatedPages()).toEqual([]);
     });
 
+    it('a failed wipe whose check cannot read either shows Try again, never the old ink', async () => {
+        await seedInk();
+        refuseDeletes();
+        // Reads fail too: a failed read has not shown that nothing is left.
+        h.db!.close({ disableAutoOpen: true });
+
+        renderDemo();
+
+        expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+        expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
+        expect(h.events).not.toContain('mount');
+        expect(window.sessionStorage.getItem(DEMO_SESSION_KEY)).toBeNull();
+
+        await h.db!.open();
+        h.gate = null;
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+        expect(await screen.findByTestId('viewport')).toBeInTheDocument();
+        await latestStore().load();
+        expect(latestStore().annotatedPages()).toEqual([]);
+    });
+
     it('a failed wipe with nothing stored to show still opens the demo (a browser that keeps no site data)', async () => {
         refuseDeletes();
 
@@ -259,6 +281,26 @@ describe('DemoViewer, Start over', () => {
         expect(h.events).toEqual(['unmount', 'purge']);
         expect(screen.getByRole('button', { name: 'Start over' })).toBeDisabled();
 
+        h.gate = null;
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+        expect(await screen.findByTestId('viewport')).toBeInTheDocument();
+        await latestStore().load();
+        expect(latestStore().annotatedPages()).toEqual([]);
+        expect(latestStore().canUndo).toBe(false);
+    });
+
+    it('a failed Clear whose check cannot read either keeps the viewport unmounted, rather than bringing the ink back', async () => {
+        await drawThenStartOver(() => {
+            refuseDeletes();
+            h.db!.close({ disableAutoOpen: true });
+        });
+
+        expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+        expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
+        expect(h.events).toEqual(['unmount', 'purge']);
+
+        await h.db!.open();
         h.gate = null;
         fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
 
