@@ -24,7 +24,7 @@ describe('demo score', () => {
             '/try?utm_source=tiktok',
             '/demo/fur-elise.html',
             '/demo/fur-elise.pdf.js',
-            '/doc/local-demo-v1',
+            '/doc/local-demo-v2',
         ]) {
             expect(DEMO_SCORE_CACHE_PATTERN.test(href(path)), path).toBe(false);
         }

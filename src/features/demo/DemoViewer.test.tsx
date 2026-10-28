@@ -71,7 +71,7 @@ vi.mock('@/features/viewer/PdfViewport', async () => {
 
 const { DemoViewer } = await import('@/features/demo/DemoViewer');
 
-const DEMO = 'local-demo-v1';
+const DEMO = 'local-demo-v2';
 
 const stroke = (id: string): Annotation => ({
     id,

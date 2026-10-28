@@ -4,7 +4,7 @@
  * bundled without the app's `@/` alias.
  */
 
-/** The demo's score: Für Elise, a US public-domain edition, served from public/demo. */
+/** The demo's score: Für Elise, the Wier edition (IMSLP #05929, public domain), served from public/demo. */
 export const DEMO_PDF_URL = '/demo/fur-elise.pdf';
 
 /**
@@ -16,7 +16,7 @@ export const DEMO_PDF_URL = '/demo/fur-elise.pdf';
  * and placed by page coordinates, so marks kept from an old edition would land
  * on the wrong bars of a new one.
  */
-export const DEMO_DOC_ID = 'local-demo-v1';
+export const DEMO_DOC_ID = 'local-demo-v2';
 
 export const DEMO_TITLE = 'Für Elise — demo';
 
