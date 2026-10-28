@@ -1,15 +1,17 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import Dexie from 'dexie';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { DEMO_KEEP_KEY, DEMO_SESSION_KEY } from '@/features/demo/demoSession';
+import { VALUE_CARD_AFTER_MARKS, VALUE_CARD_FALLBACK_MS } from '@/features/demo/DemoValueCard';
+import { DEMO_KEEP_KEY, DEMO_SESSION_KEY, DEMO_VALUE_CARD_KEY } from '@/features/demo/demoSession';
 import type * as DocumentsServiceModule from '@/features/library/documentsService';
 import { useViewerStore } from '@/state/store';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import type * as DbModule from '@/sync/db';
 import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
+import { stubAnimate } from '@/test/animate';
 import type { Annotation } from '@/types/models';
 
 /**
@@ -55,10 +57,15 @@ vi.mock('@/features/viewer/PdfViewport', async () => {
     return {
         PdfViewport: ({ docId, onStoreReady }: { docId: string; onStoreReady: (store: AnnotationStore) => void }) => {
             // As the real viewport does: a store per mount, hydrating from the mirror.
-            const [store] = useState(() => new Store(h.db!, docId));
+            // Registered as it is made, not in the effect: a test that finds the
+            // viewport in the DOM must never get the store before it.
+            const [store] = useState(() => {
+                const made = new Store(h.db!, docId);
+                h.stores.push(made);
+                return made;
+            });
             useEffect(() => {
                 h.events.push('mount');
-                h.stores.push(store);
                 onStoreReady(store);
                 return () => {
                     h.events.push('unmount');
@@ -135,6 +142,7 @@ beforeEach(() => {
 
 afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.restoreAllMocks();
     resetInkRecoveryForTests();
     useViewerStore.getState().setFingerDraws(false);
@@ -455,5 +463,232 @@ describe('DemoViewer, touch targets', () => {
                 COARSE_HIT_AREA,
             );
         }
+    });
+});
+
+describe('DemoViewer, the value card', () => {
+    const card = () => screen.queryByRole('dialog', { name: 'What Cleffy does' });
+
+    /** Draws `n` new strokes on the current store, one commit each, as a visitor's pen does. */
+    const draw = async (n: number, prefix = 'mark') => {
+        for (let i = 0; i < n; i += 1) {
+            const now = new Date().toISOString();
+            await act(() =>
+                latestStore().create({
+                    ...stroke(`${prefix}-${h.stores.length}-${i}`),
+                    createdAt: now,
+                    updatedAt: now,
+                }),
+            );
+        }
+    };
+
+    /** Opens the demo and draws until the card is up. */
+    const showCard = async () => {
+        renderDemo();
+        await screen.findByTestId('viewport');
+        await draw(VALUE_CARD_AFTER_MARKS);
+        return waitFor(() => {
+            const shown = card();
+            expect(shown).toBeInTheDocument();
+            return shown!;
+        });
+    };
+
+    it('stays away before the mark threshold, and comes up after it without taking focus', async () => {
+        renderDemo();
+        await screen.findByTestId('viewport');
+
+        await draw(VALUE_CARD_AFTER_MARKS - 1);
+        // An undo and redo of the same stroke is still one mark.
+        await act(() => latestStore().undoLast());
+        await act(() => latestStore().redoLast());
+        expect(card()).not.toBeInTheDocument();
+
+        await draw(1, 'last');
+
+        const shown = await waitFor(() => {
+            expect(card()).toBeInTheDocument();
+            return card()!;
+        });
+        expect(shown).toHaveAttribute('aria-modal', 'false');
+        expect(shown).not.toContainElement(document.activeElement as HTMLElement | null);
+        expect(within(shown).getByText(/Bring any score/)).toBeInTheDocument();
+        expect(within(shown).getByText(/saved to your library/)).toBeInTheDocument();
+        expect(within(shown).getByText(/Share one link/)).toBeInTheDocument();
+        // The hint went with the first stroke; the viewport is untouched.
+        expect(hint()).not.toBeInTheDocument();
+        expect(screen.getByTestId('viewport')).toBeInTheDocument();
+    });
+
+    it('does not count ink kept from an earlier session', async () => {
+        await seedInk();
+        window.localStorage.setItem(DEMO_KEEP_KEY, '1');
+        renderDemo();
+        await screen.findByTestId('viewport');
+
+        await draw(VALUE_CARD_AFTER_MARKS - 1);
+
+        expect(card()).not.toBeInTheDocument();
+        await draw(1, 'last');
+        await waitFor(() => expect(card()).toBeInTheDocument());
+    });
+
+    it('shows once per session: Keep playing puts it away for good, a reload included', async () => {
+        const shown = await showCard();
+
+        fireEvent.click(within(shown).getByRole('button', { name: 'Keep playing' }));
+
+        expect(card()).not.toBeInTheDocument();
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBe('1');
+        await draw(VALUE_CARD_AFTER_MARKS);
+        expect(card()).not.toBeInTheDocument();
+
+        // A reload in the same tab: the dismissal holds.
+        cleanup();
+        renderDemo();
+        await screen.findByTestId('viewport');
+        await draw(VALUE_CARD_AFTER_MARKS * 2);
+        expect(card()).not.toBeInTheDocument();
+    });
+
+    it('the close button puts it away, and is a 44px target on any pointer', async () => {
+        const shown = await showCard();
+        const close = within(shown).getByRole('button', { name: 'Close' });
+
+        // A 44px ring on any pointer, not only touch (DemoValueCard.css).
+        expect(close).toHaveClass('demo-value-close');
+        fireEvent.click(close);
+
+        expect(card()).not.toBeInTheDocument();
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBe('1');
+    });
+
+    it('Escape puts it away', async () => {
+        await showCard();
+
+        fireEvent.keyDown(document.body, { key: 'Escape' });
+
+        expect(card()).not.toBeInTheDocument();
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBe('1');
+    });
+
+    it('leaves Start over its Escape: hidden while the question is up, back once it is answered', async () => {
+        await showCard();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+        expect(card()).not.toBeInTheDocument();
+
+        fireEvent.keyDown(document, { key: 'Escape' });
+
+        expect(screen.queryByText('Clear all your markings?')).not.toBeInTheDocument();
+        expect(card()).toBeInTheDocument();
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBeNull();
+    });
+
+    it('Start free goes where the header’s Start free goes', async () => {
+        render(
+            <MemoryRouter initialEntries={['/try']}>
+                <Routes>
+                    <Route path="/try" element={<DemoViewer bytes={new ArrayBuffer(8)} />} />
+                    <Route path="/register" element={<p>Sign-up page</p>} />
+                </Routes>
+            </MemoryRouter>,
+        );
+        await screen.findByTestId('viewport');
+        await draw(VALUE_CARD_AFTER_MARKS);
+        const shown = await waitFor(() => {
+            expect(card()).toBeInTheDocument();
+            return card()!;
+        });
+        const headerStartFree = within(screen.getByRole('navigation', { name: 'Score' })).getByRole('link', {
+            name: 'Start free',
+        });
+        const cardStartFree = within(shown).getByRole('link', { name: 'Start free' });
+        expect(cardStartFree).toHaveAttribute('href', '/register');
+        expect(cardStartFree).toHaveAttribute('href', headerStartFree.getAttribute('href'));
+
+        fireEvent.click(cardStartFree);
+
+        expect(await screen.findByText('Sign-up page')).toBeInTheDocument();
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBe('1');
+    });
+
+    it('comes up after the fallback time for a visitor who never draws', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true });
+        renderDemo();
+        await screen.findByTestId('viewport');
+
+        act(() => vi.advanceTimersByTime(VALUE_CARD_FALLBACK_MS - 1_000));
+        expect(card()).not.toBeInTheDocument();
+
+        act(() => vi.advanceTimersByTime(1_000));
+        expect(card()).toBeInTheDocument();
+    });
+
+    it('waits for the mark count, not the clock, once the visitor has started drawing', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true });
+        renderDemo();
+        await screen.findByTestId('viewport');
+        await draw(1);
+
+        act(() => vi.advanceTimersByTime(VALUE_CARD_FALLBACK_MS * 2));
+        expect(card()).not.toBeInTheDocument();
+
+        await draw(VALUE_CARD_AFTER_MARKS - 1, 'more');
+        await waitFor(() => expect(card()).toBeInTheDocument());
+    });
+
+    it.each([
+        [false, 'animates'],
+        [true, 'is still'],
+    ])('reduced motion %s: the illustration %s', async (reducedMotion) => {
+        const { restore } = stubAnimate({ reducedMotion });
+        try {
+            const shown = await showCard();
+            const animated = shown.querySelectorAll('.demo-value-anim');
+            if (reducedMotion) {
+                expect(animated).toHaveLength(0);
+                expect(shown.querySelector('[class*="demo-value-anim"]')).toBeNull();
+            } else {
+                // Two strokes' reveals and their two cursors.
+                expect(animated).toHaveLength(4);
+            }
+            // Either way the drawing itself is there, finished.
+            expect(shown.querySelectorAll('[data-part="cursor"]')).toHaveLength(2);
+        } finally {
+            restore();
+        }
+    });
+
+    it('never shows over a failed wipe, and comes up once Try again has worked', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true });
+        await seedInk();
+        refuseDeletes();
+        renderDemo();
+        expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+
+        act(() => vi.advanceTimersByTime(VALUE_CARD_FALLBACK_MS));
+
+        expect(card()).not.toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+
+        h.gate = null;
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+        expect(await screen.findByTestId('viewport')).toBeInTheDocument();
+        await waitFor(() => expect(card()).toBeInTheDocument());
+    });
+
+    it('never shows over a failed Start over', async () => {
+        const shown = await showCard();
+        expect(shown).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+        refuseDeletes();
+        fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+
+        expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
+        expect(card()).not.toBeInTheDocument();
     });
 });

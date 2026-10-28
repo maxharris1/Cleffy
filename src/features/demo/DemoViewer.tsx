@@ -1,8 +1,15 @@
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 
 import { DEMO_DOC_ID, DEMO_TITLE } from '@/features/demo/demoScore';
-import { readKeepMarkings, startDemoSession, writeKeepMarkings } from '@/features/demo/demoSession';
+import {
+    readKeepMarkings,
+    readValueCardDismissed,
+    startDemoSession,
+    writeKeepMarkings,
+    writeValueCardDismissed,
+} from '@/features/demo/demoSession';
+import { DemoValueCard, VALUE_CARD_AFTER_MARKS, VALUE_CARD_FALLBACK_MS } from '@/features/demo/DemoValueCard';
 import { purgeLocalDocument } from '@/features/library/documentsService';
 import { InkSaveFailedNotice } from '@/features/viewer/InkSaveFailedNotice';
 import { LocalViewerFrame } from '@/features/viewer/LocalViewerFrame';
@@ -99,6 +106,9 @@ type StorageRefused = 'keep' | 'session';
 /** The header's small controls are 36px tall: an invisible ring takes them to 44px on touch. */
 const HIT_Y = 'pointer-coarse:hit-44-y';
 
+/** Where Start free goes, from the header and from the value card alike. */
+const SIGN_UP_TO = '/register';
+
 const WIPE_FAILED_BODY: Record<WipeFailure, string> = {
     remains: 'Your markings are still saved in this browser. Try again to start on a blank score.',
     unknown: 'This browser isn’t letting the demo use its storage right now. Try again, or come back in a minute.',
@@ -135,6 +145,17 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
     /** The current store has hydrated: the hint waits for it, so kept ink never flashes it up. */
     const [hydratedStore, setHydratedStore] = useState<AnnotationStore | null>(null);
     const confirmId = useId();
+    /** The value card has earned its moment (marks made, or time spent); it shows once nothing else needs the screen. */
+    const [valueCardDue, setValueCardDue] = useState(false);
+    const [valueCardDismissed, setValueCardDismissed] = useState(readValueCardDismissed);
+    /**
+     * Ids of the marks made on this visit, across Start over's remounts: a
+     * set, so an undo and redo of the same stroke counts once. Only marks
+     * created since the demo opened count, so ink kept from an earlier
+     * session (or an erased mark that undo brings back) does not.
+     */
+    const newMarks = useRef(new Set<string>());
+    const [openedAt] = useState(Date.now);
 
     // Most ad traffic is a phone with no stylus. With finger drawing off (the
     // app's default) a first swipe pans, and the demo looks broken. On while
@@ -235,6 +256,49 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
         };
     }, [annotationStore, hintHidden]);
 
+    // The value card comes up after the visitor's first few marks: they have
+    // found the pen works, so now is when "and it does this with your own
+    // scores" lands. Marks are told apart by when they were made, not by a
+    // snapshot of what the store held: a snapshot taken as hydration settles
+    // could swallow a stroke committed in the same moment.
+    useEffect(() => {
+        if (!annotationStore || valueCardDue || valueCardDismissed) {
+            return;
+        }
+        const count = () => {
+            for (const annotation of annotationStore.liveAnnotations()) {
+                if (Date.parse(annotation.createdAt) >= openedAt) {
+                    newMarks.current.add(annotation.id);
+                }
+            }
+            if (newMarks.current.size >= VALUE_CARD_AFTER_MARKS) {
+                setValueCardDue(true);
+            }
+        };
+        count();
+        return annotationStore.subscribe(count);
+    }, [annotationStore, valueCardDue, valueCardDismissed, openedAt]);
+
+    // A visitor who never draws still hears what Cleffy is, after a while
+    // on the page. One who has started drawing gets it at the mark count
+    // instead, rather than mid-phrase.
+    useEffect(() => {
+        if (valueCardDue || valueCardDismissed) {
+            return;
+        }
+        const timer = setTimeout(() => {
+            if (newMarks.current.size === 0) {
+                setValueCardDue(true);
+            }
+        }, VALUE_CARD_FALLBACK_MS);
+        return () => clearTimeout(timer);
+    }, [valueCardDue, valueCardDismissed]);
+
+    const dismissValueCard = useCallback(() => {
+        setValueCardDismissed(true);
+        writeValueCardDismissed();
+    }, []);
+
     const startOver = () => {
         setConfirmingClear(false);
         setAnnotationStore(null);
@@ -273,75 +337,85 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
         annotationStore !== null &&
         hydratedStore === annotationStore;
 
+    // Never over a failed wipe, a clear in progress or the Start over
+    // question (which owns Escape while it asks): it waits, and comes back.
+    const showValueCard =
+        valueCardDue && !valueCardDismissed && phase === 'ready' && wipeFailed === null && !confirmingClear;
+
     return (
-        <LocalViewerFrame
-            docId={DEMO_DOC_ID}
-            bytes={bytes}
-            onStoreReady={onStoreReady}
-            viewportKey={viewportKey}
-            showViewport={phase === 'ready'}
-            placeholder={
-                <div className="flex h-full items-center justify-center p-8">
-                    {wipeFailed ? (
-                        <EmptyState title="Couldn’t clear your markings" body={WIPE_FAILED_BODY[wipeFailed]}>
-                            {/* Secondary: Start free in the header stays the one primary. */}
-                            <Button variant="secondary" onClick={retryWipe}>
-                                Try again
-                            </Button>
-                        </EmptyState>
-                    ) : (
-                        <LoadingText>{phase === 'clearing' ? 'Clearing your markings…' : 'Loading demo…'}</LoadingText>
-                    )}
-                </div>
-            }
-            header={
-                <ViewerHeader backTo="/" backLabel="Back to home" title={DEMO_TITLE}>
-                    <Badge tone="accent">Demo</Badge>
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        className={HIT_Y}
-                        disabled={phase !== 'ready'}
-                        aria-expanded={confirmingClear}
-                        aria-controls={confirmingClear ? confirmId : undefined}
-                        onClick={() => setConfirmingClear(true)}
-                    >
-                        Start over
-                    </Button>
-                    <KeepToggle keep={keep} help={keepHelp} onToggle={toggleKeep} />
-                    <DemoMenu keep={keep} help={keepHelp} onToggleKeep={toggleKeep} />
-                    {/* The one primary: everything else in the demo is ghost or subtle. */}
-                    <Link to="/register" className={buttonClassName('primary', 'sm', `ml-auto lg:ml-0 ${HIT_Y}`)}>
-                        Start free
-                    </Link>
-                </ViewerHeader>
-            }
-            notices={
-                <>
-                    {confirmingClear ? (
-                        <ConfirmClear id={confirmId} onClear={startOver} onCancel={cancelClear} />
-                    ) : null}
-                    {keepRefusedNotice && storageRefused ? (
-                        <ViewerNotice overlay className="flex-nowrap">
-                            <p className="min-w-0 flex-1 leading-snug">{STORAGE_REFUSED_HELP[storageRefused]}</p>
-                            <CloseButton
-                                label="Dismiss"
-                                iconSize={16}
-                                className="size-7.5 text-amber-900 hover:bg-amber-100"
-                                onClick={() => setKeepRefusedNotice(false)}
-                            />
-                        </ViewerNotice>
-                    ) : null}
-                    {/* No Export here: the demo has no export menu to open, and the
+        <>
+            <LocalViewerFrame
+                docId={DEMO_DOC_ID}
+                bytes={bytes}
+                onStoreReady={onStoreReady}
+                viewportKey={viewportKey}
+                showViewport={phase === 'ready'}
+                placeholder={
+                    <div className="flex h-full items-center justify-center p-8">
+                        {wipeFailed ? (
+                            <EmptyState title="Couldn’t clear your markings" body={WIPE_FAILED_BODY[wipeFailed]}>
+                                {/* Secondary: Start free in the header stays the one primary. */}
+                                <Button variant="secondary" onClick={retryWipe}>
+                                    Try again
+                                </Button>
+                            </EmptyState>
+                        ) : (
+                            <LoadingText>
+                                {phase === 'clearing' ? 'Clearing your markings…' : 'Loading demo…'}
+                            </LoadingText>
+                        )}
+                    </div>
+                }
+                header={
+                    <ViewerHeader backTo="/" backLabel="Back to home" title={DEMO_TITLE}>
+                        <Badge tone="accent">Demo</Badge>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className={HIT_Y}
+                            disabled={phase !== 'ready'}
+                            aria-expanded={confirmingClear}
+                            aria-controls={confirmingClear ? confirmId : undefined}
+                            onClick={() => setConfirmingClear(true)}
+                        >
+                            Start over
+                        </Button>
+                        <KeepToggle keep={keep} help={keepHelp} onToggle={toggleKeep} />
+                        <DemoMenu keep={keep} help={keepHelp} onToggleKeep={toggleKeep} />
+                        {/* The one primary: everything else in the demo is ghost or subtle. */}
+                        <Link to={SIGN_UP_TO} className={buttonClassName('primary', 'sm', `ml-auto lg:ml-0 ${HIT_Y}`)}>
+                            Start free
+                        </Link>
+                    </ViewerHeader>
+                }
+                notices={
+                    <>
+                        {confirmingClear ? (
+                            <ConfirmClear id={confirmId} onClear={startOver} onCancel={cancelClear} />
+                        ) : null}
+                        {keepRefusedNotice && storageRefused ? (
+                            <ViewerNotice overlay className="flex-nowrap">
+                                <p className="min-w-0 flex-1 leading-snug">{STORAGE_REFUSED_HELP[storageRefused]}</p>
+                                <CloseButton
+                                    label="Dismiss"
+                                    iconSize={16}
+                                    className="size-7.5 text-amber-900 hover:bg-amber-100"
+                                    onClick={() => setKeepRefusedNotice(false)}
+                                />
+                            </ViewerNotice>
+                        ) : null}
+                        {/* No Export here: the demo has no export menu to open, and the
                         notice leaves its Export (and Discard) out without one, and
                         words its copy to match. */}
-                    <InkSaveFailedNotice store={annotationStore} />
-                </>
-            }
-            // Not a notice: a notice is fitted around, and the score would jump
-            // up under the visitor's first stroke as the hint went.
-            overlay={showHint ? <DrawHint onDismiss={() => setHintHidden(true)} /> : null}
-        />
+                        <InkSaveFailedNotice store={annotationStore} />
+                    </>
+                }
+                // Not a notice: a notice is fitted around, and the score would jump
+                // up under the visitor's first stroke as the hint went.
+                overlay={showHint ? <DrawHint onDismiss={() => setHintHidden(true)} /> : null}
+            />
+            {showValueCard ? <DemoValueCard signUpTo={SIGN_UP_TO} onDismiss={dismissValueCard} /> : null}
+        </>
     );
 };
 

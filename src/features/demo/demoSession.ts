@@ -23,6 +23,31 @@ export const DEMO_SESSION_KEY = 'cleffy:demo-session';
 /** localStorage: '1' when the visitor chose to keep their markings on this device. */
 export const DEMO_KEEP_KEY = 'cleffy:demo-keep';
 
+/** sessionStorage: '1' once the visitor has put away the "what Cleffy does" card in this browser session. */
+export const DEMO_VALUE_CARD_KEY = 'cleffy:demo-value-card';
+
+/**
+ * Whether the value card was put away earlier in this session (a reload, or
+ * a return to /try). Unreadable storage reads as no: the card is a nudge, so
+ * the worst a refusing browser costs is seeing it once more.
+ */
+export const readValueCardDismissed = (): boolean => {
+    try {
+        return window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY) === '1';
+    } catch {
+        return false;
+    }
+};
+
+/** Remembers the card was put away. Quietly does nothing when storage refuses: the page still hides it. */
+export const writeValueCardDismissed = (): void => {
+    try {
+        window.sessionStorage.setItem(DEMO_VALUE_CARD_KEY, '1');
+    } catch {
+        // Private mode or site data blocked: the card stays away for this page load only.
+    }
+};
+
 /** Whether the visitor asked to keep their markings. Unreadable storage reads as no. */
 export const readKeepMarkings = (): boolean => {
     try {

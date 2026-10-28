@@ -1,0 +1,102 @@
+/*
+ * The value card (see DemoValueCard.tsx). Here, not in index.css or as
+ * one-off Tailwind utilities, so it ships in the demo's chunk and nothing in
+ * the app shell's stylesheet grows for it.
+ */
+
+/* The card's dock: clear of the home indicator and the notch's sides. */
+.demo-value-dock {
+    padding: 0 max(0.5rem, var(--safe-right)) calc(0.5rem + var(--safe-bottom)) max(0.5rem, var(--safe-left));
+}
+
+@media (min-width: 40rem) {
+    .demo-value-dock {
+        padding-bottom: calc(1rem + var(--safe-bottom));
+    }
+}
+
+/* The ✕ is 32px to look at and 44px to hit, on any pointer: an invisible
+   ring, as hit-44 draws on touch, so the card's layout does not move. */
+.demo-value-close {
+    position: relative;
+}
+
+.demo-value-close::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    translate: -50% -50%;
+}
+
+/*
+ * The illustration: two strokes drawn at once, each by its own cursor.
+ *
+ * Only transform and opacity move. A stroke is revealed by its clip rect
+ * scaling out from the left; its cursor travels the same distance on the same
+ * curve and timing, so it stays at the stroke's leading edge. Every element's
+ * own state is the finished drawing: the keyframes only say where each pass
+ * starts, so animation: none (reduced motion) leaves it drawn and still.
+ */
+.demo-value-anim {
+    animation-duration: 3.2s;
+    animation-timing-function: var(--ease-out);
+    animation-iteration-count: 3;
+    animation-fill-mode: both;
+}
+
+/* The second hand starts a beat later: two people, not one gesture. */
+.demo-value-anim-b {
+    animation-delay: 0.25s;
+}
+
+.demo-value-anim[data-part='reveal'] {
+    animation-name: demo-value-reveal;
+    transform-box: fill-box;
+    transform-origin: left center;
+}
+
+.demo-value-anim[data-part='cursor'] {
+    animation-name: demo-value-cursor;
+}
+
+.demo-value-anim-a[data-part='cursor'] {
+    --demo-value-from: -36px;
+}
+
+.demo-value-anim-b[data-part='cursor'] {
+    --demo-value-from: -40px;
+}
+
+@keyframes demo-value-reveal {
+    0% {
+        transform: scaleX(0);
+    }
+    45%,
+    100% {
+        transform: scaleX(1);
+    }
+}
+
+@keyframes demo-value-cursor {
+    0% {
+        opacity: 0;
+        transform: translateX(var(--demo-value-from));
+    }
+    8% {
+        opacity: 1;
+    }
+    45%,
+    100% {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .demo-value-anim {
+        animation: none;
+    }
+}

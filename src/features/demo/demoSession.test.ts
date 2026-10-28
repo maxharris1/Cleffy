@@ -3,10 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     DEMO_KEEP_KEY,
     DEMO_SESSION_KEY,
+    DEMO_VALUE_CARD_KEY,
     readKeepMarkings,
+    readValueCardDismissed,
     shouldWipeDemo,
     startDemoSession,
     writeKeepMarkings,
+    writeValueCardDismissed,
 } from '@/features/demo/demoSession';
 
 /** Safari in private mode, or site data blocked: the storage getter itself throws. */
@@ -158,5 +161,36 @@ describe('keep my markings', () => {
         // Off is what an unreadable store means anyway, so that choice holds.
         expect(writeKeepMarkings(false)).toBe(true);
         expect(readKeepMarkings()).toBe(false);
+    });
+});
+
+describe('the value card’s dismissal', () => {
+    it('is remembered for the rest of the browser session, and only that', () => {
+        expect(readValueCardDismissed()).toBe(false);
+
+        writeValueCardDismissed();
+
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBe('1');
+        expect(readValueCardDismissed()).toBe(true);
+        expect(window.localStorage.length).toBe(0);
+        // A new browser session starts with an empty sessionStorage.
+        window.sessionStorage.clear();
+        expect(readValueCardDismissed()).toBe(false);
+    });
+
+    it('fails quietly when sessionStorage is blocked: reads as not dismissed, and the write does not throw', () => {
+        blockStorage('sessionStorage');
+
+        expect(readValueCardDismissed()).toBe(false);
+        expect(() => writeValueCardDismissed()).not.toThrow();
+    });
+
+    it('fails quietly when the write is refused (storage full)', () => {
+        vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+            throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+        });
+
+        expect(() => writeValueCardDismissed()).not.toThrow();
+        expect(readValueCardDismissed()).toBe(false);
     });
 });
