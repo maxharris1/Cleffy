@@ -25,6 +25,10 @@ Notes for agents:
 - Before pushing, run what CI's `checks` job runs: `npm run lint:check`, `npm run typecheck`, `npm run test`, `npm run build`. CI also runs `supabase-local` (local stack, SQL proofs), `omr-service`, `supabase-drift` and `edge-functions-deno`.
 - UI changes: check them with the repo's `ui-check` skill (`scripts/ui/uifuzz.mjs`, desktop, iPad and phone viewports). Backend changes: read `supabase-ops` first.
 - Risky areas: migrations, RLS and Edge Functions under `supabase/`, and billing (Stripe). Never apply migrations or change config on a hosted Supabase project from an agent session; CI runs the proofs on a local stack.
+- Codex runs locally, not in a cloud env: `codex exec -m gpt-6.1-sol -c model_reasoning_effort="high"`. There is no Codex env for Cleffy.
+- Privacy: Cleffy's privacy policy forbids tracking pixels. Never add analytics pixels or third-party trackers.
+- Marketing surfaces (landing, demo, ads landing pages): public-domain repertoire only. Never surface play-along, the fingering tool, AI-generated marks or the Founding offer. The primary CTA is always "Start free".
+- Approver: Max only. He merges every PR; there is no co-reviewer.
 
 ### pstack (vendored, MIT — see .claude/vendor/pstack/)
 
