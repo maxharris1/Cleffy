@@ -302,6 +302,22 @@ describe('InkSaveFailedNotice', () => {
         expect(screen.queryByRole('button', { name: 'Export' })).not.toBeInTheDocument();
     });
 
+    it('with no Export in this viewer: an overtaken change names Export in neither the copy nor the Dismiss title', async () => {
+        const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
+        await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });
+        const store = await mountStore(db);
+        const full = vi.spyOn(db.ops, 'bulkAdd').mockRejectedValue(quotaError());
+        await store.update('a1', { color: '#ff0000' }).catch(() => undefined);
+        full.mockRestore();
+        await db.annotations.put({ ...stroke('a1'), seq: 9, color: '#0000ff', pending: 0 });
+        await store.retryFailedPersist();
+        const { container } = render(<InkSaveFailedNotice store={store} />);
+
+        expect(screen.getByText('Some changes were overtaken elsewhere.')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Dismiss' })).toHaveAttribute('title', 'Dismiss');
+        expect(container.textContent).not.toMatch(/export/i);
+    });
+
     it('when the overtaken change was an erase: says so, and offers Export too (round 3, item 1)', async () => {
         const db = new ScribblerDb(`notice-${crypto.randomUUID()}`);
         await db.annotations.put({ ...stroke('a1'), seq: 5, pending: 0 });

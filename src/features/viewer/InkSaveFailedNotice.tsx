@@ -161,11 +161,12 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
         setRetryFailed(!saved);
     };
 
+    const canExport = onExport !== undefined;
     const { short, long } = copy(
         state,
         retryFailed,
         state === 'conflicts' ? exportableConflicts > 0 : exportable,
-        onExport !== undefined,
+        canExport,
     );
 
     return (
@@ -198,7 +199,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
                         variant="ghost"
                         className="shrink-0 px-2"
                         aria-label="Dismiss"
-                        title="Dismiss: hides this, and Export still has your versions"
+                        title={canExport ? 'Dismiss: hides this, and Export still has your versions' : 'Dismiss'}
                         onClick={() => store.hideConflictNotice()}
                     >
                         <CloseIcon size={16} className="shrink-0" />

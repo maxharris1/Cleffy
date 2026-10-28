@@ -41,7 +41,7 @@ describe('startDemoSession', () => {
             order.push(`wipe:${window.sessionStorage.getItem(DEMO_SESSION_KEY)}`);
         });
 
-        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true });
+        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true, remembered: true });
 
         expect(wipe).toHaveBeenCalledTimes(1);
         expect(order).toEqual(['wipe:null']);
@@ -52,7 +52,7 @@ describe('startDemoSession', () => {
         window.sessionStorage.setItem(DEMO_SESSION_KEY, '1');
         const wipe = vi.fn(async () => undefined);
 
-        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: false });
+        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: false, remembered: true });
 
         expect(wipe).not.toHaveBeenCalled();
         expect(window.sessionStorage.getItem(DEMO_SESSION_KEY)).toBe('1');
@@ -62,7 +62,7 @@ describe('startDemoSession', () => {
         window.localStorage.setItem(DEMO_KEEP_KEY, '1');
         const wipe = vi.fn(async () => undefined);
 
-        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: false });
+        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: false, remembered: true });
 
         expect(wipe).not.toHaveBeenCalled();
         expect(window.sessionStorage.getItem(DEMO_SESSION_KEY)).toBe('1');
@@ -72,7 +72,7 @@ describe('startDemoSession', () => {
         window.localStorage.setItem(DEMO_KEEP_KEY, '0');
         const wipe = vi.fn(async () => undefined);
 
-        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true });
+        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true, remembered: true });
 
         expect(wipe).toHaveBeenCalledTimes(1);
     });
@@ -81,8 +81,9 @@ describe('startDemoSession', () => {
         blockStorage('sessionStorage');
         const wipe = vi.fn(async () => undefined);
 
-        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true });
-        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true });
+        // remembered: false, so the viewer can say a reload will clear the ink.
+        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true, remembered: false });
+        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true, remembered: false });
 
         expect(wipe).toHaveBeenCalledTimes(2);
     });
@@ -93,7 +94,7 @@ describe('startDemoSession', () => {
         const wipe = vi.fn(async () => undefined);
 
         expect(readKeepMarkings()).toBe(false);
-        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true });
+        await expect(startDemoSession(wipe)).resolves.toEqual({ wiped: true, remembered: true });
 
         expect(wipe).toHaveBeenCalledTimes(1);
     });
@@ -142,17 +143,20 @@ describe('keep my markings', () => {
         expect(writeKeepMarkings(false)).toBe(true);
     });
 
-    it('reports a refused write, without throwing, when localStorage is blocked', () => {
-        blockStorage('localStorage');
+    it('reports a refused write without throwing, and keep stays off (storage full)', () => {
+        vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+            throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+        });
+
         expect(writeKeepMarkings(true)).toBe(false);
         expect(readKeepMarkings()).toBe(false);
     });
 
-    it('reports a write that ran out of quota', () => {
-        vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-            throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
-        });
+    it('reports a refused write without throwing when storage is blocked', () => {
+        blockStorage('localStorage');
         expect(writeKeepMarkings(true)).toBe(false);
+        // Off is what an unreadable store means anyway, so that choice holds.
+        expect(writeKeepMarkings(false)).toBe(true);
         expect(readKeepMarkings()).toBe(false);
     });
 });
