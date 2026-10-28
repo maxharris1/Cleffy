@@ -20,16 +20,26 @@ export const VALUE_CARD_FALLBACK_MS = 25_000;
 /** The card's small controls are 36px tall: an invisible ring takes them to 44px on touch. */
 const HIT_Y = 'pointer-coarse:hit-44-y';
 
+/** Where a key is typed or picked, not pressed: an editor that owns its own Escape. */
+const EDITOR = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+
+/** Open popups, which close on Escape themselves. */
+const POPUP = '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]';
+
 /**
- * Keys aimed at another control or popup belong to it: Escape there closes
- * a menu or the toolbar's style popover, not this card as well.
+ * Escape belongs to whatever else is open and handles it: an editor or popup
+ * it was pressed in, or any control whose popup is open (aria-expanded: a
+ * menu, or the toolbar's style popover, which leaves focus on its button).
+ * Those close first; the card waits for the next Escape. An ordinary button
+ * or link with focus has nothing to close, so Escape there is the card's.
  */
-const keyTargetsOtherControl = (target: EventTarget | null, card: HTMLElement | null): boolean =>
-    target instanceof Element &&
-    !card?.contains(target) &&
-    target.closest(
-        'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="alertdialog"], [role="menu"]',
-    ) !== null;
+const escapeBelongsElsewhere = (target: EventTarget | null, card: HTMLElement | null): boolean => {
+    const outside = (element: Element) => !card?.contains(element);
+    if (target instanceof Element && outside(target) && target.closest(`${EDITOR}, ${POPUP}`) !== null) {
+        return true;
+    }
+    return Array.from(document.querySelectorAll('[aria-expanded="true"]')).some(outside);
+};
 
 /**
  * Two hands drawing on one staff at once, the third point made visible: a
@@ -46,7 +56,7 @@ const LiveInkIllustration = ({ animate }: { animate: boolean }) => {
     const clipB = useId();
     const anim = (which: 'a' | 'b') => (animate ? `demo-value-anim demo-value-anim-${which}` : undefined);
     return (
-        <svg viewBox="0 0 96 48" width="96" height="48" aria-hidden="true" className="shrink-0">
+        <svg viewBox="0 0 96 48" width="96" height="48" aria-hidden="true" className="demo-value-art shrink-0">
             <defs>
                 <clipPath id={clipA}>
                     <rect className={anim('a')} data-part="reveal" x="4" y="30" width="38" height="18" />
@@ -91,11 +101,12 @@ const LiveInkIllustration = ({ animate }: { animate: boolean }) => {
 
 /**
  * What Cleffy is, for a visitor who arrived from an ad and has just found the
- * pen works. Non-modal and anchored to the bottom (over the toolbar on a
- * phone, centred below the score on wider screens), so the music above stays
- * in view. It never takes focus: it comes up between strokes, and the next
- * stroke should land on the score, not on this card. Escape, ✕ and Keep
- * playing put it away; Start free goes where the header's does.
+ * pen works. Non-modal and anchored to the bottom (just above the toolbar on
+ * a phone, so the tools stay in reach; centred below the score on wider
+ * screens), so the music above stays in view. It never takes focus: it comes
+ * up between strokes, and the next stroke should land on the score, not on
+ * this card. Escape, ✕ and Keep playing put it away; Start free goes where
+ * the header's does.
  */
 export const DemoValueCard = ({ signUpTo, onDismiss }: { signUpTo: string; onDismiss: () => void }) => {
     const titleId = useId();
@@ -108,7 +119,7 @@ export const DemoValueCard = ({ signUpTo, onDismiss }: { signUpTo: string; onDis
             if (
                 event.key !== 'Escape' ||
                 event.defaultPrevented ||
-                keyTargetsOtherControl(event.target, cardRef.current)
+                escapeBelongsElsewhere(event.target, cardRef.current)
             ) {
                 return;
             }
@@ -128,7 +139,7 @@ export const DemoValueCard = ({ signUpTo, onDismiss }: { signUpTo: string; onDis
                 data-ui-overlay
                 // Opaque, unlike the hint's frosted line: a paragraph of text over
                 // engraving, or over the toolbar's icons, does not read.
-                className="ui-sheet-pop pointer-events-auto w-full max-w-md rounded-2xl border border-stone-200 bg-white p-4 text-stone-700 shadow-lg"
+                className="demo-value-card ui-sheet-pop pointer-events-auto w-full max-w-md rounded-2xl border border-stone-200 bg-white text-stone-700 shadow-lg"
             >
                 <div className="flex items-start gap-3">
                     <LiveInkIllustration animate={animate} />

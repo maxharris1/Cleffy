@@ -1,5 +1,9 @@
+import { readFileSync } from 'node:fs';
+
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import Dexie from 'dexie';
+import { StrictMode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -52,18 +56,20 @@ vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
 }));
 
 vi.mock('@/features/viewer/PdfViewport', async () => {
-    const { useEffect, useState } = await import('react');
+    const { useEffect, useLayoutEffect, useState } = await import('react');
     const { AnnotationStore: Store } = await import('@/sync/annotationStore');
     return {
         PdfViewport: ({ docId, onStoreReady }: { docId: string; onStoreReady: (store: AnnotationStore) => void }) => {
             // As the real viewport does: a store per mount, hydrating from the mirror.
-            // Registered as it is made, not in the effect: a test that finds the
-            // viewport in the DOM must never get the store before it.
-            const [store] = useState(() => {
-                const made = new Store(h.db!, docId);
-                h.stores.push(made);
-                return made;
-            });
+            // Registered once committed, in a layout effect: before the viewport is
+            // in the DOM for a test to find, and never a store StrictMode made and
+            // threw away (its second call of the initializer).
+            const [store] = useState(() => new Store(h.db!, docId));
+            useLayoutEffect(() => {
+                if (!h.stores.includes(store)) {
+                    h.stores.push(store);
+                }
+            }, [store]);
             useEffect(() => {
                 h.events.push('mount');
                 onStoreReady(store);
@@ -637,6 +643,124 @@ describe('DemoViewer, the value card', () => {
 
         await draw(VALUE_CARD_AFTER_MARKS - 1, 'more');
         await waitFor(() => expect(card()).toBeInTheDocument());
+    });
+
+    it('counts a first stroke whose write is still pending at the deadline: the clock does not bring the card', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true });
+        renderDemo();
+        await screen.findByTestId('viewport');
+        const store = latestStore();
+        await act(() => store.load());
+        // Every IndexedDB transaction waits until the test lets it go: the
+        // stroke is drawn (live at pointer-up), its write is not done.
+        const writes = deferred();
+        const db = h.db!;
+        const transaction = db.transaction.bind(db) as (...args: unknown[]) => Promise<unknown>;
+        vi.spyOn(db, 'transaction').mockImplementation(((...args: unknown[]) =>
+            writes.promise.then(() => transaction(...args))) as unknown as ScribblerDb['transaction']);
+        const now = new Date().toISOString();
+        let saved!: Promise<void>;
+        act(() => {
+            saved = store.create({ ...stroke('pending-first'), createdAt: now, updatedAt: now });
+        });
+        expect(store.liveAnnotations().map((a) => a.id)).toEqual(['pending-first']);
+
+        act(() => vi.advanceTimersByTime(VALUE_CARD_FALLBACK_MS));
+
+        expect(card()).not.toBeInTheDocument();
+
+        writes.resolve();
+        await act(() => saved);
+        expect(card()).not.toBeInTheDocument();
+        // It counts towards the marks instead.
+        await draw(VALUE_CARD_AFTER_MARKS - 1, 'more');
+        await waitFor(() => expect(card()).toBeInTheDocument());
+    });
+
+    it.each([
+        ['Keep my markings', 'button'],
+        ['Start over', 'button'],
+        ['Start free', 'link'],
+    ] as const)(
+        'Escape with focus on the header’s %s %s, which has nothing to close, puts it away',
+        async (name, role) => {
+            await showCard();
+            const control = within(screen.getByRole('navigation', { name: 'Score' })).getByRole(role, { name });
+            control.focus();
+            expect(control).toHaveFocus();
+
+            fireEvent.keyDown(control, { key: 'Escape' });
+
+            expect(card()).not.toBeInTheDocument();
+            expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBe('1');
+        },
+    );
+
+    it('leaves an open menu its Escape, then goes on the next one', async () => {
+        const user = userEvent.setup();
+        await showCard();
+
+        await user.click(screen.getByRole('button', { name: 'Demo options' }));
+        expect(await screen.findByRole('menu')).toBeInTheDocument();
+
+        await user.keyboard('{Escape}');
+
+        await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+        expect(card()).toBeInTheDocument();
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBeNull();
+        // Focus is back on the menu's trigger, closed now: an ordinary button.
+        expect(screen.getByRole('button', { name: 'Demo options' })).toHaveFocus();
+
+        await user.keyboard('{Escape}');
+
+        expect(card()).not.toBeInTheDocument();
+    });
+
+    it('leaves a text field its Escape', async () => {
+        await showCard();
+        const field = document.createElement('textarea');
+        document.body.append(field);
+        try {
+            fireEvent.keyDown(field, { key: 'Escape' });
+            expect(card()).toBeInTheDocument();
+        } finally {
+            field.remove();
+        }
+    });
+
+    it('works under StrictMode, on the store the viewer was handed', async () => {
+        render(
+            <StrictMode>
+                <MemoryRouter>
+                    <DemoViewer bytes={new ArrayBuffer(8)} />
+                </MemoryRouter>
+            </StrictMode>,
+        );
+        await screen.findByTestId('viewport');
+        // StrictMode makes a second store and throws it away: the stub lists only the kept one.
+        expect(h.stores).toHaveLength(1);
+
+        await draw(VALUE_CARD_AFTER_MARKS);
+
+        await waitFor(() => expect(card()).toBeInTheDocument());
+        expect(hint()).not.toBeInTheDocument();
+    });
+
+    it('sits above the phone’s bottom toolbar, by the height the toolbar reports, and clears the toolbar from sm', () => {
+        // jsdom lays nothing out: the browser check (scripts/ui/uifuzz.mjs viewports)
+        // measures the boxes. This holds the rule that puts it there.
+        const css = readFileSync(`${process.cwd()}/src/features/demo/DemoValueCard.css`, 'utf8').replace(/\s+/g, ' ');
+        expect(css).toMatch(
+            /\.demo-value-dock \{ --demo-value-toolbar: var\(--toolbar-bottom-clearance, calc\(0\.75rem \+ 54px \+ var\(--safe-bottom\)\)\);/,
+        );
+        expect(css).toMatch(
+            /padding: 0 max\(0\.5rem, var\(--safe-right\)\) calc\(0\.5rem \+ max\(var\(--demo-value-toolbar\), var\(--safe-bottom\)\)\)/,
+        );
+        expect(css).toMatch(
+            /@media \(min-width: 40rem\) \{ \.demo-value-dock \{ padding-bottom: calc\(1rem \+ var\(--safe-bottom\)\); \} \}/,
+        );
+        // Below 400px wide the drawing gives its room to the words.
+        expect(css).toMatch(/@media \(width < 25rem\) \{ \.demo-value-art \{ display: none; \} \}/);
     });
 
     it.each([

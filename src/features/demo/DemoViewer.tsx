@@ -148,6 +148,8 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
     /** The value card has earned its moment (marks made, or time spent); it shows once nothing else needs the screen. */
     const [valueCardDue, setValueCardDue] = useState(false);
     const [valueCardDismissed, setValueCardDismissed] = useState(readValueCardDismissed);
+    /** The visitor has been on the page VALUE_CARD_FALLBACK_MS: the card is due if they have made no marks. */
+    const [fallbackReached, setFallbackReached] = useState(false);
     /**
      * Ids of the marks made on this visit, across Start over's remounts: a
      * set, so an undo and redo of the same stroke counts once. Only marks
@@ -261,6 +263,14 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
     // scores" lands. Marks are told apart by when they were made, not by a
     // snapshot of what the store held: a snapshot taken as hydration settles
     // could swallow a stroke committed in the same moment.
+    //
+    // A visitor who never draws still hears what Cleffy is, after a while
+    // on the page. One who has started drawing gets it at the mark count
+    // instead, rather than mid-phrase. "Started" is read from the store's
+    // live marks when the time comes, not from the last notification: a
+    // stroke is live at pointer-up, but the store only notifies once its
+    // write has landed, and a write still pending at the deadline must not
+    // look like a visitor who never drew.
     useEffect(() => {
         if (!annotationStore || valueCardDue || valueCardDismissed) {
             return;
@@ -271,28 +281,21 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
                     newMarks.current.add(annotation.id);
                 }
             }
-            if (newMarks.current.size >= VALUE_CARD_AFTER_MARKS) {
+            if (newMarks.current.size >= VALUE_CARD_AFTER_MARKS || (fallbackReached && newMarks.current.size === 0)) {
                 setValueCardDue(true);
             }
         };
         count();
         return annotationStore.subscribe(count);
-    }, [annotationStore, valueCardDue, valueCardDismissed, openedAt]);
+    }, [annotationStore, valueCardDue, valueCardDismissed, fallbackReached, openedAt]);
 
-    // A visitor who never draws still hears what Cleffy is, after a while
-    // on the page. One who has started drawing gets it at the mark count
-    // instead, rather than mid-phrase.
     useEffect(() => {
-        if (valueCardDue || valueCardDismissed) {
+        if (fallbackReached || valueCardDue || valueCardDismissed) {
             return;
         }
-        const timer = setTimeout(() => {
-            if (newMarks.current.size === 0) {
-                setValueCardDue(true);
-            }
-        }, VALUE_CARD_FALLBACK_MS);
+        const timer = setTimeout(() => setFallbackReached(true), VALUE_CARD_FALLBACK_MS);
         return () => clearTimeout(timer);
-    }, [valueCardDue, valueCardDismissed]);
+    }, [fallbackReached, valueCardDue, valueCardDismissed]);
 
     const dismissValueCard = useCallback(() => {
         setValueCardDismissed(true);

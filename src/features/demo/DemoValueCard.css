@@ -4,14 +4,49 @@
  * the app shell's stylesheet grows for it.
  */
 
-/* The card's dock: clear of the home indicator and the notch's sides. */
+/*
+ * The card's dock: clear of the home indicator and the notch's sides. Below
+ * sm the viewer's toolbar is docked at the bottom too (Toolbar.tsx), and the
+ * card sits just above it, so every tool stays in reach while it is up. The
+ * toolbar reports how much of the window's bottom it takes as
+ * --toolbar-bottom-clearance (its bar, its 0.75rem gap and the safe area).
+ * Until it has, its known size stands in: 0.75rem off the bottom, and a bar
+ * of 40px buttons in 6px of padding and a 1px border, 54px in all. From sm
+ * the toolbar is at the top, and the card has the bottom to itself.
+ */
 .demo-value-dock {
-    padding: 0 max(0.5rem, var(--safe-right)) calc(0.5rem + var(--safe-bottom)) max(0.5rem, var(--safe-left));
+    --demo-value-toolbar: var(--toolbar-bottom-clearance, calc(0.75rem + 54px + var(--safe-bottom)));
+    padding: 0 max(0.5rem, var(--safe-right)) calc(0.5rem + max(var(--demo-value-toolbar), var(--safe-bottom)))
+        max(0.5rem, var(--safe-left));
 }
 
 @media (min-width: 40rem) {
     .demo-value-dock {
         padding-bottom: calc(1rem + var(--safe-bottom));
+    }
+}
+
+/* Compact on a phone, so it covers as little of the score as it can: tighter
+   padding and a smaller drawing, and no drawing at all below 400px wide,
+   where the words need the room. */
+.demo-value-card {
+    padding: 1rem;
+}
+
+@media (width < 40rem) {
+    .demo-value-card {
+        padding: 0.75rem;
+    }
+
+    .demo-value-art {
+        width: 72px;
+        height: 36px;
+    }
+}
+
+@media (width < 25rem) {
+    .demo-value-art {
+        display: none;
     }
 }
 
