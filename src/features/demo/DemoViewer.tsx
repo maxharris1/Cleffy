@@ -15,6 +15,7 @@ import { InkSaveFailedNotice } from '@/features/viewer/InkSaveFailedNotice';
 import { LocalViewerFrame } from '@/features/viewer/LocalViewerFrame';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { ViewerNotice } from '@/features/viewer/ViewerNotice';
+import { useToolbarPopupOpen } from '@/features/viewer/toolbar/toolbarPopup';
 import { useViewerStore } from '@/state/store';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
@@ -158,6 +159,7 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
      */
     const newMarks = useRef(new Set<string>());
     const [openedAt] = useState(Date.now);
+    const toolbarPopupOpen = useToolbarPopupOpen();
 
     // Most ad traffic is a phone with no stylus. With finger drawing off (the
     // app's default) a first swipe pans, and the demo looks broken. On while
@@ -340,10 +342,17 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
         annotationStore !== null &&
         hydratedStore === annotationStore;
 
-    // Never over a failed wipe, a clear in progress or the Start over
-    // question (which owns Escape while it asks): it waits, and comes back.
+    // Never over a failed wipe, a clear in progress, the Start over question
+    // (which owns Escape while it asks) or an open toolbar popup (on a phone
+    // the colour and size popover opens into the card's spot): it waits, and
+    // comes back. Stepping aside is not a dismissal.
     const showValueCard =
-        valueCardDue && !valueCardDismissed && phase === 'ready' && wipeFailed === null && !confirmingClear;
+        valueCardDue &&
+        !valueCardDismissed &&
+        phase === 'ready' &&
+        wipeFailed === null &&
+        !confirmingClear &&
+        !toolbarPopupOpen;
 
     return (
         <>

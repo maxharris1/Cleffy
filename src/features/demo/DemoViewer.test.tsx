@@ -31,6 +31,8 @@ const h = vi.hoisted(() => ({
     stores: [] as AnnotationStore[],
     /** What the next purge does once called: wait on this, then really purge (or throw). */
     gate: null as Promise<void> | null,
+    /** The stub viewport renders the real Toolbar on its store, as PdfViewport does. */
+    withToolbar: false,
 }));
 
 vi.mock('@/sync/db', async (importOriginal) => ({
@@ -58,6 +60,7 @@ vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
 vi.mock('@/features/viewer/PdfViewport', async () => {
     const { useEffect, useLayoutEffect, useState } = await import('react');
     const { AnnotationStore: Store } = await import('@/sync/annotationStore');
+    const { Toolbar } = await import('@/features/viewer/toolbar/Toolbar');
     return {
         PdfViewport: ({ docId, onStoreReady }: { docId: string; onStoreReady: (store: AnnotationStore) => void }) => {
             // As the real viewport does: a store per mount, hydrating from the mirror.
@@ -77,7 +80,7 @@ vi.mock('@/features/viewer/PdfViewport', async () => {
                     h.events.push('unmount');
                 };
             }, [store, onStoreReady]);
-            return <div data-testid="viewport" />;
+            return <div data-testid="viewport">{h.withToolbar ? <Toolbar store={store} /> : null}</div>;
         },
     };
 });
@@ -141,6 +144,7 @@ beforeEach(() => {
     h.events = [];
     h.stores = [];
     h.gate = null;
+    h.withToolbar = false;
     window.sessionStorage.clear();
     window.localStorage.clear();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -714,6 +718,45 @@ describe('DemoViewer, the value card', () => {
         await user.keyboard('{Escape}');
 
         expect(card()).not.toBeInTheDocument();
+    });
+
+    it('steps aside while a toolbar popup is open, and comes back when it closes, without being dismissed', async () => {
+        const user = userEvent.setup();
+        h.withToolbar = true;
+        useViewerStore.setState({ tool: 'pen', color: '#1f2937', widthKey: 'medium' });
+        await showCard();
+        const styleButton = screen.getByRole('button', { name: 'Pen colour and size' });
+
+        // On a phone the popover opens upward into the card's spot.
+        await user.click(styleButton);
+        const popup = screen.getByRole('group', { name: 'Pen colour and size' });
+        expect(card()).not.toBeInTheDocument();
+        // Belt and braces: the viewer frame lifts over floating UI while a popup is open.
+        expect(popup).toHaveAttribute('data-toolbar-popup');
+        expect(popup.closest('[class~="has-[[data-toolbar-popup]]:z-50"]')).not.toBeNull();
+
+        // Picking a colour and a size keeps the popup, and so keeps the card away.
+        await user.click(within(popup).getByRole('button', { name: 'Color #dc2626' }));
+        await user.click(within(popup).getByRole('button', { name: 'Pen size Thick' }));
+        expect(useViewerStore.getState()).toMatchObject({ color: '#dc2626', widthKey: 'thick' });
+        expect(card()).not.toBeInTheDocument();
+
+        // Escape closes the popup, not the card.
+        await user.keyboard('{Escape}');
+        expect(screen.queryByRole('group', { name: 'Pen colour and size' })).not.toBeInTheDocument();
+        expect(card()).toBeInTheDocument();
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBeNull();
+
+        // So does the style button, and a tap on the score outside it.
+        await user.click(styleButton);
+        expect(card()).not.toBeInTheDocument();
+        await user.click(styleButton);
+        expect(card()).toBeInTheDocument();
+        await user.click(styleButton);
+        expect(card()).not.toBeInTheDocument();
+        fireEvent.pointerDown(screen.getByTestId('viewport'));
+        await waitFor(() => expect(card()).toBeInTheDocument());
+        expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBeNull();
     });
 
     it('leaves a text field its Escape', async () => {

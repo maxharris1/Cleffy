@@ -128,6 +128,27 @@ describe('Toolbar', () => {
         expect(screen.queryByRole('button', { name: /colour|size/i })).not.toBeInTheDocument();
     });
 
+    it('says while its popup is open, so floating UI (the demo’s value card) can step aside', async () => {
+        const { unmount } = await renderToolbar();
+        // The same fresh module copy renderToolbar loaded the Toolbar against.
+        const { isToolbarPopupOpen } = await import('@/features/viewer/toolbar/toolbarPopup');
+        const user = userEvent.setup();
+        expect(isToolbarPopupOpen()).toBe(false);
+
+        await user.click(screen.getByRole('button', { name: 'Pen colour and size' }));
+        expect(isToolbarPopupOpen()).toBe(true);
+        expect(screen.getByRole('group', { name: 'Pen colour and size' })).toHaveAttribute('data-toolbar-popup');
+
+        await user.keyboard('{Escape}');
+        expect(isToolbarPopupOpen()).toBe(false);
+
+        // A toolbar that goes with its popup open does not leave it counted.
+        await user.click(screen.getByRole('button', { name: 'Pen colour and size' }));
+        expect(isToolbarPopupOpen()).toBe(true);
+        unmount();
+        expect(isToolbarPopupOpen()).toBe(false);
+    });
+
     it('reports the strip of the viewport it covers, at the bottom on phones and at the top from sm', async () => {
         const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top }) as DOMRect;
         let barTop = 780;
