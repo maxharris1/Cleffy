@@ -1,4 +1,3 @@
-import { isSharedImslpPath } from '../../../supabase/functions/_shared/imslpPdfCache';
 import {
     importImslpPdfToStorage,
     type ImslpDownloadFallback,
@@ -977,18 +976,13 @@ const signScoreUrl = async (path: string): Promise<string | null> => {
 };
 
 /**
- * Mint the score's signed URL in parallel with the row and role fetches. A
- * cold open otherwise pays two round-trips in series — the row for its
- * storage_path, then the URL — although every score lives at
- * `{id}/original.pdf` (documentRowFromCache already assumes as much). It is
- * used only if the row's storage_path agrees. Storage policies decide whether
- * it can be minted at all; a caller who cannot see the score gets null, and
- * the row fetch says why. Unlike the download this replaced, a warm open
- * that never needs it costs one small request, not the whole file again.
+ * Prefetch only when the caller already knows the library row's actual path.
+ * An id alone cannot distinguish private and shared originals; defer signing
+ * until loadDocumentSource receives the confirmed row in that case.
  */
-export const prefetchScoreUrl = (docId: string): ScoreUrlPrefetch => {
-    const path = `${docId}/original.pdf`;
-    return { path, url: signScoreUrl(path).catch(() => null) };
+export const prefetchScoreUrl = (docId: string, storagePath?: string): ScoreUrlPrefetch => {
+    const path = storagePath ?? `${docId}/original.pdf`;
+    return { path, url: storagePath ? signScoreUrl(path).catch(() => null) : Promise.resolve(null) };
 };
 
 /** What the viewer opens a cloud score from: bytes it already has, or a URL to stream. */
@@ -1055,19 +1049,12 @@ export const replaceDocumentPdf = async (
         onProgress,
     );
 
-    const { data: updated, error: updateError } = isSharedImslpPath(doc.storage_path)
-        ? await supabase
-              .rpc('detach_imslp_pdf', {
-                  p_document_id: doc.id,
-                  p_content_rev: doc.content_rev ?? 0,
-              })
-              .single()
-        : await supabase
-              .from('documents')
-              .update({ content_rev: (doc.content_rev ?? 0) + 1 })
-              .eq('id', doc.id)
-              .select()
-              .single();
+    const { data: updated, error: updateError } = await supabase
+        .rpc('commit_pdf_replacement', {
+            p_document_id: doc.id,
+            p_content_rev: doc.content_rev ?? 0,
+        })
+        .single();
     if (updateError) {
         throw new Error(`The cleaned file was saved but the document could not be updated: ${updateError.message}`);
     }

@@ -184,6 +184,23 @@ describe('shared IMSLP PDF cache', () => {
             expect(() => validateSharedPdf(new TextEncoder().encode(pdf))).toThrow();
         },
     );
+    it('accepts PDFs with trailing NUL padding and scanner junk after %%EOF', () => {
+        const padded = new Uint8Array(bytes.length + 100);
+        padded.set(bytes);
+        padded.set(new TextEncoder().encode('scanner trailer'), bytes.length);
+        expect(() => validateSharedPdf(padded)).not.toThrow();
+    });
+
+    it('refuses a blocked cache hit before the import can run or fetch upstream', async () => {
+        const h = store();
+        const entry = (await h.importPdf()) as SharedPdfEntry;
+        entry.blocked_at = new Date().toISOString();
+        const run = vi.fn();
+        await expect(withImslpPdfCache(filename, h.deps, run, () => 'queued')).rejects.toThrow(/unavailable/);
+        expect(run).not.toHaveBeenCalled();
+        expect(h.download).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects oversize PDFs even with valid boundary markers', () => {
         const large = new Uint8Array(50 * 1024 * 1024 + 1);
         large.set(new TextEncoder().encode('%PDF-1.4'));

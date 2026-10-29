@@ -194,6 +194,26 @@ describe('runImslpImport — license and pacing come before anything is spent', 
     });
 });
 
+describe('PDF validation fallback', () => {
+    it('offers open-on-IMSLP and refunds the spent credit without creating a score', async () => {
+        const { calls, deps } = harness({
+            download: {
+                ok: false,
+                code: 'incomplete',
+                message: 'Incomplete PDF',
+                openUrl: request().openUrl,
+                filename: request().filename,
+            },
+        });
+        const response = await runImslpImport(request(), deps);
+        expect(response.status).toBe(409);
+        expect(response.body).toMatchObject({ code: 'incomplete', openUrl: request().openUrl });
+        expect(calls).toContain('refundQuota');
+        expect(calls).not.toContain('createDocument');
+        expect(calls).not.toContain('recordProvenance');
+    });
+});
+
 describe('runImslpImport — creating the score only once the PDF is in hand', () => {
     it('runs the whole import in order and reports the new score', async () => {
         const { calls, args, deps } = harness();

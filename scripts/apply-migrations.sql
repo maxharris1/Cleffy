@@ -27316,6 +27316,9 @@ grant execute on function public.read_cancel_link_token (text) to service_role;
 -- Shared, immutable IMSLP originals in the existing private scores bucket.
 -- The reserved UUID folder keeps existing Storage policies' UUID casts safe.
 -- Ready entries contain only server-verified public/CC repertoire + provenance.
+-- Shared originals are platform storage: they do not count against an individual
+-- library's byte quota. Import credits and cloud-score caps still apply.
+-- No hosted migration has been applied; keep this file and the replay in sync.
 create table if not exists public.imslp_pdf_cache (
     imslp_file_id text primary key check (char_length(imslp_file_id) between 1 and 600),
     filename text not null,
@@ -27328,6 +27331,8 @@ create table if not exists public.imslp_pdf_cache (
     provenance jsonb not null check (jsonb_typeof(provenance) = 'object'),
     check (storage_path = '00000000-0000-0000-0000-000000000000/' || sha256 || '.pdf')
 );
+-- Keep replays safe even when the original draft of this migration ran locally.
+alter table public.imslp_pdf_cache add column if not exists blocked_at timestamptz;
 create index if not exists imslp_pdf_cache_storage_path on public.imslp_pdf_cache (storage_path);
 
 create table if not exists public.imslp_pdf_claims (
@@ -27381,6 +27386,11 @@ begin
     ) then
         raise exception 'Shared PDF upload is incomplete' using errcode = '22023';
     end if;
+    -- The same bytes under another IMSLP edition id cannot bypass a block.
+    if exists (select 1 from public.imslp_pdf_cache
+        where storage_path = v_entry.storage_path and blocked_at is not null) then
+        raise exception 'Shared PDF is blocked' using errcode = '42501';
+    end if;
     insert into public.imslp_pdf_cache select v_entry.* on conflict (imslp_file_id) do nothing;
 end;
 $$;
@@ -27389,17 +27399,91 @@ revoke all on function public.claim_imslp_pdf(text, uuid), public.release_imslp_
 grant execute on function public.claim_imslp_pdf(text, uuid), public.release_imslp_pdf(text, uuid),
     public.publish_imslp_pdf(jsonb, uuid) to service_role;
 
--- Only published originals are shared. These policies grant no access to
--- documents, annotations, uploads, thumbnails or private replacement PDFs.
+-- Policy helpers live outside PostgREST's exposed schemas. Clients may evaluate
+-- their own access through RLS, but cannot probe aggregate cache presence by RPC.
+create schema if not exists imslp_private;
+revoke all on schema imslp_private from public, anon, authenticated;
+grant usage on schema imslp_private to authenticated;
+create index if not exists documents_shared_imslp_path on public.documents (storage_path)
+where storage_path like '00000000-0000-0000-0000-000000000000/%';
+
 create or replace function public.is_shared_imslp_pdf(p_path text) returns boolean
 language sql stable security definer set search_path = public as $$
-    select exists (select 1 from public.imslp_pdf_cache where storage_path = p_path);
+    select exists (select 1 from public.imslp_pdf_cache
+        where storage_path = p_path and blocked_at is null)
+      and not exists (select 1 from public.imslp_pdf_cache
+        where storage_path = p_path and blocked_at is not null);
 $$;
-revoke all on function public.is_shared_imslp_pdf(text) from public, anon;
-grant execute on function public.is_shared_imslp_pdf(text) to authenticated, service_role;
+revoke all on function public.is_shared_imslp_pdf(text) from public, anon, authenticated;
+grant execute on function public.is_shared_imslp_pdf(text) to service_role;
+
+-- Known license restrictions stop existing reads. TTL revalidation belongs to
+-- the import path; an existing library does not expire merely with the TTL.
+create or replace function imslp_private.can_read_pdf(p_path text) returns boolean
+language sql stable security definer set search_path = public as $$
+    select exists (
+        select 1 from public.imslp_pdf_cache c
+        join public.imslp_file_licenses l on l.filename = c.filename
+        where c.storage_path = p_path and c.blocked_at is null
+          and l.downloadable
+    ) and not exists (
+        select 1 from public.imslp_pdf_cache c
+        left join public.imslp_file_licenses l on l.filename = c.filename
+        where c.storage_path = p_path and (c.blocked_at is not null or l.downloadable = false)
+    ) and exists (
+        select 1 from public.documents d where d.storage_path = p_path
+          and d.storage_path like '00000000-0000-0000-0000-000000000000/%'
+          and public.document_role(d.id) is not null
+    );
+$$;
+revoke all on function imslp_private.can_read_pdf(text) from public, anon, authenticated;
+grant execute on function imslp_private.can_read_pdf(text) to authenticated;
 drop policy if exists scores_shared_imslp_read on storage.objects;
 create policy scores_shared_imslp_read on storage.objects for select to authenticated
-using (bucket_id = 'scores' and public.is_shared_imslp_pdf(name));
+using (bucket_id = 'scores' and imslp_private.can_read_pdf(name));
+-- Also constrain future permissive policies that might otherwise bypass this gate.
+drop policy if exists scores_shared_imslp_read_guard on storage.objects;
+create policy scores_shared_imslp_read_guard on storage.objects as restrictive for select to authenticated
+using (bucket_id <> 'scores' or name not like '00000000-0000-0000-0000-000000000000/%'
+    or imslp_private.can_read_pdf(name));
+
+-- A copyright restriction or removal stops redistribution of these bytes in all
+-- libraries, including future imports. Lifting a document takedown does not
+-- automatically relicense the shared file: a service operator must clear the
+-- cache block after reviewing it. The block survives document/account deletion.
+create or replace function public.block_imslp_pdf(p_file_id text) returns void
+language sql security definer set search_path = public as $$
+    update public.imslp_pdf_cache set blocked_at = coalesce(blocked_at, now())
+    where storage_path = (select storage_path from public.imslp_pdf_cache where imslp_file_id = p_file_id);
+$$;
+revoke all on function public.block_imslp_pdf(text) from public, anon, authenticated;
+grant execute on function public.block_imslp_pdf(text) to service_role;
+create or replace function imslp_private.block_taken_down_pdf() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+    if new.lifted_at is null and (new.action = 'remove' or new.ground = 'copyright') then
+        update public.imslp_pdf_cache c set blocked_at = coalesce(c.blocked_at, now())
+        from public.documents d where d.id = new.document_id and c.storage_path = d.storage_path;
+    end if;
+    return new;
+end;
+$$;
+revoke all on function imslp_private.block_taken_down_pdf() from public, anon, authenticated;
+drop trigger if exists content_takedowns_block_shared_pdf on public.content_takedowns;
+create trigger content_takedowns_block_shared_pdf after insert or update on public.content_takedowns
+for each row execute function imslp_private.block_taken_down_pdf();
+
+-- Match the caller predicates used by documents_insert and the restrictive seat
+-- policy before a claim, upstream request or permanent cache write is possible.
+create or replace function public.can_import_imslp() returns boolean
+language sql stable security definer set search_path = public as $$
+    select auth.uid() is not null
+      and not coalesce((auth.jwt() ->> 'is_anonymous')::boolean, false)
+      and coalesce(auth.jwt() -> 'app_metadata' ->> 'user_type', '') <> 'student'
+      and not public.caller_seat_read_only();
+$$;
+revoke all on function public.can_import_imslp() from public, anon;
+grant execute on function public.can_import_imslp() to authenticated;
 -- Defense in depth: even a future permissive owner policy cannot mutate cache objects.
 drop policy if exists scores_shared_imslp_delete on storage.objects;
 create policy scores_shared_imslp_delete on storage.objects as restrictive for delete to authenticated
@@ -27425,7 +27509,7 @@ with check (storage_path not like '00000000-0000-0000-0000-000000000000/%');
 
 -- Replacing an original is copy-on-write: clients upload to their own folder
 -- first; this owner-only RPC switches the reference and bumps the revision.
-create or replace function public.detach_imslp_pdf(p_document_id uuid, p_content_rev int)
+create or replace function public.commit_pdf_replacement(p_document_id uuid, p_content_rev int)
 returns public.documents language plpgsql security definer set search_path = public as $$
 declare v_doc public.documents;
 begin
@@ -27435,11 +27519,11 @@ begin
     end if;
     select * into v_doc from public.documents where id = p_document_id for update;
     if not found or v_doc.owner_id is distinct from auth.uid()
-       or public.caller_seat_read_only() or v_doc.archived_at is not null then
+       or public.caller_seat_read_only() or v_doc.archived_at is not null
+       or public.document_role(v_doc.id) is distinct from 'owner' then
         raise exception 'Only an active score owner can replace its PDF' using errcode = '42501';
     end if;
-    if p_content_rev is null or v_doc.content_rev <> p_content_rev
-       or not public.is_shared_imslp_pdf(v_doc.storage_path) then
+    if p_content_rev is null or v_doc.content_rev <> p_content_rev then
         raise exception 'Score changed before replacement' using errcode = '40001';
     end if;
     if not exists (select 1 from storage.objects where bucket_id = 'scores'
@@ -27451,5 +27535,31 @@ begin
     return v_doc;
 end;
 $$;
+revoke all on function public.commit_pdf_replacement(uuid, int) from public, anon;
+grant execute on function public.commit_pdf_replacement(uuid, int) to authenticated;
+
+-- Compatibility for clients that already selected the old detach endpoint.
+create or replace function public.detach_imslp_pdf(p_document_id uuid, p_content_rev int)
+returns public.documents language sql security definer set search_path = public as $$
+    select public.commit_pdf_replacement(p_document_id, p_content_rev);
+$$;
 revoke all on function public.detach_imslp_pdf(uuid, int) from public, anon;
 grant execute on function public.detach_imslp_pdf(uuid, int) to authenticated;
+
+-- An old client must not bump a shared row while leaving its replacement
+-- unreferenced. The definer commit RPC above is the only replacement path.
+create or replace function imslp_private.guard_shared_revision() returns trigger
+language plpgsql set search_path = public as $$
+begin
+    if current_user in ('authenticated', 'anon')
+       and old.storage_path like '00000000-0000-0000-0000-000000000000/%'
+       and new.content_rev is distinct from old.content_rev then
+        raise exception 'Use commit_pdf_replacement for shared PDFs' using errcode = '42501';
+    end if;
+    return new;
+end;
+$$;
+revoke all on function imslp_private.guard_shared_revision() from public, anon, authenticated;
+drop trigger if exists documents_guard_shared_revision on public.documents;
+create trigger documents_guard_shared_revision before update on public.documents
+for each row execute function imslp_private.guard_shared_revision();

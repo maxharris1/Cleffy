@@ -25,13 +25,18 @@ import {
 import { fileCreditsFor, type ImslpFileCredits } from '../_shared/imslpFileBlocks.ts';
 import { runImslpImport, type FlowResponse, type LiveLicense } from '../_shared/imslpImportFlow.ts';
 import {
-    LICENSE_TTL_MS,
     canonicalImslpFilename,
     classifyLicense,
     isDownloadable,
     parseWorkPageLicenses,
 } from '../_shared/imslpLicense.ts';
-import { withImslpPdfCache, validateSharedPdf } from '../_shared/imslpPdfCache.ts';
+import {
+    withImslpPdfCache,
+    validateSharedPdf,
+    SharedPdfBlockedError,
+    SharedPdfValidationError,
+} from '../_shared/imslpPdfCache.ts';
+import { imslpCachedClearance } from '../_shared/imslpCachedClearance.ts';
 import { imslpPdfCacheStore } from '../_shared/imslpPdfCacheStore.ts';
 import { buildImslpProvenance } from '../_shared/imslpProvenance.ts';
 import { wikitextFromMwPage } from '../_shared/imslpWorkPage.ts';
@@ -140,7 +145,18 @@ Deno.serve(async (req) => {
     if (!auth.ok) {
         return auth.response;
     }
-    const { userClient, userId } = auth.caller;
+    const { userClient, userId, isAnonymous, userType } = auth.caller;
+    // Auth-server metadata, before any cache claim or upstream request.
+    if (isAnonymous || userType === 'student') {
+        return jsonResponse({ error: 'This account cannot add scores' }, 403);
+    }
+    const { data: canImport, error: eligibilityError } = await userClient.rpc('can_import_imslp');
+    if (eligibilityError) {
+        return jsonResponse({ error: 'Could not check import permissions' }, 503);
+    }
+    if (canImport !== true) {
+        return jsonResponse({ error: 'This account cannot add scores' }, 403);
+    }
 
     const userRate = await checkRateLimit(`download:user:${userId}`, PER_USER_LIMIT, 60_000);
     if (!userRate.ok) {
@@ -246,7 +262,6 @@ Deno.serve(async (req) => {
         return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
     }
 
-    let signedUrl: string | null = null;
     let flow: FlowResponse;
     try {
         flow = await withImslpPdfCache(
@@ -255,10 +270,11 @@ Deno.serve(async (req) => {
             async (cache) => {
                 let verifiedWork = cache.entry?.work_title ?? workTitle;
                 let verifiedLicense = cache.entry?.license_label ?? null;
+                let freshClearance = false;
                 return await runImslpImport(
                     {
                         filename: canonicalFilename,
-                        workTitle,
+                        workTitle: cache.entry?.work_title ?? workTitle,
                         documentId,
                         storagePath,
                         openUrl: imagefromIndexUrl(canonicalFilename),
@@ -274,31 +290,13 @@ Deno.serve(async (req) => {
                                 .select('restriction, downloadable, fetched_at, license_label, work_title')
                                 .eq('filename', cache.entry?.filename ?? canonicalFilename)
                                 .maybeSingle();
-                            const fresh =
-                                row && Date.now() - new Date(row.fetched_at as string).getTime() < LICENSE_TTL_MS;
-                            // A newly discovered restriction still refuses a cached original.
-                            if (cache.entry && !(fresh && row.downloadable === false)) {
-                                return {
-                                    downloadable: true,
-                                    restriction: null,
-                                    licenseLabel: cache.entry.license_label,
-                                    workTitle: cache.entry.work_title,
-                                };
+                            const clearance = imslpCachedClearance(row);
+                            freshClearance = clearance !== null;
+                            if (clearance) {
+                                verifiedWork = clearance.workTitle ?? verifiedWork;
+                                verifiedLicense = clearance.licenseLabel;
                             }
-                            if (!fresh) {
-                                return null;
-                            }
-                            if (typeof row.downloadable !== 'boolean') {
-                                return null;
-                            }
-                            verifiedWork = typeof row.work_title === 'string' ? row.work_title : workTitle;
-                            verifiedLicense = typeof row.license_label === 'string' ? row.license_label : null;
-                            return {
-                                downloadable: row.downloadable,
-                                restriction: typeof row.restriction === 'string' ? row.restriction : null,
-                                licenseLabel: typeof row.license_label === 'string' ? row.license_label : null,
-                                workTitle: typeof row.work_title === 'string' && row.work_title ? row.work_title : null,
-                            };
+                            return clearance;
                         },
 
                         precheckCreate: async () => {
@@ -342,7 +340,7 @@ Deno.serve(async (req) => {
 
                         // Deployment-wide pacing of live IMSLP requests (imslpDownloadGate.ts).
                         pace: () =>
-                            cache.entry
+                            cache.entry && freshClearance
                                 ? Promise.resolve({ ok: true })
                                 : gateGlobalImslpDownload(checkRateLimit, readGlobalDownloadGateConfig(Deno.env.get)),
 
@@ -355,11 +353,20 @@ Deno.serve(async (req) => {
                             }
                             const license = parseWorkPageLicenses(page.html).get(canonicalFilename);
                             if (!license) {
-                                return { kind: 'not_listed' };
+                                // Persist negative clearance so existing shared references
+                                // cannot continue signing the removed edition.
+                                const { error } = await admin.from('imslp_file_licenses').upsert({
+                                    filename: cache.entry?.filename ?? canonicalFilename,
+                                    work_title: title,
+                                    license: 'unknown',
+                                    downloadable: false,
+                                    fetched_at: new Date().toISOString(),
+                                });
+                                return { kind: error ? 'unavailable' : 'not_listed' };
                             }
                             try {
-                                await admin.from('imslp_file_licenses').upsert({
-                                    filename: canonicalFilename,
+                                const { error } = await admin.from('imslp_file_licenses').upsert({
+                                    filename: cache.entry?.filename ?? canonicalFilename,
                                     work_title: title,
                                     license: classifyLicense(license.licenseLabel),
                                     license_label: license.licenseLabel,
@@ -368,8 +375,11 @@ Deno.serve(async (req) => {
                                     downloadable: isDownloadable(license),
                                     fetched_at: new Date().toISOString(),
                                 });
+                                if (error) {
+                                    return { kind: 'unavailable' };
+                                }
                             } catch {
-                                // cache write is best-effort
+                                return { kind: 'unavailable' };
                             }
                             verifiedWork = title;
                             verifiedLicense = license.licenseLabel;
@@ -412,7 +422,20 @@ Deno.serve(async (req) => {
                                 if (!result.ok) {
                                     return result;
                                 }
-                                validateSharedPdf(result.bytes);
+                                try {
+                                    validateSharedPdf(result.bytes);
+                                } catch (error) {
+                                    if (!(error instanceof SharedPdfValidationError)) {
+                                        throw error;
+                                    }
+                                    return {
+                                        ok: false,
+                                        code: 'incomplete',
+                                        message: error.message,
+                                        openUrl: imagefromIndexUrl(canonicalFilename),
+                                        filename: canonicalFilename,
+                                    };
+                                }
                                 const credits = await fetchFileCredits(verifiedWork, canonicalFilename);
                                 entry = await cache.store(result.bytes, {
                                     work_title: verifiedWork,
@@ -488,13 +511,6 @@ Deno.serve(async (req) => {
                             if (!entry) {
                                 return 'Shared original is missing';
                             }
-                            const { data: signed, error: signError } = await admin.storage
-                                .from('scores')
-                                .createSignedUrl(entry.storage_path, 3600);
-                            if (signError || !signed) {
-                                return signError?.message ?? 'Could not sign the shared original';
-                            }
-                            signedUrl = signed.signedUrl;
                             const { error } = await admin
                                 .from('documents')
                                 .update({ ...entry.provenance, storage_path: entry.storage_path })
@@ -507,13 +523,22 @@ Deno.serve(async (req) => {
                     },
                 );
             },
-            () => downloadQueued(2),
+            () => downloadQueued(30),
         );
     } catch (err) {
-        flow = { status: 502, body: { error: err instanceof Error ? err.message : 'Shared IMSLP cache failed' } };
-    }
-    if (flow.status === 200) {
-        flow = { ...flow, body: { ...(flow.body as Record<string, unknown>), signedUrl } };
+        flow =
+            err instanceof SharedPdfBlockedError
+                ? {
+                      status: 409,
+                      body: {
+                          ok: false,
+                          code: 'non_pd',
+                          message: err.message,
+                          openUrl: imagefromIndexUrl(canonicalFilename),
+                          filename: canonicalFilename,
+                      },
+                  }
+                : { status: 502, body: { error: err instanceof Error ? err.message : 'Shared IMSLP cache failed' } };
     }
     reportFailure(flow, { documentId, creating });
     return respond(flow);

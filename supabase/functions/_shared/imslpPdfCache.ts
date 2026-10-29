@@ -17,6 +17,7 @@ export interface SharedPdfEntry {
     sha256: string;
     size: number;
     fetched_at: string;
+    blocked_at?: string | null;
     work_title: string;
     license_label: string | null;
     provenance: {
@@ -57,11 +58,14 @@ export const pdfSha256 = async (bytes: Uint8Array): Promise<string> => {
     return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
 };
 
+export class SharedPdfBlockedError extends Error {}
+export class SharedPdfValidationError extends Error {}
+
 export const validateSharedPdf = (bytes: Uint8Array): void => {
     const head = new TextDecoder().decode(bytes.subarray(0, 8));
     const tail = new TextDecoder().decode(bytes.subarray(Math.max(0, bytes.length - 1024)));
-    if (bytes.length > 50 * 1024 * 1024 || !/^%PDF-\d\.\d/.test(head) || !/%%EOF\s*$/.test(tail)) {
-        throw new Error('IMSLP did not deliver a complete PDF within the size limit');
+    if (bytes.length > 50 * 1024 * 1024 || !/^%PDF-\d\.\d/.test(head) || !tail.includes('%%EOF')) {
+        throw new SharedPdfValidationError('IMSLP did not deliver a complete PDF within the size limit');
     }
 };
 
@@ -86,6 +90,9 @@ export const withImslpPdfCache = async <T>(
             if (!claimed && !entry) {
                 return busy();
             }
+        }
+        if (entry?.blocked_at) {
+            throw new SharedPdfBlockedError('This edition is unavailable for import');
         }
         const session: PdfCacheSession = {
             entry,

@@ -326,7 +326,7 @@ const makeStub = (options: StubOptions = {}) => {
         storage: { from: (bucket: string) => storageApi(bucket) },
         rpc: (fn: string, args: unknown) => {
             calls.rpc(fn, args);
-            if (fn === 'detach_imslp_pdf') {
+            if (fn === 'commit_pdf_replacement') {
                 return {
                     single: () =>
                         Promise.resolve({ data: options.updatedRow ?? null, error: options.rpcError ?? null }),
@@ -658,6 +658,17 @@ describe('loadDocumentSource (viewer open)', () => {
         expect(memCache.has(d.id)).toBe(false);
     });
 
+    it('defers speculative signing until the shared storage path is known', async () => {
+        makeStub();
+        const d = doc({ storage_path: `00000000-0000-0000-0000-000000000000/${'a'.repeat(64)}.pdf` });
+        const unknownPath = prefetchScoreUrl(d.id);
+        expect(await unknownPath.url).toBeNull();
+        const knownPath = prefetchScoreUrl(d.id, d.storage_path);
+        expect(knownPath.path).toBe(d.storage_path);
+        expect(await knownPath.url).toBe(`https://storage.test/sign/${d.storage_path}`);
+        expect(await loadDocumentSource(d, { prefetch: knownPath })).toEqual({ url: await knownPath.url });
+    });
+
     it('mints a URL for the row’s own path when the early one was for another', async () => {
         makeStub();
         const d = doc({ storage_path: 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1/renamed.pdf' });
@@ -824,17 +835,20 @@ describe('cacheStreamedDocument (a first open closed mid-download)', () => {
 });
 
 describe('replaceDocumentPdf', () => {
-    it('writes a private replacement then detaches without overwriting a shared original', async () => {
-        const sharedPath = `00000000-0000-0000-0000-000000000000/${'a'.repeat(64)}.pdf`;
-        const d = doc({ storage_path: sharedPath });
-        const privatePath = `${d.id}/original.pdf`;
-        const calls = makeStub({ updatedRow: doc({ storage_path: privatePath, content_rev: 1 }) });
-        const updated = await replaceDocumentPdf(d, new ArrayBuffer(4), new Uint8Array([1, 2, 3]));
-        expect(vi.mocked(uploadPdfToStorage)).toHaveBeenCalledWith(privatePath, expect.anything(), undefined);
-        expect(calls.rpc).toHaveBeenCalledWith('detach_imslp_pdf', { p_document_id: d.id, p_content_rev: 0 });
-        expect(updated.storage_path).toBe(privatePath);
-        expect(calls.upload.mock.calls.every(([path]) => path !== sharedPath)).toBe(true);
-    });
+    it.each([true, false])(
+        'commits replacement server-side even with a stale private path (shared path known: %s)',
+        async (known) => {
+            const sharedPath = `00000000-0000-0000-0000-000000000000/${'a'.repeat(64)}.pdf`;
+            const d = known ? doc({ storage_path: sharedPath }) : doc();
+            const privatePath = `${d.id}/original.pdf`;
+            const calls = makeStub({ updatedRow: doc({ storage_path: privatePath, content_rev: 1 }) });
+            const updated = await replaceDocumentPdf(d, new ArrayBuffer(4), new Uint8Array([1, 2, 3]));
+            expect(vi.mocked(uploadPdfToStorage)).toHaveBeenCalledWith(privatePath, expect.anything(), undefined);
+            expect(calls.rpc).toHaveBeenCalledWith('commit_pdf_replacement', { p_document_id: d.id, p_content_rev: 0 });
+            expect(updated.storage_path).toBe(privatePath);
+            expect(calls.upload.mock.calls.every(([path]) => path !== sharedPath)).toBe(true);
+        },
+    );
 
     it('backs up the original once, uploads the replacement, bumps content_rev, refreshes the cache', async () => {
         const calls = makeStub({ updatedRow: doc({ content_rev: 1 }) });
@@ -847,7 +861,7 @@ describe('replaceDocumentPdf', () => {
             expect.objectContaining({ upsert: false }),
         );
         expect(vi.mocked(uploadPdfToStorage)).toHaveBeenCalledWith(d.storage_path, expect.anything(), undefined);
-        expect(calls.update).toHaveBeenCalledWith('documents', { content_rev: 1 });
+        expect(calls.rpc).toHaveBeenCalledWith('commit_pdf_replacement', { p_document_id: d.id, p_content_rev: 0 });
         expect(updated.content_rev).toBe(1);
 
         const cached = await getDb().pdfCache.get(d.id);

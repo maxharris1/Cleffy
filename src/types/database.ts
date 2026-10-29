@@ -894,10 +894,15 @@ export type Database = {
                 Args: { p_email: string };
                 Returns: boolean;
             };
-            // Owner-only: switch a shared original to an uploaded private replacement.
+            // Owner-only: derive the stored path and commit any uploaded replacement.
+            commit_pdf_replacement: {
+                Args: { p_document_id: string; p_content_rev: number };
+                Returns: DocumentRow[];
+            };
+            // Compatibility alias for older clients.
             detach_imslp_pdf: {
                 Args: { p_document_id: string; p_content_rev: number };
-                Returns: DocumentRow;
+                Returns: DocumentRow[];
             };
             // Service role only: close the shared pacing key after IMSLP answers 429.
             edge_rate_block: {

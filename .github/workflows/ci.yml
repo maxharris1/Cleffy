@@ -220,3 +220,5 @@ jobs:
                   deno-version: v2.1.4
             - name: deno check the Edge Function entry points
               run: deno check --config supabase/functions/deno.json supabase/functions/*/index.ts
+            - name: Shared IMSLP cache Deno regression tests
+              run: deno test --config supabase/functions/deno.json supabase/functions/_shared/imslpPdfCacheStore_test.ts
