@@ -103,14 +103,12 @@ revoke all on function public.is_shared_imslp_pdf(text) from public, anon, authe
 grant execute on function public.is_shared_imslp_pdf(text) to service_role;
 
 -- Known license restrictions stop existing reads. TTL revalidation belongs to
--- the import path; an existing library does not expire merely with the TTL.
+-- the import path; missing/purged cache rows and TTL expiry do not revoke reads.
 create or replace function imslp_private.can_read_pdf(p_path text) returns boolean
 language sql stable security definer set search_path = public as $$
     select exists (
         select 1 from public.imslp_pdf_cache c
-        join public.imslp_file_licenses l on l.filename = c.filename
         where c.storage_path = p_path and c.blocked_at is null
-          and l.downloadable
     ) and not exists (
         select 1 from public.imslp_pdf_cache c
         left join public.imslp_file_licenses l on l.filename = c.filename
@@ -125,17 +123,20 @@ revoke all on function imslp_private.can_read_pdf(text) from public, anon, authe
 grant execute on function imslp_private.can_read_pdf(text) to authenticated;
 drop policy if exists scores_shared_imslp_read on storage.objects;
 create policy scores_shared_imslp_read on storage.objects for select to authenticated
-using (bucket_id = 'scores' and imslp_private.can_read_pdf(name));
+using (bucket_id = 'scores' and name like '00000000-0000-0000-0000-000000000000/%'
+    and imslp_private.can_read_pdf(name));
 -- Also constrain future permissive policies that might otherwise bypass this gate.
 drop policy if exists scores_shared_imslp_read_guard on storage.objects;
 create policy scores_shared_imslp_read_guard on storage.objects as restrictive for select to authenticated
 using (bucket_id <> 'scores' or name not like '00000000-0000-0000-0000-000000000000/%'
     or imslp_private.can_read_pdf(name));
 
--- A copyright restriction or removal stops redistribution of these bytes in all
--- libraries, including future imports. Lifting a document takedown does not
--- automatically relicense the shared file: a service operator must clear the
--- cache block after reviewing it. The block survives document/account deletion.
+-- Copyright grounds concern the shared bytes and stop redistribution in all
+-- libraries, including future imports. Other grounds (terms/illegal conduct)
+-- concern the uploader's document and remain scoped by document_role(). Lifting
+-- a document takedown does not automatically relicense the shared file: a
+-- service operator must clear the cache block after reviewing it. The block
+-- survives document/account deletion.
 create or replace function public.block_imslp_pdf(p_file_id text) returns void
 language sql security definer set search_path = public as $$
     update public.imslp_pdf_cache set blocked_at = coalesce(blocked_at, now())
@@ -146,7 +147,7 @@ grant execute on function public.block_imslp_pdf(text) to service_role;
 create or replace function imslp_private.block_taken_down_pdf() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-    if new.lifted_at is null and (new.action = 'remove' or new.ground = 'copyright') then
+    if new.lifted_at is null and new.ground = 'copyright' then
         update public.imslp_pdf_cache c set blocked_at = coalesce(c.blocked_at, now())
         from public.documents d where d.id = new.document_id and c.storage_path = d.storage_path;
     end if;

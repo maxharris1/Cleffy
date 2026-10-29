@@ -249,6 +249,7 @@ const thenable = <T, X extends object>(result: T, extra: X): Promise<T> & X =>
 const makeStub = (options: StubOptions = {}) => {
     const calls = {
         download: vi.fn(),
+        createSignedUrl: vi.fn(),
         upload: vi.fn(),
         remove: vi.fn(),
         removeFrom: vi.fn(),
@@ -315,12 +316,14 @@ const makeStub = (options: StubOptions = {}) => {
                 error: null,
             });
         },
-        createSignedUrl: (path: string) =>
-            Promise.resolve(
+        createSignedUrl: (path: string) => {
+            calls.createSignedUrl(path);
+            return Promise.resolve(
                 options.signError
                     ? { data: null, error: { message: options.signError } }
                     : { data: { signedUrl: `https://storage.test/sign/${path}` }, error: null },
-            ),
+            );
+        },
     });
     const supabase = {
         storage: { from: (bucket: string) => storageApi(bucket) },
@@ -651,6 +654,8 @@ describe('loadDocumentSource (viewer open)', () => {
         const d = doc();
         const prefetch = prefetchScoreUrl(d.id);
         expect(prefetch.path).toBe(d.storage_path);
+        // Signing has started before the row is handed to the source loader.
+        expect(calls.createSignedUrl).toHaveBeenCalled();
         const source = await loadDocumentSource(d, { prefetch, userId: 'user-1', role: 'owner' });
         expect(source).toEqual({ url: `https://storage.test/sign/${d.storage_path}` });
         // Nothing downloaded, and nothing cached until the stream ends.
@@ -658,11 +663,14 @@ describe('loadDocumentSource (viewer open)', () => {
         expect(memCache.has(d.id)).toBe(false);
     });
 
-    it('defers speculative signing until the shared storage path is known', async () => {
+    it('signs a known shared path and discards a speculative private URL on a shared row', async () => {
         makeStub();
         const d = doc({ storage_path: `00000000-0000-0000-0000-000000000000/${'a'.repeat(64)}.pdf` });
         const unknownPath = prefetchScoreUrl(d.id);
-        expect(await unknownPath.url).toBeNull();
+        expect(await unknownPath.url).toBe(`https://storage.test/sign/${d.id}/original.pdf`);
+        expect(await loadDocumentSource(d, { prefetch: unknownPath })).toEqual({
+            url: `https://storage.test/sign/${d.storage_path}`,
+        });
         const knownPath = prefetchScoreUrl(d.id, d.storage_path);
         expect(knownPath.path).toBe(d.storage_path);
         expect(await knownPath.url).toBe(`https://storage.test/sign/${d.storage_path}`);

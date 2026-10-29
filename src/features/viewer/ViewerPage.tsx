@@ -508,8 +508,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
             // Warm open: paint from Dexie immediately with the role stored
             // there (see CloudDocState), then confirm in the background.
-            // Signing waits for the confirmed storage path: a cache-painted
-            // row cannot distinguish a shared original from a private one.
+            // Speculate on the private original alongside the row fetch. The
+            // confirmed row's path decides whether that URL can be reused.
             const prefetch = current ? undefined : prefetchScoreUrl(docId);
             if (!current) {
                 // Its script loads alongside these lookups, not after them.

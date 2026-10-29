@@ -268,6 +268,7 @@ Deno.serve(async (req) => {
             canonicalFilename,
             imslpPdfCacheStore(admin),
             async (cache) => {
+                const licenseFilename = cache.entry?.filename ?? canonicalFilename;
                 let verifiedWork = cache.entry?.work_title ?? workTitle;
                 let verifiedLicense = cache.entry?.license_label ?? null;
                 let freshClearance = false;
@@ -288,7 +289,7 @@ Deno.serve(async (req) => {
                             const { data: row } = await admin
                                 .from('imslp_file_licenses')
                                 .select('restriction, downloadable, fetched_at, license_label, work_title')
-                                .eq('filename', cache.entry?.filename ?? canonicalFilename)
+                                .eq('filename', licenseFilename)
                                 .maybeSingle();
                             const clearance = imslpCachedClearance(row);
                             freshClearance = clearance !== null;
@@ -351,22 +352,16 @@ Deno.serve(async (req) => {
                                     ? { kind: 'rate_limited', retryAfterSec: page.retryAfterSec }
                                     : { kind: 'unavailable' };
                             }
-                            const license = parseWorkPageLicenses(page.html).get(canonicalFilename);
+                            const license = parseWorkPageLicenses(page.html).get(licenseFilename);
                             if (!license) {
-                                // Persist negative clearance so existing shared references
-                                // cannot continue signing the removed edition.
-                                const { error } = await admin.from('imslp_file_licenses').upsert({
-                                    filename: cache.entry?.filename ?? canonicalFilename,
-                                    work_title: title,
-                                    license: 'unknown',
-                                    downloadable: false,
-                                    fetched_at: new Date().toISOString(),
-                                });
-                                return { kind: error ? 'unavailable' : 'not_listed' };
+                                // Absence on this page is an import-only refusal, not
+                                // evidence that the file's license has changed. The
+                                // caller may have supplied an unrelated work title.
+                                return { kind: 'not_listed' };
                             }
                             try {
                                 const { error } = await admin.from('imslp_file_licenses').upsert({
-                                    filename: cache.entry?.filename ?? canonicalFilename,
+                                    filename: licenseFilename,
                                     work_title: title,
                                     license: classifyLicense(license.licenseLabel),
                                     license_label: license.licenseLabel,

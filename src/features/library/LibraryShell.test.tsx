@@ -344,7 +344,12 @@ describe('LibraryShell', () => {
 
         // Enter on a link dispatches click and no pointerdown, so the menu's
         // outside-click listener never learns that the route changed.
-        screen.getByRole('link', { name: 'Students' }).focus();
+        const studentsLink = screen.getByRole('link', { name: 'Students' });
+        // Wait for the menu's scheduled initial focus before focusing the nav
+        // link; otherwise pending focus work can steal Enter on a busy CI worker.
+        await waitFor(() => expect(screen.getByRole('menu', { name: 'Account' })).toHaveFocus());
+        studentsLink.focus();
+        expect(studentsLink).toHaveFocus();
         await user.keyboard('{Enter}');
         expect(await screen.findByText('students page')).toBeInTheDocument();
 

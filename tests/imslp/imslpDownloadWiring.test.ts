@@ -18,7 +18,9 @@ describe('IMSLP entry point security wiring', () => {
     it('requires fresh license clearance to skip pacing on a byte-cache hit', () => {
         expect(source).toContain('imslpCachedClearance(row)');
         expect(source).toContain('cache.entry && freshClearance');
-        expect(source).toContain('downloadable: false');
+        expect(source).toContain('const licenseFilename = cache.entry?.filename ?? canonicalFilename');
+        expect(source).toContain('parseWorkPageLicenses(page.html).get(licenseFilename)');
+        expect(source).not.toContain('downloadable: false');
     });
 
     it('turns typed validation failures into the open-on-IMSLP flow contract', () => {

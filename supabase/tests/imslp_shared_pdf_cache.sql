@@ -80,7 +80,7 @@ select pg_temp.tap('11 stale holder cannot remove successor', (select token = :'
 select pg_temp.refused('12 stale worker cannot publish',
     format('select public.publish_imslp_pdf(%L::jsonb, %L::uuid)', jsonb_build_object('imslp_file_id', '51037'), :'token'), '40001');
 
--- A known positive license clearance is required for existing library references.
+-- Explicit license restrictions revoke reads; license-cache presence is not required.
 insert into public.imslp_file_licenses (filename, work_title, license, downloadable)
 values ('IMSLP51037-score.pdf', 'Sonata', 'public_domain', true);
 
@@ -172,11 +172,18 @@ select pg_temp.refused('28m registered owner cannot insert a shared reference',
 reset role;
 delete from public.imslp_file_licenses where filename = 'IMSLP51037-score.pdf';
 set local role authenticated;
-select pg_temp.tap('28n missing clearance blocks existing shared reads', not exists (
+select pg_temp.tap('28n missing clearance preserves existing shared reads', exists (
+    select 1 from storage.objects where bucket_id = 'scores' and name = :'shared'));
+reset role;
+-- A caller's alias is not a licensing fact about the cached canonical file.
+insert into public.imslp_file_licenses(filename, work_title, license, downloadable)
+values ('IMSLP51037-attacker.pdf', 'Unrelated work', 'unknown', false);
+set local role authenticated;
+select pg_temp.tap('28n2 an unlisted caller alias cannot disable the canonical score', exists (
     select 1 from storage.objects where bucket_id = 'scores' and name = :'shared'));
 reset role;
 insert into public.imslp_file_licenses(filename, work_title, license, downloadable)
-values ('IMSLP51037-score.pdf', 'Sonata', 'unknown', false);
+values ('IMSLP51037-score.pdf', 'Sonata', 'non-pd', false);
 set local role authenticated;
 select pg_temp.tap('28o restricted license blocks shared reads', not exists (
     select 1 from storage.objects where bucket_id = 'scores' and name = :'shared'));
@@ -189,6 +196,33 @@ select '51038', 'IMSLP51038-alias.pdf', sha256, storage_path, size, fetched_at,
     work_title, license_label, provenance from public.imslp_pdf_cache where imslp_file_id = '51037';
 insert into public.imslp_file_licenses(filename, work_title, license, downloadable)
 values ('IMSLP51038-alias.pdf', 'Sonata', 'public_domain', true);
+-- Uploader-specific removals still deny that document's members, but never
+-- blacklist the public-domain original in somebody else's library.
+insert into public.content_takedowns(document_id, uploader_id, action, ground, legal_basis, facts)
+values (:'doc', :'owner', 'remove', 'terms', 'Test uploader terms removal', 'Test document scope');
+set local role authenticated;
+select pg_temp.tap('28o2 terms removal denies the removed document owner', not exists (
+    select 1 from storage.objects where bucket_id = 'scores' and name = :'shared'));
+reset role;
+select set_config('request.jwt.claims', json_build_object('sub', :'other', 'role', 'authenticated')::text, true);
+set local role authenticated;
+select pg_temp.tap('28o3 terms removal preserves another library', exists (
+    select 1 from storage.objects where bucket_id = 'scores' and name = :'shared'));
+reset role;
+update public.content_takedowns set ground = 'illegal' where document_id = :'doc';
+select set_config('request.jwt.claims', json_build_object('sub', :'owner', 'role', 'authenticated')::text, true);
+set local role authenticated;
+select pg_temp.tap('28o3a illegal-conduct removal denies the removed document owner', not exists (
+    select 1 from storage.objects where bucket_id = 'scores' and name = :'shared'));
+reset role;
+select set_config('request.jwt.claims', json_build_object('sub', :'other', 'role', 'authenticated')::text, true);
+set local role authenticated;
+select pg_temp.tap('28o4 uploader illegal-conduct removal preserves another library', exists (
+    select 1 from storage.objects where bucket_id = 'scores' and name = :'shared'));
+reset role;
+select pg_temp.tap('28o5 uploader takedowns do not block future cache hits', public.is_shared_imslp_pdf(:'shared'));
+update public.content_takedowns set lifted_at = now() where document_id = :'doc';
+select set_config('request.jwt.claims', json_build_object('sub', :'owner', 'role', 'authenticated')::text, true);
 insert into public.content_takedowns(document_id, uploader_id, action, ground, legal_basis, facts)
 values (:'doc', :'owner', 'remove', 'copyright', 'Test copyright removal', 'Test shared cache block');
 set local role authenticated;

@@ -976,13 +976,13 @@ const signScoreUrl = async (path: string): Promise<string | null> => {
 };
 
 /**
- * Prefetch only when the caller already knows the library row's actual path.
- * An id alone cannot distinguish private and shared originals; defer signing
- * until loadDocumentSource receives the confirmed row in that case.
+ * Sign alongside the row fetch on cold opens. Use the actual path when known,
+ * otherwise speculate on the usual private original. loadDocumentSource only
+ * reuses this URL if the confirmed row agrees, including after a replacement.
  */
 export const prefetchScoreUrl = (docId: string, storagePath?: string): ScoreUrlPrefetch => {
     const path = storagePath ?? `${docId}/original.pdf`;
-    return { path, url: storagePath ? signScoreUrl(path).catch(() => null) : Promise.resolve(null) };
+    return { path, url: signScoreUrl(path).catch(() => null) };
 };
 
 /** What the viewer opens a cloud score from: bytes it already has, or a URL to stream. */
