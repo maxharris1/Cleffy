@@ -113,7 +113,7 @@ export interface ImslpImportDeps {
 const LICENSE_UNKNOWN_MESSAGE =
     "The source page didn't confirm a public-domain or Creative Commons license for this edition; it can't be imported automatically.";
 const LICENSE_UNCHECKED_MESSAGE =
-    "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute — or view the source page.";
+    "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute.";
 
 const licenseConflict = (
     request: ImslpImportRequest,

@@ -24,6 +24,7 @@ import {
     unionCategories,
     walkCategoryBatch,
 } from '../supabase/functions/_shared/categorySync.ts';
+import { ImslpFetchError } from '../supabase/functions/_shared/imslpDownload.ts';
 import { ALL_TAXONOMY_CATEGORIES } from '../supabase/functions/_shared/searchFacetData.ts';
 import {
     CATALOG_JSONL_PATH,
@@ -91,7 +92,13 @@ const mwFetch = async (params) => {
                     await sleep(waitMs);
                     continue;
                 }
-                throw new Error(`IMSLP API HTTP ${res.status}`);
+                throw new ImslpFetchError(
+                    res.status === 429 ? 'rate_limited' : 'http_error',
+                    `IMSLP API HTTP ${res.status}`,
+                    {
+                        status: res.status,
+                    },
+                );
             }
             const payload = await res.json();
             if (payload && typeof payload === 'object' && payload.error) {
@@ -99,7 +106,10 @@ const mwFetch = async (params) => {
             }
             return payload;
         } catch (err) {
-            lastError = err;
+            lastError =
+                err instanceof Error && err.name === 'TimeoutError'
+                    ? new ImslpFetchError('timeout', err.message, { cause: err })
+                    : err;
             if (attempt < MW_RETRIES) {
                 await sleep(2000 * attempt);
             }
@@ -238,12 +248,16 @@ const main = async () => {
     }
     const wanted = args.categories.length > 0 ? args.categories : all;
     const progress = loadProgress();
-    console.log(`[imslp-export-catalog] ${wanted.length} categor${wanted.length === 1 ? 'y' : 'ies'} → ${CATALOG_JSONL_PATH}`);
+    console.log(
+        `[imslp-export-catalog] ${wanted.length} categor${wanted.length === 1 ? 'y' : 'ies'} → ${CATALOG_JSONL_PATH}`,
+    );
 
     let failed = 0;
     for (const category of wanted) {
         if (progress.sync[category] && !(progress.inProgress && progress.inProgress.category === category)) {
-            console.log(`[imslp-export-catalog] ${category}: already in checkpoint (${progress.sync[category].pages_done} pages)`);
+            console.log(
+                `[imslp-export-catalog] ${category}: already in checkpoint (${progress.sync[category].pages_done} pages)`,
+            );
             continue;
         }
         try {
@@ -258,7 +272,9 @@ const main = async () => {
 
     publish(progress);
     if (failed > 0) {
-        console.error(`[imslp-export-catalog] ${failed} categor${failed === 1 ? 'y' : 'ies'} failed; run again to resume`);
+        console.error(
+            `[imslp-export-catalog] ${failed} categor${failed === 1 ? 'y' : 'ies'} failed; run again to resume`,
+        );
         process.exit(1);
     }
     const missing = taxonomyCategories().filter((category) => !progress.sync[category]);

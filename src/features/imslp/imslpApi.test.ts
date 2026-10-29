@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     DOWNLOAD_QUEUE_SIGNAL_MS,
+    fetchImslpWork,
     IMSLP_DOWNLOAD_BUSY_MESSAGE,
     IMSLP_DOWNLOAD_TIMEOUT_MESSAGE,
     ImslpImportCancelledError,
@@ -10,8 +11,11 @@ import {
     type ImslpImportRequest,
 } from '@/features/imslp/imslpApi';
 
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+
 vi.mock('@/lib/supabase', () => ({
     getSupabase: () => ({
+        functions: { invoke: invokeMock },
         auth: {
             getSession: () => Promise.resolve({ data: { session: { access_token: 'test-token' } } }),
         },
@@ -251,4 +255,17 @@ describe('importImslpPdfToStorage — bounded call', () => {
             });
         },
     );
+});
+
+describe('fetchImslpWork', () => {
+    it('describes an empty function response as a load failure', async () => {
+        invokeMock.mockResolvedValueOnce({ data: null, error: null });
+        await expect(fetchImslpWork('Missing work')).rejects.toThrow("Couldn't load this work. Try again.");
+    });
+
+    it('returns a successfully loaded work with no editions', async () => {
+        const work = { title: 'Work with no PDFs', editions: [] };
+        invokeMock.mockResolvedValueOnce({ data: work, error: null });
+        await expect(fetchImslpWork(work.title)).resolves.toEqual(work);
+    });
 });

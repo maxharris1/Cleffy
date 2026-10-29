@@ -168,7 +168,7 @@ describe('runImslpImport — license and pacing come before anything is spent', 
         expect(res.body).toMatchObject({
             code: 'license_unknown',
             message:
-                "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute — or view the source page.",
+                "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute.",
         });
         expect(calls).not.toContain('enforceQuota');
     });

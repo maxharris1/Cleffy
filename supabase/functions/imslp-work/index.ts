@@ -1,4 +1,5 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { WORK_NOT_FOUND_COPY } from '../_shared/scoreSearchCopy.ts';
 import {
     checkRateLimit,
     clientKey,
@@ -175,7 +176,7 @@ Deno.serve(async (req) => {
 
         const page = Object.values(imagesData.query?.pages ?? {})[0];
         if (!page || page.missing) {
-            return jsonResponse({ error: 'Work not found on the source page' }, 404);
+            return jsonResponse({ error: WORK_NOT_FOUND_COPY }, 404);
         }
 
         const pdfTitles = (page.images ?? [])

@@ -96,22 +96,25 @@ describe('ScoreSourceButton', () => {
         expect(within(dialog).queryByRole('link', { name: 'score.pdf' })).not.toBeInTheDocument();
     });
 
-    it('shows public-domain attribution, omits the reminder, and joins publisher with year', async () => {
-        render(
-            <ScoreSourceButton
-                doc={{
-                    ...ccTypeset,
-                    source_license: 'Public Domain',
-                    source_attribution: { ...ccTypeset.source_attribution, publisher: 'Diabelli', year: 1802 },
-                }}
-            />,
-        );
-        await userEvent.click(screen.getByRole('button', { name: 'Source' }));
-        const dialog = await screen.findByRole('dialog', { name: 'About this score' });
-        expect(within(dialog).getByText('Public-domain scores via IMSLP')).toBeInTheDocument();
-        expect(within(dialog).getByText('Diabelli, 1802')).toBeInTheDocument();
-        expect(within(dialog).queryByText(/requires attribution/)).not.toBeInTheDocument();
-    });
+    it.each(['Public Domain', 'Public Domain (dedicated)'])(
+        'shows public-domain attribution, omits the reminder, and joins publisher with year for %s',
+        async (source_license) => {
+            render(
+                <ScoreSourceButton
+                    doc={{
+                        ...ccTypeset,
+                        source_license,
+                        source_attribution: { ...ccTypeset.source_attribution, publisher: 'Diabelli', year: 1802 },
+                    }}
+                />,
+            );
+            await userEvent.click(screen.getByRole('button', { name: 'Source' }));
+            const dialog = await screen.findByRole('dialog', { name: 'About this score' });
+            expect(within(dialog).getByText('Public-domain scores via IMSLP')).toBeInTheDocument();
+            expect(within(dialog).getByText('Diabelli, 1802')).toBeInTheDocument();
+            expect(within(dialog).queryByText(/requires attribution/)).not.toBeInTheDocument();
+        },
+    );
 
     it.each(['Creative Commons Zero 1.0', 'Copyright restricted', null])(
         'uses neutral attribution when the recorded license is %s',

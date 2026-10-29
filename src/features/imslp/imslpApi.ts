@@ -255,7 +255,7 @@ export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> =>
         throw new Error(await functionErrorMessage(error));
     }
     if (!data) {
-        throw new Error('The source page returned no editions');
+        throw new Error("Couldn't load this work. Try again.");
     }
     return data;
 };

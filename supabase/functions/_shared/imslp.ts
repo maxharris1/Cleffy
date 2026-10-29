@@ -81,7 +81,7 @@ export const mwFetch = async (params: Record<string, string>, options: MwFetchOp
             });
         } catch (err) {
             if (err instanceof DOMException && err.name === 'TimeoutError') {
-                lastError = new Error('The source page timed out', { cause: err });
+                lastError = new ImslpFetchError('timeout', 'The source page timed out', { cause: err });
                 if (attempt < attempts) {
                     await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
                     continue;
@@ -99,8 +99,6 @@ export const mwFetch = async (params: Record<string, string>, options: MwFetchOp
             // Typed, so the download path can back the deployment off for as
             // long as IMSLP asked instead of reading this as a plain failure.
             await res.body?.cancel().catch(() => undefined);
-            // The message is unchanged from the untyped error it replaces:
-            // categorySync retries on /HTTP 429/ and records it as lastError.
             throw new ImslpFetchError('rate_limited', 'The source page returned HTTP 429', {
                 status: 429,
                 retryAfterSec: parseRetryAfterSec(res.headers.get('Retry-After')),
@@ -131,7 +129,7 @@ export const mwFetch = async (params: Record<string, string>, options: MwFetchOp
         }
         return payload;
     }
-    throw lastError instanceof Error ? lastError : new Error('The source page timed out');
+    throw lastError instanceof Error ? lastError : new ImslpFetchError('timeout', 'The source page timed out');
 };
 
 export const workPageUrl = (title: string): string =>

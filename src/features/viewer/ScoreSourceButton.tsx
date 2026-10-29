@@ -73,7 +73,7 @@ export const ScoreSourceDetails = ({ doc }: { doc: ProvenanceFields }) => {
         <div className="text-sm">
             {fromImslp ? (
                 <p className="text-xs text-stone-500">
-                    {doc.source_license?.trim().toLowerCase() === 'public domain'
+                    {doc.source_license?.trim().toLowerCase().startsWith('public domain')
                         ? 'Public-domain scores via IMSLP'
                         : 'Score via IMSLP'}
                 </p>

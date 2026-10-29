@@ -132,9 +132,9 @@ export class ImslpFetchError extends Error {
     constructor(
         code: ImslpFetchFailure,
         message: string,
-        detail: { status?: number | null; retryAfterSec?: number | null } = {},
+        detail: { status?: number | null; retryAfterSec?: number | null; cause?: unknown } = {},
     ) {
-        super(message);
+        super(message, { cause: detail.cause });
         this.name = 'ImslpFetchError';
         this.code = code;
         this.status = detail.status ?? null;

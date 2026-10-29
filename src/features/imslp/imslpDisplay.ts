@@ -1,6 +1,6 @@
 /** Presentation helpers for IMSLP titles and edition labels. */
 
-import { SEARCH_TIMEOUT_COPY } from '../../../supabase/functions/_shared/scoreSearchCopy';
+import { SEARCH_TIMEOUT_COPY, WORK_NOT_FOUND_COPY } from '../../../supabase/functions/_shared/scoreSearchCopy';
 
 export { SEARCH_TIMEOUT_COPY };
 
@@ -91,6 +91,15 @@ export const hasSearchableQuery = (q: string): boolean => /[\p{L}\p{N}]/u.test(q
 /** Compatibility with older functions; source metadata and URLs never pass through here. */
 export const genericScoreMessage = (message: string): string =>
     message
+        .replace(/^Work not found on (?:IMSLP|the source page)\.?$/, WORK_NOT_FOUND_COPY)
+        .replace(
+            /(so it wasn't imported\. Try again in a minute) — or (?:open it on IMSLP|view the source page)\./g,
+            '$1.',
+        )
+        .replace(/^IMSLP API timeout$/, 'The source page timed out')
+        .replace(/^IMSLP API HTTP (\d+)$/, 'The source page returned HTTP $1')
+        .replace(/^IMSLP API answer too large$/, 'The source page response is too large')
+        .replace(/^IMSLP API\b/, 'The source page')
         .replace(/\bIMSLP work lookup failed\b/g, 'Could not load the source page')
         .replace(/\bIMSLP (search|download) failed\b/g, 'Score $1 failed')
         .replace(/^IMSLP (imports|downloads)\b/, 'Score $1')

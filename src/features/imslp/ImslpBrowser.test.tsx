@@ -91,11 +91,19 @@ const edition = (filename: string, overrides: Partial<ImslpEdition> = {}): Imslp
 describe('imslp display helpers', () => {
     it.each([
         ['IMSLP is down', 'The source page is down'],
-        ['Work not found on IMSLP', 'Work not found on the source page'],
+        ['Work not found on IMSLP', "We couldn't find this work. It may have been renamed or removed."],
+        ['Work not found on the source page', "We couldn't find this work. It may have been renamed or removed."],
+        ['IMSLP API timeout', 'The source page timed out'],
+        ['IMSLP API HTTP 500', 'The source page returned HTTP 500'],
+        ['IMSLP API answer too large', 'The source page response is too large'],
         ['Could not reach IMSLP to download this file.', 'Could not reach the source page to download this file.'],
         [
             "Cleffy couldn't reach IMSLP to check this edition's license, so it wasn't imported. Try again in a minute — or open it on IMSLP.",
+            "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute.",
+        ],
+        [
             "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute — or view the source page.",
+            "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute.",
         ],
         [
             'Too many IMSLP imports at once — waiting a moment before trying again',
