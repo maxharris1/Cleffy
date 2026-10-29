@@ -1,3 +1,4 @@
+import { isSharedImslpPath } from '../_shared/imslpPdfCache.ts';
 import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
@@ -95,7 +96,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Document not found or not accessible' }, 403);
     }
 
-    if (doc.storage_path !== `${documentId}/original.pdf`) {
+    if (doc.storage_path !== `${documentId}/original.pdf` && !isSharedImslpPath(doc.storage_path)) {
         return jsonResponse({ error: 'Document storage path is invalid' }, 400);
     }
 

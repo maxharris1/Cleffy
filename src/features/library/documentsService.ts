@@ -1,3 +1,4 @@
+import { isSharedImslpPath } from '../../../supabase/functions/_shared/imslpPdfCache';
 import {
     importImslpPdfToStorage,
     type ImslpDownloadFallback,
@@ -506,11 +507,15 @@ export const purgeDocumentStorage = async (
         // The whole folder, so import backups go too; the stamped path is
         // added in case the listing was refused.
         const listed = (await listFolder('scores', docId)) ?? [];
-        const { error: removeError } = await supabase.storage
-            .from('scores')
-            .remove([...new Set([target.storage_path, ...listed])]);
-        if (removeError) {
-            throw new Error(removeError.message);
+        // Shared originals outlive each library reference. Only purge this document's folder.
+        const scorePaths = [...new Set([target.storage_path, ...listed])].filter((path) =>
+            path.startsWith(`${docId}/`),
+        );
+        if (scorePaths.length > 0) {
+            const { error: removeError } = await supabase.storage.from('scores').remove(scorePaths);
+            if (removeError) {
+                throw new Error(removeError.message);
+            }
         }
         const knownCover = target.thumb_rev != null ? [`${docId}/${target.thumb_rev}.jpg`] : [];
         const covers = [...new Set([...knownCover, ...((await listFolder('thumbnails', docId)) ?? [])])];
@@ -1045,17 +1050,24 @@ export const replaceDocumentPdf = async (
     }
 
     await uploadPdfToStorage(
-        doc.storage_path,
+        `${doc.id}/original.pdf`,
         new Blob([newBytes as unknown as BlobPart], { type: 'application/pdf' }),
         onProgress,
     );
 
-    const { data: updated, error: updateError } = await supabase
-        .from('documents')
-        .update({ content_rev: (doc.content_rev ?? 0) + 1 })
-        .eq('id', doc.id)
-        .select()
-        .single();
+    const { data: updated, error: updateError } = isSharedImslpPath(doc.storage_path)
+        ? await supabase
+              .rpc('detach_imslp_pdf', {
+                  p_document_id: doc.id,
+                  p_content_rev: doc.content_rev ?? 0,
+              })
+              .single()
+        : await supabase
+              .from('documents')
+              .update({ content_rev: (doc.content_rev ?? 0) + 1 })
+              .eq('id', doc.id)
+              .select()
+              .single();
     if (updateError) {
         throw new Error(`The cleaned file was saved but the document could not be updated: ${updateError.message}`);
     }

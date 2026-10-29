@@ -326,6 +326,12 @@ const makeStub = (options: StubOptions = {}) => {
         storage: { from: (bucket: string) => storageApi(bucket) },
         rpc: (fn: string, args: unknown) => {
             calls.rpc(fn, args);
+            if (fn === 'detach_imslp_pdf') {
+                return {
+                    single: () =>
+                        Promise.resolve({ data: options.updatedRow ?? null, error: options.rpcError ?? null }),
+                };
+            }
             if (fn === 'finish_document_storage_cleanup') {
                 calls.events.push('tombstone:finish');
                 return Promise.resolve(
@@ -818,6 +824,18 @@ describe('cacheStreamedDocument (a first open closed mid-download)', () => {
 });
 
 describe('replaceDocumentPdf', () => {
+    it('writes a private replacement then detaches without overwriting a shared original', async () => {
+        const sharedPath = `00000000-0000-0000-0000-000000000000/${'a'.repeat(64)}.pdf`;
+        const d = doc({ storage_path: sharedPath });
+        const privatePath = `${d.id}/original.pdf`;
+        const calls = makeStub({ updatedRow: doc({ storage_path: privatePath, content_rev: 1 }) });
+        const updated = await replaceDocumentPdf(d, new ArrayBuffer(4), new Uint8Array([1, 2, 3]));
+        expect(vi.mocked(uploadPdfToStorage)).toHaveBeenCalledWith(privatePath, expect.anything(), undefined);
+        expect(calls.rpc).toHaveBeenCalledWith('detach_imslp_pdf', { p_document_id: d.id, p_content_rev: 0 });
+        expect(updated.storage_path).toBe(privatePath);
+        expect(calls.upload.mock.calls.every(([path]) => path !== sharedPath)).toBe(true);
+    });
+
     it('backs up the original once, uploads the replacement, bumps content_rev, refreshes the cache', async () => {
         const calls = makeStub({ updatedRow: doc({ content_rev: 1 }) });
         const d = doc();
@@ -999,6 +1017,18 @@ describe('leaveSharedDocument', () => {
 });
 
 describe('deleteDocument ordering (row first, bytes after)', () => {
+    it('keeps the shared original when deleting a library reference and its private backups', async () => {
+        const sharedPath = `00000000-0000-0000-0000-000000000000/${'b'.repeat(64)}.pdf`;
+        const d = doc({ storage_path: sharedPath });
+        const calls = makeStub({ listNames: ['pre-import-original.pdf'] });
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
+        expect(calls.removeFrom).toHaveBeenCalledWith('scores', [`${d.id}/pre-import-original.pdf`]);
+        expect(calls.remove.mock.calls.every(([paths]) => !paths.includes(sharedPath))).toBe(true);
+        expect(calls.events).toContain('tombstone:finish');
+    });
+
     it('deletes the row before any stored file is touched, then has the server clear the tombstone', async () => {
         const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: ['0.jpg'] });
         await (

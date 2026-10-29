@@ -326,3 +326,18 @@ describe('runImslpImport — creating the score only once the PDF is in hand', (
         expect(early.calls.slice(early.calls.indexOf('downloadPdf') + 1)).toEqual(['refundQuota']);
     });
 });
+
+describe('shared originals in the import flow', () => {
+    it('references a shared PDF without uploading a per-user copy', async () => {
+        const shared = { storagePath: `00000000-0000-0000-0000-000000000000/${'a'.repeat(64)}.pdf`, byteLength: 1234 };
+        const { calls, deps } = harness({
+            cached: { downloadable: true, restriction: null, licenseLabel: 'Public Domain', workTitle: WORK },
+            download: { ok: true, filename: 'a.pdf', shared },
+        });
+        const result = await runImslpImport(request(), deps);
+        expect(result).toMatchObject({ status: 200, body: { storagePath: shared.storagePath, byteLength: 1234 } });
+        expect(calls).not.toContain('liveLicense');
+        expect(calls).not.toContain('uploadPdf');
+        expect(calls).toContain('recordProvenance');
+    });
+});

@@ -31,6 +31,8 @@ import {
     isDownloadable,
     parseWorkPageLicenses,
 } from '../_shared/imslpLicense.ts';
+import { withImslpPdfCache, validateSharedPdf } from '../_shared/imslpPdfCache.ts';
+import { imslpPdfCacheStore } from '../_shared/imslpPdfCacheStore.ts';
 import { buildImslpProvenance } from '../_shared/imslpProvenance.ts';
 import { wikitextFromMwPage } from '../_shared/imslpWorkPage.ts';
 import { enforce, refund } from '../_shared/quota.ts';
@@ -172,7 +174,7 @@ Deno.serve(async (req) => {
     };
 
     const filename = typeof body.filename === 'string' ? body.filename.trim() : '';
-    if (!filename || !filename.toLowerCase().endsWith('.pdf')) {
+    if (!filename || filename.length > 512 || !filename.toLowerCase().endsWith('.pdf')) {
         return jsonResponse({ error: 'filename must be a .pdf' }, 400);
     }
     if (!body.acceptedDisclaimer) {
@@ -244,202 +246,275 @@ Deno.serve(async (req) => {
         return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
     }
 
-    const flow = await runImslpImport(
-        {
-            filename: canonicalFilename,
-            workTitle,
-            documentId,
-            storagePath,
-            openUrl: imagefromIndexUrl(canonicalFilename),
-            createTitle,
-        },
-        {
-            // License backstop, read BEFORE any pacing slot or quota is spent.
-            // What it verified (the work page the file is listed on, IMSLP's
-            // license tag) is also what the document's provenance records.
-            cachedClearance: async () => {
-                const { data: row } = await admin
-                    .from('imslp_file_licenses')
-                    .select('restriction, downloadable, fetched_at, license_label, work_title')
-                    .eq('filename', canonicalFilename)
-                    .maybeSingle();
-                if (!row || Date.now() - new Date(row.fetched_at as string).getTime() >= LICENSE_TTL_MS) {
-                    return null;
-                }
-                if (typeof row.downloadable !== 'boolean') {
-                    return null;
-                }
-                return {
-                    downloadable: row.downloadable,
-                    restriction: typeof row.restriction === 'string' ? row.restriction : null,
-                    licenseLabel: typeof row.license_label === 'string' ? row.license_label : null,
-                    workTitle: typeof row.work_title === 'string' && row.work_title ? row.work_title : null,
-                };
-            },
-
-            precheckCreate: async () => {
-                const { data: existing, error: existingError } = await admin
-                    .from('documents')
-                    .select('id')
-                    .eq('id', documentId)
-                    .maybeSingle();
-                if (existingError) {
-                    return { status: 502, body: { error: 'Could not check the library' } };
-                }
-                if (existing) {
-                    return { status: 409, body: { error: 'That score id is already in use' } };
-                }
-                // UX pre-check of the cloud-score cap so a full library costs no
-                // IMSLP request; the documents_enforce_score_cap trigger on the
-                // insert below remains the enforcement.
-                const { data: ent } = await admin.rpc('get_entitlements', { p_user: userId });
-                const entitlements = ent as { tier?: unknown; limits?: { cloud_scores?: unknown } } | null;
-                const limit = entitlements?.limits?.cloud_scores;
-                if (typeof limit === 'number' && limit >= 0) {
-                    const { count, error: countError } = await admin
-                        .from('documents')
-                        .select('id', { count: 'exact', head: true })
-                        .eq('owner_id', userId)
-                        .is('archived_at', null);
-                    if (!countError && count !== null && count >= limit) {
-                        return {
-                            status: 402,
-                            body: {
-                                code: 'limit_reached',
-                                metric: 'cloud_scores',
-                                limit,
-                                tier: typeof entitlements?.tier === 'string' ? entitlements.tier : 'free',
-                            },
-                        };
-                    }
-                }
-                return null;
-            },
-
-            // Deployment-wide pacing of live IMSLP requests (imslpDownloadGate.ts).
-            pace: () => gateGlobalImslpDownload(checkRateLimit, readGlobalDownloadGateConfig(Deno.env.get)),
-
-            liveLicense: async (title): Promise<LiveLicense> => {
-                const page = await fetchWorkPage(title, LICENSE_PARSE_OPTIONS);
-                if (!page.ok) {
-                    return page.reason === 'rate_limited'
-                        ? { kind: 'rate_limited', retryAfterSec: page.retryAfterSec }
-                        : { kind: 'unavailable' };
-                }
-                const license = parseWorkPageLicenses(page.html).get(canonicalFilename);
-                if (!license) {
-                    return { kind: 'not_listed' };
-                }
-                try {
-                    await admin.from('imslp_file_licenses').upsert({
+    let signedUrl: string | null = null;
+    let flow: FlowResponse;
+    try {
+        flow = await withImslpPdfCache(
+            canonicalFilename,
+            imslpPdfCacheStore(admin),
+            async (cache) => {
+                let verifiedWork = cache.entry?.work_title ?? workTitle;
+                let verifiedLicense = cache.entry?.license_label ?? null;
+                return await runImslpImport(
+                    {
                         filename: canonicalFilename,
-                        work_title: title,
-                        license: classifyLicense(license.licenseLabel),
-                        license_label: license.licenseLabel,
-                        restriction: license.restriction,
-                        eu_hosted: license.euHosted,
-                        downloadable: isDownloadable(license),
-                        fetched_at: new Date().toISOString(),
-                    });
-                } catch {
-                    // cache write is best-effort
-                }
-                return {
-                    kind: 'found',
-                    downloadable: isDownloadable(license),
-                    restriction: license.restriction,
-                    licenseLabel: license.licenseLabel,
-                };
-            },
+                        workTitle,
+                        documentId,
+                        storagePath,
+                        openUrl: imagefromIndexUrl(canonicalFilename),
+                        createTitle,
+                    },
+                    {
+                        // License backstop, read BEFORE any pacing slot or quota is spent.
+                        // What it verified (the work page the file is listed on, IMSLP's
+                        // license tag) is also what the document's provenance records.
+                        cachedClearance: async () => {
+                            const { data: row } = await admin
+                                .from('imslp_file_licenses')
+                                .select('restriction, downloadable, fetched_at, license_label, work_title')
+                                .eq('filename', cache.entry?.filename ?? canonicalFilename)
+                                .maybeSingle();
+                            const fresh =
+                                row && Date.now() - new Date(row.fetched_at as string).getTime() < LICENSE_TTL_MS;
+                            // A newly discovered restriction still refuses a cached original.
+                            if (cache.entry && !(fresh && row.downloadable === false)) {
+                                return {
+                                    downloadable: true,
+                                    restriction: null,
+                                    licenseLabel: cache.entry.license_label,
+                                    workTitle: cache.entry.work_title,
+                                };
+                            }
+                            if (!fresh) {
+                                return null;
+                            }
+                            if (typeof row.downloadable !== 'boolean') {
+                                return null;
+                            }
+                            verifiedWork = typeof row.work_title === 'string' ? row.work_title : workTitle;
+                            verifiedLicense = typeof row.license_label === 'string' ? row.license_label : null;
+                            return {
+                                downloadable: row.downloadable,
+                                restriction: typeof row.restriction === 'string' ? row.restriction : null,
+                                licenseLabel: typeof row.license_label === 'string' ? row.license_label : null,
+                                workTitle: typeof row.work_title === 'string' && row.work_title ? row.work_title : null,
+                            };
+                        },
 
-            // IMSLP is throttling our egress IP. Close the shared pacing key for
-            // as long as it asked, so no other import tries meanwhile, and queue
-            // this caller behind it like any paced request.
-            backOff: async (retryAfterSec) => {
-                const backoff = imslpBackoffSec(retryAfterSec);
-                const { error: blockError } = await admin.rpc('edge_rate_block', {
-                    p_key: IMSLP_GLOBAL_DOWNLOAD_KEY,
-                    p_seconds: backoff,
-                });
-                if (blockError) {
-                    console.error(`imslp-download: could not record IMSLP back-off: ${blockError.message}`);
-                }
-                return downloadQueued(backoff);
-            },
+                        precheckCreate: async () => {
+                            const { data: existing, error: existingError } = await admin
+                                .from('documents')
+                                .select('id')
+                                .eq('id', documentId)
+                                .maybeSingle();
+                            if (existingError) {
+                                return { status: 502, body: { error: 'Could not check the library' } };
+                            }
+                            if (existing) {
+                                return { status: 409, body: { error: 'That score id is already in use' } };
+                            }
+                            // UX pre-check of the cloud-score cap so a full library costs no
+                            // IMSLP request; the documents_enforce_score_cap trigger on the
+                            // insert below remains the enforcement.
+                            const { data: ent } = await admin.rpc('get_entitlements', { p_user: userId });
+                            const entitlements = ent as { tier?: unknown; limits?: { cloud_scores?: unknown } } | null;
+                            const limit = entitlements?.limits?.cloud_scores;
+                            if (typeof limit === 'number' && limit >= 0) {
+                                const { count, error: countError } = await admin
+                                    .from('documents')
+                                    .select('id', { count: 'exact', head: true })
+                                    .eq('owner_id', userId)
+                                    .is('archived_at', null);
+                                if (!countError && count !== null && count >= limit) {
+                                    return {
+                                        status: 402,
+                                        body: {
+                                            code: 'limit_reached',
+                                            metric: 'cloud_scores',
+                                            limit,
+                                            tier: typeof entitlements?.tier === 'string' ? entitlements.tier : 'free',
+                                        },
+                                    };
+                                }
+                            }
+                            return null;
+                        },
 
-            // Metered as smart_imports, gated before the IMSLP fetch it pays for.
-            enforceQuota: async () => {
-                const gate = await enforce(admin, userId, 'smart_imports');
-                return gate.ok
-                    ? { ok: true, consumed: gate.consumed }
-                    : { ok: false, status: gate.status, body: gate.body };
-            },
-            refundQuota: () => refund(admin, userId, 'smart_imports'),
+                        // Deployment-wide pacing of live IMSLP requests (imslpDownloadGate.ts).
+                        pace: () =>
+                            cache.entry
+                                ? Promise.resolve({ ok: true })
+                                : gateGlobalImslpDownload(checkRateLimit, readGlobalDownloadGateConfig(Deno.env.get)),
 
-            downloadPdf: () => tryDownloadPdf(canonicalFilename),
+                        liveLicense: async (title): Promise<LiveLicense> => {
+                            const page = await fetchWorkPage(title, LICENSE_PARSE_OPTIONS);
+                            if (!page.ok) {
+                                return page.reason === 'rate_limited'
+                                    ? { kind: 'rate_limited', retryAfterSec: page.retryAfterSec }
+                                    : { kind: 'unavailable' };
+                            }
+                            const license = parseWorkPageLicenses(page.html).get(canonicalFilename);
+                            if (!license) {
+                                return { kind: 'not_listed' };
+                            }
+                            try {
+                                await admin.from('imslp_file_licenses').upsert({
+                                    filename: canonicalFilename,
+                                    work_title: title,
+                                    license: classifyLicense(license.licenseLabel),
+                                    license_label: license.licenseLabel,
+                                    restriction: license.restriction,
+                                    eu_hosted: license.euHosted,
+                                    downloadable: isDownloadable(license),
+                                    fetched_at: new Date().toISOString(),
+                                });
+                            } catch {
+                                // cache write is best-effort
+                            }
+                            verifiedWork = title;
+                            verifiedLicense = license.licenseLabel;
+                            return {
+                                kind: 'found',
+                                downloadable: isDownloadable(license),
+                                restriction: license.restriction,
+                                licenseLabel: license.licenseLabel,
+                            };
+                        },
 
-            // As the caller, so the documents_insert policy and the score-cap
-            // trigger judge it exactly as they judge an upload.
-            createDocument: async (title) => {
-                const { error } = await userClient
-                    .from('documents')
-                    .insert({ id: documentId, owner_id: userId, title, storage_path: storagePath });
-                if (!error) {
-                    return null;
-                }
-                if (error.message === 'limit_reached') {
-                    return scoreCapRefusal(error.details);
-                }
-                if (error.code === '23505') {
-                    return { status: 409, body: { error: 'That score id is already in use' } };
-                }
-                if (error.code === '42501') {
-                    return { status: 403, body: { error: 'This account cannot add scores' } };
-                }
-                return { status: 502, body: { error: `Could not create the score: ${error.message}` } };
-            },
-            // Cleanup of a row and file this invocation created. Service role
-            // so a cleanup is never refused, scoped to that exact row and path.
-            deleteDocument: async () => {
-                const { error } = await admin.from('documents').delete().eq('id', documentId).eq('owner_id', userId);
-                if (error) {
-                    console.error(`imslp-download: could not remove a failed import's score: ${error.message}`);
-                }
-            },
+                        // IMSLP is throttling our egress IP. Close the shared pacing key for
+                        // as long as it asked, so no other import tries meanwhile, and queue
+                        // this caller behind it like any paced request.
+                        backOff: async (retryAfterSec) => {
+                            const backoff = imslpBackoffSec(retryAfterSec);
+                            const { error: blockError } = await admin.rpc('edge_rate_block', {
+                                p_key: IMSLP_GLOBAL_DOWNLOAD_KEY,
+                                p_seconds: backoff,
+                            });
+                            if (blockError) {
+                                console.error(`imslp-download: could not record IMSLP back-off: ${blockError.message}`);
+                            }
+                            return downloadQueued(backoff);
+                        },
 
-            // User-scoped client: Storage RLS requires owner for insert/update —
-            // never upload with the service role (that would let any
-            // SELECT-capable member overwrite).
-            uploadPdf: async (bytes) => {
-                const { error } = await userClient.storage.from('scores').upload(storagePath, bytes, {
-                    contentType: 'application/pdf',
-                    upsert: true,
-                });
-                return error ? error.message : null;
-            },
-            removePdf: async () => {
-                const { error } = await admin.storage.from('scores').remove([storagePath]);
-                if (error) {
-                    console.error(`imslp-download: could not remove a failed import's PDF: ${error.message}`);
-                }
-            },
+                        // Metered as smart_imports, gated before the IMSLP fetch it pays for.
+                        enforceQuota: async () => {
+                            const gate = await enforce(admin, userId, 'smart_imports');
+                            return gate.ok
+                                ? { ok: true, consumed: gate.consumed }
+                                : { ok: false, status: gate.status, body: gate.body };
+                        },
+                        refundQuota: () => refund(admin, userId, 'smart_imports'),
 
-            // Provenance: where the score came from, its license and who IMSLP
-            // credits. Written with the service role (clients cannot set or
-            // change these columns — documents_guard_provenance).
-            recordProvenance: async (title, licenseLabel) => {
-                const credits = await fetchFileCredits(title, canonicalFilename);
-                const provenance = buildImslpProvenance({
-                    workTitle: title,
-                    filename: canonicalFilename,
-                    licenseLabel,
-                    credits,
-                });
-                const { error } = await admin.from('documents').update(provenance).eq('id', documentId);
-                return error ? error.message : null;
+                        downloadPdf: async () => {
+                            let entry = cache.entry;
+                            if (!entry) {
+                                const result = await tryDownloadPdf(canonicalFilename);
+                                if (!result.ok) {
+                                    return result;
+                                }
+                                validateSharedPdf(result.bytes);
+                                const credits = await fetchFileCredits(verifiedWork, canonicalFilename);
+                                entry = await cache.store(result.bytes, {
+                                    work_title: verifiedWork,
+                                    license_label: verifiedLicense,
+                                    provenance: buildImslpProvenance({
+                                        workTitle: verifiedWork,
+                                        filename: canonicalFilename,
+                                        licenseLabel: verifiedLicense,
+                                        credits,
+                                    }),
+                                });
+                            }
+                            return {
+                                ok: true,
+                                filename: entry.filename,
+                                shared: { storagePath: entry.storage_path, byteLength: entry.size },
+                            };
+                        },
+
+                        // As the caller, so the documents_insert policy and the score-cap
+                        // trigger judge it exactly as they judge an upload.
+                        createDocument: async (title) => {
+                            const { error } = await userClient
+                                .from('documents')
+                                .insert({ id: documentId, owner_id: userId, title, storage_path: storagePath });
+                            if (!error) {
+                                return null;
+                            }
+                            if (error.message === 'limit_reached') {
+                                return scoreCapRefusal(error.details);
+                            }
+                            if (error.code === '23505') {
+                                return { status: 409, body: { error: 'That score id is already in use' } };
+                            }
+                            if (error.code === '42501') {
+                                return { status: 403, body: { error: 'This account cannot add scores' } };
+                            }
+                            return { status: 502, body: { error: `Could not create the score: ${error.message}` } };
+                        },
+                        // Cleanup of a row and file this invocation created. Service role
+                        // so a cleanup is never refused, scoped to that exact row and path.
+                        deleteDocument: async () => {
+                            const { error } = await admin
+                                .from('documents')
+                                .delete()
+                                .eq('id', documentId)
+                                .eq('owner_id', userId);
+                            if (error) {
+                                console.error(
+                                    `imslp-download: could not remove a failed import's score: ${error.message}`,
+                                );
+                            }
+                        },
+
+                        // Shared originals are uploaded once by cache.store, never per user.
+                        uploadPdf: async () => {
+                            throw new Error('IMSLP imports must reference a shared original');
+                        },
+                        removePdf: async () => {
+                            const { error } = await admin.storage.from('scores').remove([storagePath]);
+                            if (error) {
+                                console.error(
+                                    `imslp-download: could not remove a failed import's PDF: ${error.message}`,
+                                );
+                            }
+                        },
+
+                        // Provenance: where the score came from, its license and who IMSLP
+                        // credits. Written with the service role (clients cannot set or
+                        // change these columns — documents_guard_provenance).
+                        recordProvenance: async () => {
+                            const entry = cache.entry;
+                            if (!entry) {
+                                return 'Shared original is missing';
+                            }
+                            const { data: signed, error: signError } = await admin.storage
+                                .from('scores')
+                                .createSignedUrl(entry.storage_path, 3600);
+                            if (signError || !signed) {
+                                return signError?.message ?? 'Could not sign the shared original';
+                            }
+                            signedUrl = signed.signedUrl;
+                            const { error } = await admin
+                                .from('documents')
+                                .update({ ...entry.provenance, storage_path: entry.storage_path })
+                                .eq('id', documentId)
+                                .eq('owner_id', userId)
+                                .select('id')
+                                .single();
+                            return error ? error.message : null;
+                        },
+                    },
+                );
             },
-        },
-    );
+            () => downloadQueued(2),
+        );
+    } catch (err) {
+        flow = { status: 502, body: { error: err instanceof Error ? err.message : 'Shared IMSLP cache failed' } };
+    }
+    if (flow.status === 200) {
+        flow = { ...flow, body: { ...(flow.body as Record<string, unknown>), signedUrl } };
+    }
     reportFailure(flow, { documentId, creating });
     return respond(flow);
 });

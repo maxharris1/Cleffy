@@ -128,6 +128,26 @@ describe('parseRetryAfterSec', () => {
 });
 
 describe('fetchImslpBytes', () => {
+    it('refuses an incomplete declared transfer before it can be cached', async () => {
+        await expect(
+            fetchImslpBytes(CDN, {
+                accept: 'application/pdf',
+                maxBytes: 1024,
+                timeoutMs: 1000,
+                fetchImpl: async () => pdfResponse(PDF, { 'content-length': String(PDF.length + 10) }),
+            }),
+        ).rejects.toThrow('Content-Length');
+    });
+
+    it('does not compare a decompressed body length against the compressed length', async () => {
+        const result = await fetchImslpBytes(CDN, {
+            accept: 'application/pdf',
+            maxBytes: 1024,
+            timeoutMs: 1000,
+            fetchImpl: async () => pdfResponse(PDF, { 'content-length': '5', 'content-encoding': 'gzip' }),
+        });
+        expect(Array.from(result.bytes)).toEqual(Array.from(PDF));
+    });
     const opts = { accept: 'application/pdf', maxBytes: 1024, timeoutMs: 5_000 };
 
     it('returns the body of a 200', async () => {

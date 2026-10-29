@@ -894,8 +894,12 @@ export type Database = {
                 Args: { p_email: string };
                 Returns: boolean;
             };
-            // Service role only: imslp-download closes the shared IMSLP pacing
-            // key for IMSLP's Retry-After after a 429.
+            // Owner-only: switch a shared original to an uploaded private replacement.
+            detach_imslp_pdf: {
+                Args: { p_document_id: string; p_content_rev: number };
+                Returns: DocumentRow;
+            };
+            // Service role only: close the shared pacing key after IMSLP answers 429.
             edge_rate_block: {
                 Args: { p_key: string; p_seconds: number };
                 Returns: undefined;

@@ -23,7 +23,8 @@
  *    caller (RLS and the score-cap trigger apply), so a queued or failed import
  *    never leaves an empty score in anyone's library — the client holds no row
  *    while it waits.
- * 8. Upload as the caller, then provenance under the service role. A failure
+ * 8. Attach a shared original and provenance under the service role (legacy
+ *    byte results still upload as the caller). A failure
  *    after step 7 removes the PDF and the row this invocation created; for a
  *    row the client created (older clients) it removes the PDF and the client
  *    rolls its own row back.
@@ -55,9 +56,10 @@ export type LiveLicense =
     /** IMSLP answered 429. */
     | { kind: 'rate_limited'; retryAfterSec: number | null };
 
-/** Structurally DownloadResult (imslpDownload.ts). */
+/** DownloadResult, or a validated original already published to the shared cache. */
 export type FetchedPdf =
     | { ok: true; bytes: Uint8Array; filename: string }
+    | { ok: true; shared: { storagePath: string; byteLength: number }; filename: string }
     | {
           ok: false;
           code: string;
@@ -267,12 +269,12 @@ export const runImslpImport = async (request: ImslpImportRequest, deps: ImslpImp
         // 8. Store, then record where it came from. A CC-BY score must not
         // exist in a library without its attribution, so a failed provenance
         // write fails the import.
-        const uploadError = await deps.uploadPdf(result.bytes);
+        const uploadError = 'shared' in result ? null : await deps.uploadPdf(result.bytes);
         if (uploadError) {
             await undo();
             return { status: 502, body: { error: `Storage upload failed: ${uploadError}` } };
         }
-        uploaded = true;
+        uploaded = !('shared' in result);
 
         const provenanceError = await deps.recordProvenance(title, licenseLabel);
         if (provenanceError) {
@@ -287,9 +289,9 @@ export const runImslpImport = async (request: ImslpImportRequest, deps: ImslpImp
             body: {
                 ok: true,
                 documentId: request.documentId,
-                storagePath: request.storagePath,
+                storagePath: 'shared' in result ? result.shared.storagePath : request.storagePath,
                 filename: result.filename,
-                byteLength: result.bytes.byteLength,
+                byteLength: 'shared' in result ? result.shared.byteLength : result.bytes.byteLength,
                 created,
             },
         };

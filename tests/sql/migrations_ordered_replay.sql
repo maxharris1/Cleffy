@@ -228,6 +228,7 @@ set constraints all immediate;
 \ir ../../supabase/migrations/20261022140900_end_student_sessions_lock_order.sql
 \ir ../../supabase/migrations/20261022141000_sweep_stale_account_deletions.sql
 \ir ../../supabase/migrations/20261022160000_cancel_link_release_for_deletion.sql
+\ir ../../supabase/migrations/20261028120000_imslp_shared_pdf_cache.sql
 
 reset client_min_messages;
 
