@@ -165,7 +165,11 @@ describe('runImslpImport — license and pacing come before anything is spent', 
         const { calls, deps } = harness({ live: { kind: 'unavailable' } });
         const res = await runImslpImport(request(), deps);
         expect(res.status).toBe(409);
-        expect(res.body).toMatchObject({ code: 'license_unknown', message: expect.stringMatching(/couldn't reach/i) });
+        expect(res.body).toMatchObject({
+            code: 'license_unknown',
+            message:
+                "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute — or view the source page.",
+        });
         expect(calls).not.toContain('enforceQuota');
     });
 

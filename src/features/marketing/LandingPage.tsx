@@ -34,7 +34,10 @@ const STEPS = [
 const FEATURES = [
     { title: 'Live ink', body: 'Strokes stream to everyone as they’re drawn, not after.' },
     { title: 'Works offline', body: 'Annotate anywhere; changes sync when you’re back.' },
-    { title: 'Find a score', body: 'Search public-domain scores and add them straight to your library.' },
+    {
+        title: 'Public-domain library built in',
+        body: 'Search public-domain scores and add them straight to your library.',
+    },
     { title: 'Export & share', body: 'Send a page as a photo, or a flattened PDF of the whole score.' },
     { title: 'The PDF stays pristine', body: 'Marks live on top — the original file is never modified.' },
 ] as const;

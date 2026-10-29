@@ -396,7 +396,10 @@ describe('tryDownloadPdfWith', () => {
     it('treats a 429 from the imageinfo API as IMSLP throttling us: no more requests', async () => {
         const fetchImpl = vi.fn<typeof fetch>(async () => htmlResponse('<html>no wait page here</html>'));
         const throttledMw = vi.fn(async () => {
-            throw new ImslpFetchError('rate_limited', 'IMSLP API HTTP 429', { status: 429, retryAfterSec: 75 });
+            throw new ImslpFetchError('rate_limited', 'The source page returned HTTP 429', {
+                status: 429,
+                retryAfterSec: 75,
+            });
         });
         const result = await tryDownloadPdfWith('a.pdf', { mwFetch: throttledMw, fetchImpl });
         expect(result).toMatchObject({ ok: false, code: 'rate_limited', retryAfterSec: 75 });

@@ -10,6 +10,7 @@ import {
     editionListSummary,
     formatBytes,
     friendlySearchError,
+    genericScoreMessage,
     hasSearchableQuery,
     highlightRanges,
     isEditionImportable,
@@ -88,6 +89,42 @@ const edition = (filename: string, overrides: Partial<ImslpEdition> = {}): Imslp
 });
 
 describe('imslp display helpers', () => {
+    it.each([
+        ['IMSLP is down', 'The source page is down'],
+        ['Work not found on IMSLP', 'Work not found on the source page'],
+        ['Could not reach IMSLP to download this file.', 'Could not reach the source page to download this file.'],
+        [
+            "Cleffy couldn't reach IMSLP to check this edition's license, so it wasn't imported. Try again in a minute — or open it on IMSLP.",
+            "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute — or view the source page.",
+        ],
+        [
+            'Too many IMSLP imports at once — waiting a moment before trying again',
+            'Too many score imports at once — waiting a moment before trying again',
+        ],
+        [
+            'IMSLP downloads are paced — queued for the next slot',
+            'Score downloads are paced — queued for the next slot',
+        ],
+        ['IMSLP work lookup failed', 'Could not load the source page'],
+        ['IMSLP search failed', 'Score search failed'],
+        ['IMSLP download failed', 'Score download failed'],
+        ['The source page did not return a PDF for this file.', 'The source page did not return a PDF for this file.'],
+        ['Failed to fetch', 'Failed to fetch'],
+    ])('renders older server prose naturally: %s', (raw, expected) => {
+        expect(genericScoreMessage(raw)).toBe(expected);
+    });
+
+    it.each([
+        new DOMException('The operation timed out.', 'TimeoutError'),
+        new Error('canceling statement due to statement timeout'),
+        new Error('Request timed out'),
+        new Error('IMSLP took too long to answer.'),
+        new Error('The source page took too long to answer.'),
+        new Error(SEARCH_TIMEOUT_COPY),
+    ])('uses the shared search timeout copy for %s', (error) => {
+        expect(friendlySearchError(error)).toBe(SEARCH_TIMEOUT_COPY);
+    });
+
     it('formats byte sizes', () => {
         expect(formatBytes(null)).toBe('');
         expect(formatBytes(500)).toBe('500 B');
@@ -129,7 +166,7 @@ describe('imslp display helpers', () => {
         expect(friendlySearchError(new Error('canceling statement due to statement timeout'))).toBe(
             SEARCH_TIMEOUT_COPY,
         );
-        expect(friendlySearchError(new Error('IMSLP is down'))).toBe('The source library is down');
+        expect(friendlySearchError(new Error('IMSLP is down'))).toBe('The source page is down');
     });
 
     it('recommends a mid-size edition over tiny or huge files', () => {
@@ -617,7 +654,7 @@ describe('ImslpBrowser', () => {
             expect(searchSpy).toHaveBeenCalledTimes(2);
         });
 
-        expect(await screen.findByText('The source library is down')).toBeInTheDocument();
+        expect(await screen.findByText('The source page is down')).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
         // Prior results stay; the "No matches" empty state must not appear.
         expect(screen.getByText('Best matches')).toBeInTheDocument();
@@ -731,22 +768,20 @@ describe('ImslpBrowser', () => {
         const add = screen.getByRole('button', { name: 'Add to my library' });
         expect(add).toBeEnabled();
         expect(screen.queryByText('Select a downloadable edition to add.')).not.toBeInTheDocument();
-        expect(screen.getByRole('link', { name: /^Open source page$/ })).toBeInTheDocument();
+        expect(screen.getAllByRole('link', { name: /^View source page$/ })).toHaveLength(2);
         expect(within(list).queryByText('Urtext · Henle · 1976')).not.toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
 
         // Henle stays visible, below, with its own way to IMSLP — never selectable.
         expect(screen.getByRole('heading', { name: 'Not downloadable here (2)' })).toBeInTheDocument();
-        const restricted = within(screen.getByRole('list', { name: 'Editions to open at source' })).getAllByRole(
-            'listitem',
-        );
+        const restricted = within(screen.getByRole('list', { name: 'Not downloadable here' })).getAllByRole('listitem');
         expect(restricted).toHaveLength(2);
         for (const row of restricted) {
             const henle = within(row);
             expect(henle.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
             expect(henle.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
             expect(henle.getByText('Restricted')).toBeInTheDocument();
-            expect(henle.getByRole('link', { name: /^open source page$/ })).toBeInTheDocument();
+            expect(henle.getByRole('link', { name: /^view source page$/ })).toBeInTheDocument();
             expect(henle.queryByRole('radio')).not.toBeInTheDocument();
         }
         expect(within(restricted[0]!).getByText(/Complete Score/)).toBeInTheDocument();
@@ -815,11 +850,11 @@ describe('ImslpBrowser', () => {
         expect(within(rows[0]!).getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
         expect(within(rows[0]!).getByText(/Complete Score/)).toBeInTheDocument();
         expect(within(rows[0]!).queryByRole('link', { name: /source page/i })).not.toBeInTheDocument();
-        expect(screen.getByRole('link', { name: /^Open source page$/ })).toBeInTheDocument();
-        const peters = within(screen.getByRole('list', { name: 'Editions to open at source' }));
+        expect(screen.getAllByRole('link', { name: /^View source page$/ })).toHaveLength(2);
+        const peters = within(screen.getByRole('list', { name: 'Not downloadable here' }));
         expect(peters.queryByRole('radio')).not.toBeInTheDocument();
         expect(peters.getByText('Non-PD US')).toBeInTheDocument();
-        expect(peters.getByRole('link', { name: /^open source page$/ })).toBeInTheDocument();
+        expect(peters.getByRole('link', { name: /^view source page$/ })).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
 
         expect(screen.getByText(/Files are not guaranteed/)).toBeInTheDocument();
@@ -914,7 +949,7 @@ describe('ImslpBrowser', () => {
             expect.any(AbortSignal),
         );
         expect(within(list).queryByRole('link', { name: /source page/i })).not.toBeInTheDocument();
-        expect(screen.getByRole('link', { name: /^Open source page$/ })).toBeInTheDocument();
+        expect(screen.getAllByRole('link', { name: /^View source page$/ })).toHaveLength(2);
     });
 
     it('shows a paced download as queued, then downloading, while the client retries on its own', async () => {
@@ -1036,7 +1071,7 @@ describe('ImslpBrowser', () => {
         expect(signal?.aborted).toBe(true);
     });
 
-    it('says "check source page" when the license lookup itself was unavailable', async () => {
+    it('says "view source page" when the license lookup itself was unavailable', async () => {
         const { screen, within } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');
 
@@ -1059,11 +1094,11 @@ describe('ImslpBrowser', () => {
         await screen.findByRole('heading', { name: 'Not downloadable here (1)' });
 
         expect(screen.queryByRole('list', { name: 'PDF editions' })).not.toBeInTheDocument();
-        const list = screen.getByRole('list', { name: 'Editions to open at source' });
+        const list = screen.getByRole('list', { name: 'Not downloadable here' });
         expect(within(list).queryByRole('radio')).not.toBeInTheDocument();
         expect(within(list).getByText('License check unavailable')).toBeInTheDocument();
         expect(within(list).getByText(/Couldn’t check the license just now/)).toBeInTheDocument();
-        expect(within(list).getByRole('link', { name: 'check source page' })).toHaveAttribute(
+        expect(within(list).getByRole('link', { name: 'view source page' })).toHaveAttribute(
             'href',
             'https://imslp.org/wiki/Special:ImagefromIndex/unchecked.pdf',
         );
@@ -1093,7 +1128,7 @@ describe('ImslpBrowser', () => {
         const radios = within(list).getAllByRole('radio');
         expect(radios).toHaveLength(1);
         expect(within(list).getByRole('radio', { name: /Select known/i })).toBeChecked();
-        const unavailable = screen.getByRole('list', { name: 'Editions to open at source' });
+        const unavailable = screen.getByRole('list', { name: 'Not downloadable here' });
         expect(within(unavailable).getByText('mystery')).toBeInTheDocument();
         expect(within(unavailable).queryByRole('radio')).not.toBeInTheDocument();
         expect(within(unavailable).getByText('License unknown')).toBeInTheDocument();
@@ -1121,7 +1156,7 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText('Choose a PDF edition')).not.toBeInTheDocument();
         // Both stay listed, each with its own way to IMSLP.
         expect(screen.getByRole('heading', { name: 'Not downloadable here (2)' })).toBeInTheDocument();
-        expect(screen.getAllByRole('link', { name: 'open source page' })).toHaveLength(2);
+        expect(screen.getAllByRole('link', { name: 'view source page' })).toHaveLength(2);
         expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
         // No import button, no consent checkbox — there is nothing to import.
         expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
@@ -1204,7 +1239,7 @@ describe('ImslpBrowser', () => {
         expect(onUpgrade).toHaveBeenCalledTimes(1);
     });
 
-    it('says the month’s IMSLP imports are spent, not the cloud-score cap, and links the plans', async () => {
+    it('says the month’s imports from Find a score are spent, not the cloud-score cap, and links the plans', async () => {
         const { screen } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
@@ -1233,7 +1268,7 @@ describe('ImslpBrowser', () => {
         await screen.findByText('Choose a PDF edition');
 
         expect(screen.getByRole('button', { name: 'Add to my library' })).toBeDisabled();
-        expect(screen.getByText(/You have used your 2 free score imports this month/)).toBeInTheDocument();
+        expect(screen.getByText(/You have used your 2 free imports from Find a score this month/)).toBeInTheDocument();
         expect(screen.queryByText(/Cloud-score limit reached/)).not.toBeInTheDocument();
         await userEvent.click(screen.getByRole('button', { name: 'see plans' }));
         expect(onUpgrade).toHaveBeenCalledTimes(1);
@@ -1365,9 +1400,9 @@ describe('ImslpBrowser', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Key' }));
         await userEvent.click(await screen.findByRole('button', { name: 'E-flat major' }));
 
-        expect(await screen.findByText('Index still building')).toBeInTheDocument();
+        expect(await screen.findByText('Preparing scores')).toBeInTheDocument();
         expect(
-            screen.getByText('The score index is still being built for E-flat major. Try typing a title.'),
+            screen.getByText('We’re still preparing scores for E-flat major. Try typing a title.'),
         ).toBeInTheDocument();
     });
 
@@ -1420,8 +1455,8 @@ describe('ImslpBrowser', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Era' }));
         await userEvent.click(await screen.findByRole('button', { name: 'Baroque' }));
 
-        expect(await screen.findByText('Index still building')).toBeInTheDocument();
-        expect(screen.getByText(/The score index is still being built for Baroque/)).toBeInTheDocument();
+        expect(await screen.findByText('Preparing scores')).toBeInTheDocument();
+        expect(screen.getByText(/We’re still preparing scores for Baroque/)).toBeInTheDocument();
         expect(screen.queryByText('No matches')).not.toBeInTheDocument();
     });
 
@@ -1444,9 +1479,9 @@ describe('ImslpBrowser', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Form' }));
         await userEvent.click(await screen.findByRole('button', { name: 'Nocturne' }));
 
-        expect(await screen.findByText('Index still building')).toBeInTheDocument();
+        expect(await screen.findByText('Preparing scores')).toBeInTheDocument();
         expect(
-            screen.getByText('The score index is still being built for Piano and Nocturne. Try typing a title.'),
+            screen.getByText('We’re still preparing scores for Piano and Nocturne. Try typing a title.'),
         ).toBeInTheDocument();
         expect(screen.queryByText(/for For piano/)).not.toBeInTheDocument();
     });

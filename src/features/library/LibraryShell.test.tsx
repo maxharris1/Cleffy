@@ -444,7 +444,9 @@ describe('LibraryShell', () => {
 
         await user.click(screen.getByRole('button', { name: 'import' }));
 
-        expect(await screen.findByText('You have used your 2 free score imports this month')).toBeInTheDocument();
+        expect(
+            await screen.findByText('You have used your 2 free imports from Find a score this month'),
+        ).toBeInTheDocument();
         expect(screen.getByText('imports spent')).toBeInTheDocument();
         // Uploading a PDF of one's own draws on a different allowance.
         expect(screen.queryByText('uploads blocked')).not.toBeInTheDocument();

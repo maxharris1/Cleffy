@@ -41,7 +41,7 @@ interface ImslpWorkPanelProps {
     importing: boolean;
     /** Free cloud-score quota is exhausted — Add stays disabled. */
     quotaExhausted?: boolean;
-    /** This month's IMSLP imports are spent — Add stays disabled. */
+    /** This month's imports from Find a score are spent — Add stays disabled. */
     importLimit?: LimitReachedError | null;
     /** False on student (limit 0): plain copy, no upgrade CTA. */
     quotaUpgradeHint?: boolean;
@@ -214,7 +214,7 @@ export const ImslpWorkPanel = ({
                         for direct download here.
                     </p>
                     <p className="mt-1 text-xs text-amber-900/80">
-                        Open the source page to review your options there, or choose a PDF you already own.
+                        View the source page to review your options there, or choose a PDF you already own.
                     </p>
                     <div className="mt-3 flex flex-wrap items-center gap-3">
                         <a
@@ -223,7 +223,7 @@ export const ImslpWorkPanel = ({
                             rel="noreferrer"
                             className={buttonClassName('primary', 'sm')}
                         >
-                            Open source page
+                            View source page
                         </a>
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
@@ -246,7 +246,7 @@ export const ImslpWorkPanel = ({
                         </button>
                         {selected ? (
                             <a href={selected.openUrl} target="_blank" rel="noreferrer" className={linkClassName}>
-                                Open source page
+                                View source page
                             </a>
                         ) : null}
                         {quotaExhausted ? (
@@ -297,7 +297,7 @@ export const ImslpWorkPanel = ({
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
                     <p className="text-sm text-amber-950">{download.message}</p>
                     <p className="mt-1 text-xs text-amber-900/80">
-                        Open the source page (verify if asked), save the PDF, then choose it here.
+                        View the source page (verify if asked), save the PDF, then choose it here.
                     </p>
                     <div className="mt-3 flex flex-wrap items-center gap-3">
                         <a
@@ -306,7 +306,7 @@ export const ImslpWorkPanel = ({
                             rel="noreferrer"
                             className={buttonClassName('primary', 'sm')}
                         >
-                            Open source page
+                            View source page
                         </a>
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
@@ -321,12 +321,12 @@ export const ImslpWorkPanel = ({
                         Not downloadable here ({unavailable.length})
                     </h3>
                     <p className="mt-1 text-xs text-stone-500">
-                        These files are restricted or their license could not be confirmed. Open a source page to see
+                        These files are restricted or their license could not be confirmed. View the source page to see
                         your options there.
                     </p>
                     <ul
                         className="mt-1 max-h-[12rem] overflow-y-auto overscroll-contain"
-                        aria-label="Editions to open at source"
+                        aria-label="Not downloadable here"
                     >
                         {unavailable.map((edition) => (
                             <li
@@ -397,7 +397,7 @@ const EditionIdentity = ({ edition, recommended }: { edition: ImslpEdition; reco
                           ? 'Not importable here — '
                           : 'Not downloadable here — '}
                     <a href={edition.openUrl} target="_blank" rel="noreferrer" className={`text-xs ${linkClassName}`}>
-                        {edition.licenseCheck === 'unavailable' ? 'check source page' : 'open source page'}
+                        view source page
                     </a>
                 </span>
             ) : null}

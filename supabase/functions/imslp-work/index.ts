@@ -175,7 +175,7 @@ Deno.serve(async (req) => {
 
         const page = Object.values(imagesData.query?.pages ?? {})[0];
         if (!page || page.missing) {
-            return jsonResponse({ error: 'Work not found on IMSLP' }, 404);
+            return jsonResponse({ error: 'Work not found on the source page' }, 404);
         }
 
         const pdfTitles = (page.images ?? [])
@@ -270,6 +270,6 @@ Deno.serve(async (req) => {
             editions,
         });
     } catch (err) {
-        return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP work lookup failed' }, 502);
+        return jsonResponse({ error: err instanceof Error ? err.message : 'Could not load the source page' }, 502);
     }
 });

@@ -81,7 +81,7 @@ export const mwFetch = async (params: Record<string, string>, options: MwFetchOp
             });
         } catch (err) {
             if (err instanceof DOMException && err.name === 'TimeoutError') {
-                lastError = new Error('IMSLP API timeout', { cause: err });
+                lastError = new Error('The source page timed out', { cause: err });
                 if (attempt < attempts) {
                     await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
                     continue;
@@ -101,19 +101,19 @@ export const mwFetch = async (params: Record<string, string>, options: MwFetchOp
             await res.body?.cancel().catch(() => undefined);
             // The message is unchanged from the untyped error it replaces:
             // categorySync retries on /HTTP 429/ and records it as lastError.
-            throw new ImslpFetchError('rate_limited', 'IMSLP API HTTP 429', {
+            throw new ImslpFetchError('rate_limited', 'The source page returned HTTP 429', {
                 status: 429,
                 retryAfterSec: parseRetryAfterSec(res.headers.get('Retry-After')),
             });
         }
         if (!res.ok) {
             await res.body?.cancel().catch(() => undefined);
-            throw new Error(`IMSLP API HTTP ${res.status}`);
+            throw new Error(`The source page returned HTTP ${res.status}`);
         }
         const declared = Number(res.headers.get('content-length') ?? '');
         if (Number.isFinite(declared) && declared > MW_MAX_BYTES) {
             await res.body?.cancel().catch(() => undefined);
-            throw new Error('IMSLP API answer too large');
+            throw new Error('The source page response is too large');
         }
         const payload: unknown = JSON.parse(new TextDecoder().decode(await readBodyCapped(res, MW_MAX_BYTES)));
         if (payload && typeof payload === 'object' && 'error' in payload) {
@@ -125,13 +125,13 @@ export const mwFetch = async (params: Record<string, string>, options: MwFetchOp
                     'info' in err &&
                     typeof (err as { info: unknown }).info === 'string'
                         ? (err as { info: string }).info
-                        : 'IMSLP API error';
+                        : 'The source page returned an error';
                 throw new Error(info);
             }
         }
         return payload;
     }
-    throw lastError instanceof Error ? lastError : new Error('IMSLP API timeout');
+    throw lastError instanceof Error ? lastError : new Error('The source page timed out');
 };
 
 export const workPageUrl = (title: string): string =>

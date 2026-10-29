@@ -245,7 +245,7 @@ describe('importImslpPdfToStorage — bounded call', () => {
             await expect(importNocturnes()).resolves.toEqual({
                 ok: false,
                 code,
-                message: 'The source library said no',
+                message: 'The source page said no',
                 openUrl: 'https://imslp.org/wiki/Special:ImagefromIndex/nocturnes.pdf',
                 filename: 'nocturnes.pdf',
             });

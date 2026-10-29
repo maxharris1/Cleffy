@@ -37,7 +37,7 @@ export interface ImslpBrowserProps {
     busy?: boolean;
     /** Free cloud-score quota is exhausted — disable the primary Add. */
     quotaExhausted?: boolean;
-    /** This month's IMSLP imports are spent — disable the primary Add and say so. */
+    /** This month's imports from Find a score are spent — disable the primary Add and say so. */
     importLimit?: LimitReachedError | null;
     /** False on student (limit 0): disabled copy, no upgrade CTA. */
     quotaUpgradeHint?: boolean;

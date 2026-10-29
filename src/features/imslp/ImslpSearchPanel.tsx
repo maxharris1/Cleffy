@@ -674,10 +674,10 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             {showResults && results.length === 0 && !searching && !liveError ? (
                 <EmptyState
                     className="imslp-panel-view mt-8"
-                    title={!indexReady ? 'Index still building' : 'No matches'}
+                    title={!indexReady ? 'Preparing scores' : 'No matches'}
                     body={
                         !indexReady
-                            ? `The score index is still being built for ${indexLabel}. Try typing a title.`
+                            ? `We’re still preparing scores for ${indexLabel}. Try typing a title.`
                             : q.length >= 2
                               ? `No scores match “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
                               : `No scores are in all of: ${emptyParts.join(' · ') || 'these filters'}.`

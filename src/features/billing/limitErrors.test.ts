@@ -231,8 +231,8 @@ describe('limit copy', () => {
         // marks' AI pass — neither may read as a fingering feature this release
         // does not ship.
         const imports = { code: 'limit_reached', metric: 'smart_imports', limit: 2, tier: 'free' } as const;
-        expect(limitHeadline(imports)).toContain('2 free score imports');
-        expect(limitAction(imports)).toContain('Upgrade for unlimited score imports');
+        expect(limitHeadline(imports)).toContain('2 free imports from Find a score');
+        expect(limitAction(imports)).toContain('Upgrade for unlimited imports from Find a score');
         const reads = { code: 'limit_reached', metric: 'vision_reads', limit: 5, tier: 'free' } as const;
         expect(limitHeadline(reads)).toContain('5 free AI page reads');
         expect(`${limitHeadline(reads)} ${limitAction(reads)}`).not.toMatch(/fingering/i);

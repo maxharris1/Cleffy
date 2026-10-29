@@ -218,7 +218,7 @@ export const readBodyCapped = async (res: Response, maxBytes: number): Promise<U
             } catch {
                 // already closed
             }
-            throw new ImslpFetchError('too_large', `IMSLP response exceeded ${maxBytes} bytes`);
+            throw new ImslpFetchError('too_large', `The response from the source page exceeded ${maxBytes} bytes`);
         }
         chunks.push(value);
     }
@@ -265,16 +265,16 @@ export const fetchImslpBytes = async (url: string, options: BoundedFetchOptions)
                     throw err;
                 }
                 if (signal.aborted || isAbort(err)) {
-                    throw new ImslpFetchError('timeout', 'IMSLP did not answer in time');
+                    throw new ImslpFetchError('timeout', 'The source page did not answer in time');
                 }
-                throw new ImslpFetchError('network', 'Could not reach IMSLP');
+                throw new ImslpFetchError('network', 'Could not reach the source page');
             }
 
             if (REDIRECT_STATUSES.has(res.status)) {
                 const location = res.headers.get('location');
                 await discardBody(res);
                 if (!location || hop >= MAX_REDIRECTS) {
-                    throw new ImslpFetchError('http_error', 'IMSLP redirected without a usable target', {
+                    throw new ImslpFetchError('http_error', 'The source page redirected without a usable target', {
                         status: res.status,
                     });
                 }
@@ -283,24 +283,28 @@ export const fetchImslpBytes = async (url: string, options: BoundedFetchOptions)
             }
             if (res.status === 429) {
                 await discardBody(res);
-                throw new ImslpFetchError('rate_limited', 'IMSLP is rate limiting downloads', {
+                throw new ImslpFetchError('rate_limited', 'The source page is rate limiting downloads', {
                     status: 429,
                     retryAfterSec: parseRetryAfterSec(res.headers.get('retry-after')),
                 });
             }
             if (res.status === 403) {
                 await discardBody(res);
-                throw new ImslpFetchError('forbidden', 'IMSLP refused this download', { status: 403 });
+                throw new ImslpFetchError('forbidden', 'The source page refused this download', { status: 403 });
             }
             if (!res.ok) {
                 await discardBody(res);
-                throw new ImslpFetchError('http_error', `IMSLP answered HTTP ${res.status}`, { status: res.status });
+                throw new ImslpFetchError('http_error', `The source page answered HTTP ${res.status}`, {
+                    status: res.status,
+                });
             }
 
             const declared = Number(res.headers.get('content-length') ?? '');
             if (Number.isFinite(declared) && declared > options.maxBytes) {
                 await discardBody(res);
-                throw new ImslpFetchError('too_large', `IMSLP file is ${declared} bytes`, { status: res.status });
+                throw new ImslpFetchError('too_large', `The file is ${declared} bytes`, {
+                    status: res.status,
+                });
             }
             const bytes = await readBodyCapped(res, options.maxBytes);
             return { bytes, contentType: res.headers.get('content-type'), finalUrl: current };
@@ -311,9 +315,9 @@ export const fetchImslpBytes = async (url: string, options: BoundedFetchOptions)
         }
         // A deadline that fires mid-body surfaces from reader.read().
         if (signal.aborted || isAbort(err)) {
-            throw new ImslpFetchError('timeout', 'IMSLP did not answer in time');
+            throw new ImslpFetchError('timeout', 'The source page did not answer in time');
         }
-        throw new ImslpFetchError('network', 'Could not reach IMSLP');
+        throw new ImslpFetchError('network', 'Could not reach the source page');
     }
 };
 
@@ -457,14 +461,14 @@ export type DownloadResult =
       };
 
 const FAILURE_MESSAGES: Record<DownloadFailureCode, string> = {
-    bot_check: 'IMSLP requires a browser verification before this file can download.',
-    disclaimer: 'IMSLP showed a copyright disclaimer page instead of the PDF.',
-    not_pdf: 'IMSLP did not return a PDF for this file.',
+    bot_check: 'The source page requires a browser verification before this file can download.',
+    disclaimer: 'The source page showed a copyright disclaimer page instead of the PDF.',
+    not_pdf: 'The source page did not return a PDF for this file.',
     too_large: `File is larger than ${MAX_PDF_BYTES / (1024 * 1024)} MB.`,
-    upstream: 'Could not reach IMSLP to download this file.',
-    forbidden: 'IMSLP refused to serve this file to Cleffy.',
-    timeout: 'IMSLP took too long to send this file.',
-    rate_limited: 'IMSLP is busy right now.',
+    upstream: 'Could not reach the source page to download this file.',
+    forbidden: 'The source page refused to serve this file to Cleffy.',
+    timeout: 'The source page took too long to send this file.',
+    rate_limited: 'The source page is busy right now.',
 };
 
 /** The DownloadFailureCode a fetch failure reports to the user. */

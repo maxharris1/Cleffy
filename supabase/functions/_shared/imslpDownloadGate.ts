@@ -82,7 +82,7 @@ export const downloadQueued = (retryAfterSec: number): { status: 429; body: Down
     body: {
         ok: false,
         code: 'download_queued',
-        error: 'IMSLP downloads are paced — queued for the next slot',
+        error: 'Score downloads are paced — queued for the next slot',
         retryAfterSec: Math.max(1, Math.ceil(Number.isFinite(retryAfterSec) ? retryAfterSec : 1)),
     },
 });

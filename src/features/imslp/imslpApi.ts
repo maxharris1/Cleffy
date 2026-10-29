@@ -255,7 +255,7 @@ export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> =>
         throw new Error(await functionErrorMessage(error));
     }
     if (!data) {
-        throw new Error('Empty response from score lookup');
+        throw new Error('The source page returned no editions');
     }
     return data;
 };
@@ -290,14 +290,14 @@ const queuedRetryFloorMs = (retriesSoFar: number): number => Math.min(15_000, 1_
 export const IMSLP_DOWNLOAD_TIMEOUT_MS = 150_000;
 
 export const IMSLP_DOWNLOAD_BUSY_MESSAGE =
-    'Score downloads are busy right now. Wait a minute, then press Add again — or open the source page and add the PDF yourself.';
+    'Score downloads are busy right now. Wait a minute, then press Add again — or view the source page and add the PDF yourself.';
 /**
  * The function may still finish after the browser stops waiting, and then the
  * score lands in the library on its own — so the copy says so rather than
  * inviting a duplicate import straight away.
  */
 export const IMSLP_DOWNLOAD_TIMEOUT_MESSAGE =
-    'The score download took too long. If it arrives it will appear in your library; otherwise try again in a minute — or open the source page and add the PDF yourself.';
+    'The score download took too long. If it arrives it will appear in your library; otherwise try again in a minute — or view the source page and add the PDF yourself.';
 
 /**
  * The import was cancelled while it waited in the pacing queue (the user

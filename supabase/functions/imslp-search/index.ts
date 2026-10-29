@@ -1,4 +1,5 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { SEARCH_TIMEOUT_COPY } from '../_shared/scoreSearchCopy.ts';
 import {
     COMPOSER_FACETS,
     FORM_FACETS,
@@ -449,7 +450,7 @@ Deno.serve(async (req) => {
         };
         pushAliasBatch(aliasTitles);
         if (variants.length > 0 && variantFailures === variants.length && aliasTitles.length === 0) {
-            throw lastVariantError instanceof Error ? lastVariantError : new Error('IMSLP search failed');
+            throw lastVariantError instanceof Error ? lastVariantError : new Error('Score search failed');
         }
 
         const collectTitles = (): string[] => {
@@ -583,8 +584,8 @@ Deno.serve(async (req) => {
             period: source ? { eraIds, source } : null,
         });
     } catch (err) {
-        const raw = err instanceof Error ? err.message : 'IMSLP search failed';
-        const message = /canceling statement|statement timeout/i.test(raw) ? 'IMSLP took too long to answer.' : raw;
+        const raw = err instanceof Error ? err.message : 'Score search failed';
+        const message = /canceling statement|statement timeout/i.test(raw) ? SEARCH_TIMEOUT_COPY : raw;
         return jsonResponse({ error: message }, 502);
     }
 });

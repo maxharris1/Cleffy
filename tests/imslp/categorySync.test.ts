@@ -554,12 +554,12 @@ describe('applyPageResult rollover', () => {
             cmcontinue: 'page|80',
             pages_done: 80,
         });
-        const decision = applyPageResult(mid, previous, [], 'page|80', 'IMSLP API HTTP 429');
+        const decision = applyPageResult(mid, previous, [], 'page|80', 'The source page returned HTTP 429');
         expect(decision.kind).toBe('failed');
         expect(decision.activeGeneration).toBe(1);
         expect(decision.buildingGeneration).toBe(2);
         expect(decision.cmcontinue).toBe('page|80');
-        expect(decision.lastError).toBe('IMSLP API HTTP 429');
+        expect(decision.lastError).toBe('The source page returned HTTP 429');
     });
 
     it('continue persists the cursor without rolling over', () => {
