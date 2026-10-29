@@ -29,6 +29,10 @@ const SearchPage = lazy(() => import('@/features/library/SearchPage').then((m) =
 // Lazy: the invite landing is reached once per share link, by a guest.
 const JoinPage = lazy(() => import('@/features/share/JoinPage').then((m) => ({ default: m.JoinPage })));
 
+// Lazy: the /try demo is where the ads land. Its viewer (pdf.js and the ink
+// stack) is a further chunk the page requests itself (features/demo/DemoPage).
+const DemoPage = lazy(() => import('@/features/demo/DemoPage').then((m) => ({ default: m.DemoPage })));
+
 // Lazy: the account surface is rarely visited — keep Stripe copy and the
 // pricing dialog out of the shell bundle that every session pays for.
 const AccountPage = lazy(() => import('@/features/account/AccountPage').then((m) => ({ default: m.AccountPage })));
@@ -222,6 +226,16 @@ export const AppRoutes = () => {
                 element={
                     <Suspense fallback={<PageFallback label="Loading viewer…" />}>
                         <ViewerPage />
+                    </Suspense>
+                }
+            />
+            {/* Public and not behind RequireGuest: a signed-in teacher who taps
+                an ad link still gets the demo. Nothing in it touches the server. */}
+            <Route
+                path="/try"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading demo…" />}>
+                        <DemoPage />
                     </Suspense>
                 }
             />

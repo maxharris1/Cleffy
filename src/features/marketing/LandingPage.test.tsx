@@ -40,6 +40,11 @@ describe('LandingPage (cloud)', () => {
             expect(link).toHaveAttribute('href', '/register');
         }
         expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', '/login');
+        // The demo is offered quietly beside Start free, never as a second primary.
+        const tryLink = screen.getByRole('link', { name: 'Try it — no sign-up' });
+        expect(tryLink).toHaveAttribute('href', '/try');
+        expect(tryLink).not.toHaveClass('landing-cta');
+        expect(screen.getByText('Or open a PDF locally — no account')).toBeInTheDocument();
         expect(screen.getByRole('navigation', { name: 'Main' })).toHaveClass('safe-landing-nav');
         expect(screen.getByRole('navigation', { name: 'Main' }).parentElement).toHaveClass('safe-landing-gutter');
     });

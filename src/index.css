@@ -877,3 +877,18 @@ body {
         transition-duration: var(--duration-exit);
     }
 }
+
+/*
+ * The /try demo's first-run hint over the score (features/demo/DemoViewer):
+ * a short rise into place. A fade in place under reduced motion. It leaves
+ * without animating, like a dismissed menu.
+ */
+.demo-hint {
+    animation: library-row-in var(--duration-enter) var(--ease-out) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .demo-hint {
+        animation-name: ui-fade-in;
+    }
+}

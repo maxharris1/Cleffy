@@ -105,6 +105,11 @@ const CloudLanding = () => (
                                 {lowestMonthlyPrice(currencyForCountry(initialBillingCountry()))}/month
                             </p>
                         </div>
+                        {/* Quiet beside Start free, which stays the one primary: the
+                            demo is a way to look first, not the thing we sell. */}
+                        <Link to="/try" className={`inline-flex items-center pointer-coarse:min-h-11 ${linkClassName}`}>
+                            Try it — no sign-up
+                        </Link>
                         <LocalOpenControl label="Or open a PDF locally — no account" subtle />
                         <Link
                             to="/student"

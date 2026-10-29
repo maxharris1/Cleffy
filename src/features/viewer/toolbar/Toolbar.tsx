@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNod
 
 import { features } from '@/lib/features';
 import type { ObscuredEdges } from '@/features/viewer/geometry';
+import { useReportToolbarPopup } from '@/features/viewer/toolbar/toolbarPopup';
 import { settleEdit, type AnnotationStore } from '@/sync/annotationStore';
 import { STROKE_COLORS, useViewerStore } from '@/state/store';
 import type { StrokeWidthKey, Tool } from '@/types/models';
@@ -73,6 +74,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const styleButtonRef = useRef<HTMLButtonElement | null>(null);
     const popoverRef = useRef<HTMLDivElement | null>(null);
     const popoverId = useId();
+    useReportToolbarPopup(styleOpen);
 
     const undoState = useSyncExternalStore(
         (cb) => store.subscribeMeta(cb),
@@ -256,6 +258,8 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                                 id={popoverId}
                                 role="group"
                                 aria-label={styleLabel}
+                                // Lifts the viewer frame over floating UI while open (LocalViewerFrame).
+                                data-toolbar-popup
                                 // Above the phone's bottom bar; below the bar docked at the top from sm.
                                 className="chrome-glass ui-menu-pop absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-2xl border border-stone-200 bg-white/95 px-3 py-2 shadow-lg [--transform-origin:bottom_center] sm:bottom-auto sm:[--transform-origin:top_center] sm:top-full sm:mb-0 sm:mt-2 lg:hidden"
                             >

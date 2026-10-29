@@ -39,6 +39,7 @@ import { warmPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
 import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
 import { InkSaveFailedNotice } from '@/features/viewer/InkSaveFailedNotice';
+import { LocalViewerFrame } from '@/features/viewer/LocalViewerFrame';
 import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
@@ -1265,8 +1266,6 @@ const LocalViewer = ({ docId }: { docId: string }) => {
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     /** Bumped by the "couldn't be saved" banner's Export to open the Export menu. */
     const [exportSignal, setExportSignal] = useState(0);
-    /** How far the notices over the score reach down it (ViewerNoticeRegion). */
-    const [noticeInset, setNoticeInset] = useState(0);
     const [reopenError, setReopenError] = useState<string | null>(null);
     const bytes = getLocalDoc(docId);
 
@@ -1326,32 +1325,28 @@ const LocalViewer = ({ docId }: { docId: string }) => {
     }
 
     return (
-        <div className="fixed inset-0 flex flex-col">
-            <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
-                <Badge>this device only</Badge>
-                {features.smartImport && annotationStore ? (
-                    <ImportScanButton
-                        store={annotationStore}
-                        docId={docId}
-                        bytes={bytes}
-                        classify={null}
-                        includeBornDigital={false}
-                        clean={null}
-                    />
-                ) : null}
-                {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
-                <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly openSignal={exportSignal} />
-            </ViewerHeader>
-            <main className="flex min-h-0 flex-1 flex-col">
-                <div className="relative min-h-0 flex-1">
-                    <ViewerNoticeRegion onInsetChange={setNoticeInset}>
-                        <InkSaveFailedNotice store={annotationStore} onExport={() => setExportSignal((n) => n + 1)} />
-                    </ViewerNoticeRegion>
-                    <PdfProvider data={bytes}>
-                        <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} noticeInset={noticeInset} />
-                    </PdfProvider>
-                </div>
-            </main>
-        </div>
+        <LocalViewerFrame
+            docId={docId}
+            bytes={bytes}
+            onStoreReady={onStoreReady}
+            header={
+                <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
+                    <Badge>this device only</Badge>
+                    {features.smartImport && annotationStore ? (
+                        <ImportScanButton
+                            store={annotationStore}
+                            docId={docId}
+                            bytes={bytes}
+                            classify={null}
+                            includeBornDigital={false}
+                            clean={null}
+                        />
+                    ) : null}
+                    {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
+                    <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly openSignal={exportSignal} />
+                </ViewerHeader>
+            }
+            notices={<InkSaveFailedNotice store={annotationStore} onExport={() => setExportSignal((n) => n + 1)} />}
+        />
     );
 };

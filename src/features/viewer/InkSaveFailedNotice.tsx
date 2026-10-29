@@ -39,11 +39,21 @@ const useRecoveryCount = (store: AnnotationStore | null, read: (store: Annotatio
 
 type NoticeState = 'overflow' | 'held' | 'refused' | 'conflicts';
 
-/** What the strip says: short on phones, so it stays about two lines with its buttons beside it. */
-const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { short: string; long: string } => {
+/**
+ * What the strip says: short on phones, so it stays about two lines with its
+ * buttons beside it. `exportable` is whether there is something to export;
+ * `canExport` whether this viewer has an Export to offer at all (the /try
+ * demo has none), so the copy never sends anyone to a button that is not there.
+ */
+const copy = (
+    state: NoticeState,
+    retryFailed: boolean,
+    exportable: boolean,
+    canExport: boolean,
+): { short: string; long: string } => {
     if (state === 'overflow') {
         // Export only when this score has unsaved marks of its own to keep.
-        return exportable
+        return exportable && canExport
             ? {
                   short: 'Too many unsaved marks: new ones weren’t made. Export a copy.',
                   long: 'This device can’t keep any more unsaved marks, so your latest changes weren’t made. Export a copy to keep the rest, then Retry.',
@@ -56,6 +66,12 @@ const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { 
     if (state === 'conflicts') {
         // An overtaken erase has no version of its own to draw: its Export
         // is of the score as it is now, and says the erase was overtaken.
+        if (!canExport) {
+            return {
+                short: 'Some changes were overtaken elsewhere.',
+                long: 'Some of your unsaved changes were overtaken by newer ones made elsewhere before this device could save them, so the newer versions are shown.',
+            };
+        }
         return exportable
             ? {
                   short: 'Some marks changed elsewhere first.',
@@ -67,6 +83,12 @@ const copy = (state: NoticeState, retryFailed: boolean, exportable: boolean): { 
               };
     }
     if (state === 'held') {
+        if (retryFailed && !canExport) {
+            return {
+                short: 'Still not saved. Free up storage, then Retry.',
+                long: 'Some marks couldn’t be saved on this device, and retrying didn’t work. Free up storage, then Retry.',
+            };
+        }
         return retryFailed
             ? {
                   short: 'Still not saved. Storage may be full: export a copy.',
@@ -139,7 +161,13 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
         setRetryFailed(!saved);
     };
 
-    const { short, long } = copy(state, retryFailed, state === 'conflicts' ? exportableConflicts > 0 : exportable);
+    const canExport = onExport !== undefined;
+    const { short, long } = copy(
+        state,
+        retryFailed,
+        state === 'conflicts' ? exportableConflicts > 0 : exportable,
+        canExport,
+    );
 
     return (
         <ViewerNotice bare className="flex items-center gap-2 sm:flex-wrap">
@@ -171,7 +199,7 @@ export const InkSaveFailedNotice = ({ store, onExport }: InkSaveFailedNoticeProp
                         variant="ghost"
                         className="shrink-0 px-2"
                         aria-label="Dismiss"
-                        title="Dismiss: hides this, and Export still has your versions"
+                        title={canExport ? 'Dismiss: hides this, and Export still has your versions' : 'Dismiss'}
                         onClick={() => store.hideConflictNotice()}
                     >
                         <CloseIcon size={16} className="shrink-0" />
