@@ -1709,11 +1709,11 @@ const EmptyLibrary = ({
     <EmptyState
         className="library-empty mt-8 md:mt-16"
         title="No scores yet"
-        body="Find a score on IMSLP or upload a PDF or photo to start annotating."
+        body="Find a score or upload a PDF or photo to start annotating."
     >
         <div className="flex flex-wrap items-center justify-center gap-3">
             <Link to="/search" className={buttonClassName('primary', 'sm')}>
-                Find on IMSLP
+                Find a score
             </Link>
             <UploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
         </div>

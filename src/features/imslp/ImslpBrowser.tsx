@@ -240,10 +240,8 @@ export const ImslpBrowser = ({
         <section className={className}>
             {showHeading ? (
                 <div>
-                    <h2 className="text-sm font-medium text-stone-800">Find on IMSLP</h2>
-                    <p className="mt-0.5 text-xs text-stone-500">
-                        Search or browse popular scores, then add a PDF to your library.
-                    </p>
+                    <h2 className="text-sm font-medium text-stone-800">Find a score</h2>
+                    <p className="mt-0.5 text-xs text-stone-500">Search thousands of public-domain scores.</p>
                 </div>
             ) : null}
 

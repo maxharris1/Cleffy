@@ -42,13 +42,13 @@ describe('ScoreSourceButton', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
 
         const dialog = await screen.findByRole('dialog', { name: 'About this score' });
-        expect(within(dialog).getByText('Imported from IMSLP, the Petrucci Music Library.')).toBeInTheDocument();
+        expect(within(dialog).getByText('Public-domain scores via IMSLP')).toBeInTheDocument();
         expect(within(dialog).getByText('Beethoven, Ludwig van')).toBeInTheDocument();
         expect(within(dialog).getByText('Viktor Keil')).toBeInTheDocument();
         expect(within(dialog).getByText('Viktor Keil, 2024')).toBeInTheDocument();
         expect(within(dialog).getByText('Creative Commons Attribution-ShareAlike 4.0')).toBeInTheDocument();
         expect(within(dialog).getByText(/requires attribution/)).toBeInTheDocument();
-        const link = within(dialog).getByRole('link', { name: 'View on IMSLP' });
+        const link = within(dialog).getByRole('link', { name: 'View source page' });
         expect(link).toHaveAttribute('href', ccTypeset.source_url);
         expect(link).toHaveAttribute('rel', 'noreferrer');
         expect(within(dialog).queryByText('Arranger')).not.toBeInTheDocument();
@@ -66,7 +66,7 @@ describe('ScoreSourceButton', () => {
         );
         expect(file).toHaveAttribute('target', '_blank');
         expect(file).toHaveAttribute('rel', 'noreferrer');
-        expect(within(dialog).getByRole('link', { name: 'View on IMSLP' })).toHaveAttribute(
+        expect(within(dialog).getByRole('link', { name: 'View source page' })).toHaveAttribute(
             'href',
             ccTypeset.source_url,
         );
@@ -115,7 +115,7 @@ describe('ScoreSourceButton', () => {
         render(<ScoreSourceButton doc={{ ...ccTypeset, source_url: 'javascript:alert(1)' }} />);
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
         await screen.findByRole('dialog', { name: 'About this score' });
-        expect(screen.queryByRole('link', { name: 'View on IMSLP' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: 'View source page' })).not.toBeInTheDocument();
     });
 });
 

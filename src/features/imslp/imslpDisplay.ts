@@ -84,7 +84,11 @@ export const displayEditionName = (filename: string, meta?: EditionDisplayFields
 /** True when the query has a letter or digit — `%%%` is not a search. */
 export const hasSearchableQuery = (q: string): boolean => /[\p{L}\p{N}]/u.test(q);
 
-export const SEARCH_TIMEOUT_COPY = 'IMSLP took too long to answer.';
+export const SEARCH_TIMEOUT_COPY = 'The score search took too long to answer.';
+
+/** Keep upstream error and fallback copy generic without changing source metadata or URLs. */
+export const genericScoreMessage = (message: string): string =>
+    message.replace(/^IMSLP\b/, 'The source library').replace(/\bIMSLP\b/g, 'the source library');
 
 /** Map Postgres statement-timeout and abort timeouts to one friendly line. */
 export const friendlySearchError = (err: unknown): string => {
@@ -95,7 +99,7 @@ export const friendlySearchError = (err: unknown): string => {
     if (/canceling statement|statement timeout|timed? out/i.test(raw)) {
         return SEARCH_TIMEOUT_COPY;
     }
-    return raw;
+    return genericScoreMessage(raw);
 };
 
 interface EditionLicenseFields {

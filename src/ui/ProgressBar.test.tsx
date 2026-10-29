@@ -24,9 +24,9 @@ describe('ProgressBar', () => {
     });
 
     it('turns an indeterminate sweep into a full determinate bar', () => {
-        const { rerender } = render(<ProgressBar indeterminate value={100} label="Importing from IMSLP" />);
+        const { rerender } = render(<ProgressBar indeterminate value={100} label="Importing score" />);
         expect(screen.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
-        rerender(<ProgressBar value={100} label="Importing from IMSLP" />);
+        rerender(<ProgressBar value={100} label="Importing score" />);
         expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100');
     });
 });

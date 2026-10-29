@@ -343,7 +343,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     })();
 
     const statusLine = searching
-        ? `${facetPrefix}Searching IMSLP…`
+        ? `${facetPrefix}Searching scores…`
         : isLiveQuery && results
           ? searchMode === 'browse' && indexReady
               ? `${facetPrefix}${total} score${total === 1 ? '' : 's'}`
@@ -351,7 +351,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 ? `${facetPrefix}${results.length} of ${total}`
                 : `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`
           : isLiveQuery
-            ? `${facetPrefix}${liveError ? 'Search unavailable' : 'Searching IMSLP…'}`
+            ? `${facetPrefix}${liveError ? 'Search unavailable' : 'Searching scores…'}`
             : `${facetPrefix}Popular · ${curatedWorks.length} ${curatedWorks.length === 1 ? 'score' : 'scores'}`;
 
     const relaxedHint = (() => {
@@ -519,7 +519,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     }}
                 >
                     <label className="sr-only" htmlFor={searchId}>
-                        Search IMSLP by composer or piece
+                        Search scores by composer or piece
                     </label>
                     <input
                         ref={searchRef}
@@ -677,10 +677,10 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     title={!indexReady ? 'Index still building' : 'No matches'}
                     body={
                         !indexReady
-                            ? `IMSLP index is still being built for ${indexLabel}. Try typing a title.`
+                            ? `The score index is still being built for ${indexLabel}. Try typing a title.`
                             : q.length >= 2
-                              ? `Nothing on IMSLP matches “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
-                              : `No IMSLP works are in all of: ${emptyParts.join(' · ') || 'these filters'}.`
+                              ? `No scores match “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
+                              : `No scores are in all of: ${emptyParts.join(' · ') || 'these filters'}.`
                     }
                 >
                     {!isDefaultState ? (
@@ -707,7 +707,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     {more.length > 0 ? (
                         <>
                             <h3 className="mt-4 text-xs font-medium uppercase tracking-wide text-stone-500">
-                                More from IMSLP
+                                More scores
                             </h3>
                             <ul className={view === 'grid' ? `mt-3 ${GRID_UL_CLASS}` : 'mt-1'}>
                                 {more.map((hit, i) =>
@@ -725,6 +725,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     ) : null}
                 </div>
             ) : null}
+            <p className="mt-6 text-xs text-stone-500">Public-domain scores via IMSLP</p>
         </div>
     );
 };

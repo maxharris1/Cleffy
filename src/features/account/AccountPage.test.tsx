@@ -296,7 +296,7 @@ describe('AccountPage', () => {
         expect(await screen.findByText('unlimited')).toBeInTheDocument();
         // Two capped metered rows remain; the unlimited one contributes no bar.
         await waitFor(() => expect(screen.getAllByRole('progressbar')).toHaveLength(2));
-        expect(screen.queryByRole('progressbar', { name: 'IMSLP imports used this month' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('progressbar', { name: 'Score imports used this month' })).not.toBeInTheDocument();
         expect(screen.getByRole('progressbar', { name: 'PDF exports used this month' })).toBeInTheDocument();
         expect(screen.getByRole('progressbar', { name: 'AI page reads used this month' })).toBeInTheDocument();
     });
@@ -356,7 +356,7 @@ describe('AccountPage', () => {
         await renderSettled();
 
         // smart_imports (IMSLP imports): 1 of 2.
-        const bar = await screen.findByRole('progressbar', { name: 'IMSLP imports used this month' });
+        const bar = await screen.findByRole('progressbar', { name: 'Score imports used this month' });
         expect(bar).toHaveAttribute('aria-valuenow', '50');
         expect(screen.getByText('1 of 2 used this month')).toBeInTheDocument();
     });

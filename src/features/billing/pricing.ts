@@ -175,7 +175,7 @@ export const tierCards = (flags: TierCardFlags): TierCard[] => {
             features: [
                 '3 active cloud scores',
                 ...(playalong ? ['3 play-along analyses a month'] : []),
-                '2 IMSLP imports a month',
+                '2 score imports a month',
                 `5 ${aiReads} a month`,
                 '1 PDF export a month',
                 fingering ? 'Unlimited annotation and fingering tools' : 'Unlimited annotation',
@@ -188,7 +188,7 @@ export const tierCards = (flags: TierCardFlags): TierCard[] => {
             features: [
                 'Unlimited cloud scores',
                 ...(playalong ? ['Unlimited play-along analysis'] : []),
-                'Unlimited IMSLP imports',
+                'Unlimited score imports',
                 // Paid AI reads carry a fair-use ceiling (tier_limits() in SQL),
                 // so the card states it rather than promising "unlimited".
                 `${PAID_VISION_READS} ${aiReads} a month (fair use)`,

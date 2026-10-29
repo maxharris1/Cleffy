@@ -17,7 +17,7 @@ const STEPS = [
     {
         mark: 'A',
         title: 'Add a score',
-        body: 'Upload a PDF, or pull one from IMSLP’s public-domain library without leaving the app.',
+        body: 'Upload a PDF, or search thousands of public-domain scores without leaving the app.',
     },
     {
         mark: 'B',
@@ -34,7 +34,7 @@ const STEPS = [
 const FEATURES = [
     { title: 'Live ink', body: 'Strokes stream to everyone as they’re drawn, not after.' },
     { title: 'Works offline', body: 'Annotate anywhere; changes sync when you’re back.' },
-    { title: 'IMSLP built in', body: 'Search public-domain scores and add them straight to your library.' },
+    { title: 'Find a score', body: 'Search public-domain scores and add them straight to your library.' },
     { title: 'Export & share', body: 'Send a page as a photo, or a flattened PDF of the whole score.' },
     { title: 'The PDF stays pristine', body: 'Marks live on top — the original file is never modified.' },
 ] as const;

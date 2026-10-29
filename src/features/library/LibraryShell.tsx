@@ -123,7 +123,7 @@ const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, 
 const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean; needsStudents?: boolean }[] = [
     { to: '/library', label: 'Library', end: true },
     { to: '/students', label: 'Students', end: true, needsStudents: true },
-    { to: '/search', label: 'Find on IMSLP', shortLabel: 'IMSLP', end: true },
+    { to: '/search', label: 'Find a score', end: true },
 ];
 
 /**
@@ -492,7 +492,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     navigate(`/doc/${result.document.id}`);
                 }
             }
-            toast.success('Imported from IMSLP', { description: result.document.title });
+            toast.success('Score imported', { description: result.document.title });
             return { ok: true as const };
         } catch (err) {
             // A cancelled queue wait created nothing and is not a failure.
@@ -603,7 +603,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     <ProgressBar
                         indeterminate={!imslpFilled}
                         value={100}
-                        label="Importing from IMSLP"
+                        label="Importing score"
                         done={barFading}
                         className="shell-progress absolute inset-x-0 bottom-0"
                     />

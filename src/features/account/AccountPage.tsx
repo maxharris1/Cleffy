@@ -55,7 +55,7 @@ import {
 const meteredRows = (): Array<{ metric: UsageMetric; label: string }> => [
     ...(features.playalong ? [{ metric: 'omr_runs' as const, label: 'Play-along analyses' }] : []),
     { metric: 'vision_reads', label: 'AI page reads' },
-    { metric: 'smart_imports', label: 'IMSLP imports' },
+    { metric: 'smart_imports', label: 'Score imports' },
     { metric: 'pdf_exports', label: 'PDF exports' },
 ];
 

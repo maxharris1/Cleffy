@@ -17,7 +17,7 @@ import { Badge } from '@/ui/Badge';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 
 const DISCLAIMER =
-    'IMSLP makes no guarantee that files are public domain in your country. By downloading you acknowledge you understand and agree to obey the copyright laws of your country.';
+    'Files are not guaranteed to be public domain in your country. By downloading you acknowledge you understand and agree to obey the copyright laws of your country.';
 
 /**
  * `queued`: IMSLP downloads are paced deployment-wide and this one is waiting
@@ -30,7 +30,7 @@ export type DownloadStatus =
     | { kind: 'queued' }
     | { kind: 'fallback'; openUrl: string; message: string };
 
-const QUEUED_COPY = 'Queued — IMSLP downloads are paced. Retrying automatically…';
+const QUEUED_COPY = 'Queued — score downloads are paced. Retrying automatically…';
 
 interface ImslpWorkPanelProps {
     work: ImslpWorkDetail;
@@ -121,9 +121,9 @@ export const ImslpWorkPanel = ({
 
     const buttonLabel =
         download.kind === 'downloading'
-            ? 'Downloading from IMSLP…'
+            ? 'Downloading score…'
             : download.kind === 'queued'
-              ? 'Queued for IMSLP…'
+              ? 'Queued for download…'
               : busy
                 ? 'Adding to library…'
                 : 'Add to my library';
@@ -131,7 +131,7 @@ export const ImslpWorkPanel = ({
        announced — the polite region below is the only screen-reader feedback. */
     const statusLine =
         download.kind === 'downloading'
-            ? 'Downloading from IMSLP…'
+            ? 'Downloading score…'
             : download.kind === 'queued'
               ? QUEUED_COPY
               : busy
@@ -150,7 +150,7 @@ export const ImslpWorkPanel = ({
                         rel="noreferrer"
                         className={`mt-1 inline-block text-xs ${linkClassName}`}
                     >
-                        View on IMSLP
+                        View source page
                     </a>
                 </div>
                 <button type="button" onClick={onBack} className={buttonClassName('ghost', 'sm', 'shrink-0')}>
@@ -167,7 +167,7 @@ export const ImslpWorkPanel = ({
                     </legend>
                     {countLine ? <p className="mt-1 text-xs text-stone-500">{countLine}</p> : null}
                     {noUrtext ? (
-                        <p className="mt-1 text-xs text-stone-500">No Urtext file tagged on this IMSLP page.</p>
+                        <p className="mt-1 text-xs text-stone-500">No Urtext file tagged on this source page.</p>
                     ) : null}
                     {/* Only importable rows live here, so the first screen is always
                         choosable. 16rem alone does not keep Add above the fold on a
@@ -214,7 +214,7 @@ export const ImslpWorkPanel = ({
                         for direct download here.
                     </p>
                     <p className="mt-1 text-xs text-amber-900/80">
-                        Open the work on IMSLP to review your options there, or choose a PDF you already own.
+                        Open the source page to review your options there, or choose a PDF you already own.
                     </p>
                     <div className="mt-3 flex flex-wrap items-center gap-3">
                         <a
@@ -223,7 +223,7 @@ export const ImslpWorkPanel = ({
                             rel="noreferrer"
                             className={buttonClassName('primary', 'sm')}
                         >
-                            Open on IMSLP
+                            Open source page
                         </a>
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
@@ -246,7 +246,7 @@ export const ImslpWorkPanel = ({
                         </button>
                         {selected ? (
                             <a href={selected.openUrl} target="_blank" rel="noreferrer" className={linkClassName}>
-                                Open on IMSLP
+                                Open source page
                             </a>
                         ) : null}
                         {quotaExhausted ? (
@@ -297,7 +297,7 @@ export const ImslpWorkPanel = ({
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
                     <p className="text-sm text-amber-950">{download.message}</p>
                     <p className="mt-1 text-xs text-amber-900/80">
-                        Open the file on IMSLP (verify if asked), save the PDF, then choose it here.
+                        Open the source page (verify if asked), save the PDF, then choose it here.
                     </p>
                     <div className="mt-3 flex flex-wrap items-center gap-3">
                         <a
@@ -306,7 +306,7 @@ export const ImslpWorkPanel = ({
                             rel="noreferrer"
                             className={buttonClassName('primary', 'sm')}
                         >
-                            Open on IMSLP
+                            Open source page
                         </a>
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
@@ -321,12 +321,12 @@ export const ImslpWorkPanel = ({
                         Not downloadable here ({unavailable.length})
                     </h3>
                     <p className="mt-1 text-xs text-stone-500">
-                        IMSLP restricts these files or their license could not be confirmed. Open one on IMSLP to see
+                        These files are restricted or their license could not be confirmed. Open a source page to see
                         your options there.
                     </p>
                     <ul
                         className="mt-1 max-h-[12rem] overflow-y-auto overscroll-contain"
-                        aria-label="Editions to open on IMSLP"
+                        aria-label="Editions to open at source"
                     >
                         {unavailable.map((edition) => (
                             <li
@@ -339,6 +339,7 @@ export const ImslpWorkPanel = ({
                     </ul>
                 </section>
             ) : null}
+            <p className="mt-6 text-xs text-stone-500">Public-domain scores via IMSLP</p>
         </div>
     );
 };
@@ -396,7 +397,7 @@ const EditionIdentity = ({ edition, recommended }: { edition: ImslpEdition; reco
                           ? 'Not importable here — '
                           : 'Not downloadable here — '}
                     <a href={edition.openUrl} target="_blank" rel="noreferrer" className={`text-xs ${linkClassName}`}>
-                        {edition.licenseCheck === 'unavailable' ? 'check on IMSLP' : 'open on IMSLP'}
+                        {edition.licenseCheck === 'unavailable' ? 'check source page' : 'open source page'}
                     </a>
                 </span>
             ) : null}
