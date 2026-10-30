@@ -146,7 +146,7 @@ Deno.serve(async (req) => {
             {
                 ok: false,
                 code: 'caller_rate_limited',
-                error: 'Too many IMSLP imports at once — waiting a moment before trying again',
+                error: 'Too many score imports at once — waiting a moment before trying again',
                 retryAfterSec: userRate.retryAfterSec,
             },
             429,

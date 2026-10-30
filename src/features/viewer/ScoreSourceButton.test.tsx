@@ -42,13 +42,14 @@ describe('ScoreSourceButton', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
 
         const dialog = await screen.findByRole('dialog', { name: 'About this score' });
-        expect(within(dialog).getByText('Imported from IMSLP, the Petrucci Music Library.')).toBeInTheDocument();
+        expect(within(dialog).getByText('Score via IMSLP')).toBeInTheDocument();
+        expect(within(dialog).queryByText('Public-domain scores via IMSLP')).not.toBeInTheDocument();
         expect(within(dialog).getByText('Beethoven, Ludwig van')).toBeInTheDocument();
         expect(within(dialog).getByText('Viktor Keil')).toBeInTheDocument();
         expect(within(dialog).getByText('Viktor Keil, 2024')).toBeInTheDocument();
         expect(within(dialog).getByText('Creative Commons Attribution-ShareAlike 4.0')).toBeInTheDocument();
         expect(within(dialog).getByText(/requires attribution/)).toBeInTheDocument();
-        const link = within(dialog).getByRole('link', { name: 'View on IMSLP' });
+        const link = within(dialog).getByRole('link', { name: 'View source page' });
         expect(link).toHaveAttribute('href', ccTypeset.source_url);
         expect(link).toHaveAttribute('rel', 'noreferrer');
         expect(within(dialog).queryByText('Arranger')).not.toBeInTheDocument();
@@ -66,7 +67,7 @@ describe('ScoreSourceButton', () => {
         );
         expect(file).toHaveAttribute('target', '_blank');
         expect(file).toHaveAttribute('rel', 'noreferrer');
-        expect(within(dialog).getByRole('link', { name: 'View on IMSLP' })).toHaveAttribute(
+        expect(within(dialog).getByRole('link', { name: 'View source page' })).toHaveAttribute(
             'href',
             ccTypeset.source_url,
         );
@@ -95,27 +96,43 @@ describe('ScoreSourceButton', () => {
         expect(within(dialog).queryByRole('link', { name: 'score.pdf' })).not.toBeInTheDocument();
     });
 
-    it('omits the attribution reminder for public domain and CC0, and joins publisher with year', async () => {
-        render(
-            <ScoreSourceButton
-                doc={{
-                    ...ccTypeset,
-                    source_license: 'Public Domain',
-                    source_attribution: { ...ccTypeset.source_attribution, publisher: 'Diabelli', year: 1802 },
-                }}
-            />,
-        );
-        await userEvent.click(screen.getByRole('button', { name: 'Source' }));
-        const dialog = await screen.findByRole('dialog', { name: 'About this score' });
-        expect(within(dialog).getByText('Diabelli, 1802')).toBeInTheDocument();
-        expect(within(dialog).queryByText(/requires attribution/)).not.toBeInTheDocument();
-    });
+    it.each(['Public Domain', 'Public Domain (dedicated)'])(
+        'shows public-domain attribution, omits the reminder, and joins publisher with year for %s',
+        async (source_license) => {
+            render(
+                <ScoreSourceButton
+                    doc={{
+                        ...ccTypeset,
+                        source_license,
+                        source_attribution: { ...ccTypeset.source_attribution, publisher: 'Diabelli', year: 1802 },
+                    }}
+                />,
+            );
+            await userEvent.click(screen.getByRole('button', { name: 'Source' }));
+            const dialog = await screen.findByRole('dialog', { name: 'About this score' });
+            expect(within(dialog).getByText('Public-domain scores via IMSLP')).toBeInTheDocument();
+            expect(within(dialog).getByText('Diabelli, 1802')).toBeInTheDocument();
+            expect(within(dialog).queryByText(/requires attribution/)).not.toBeInTheDocument();
+        },
+    );
+
+    it.each(['Creative Commons Zero 1.0', 'Copyright restricted', null])(
+        'uses neutral attribution when the recorded license is %s',
+        async (source_license) => {
+            render(<ScoreSourceButton doc={{ ...ccTypeset, source_license }} />);
+            await userEvent.click(screen.getByRole('button', { name: 'Source' }));
+            const dialog = await screen.findByRole('dialog', { name: 'About this score' });
+            expect(within(dialog).getByText('Score via IMSLP')).toBeInTheDocument();
+            expect(within(dialog).queryByText('Public-domain scores via IMSLP')).not.toBeInTheDocument();
+            expect(within(dialog).queryByText(/requires attribution/)).not.toBeInTheDocument();
+        },
+    );
 
     it('never links a non-https source', async () => {
         render(<ScoreSourceButton doc={{ ...ccTypeset, source_url: 'javascript:alert(1)' }} />);
         await userEvent.click(screen.getByRole('button', { name: 'Source' }));
         await screen.findByRole('dialog', { name: 'About this score' });
-        expect(screen.queryByRole('link', { name: 'View on IMSLP' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: 'View source page' })).not.toBeInTheDocument();
     });
 });
 

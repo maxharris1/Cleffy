@@ -107,7 +107,10 @@ describe('imslp-work query contract', () => {
         const imagesOnly = {
             query: { pages: { '1': { title: 'Moonlight', images: [{ title: 'File:a.pdf' }] } } },
         };
-        const fetchMw = vi.fn().mockRejectedValueOnce(new Error('IMSLP API timeout')).mockResolvedValueOnce(imagesOnly);
+        const fetchMw = vi
+            .fn()
+            .mockRejectedValueOnce(new Error('The source page timed out'))
+            .mockResolvedValueOnce(imagesOnly);
 
         const result = await fetchWorkPageOrImages('Piano Sonata No.14', fetchMw);
 

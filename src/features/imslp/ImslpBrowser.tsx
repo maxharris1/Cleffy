@@ -37,7 +37,7 @@ export interface ImslpBrowserProps {
     busy?: boolean;
     /** Free cloud-score quota is exhausted — disable the primary Add. */
     quotaExhausted?: boolean;
-    /** This month's IMSLP imports are spent — disable the primary Add and say so. */
+    /** This month's imports from Find a score are spent — disable the primary Add and say so. */
     importLimit?: LimitReachedError | null;
     /** False on student (limit 0): disabled copy, no upgrade CTA. */
     quotaUpgradeHint?: boolean;
@@ -240,10 +240,8 @@ export const ImslpBrowser = ({
         <section className={className}>
             {showHeading ? (
                 <div>
-                    <h2 className="text-sm font-medium text-stone-800">Find on IMSLP</h2>
-                    <p className="mt-0.5 text-xs text-stone-500">
-                        Search or browse popular scores, then add a PDF to your library.
-                    </p>
+                    <h2 className="text-sm font-medium text-stone-800">Find a score</h2>
+                    <p className="mt-0.5 text-xs text-stone-500">Search thousands of public-domain scores.</p>
                 </div>
             ) : null}
 

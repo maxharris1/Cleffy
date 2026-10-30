@@ -88,8 +88,8 @@ export type LibraryOutletContext = {
      */
     quotaExhausted?: boolean;
     /**
-     * This month's IMSLP imports are spent (the server's 402 said so). Blocks
-     * the IMSLP Add button only — uploading a PDF of your own is still open.
+     * This month's imports from Find a score are spent (the server's 402 said so). Blocks
+     * the Find a score Add button only — uploading a PDF of your own is still open.
      */
     importLimit?: LimitReachedError | null;
     /** False on student (limit 0): disabled copy, no upgrade CTA. */
@@ -120,10 +120,10 @@ const BAR_FADE_MS = 150;
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean; needsStudents?: boolean }[] = [
+const NAV_ITEMS: { to: string; label: string; end: boolean; needsStudents?: boolean }[] = [
     { to: '/library', label: 'Library', end: true },
     { to: '/students', label: 'Students', end: true, needsStudents: true },
-    { to: '/search', label: 'Find on IMSLP', shortLabel: 'IMSLP', end: true },
+    { to: '/search', label: 'Find a score', end: true },
 ];
 
 /**
@@ -492,7 +492,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     navigate(`/doc/${result.document.id}`);
                 }
             }
-            toast.success('Imported from IMSLP', { description: result.document.title });
+            toast.success('Score imported', { description: result.document.title });
             return { ok: true as const };
         } catch (err) {
             // A cancelled queue wait created nothing and is not a failure.
@@ -561,14 +561,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                                     `${NAV_LINK_BASE} ${isActive ? NAV_LINK_ACTIVE : NAV_LINK_IDLE}`
                                 }
                             >
-                                {item.shortLabel ? (
-                                    <>
-                                        <span className="sm:hidden">{item.shortLabel}</span>
-                                        <span className="hidden sm:inline">{item.label}</span>
-                                    </>
-                                ) : (
-                                    item.label
-                                )}
+                                {item.label}
                             </NavLink>
                         ))}
                     </nav>
@@ -603,7 +596,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     <ProgressBar
                         indeterminate={!imslpFilled}
                         value={100}
-                        label="Importing from IMSLP"
+                        label="Importing score"
                         done={barFading}
                         className="shell-progress absolute inset-x-0 bottom-0"
                     />

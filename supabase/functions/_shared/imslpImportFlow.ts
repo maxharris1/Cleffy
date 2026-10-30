@@ -111,9 +111,9 @@ export interface ImslpImportDeps {
 }
 
 const LICENSE_UNKNOWN_MESSAGE =
-    "IMSLP didn't confirm a public-domain or Creative Commons license for this edition; it can't be imported automatically.";
+    "The source page didn't confirm a public-domain or Creative Commons license for this edition; it can't be imported automatically.";
 const LICENSE_UNCHECKED_MESSAGE =
-    "Cleffy couldn't reach IMSLP to check this edition's license, so it wasn't imported. Try again in a minute — or open it on IMSLP.";
+    "Cleffy couldn't reach the source page to check this edition's license, so it wasn't imported. Try again in a minute.";
 
 const licenseConflict = (
     request: ImslpImportRequest,
@@ -128,8 +128,8 @@ const licenseConflict = (
         message:
             code === 'non_pd'
                 ? restriction
-                    ? `IMSLP lists this edition as copyright-restricted (${restriction}); it can't be imported automatically.`
-                    : "IMSLP lists this edition as copyright-restricted; it can't be imported automatically."
+                    ? `The source page lists this edition as copyright-restricted (${restriction}); it can't be imported automatically.`
+                    : "The source page lists this edition as copyright-restricted; it can't be imported automatically."
                 : unchecked
                   ? LICENSE_UNCHECKED_MESSAGE
                   : LICENSE_UNKNOWN_MESSAGE,
@@ -295,6 +295,6 @@ export const runImslpImport = async (request: ImslpImportRequest, deps: ImslpImp
         };
     } catch (err) {
         await undo();
-        return { status: 502, body: { error: err instanceof Error ? err.message : 'IMSLP download failed' } };
+        return { status: 502, body: { error: err instanceof Error ? err.message : 'Score download failed' } };
     }
 };

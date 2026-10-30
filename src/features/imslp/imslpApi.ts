@@ -1,4 +1,5 @@
 import { parseLimitResponse } from '@/features/billing/limitErrors';
+import { genericScoreMessage } from '@/features/imslp/imslpDisplay';
 import type { EraId, RelaxedConstraint, SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
@@ -102,22 +103,22 @@ const functionErrorMessage = async (error: { message: string; context?: Response
         try {
             const body = (await res.json()) as { error?: string; message?: string };
             if (body.message) {
-                return body.message;
+                return genericScoreMessage(body.message);
             }
             if (body.error) {
-                return body.error;
+                return genericScoreMessage(body.error);
             }
         } catch {
             // ignore
         }
     }
-    return error.message;
+    return genericScoreMessage(error.message);
 };
 
 const messageFromJsonBody = async (res: Response): Promise<string> => {
     try {
         const body = (await res.json()) as { error?: string; message?: string };
-        return body.message || body.error || `Request failed (${res.status})`;
+        return genericScoreMessage(body.message || body.error || `Request failed (${res.status})`);
     } catch {
         return `Request failed (${res.status})`;
     }
@@ -141,7 +142,7 @@ const parseDownloadFallback = (body: unknown): ImslpDownloadFallback | null => {
     if (typeof message !== 'string' || typeof openUrl !== 'string' || typeof filename !== 'string') {
         return null;
     }
-    return { ok: false, code: code as FallbackCode, message, openUrl, filename };
+    return { ok: false, code: code as FallbackCode, message: genericScoreMessage(message), openUrl, filename };
 };
 
 /** Completed searches, so repeated queries don't re-fan-out against IMSLP. */
@@ -254,7 +255,7 @@ export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> =>
         throw new Error(await functionErrorMessage(error));
     }
     if (!data) {
-        throw new Error('Empty response from IMSLP work lookup');
+        throw new Error("Couldn't load this work. Try again.");
     }
     return data;
 };
@@ -289,14 +290,14 @@ const queuedRetryFloorMs = (retriesSoFar: number): number => Math.min(15_000, 1_
 export const IMSLP_DOWNLOAD_TIMEOUT_MS = 150_000;
 
 export const IMSLP_DOWNLOAD_BUSY_MESSAGE =
-    'IMSLP downloads are busy right now. Wait a minute, then press Add again — or open the file on IMSLP and add the PDF yourself.';
+    'Score downloads are busy right now. Wait a minute, then press Add again — or view the source page and add the PDF yourself.';
 /**
  * The function may still finish after the browser stops waiting, and then the
  * score lands in the library on its own — so the copy says so rather than
  * inviting a duplicate import straight away.
  */
 export const IMSLP_DOWNLOAD_TIMEOUT_MESSAGE =
-    'IMSLP took too long to send this score. If it arrives it will appear in your library; otherwise try again in a minute — or open the file on IMSLP and add the PDF yourself.';
+    'The score download took too long. If it arrives it will appear in your library; otherwise try again in a minute — or view the source page and add the PDF yourself.';
 
 /**
  * The import was cancelled while it waited in the pacing queue (the user
@@ -304,7 +305,7 @@ export const IMSLP_DOWNLOAD_TIMEOUT_MESSAGE =
  */
 export class ImslpImportCancelledError extends Error {
     constructor() {
-        super('IMSLP import cancelled');
+        super('Score import cancelled');
         this.name = 'ImslpImportCancelledError';
     }
 }
@@ -496,7 +497,7 @@ export const importImslpPdfToStorage = async ({
             (typeof record?.['message'] === 'string' && record['message']) ||
             (typeof record?.['error'] === 'string' && record['error']) ||
             `Download failed (${response.status})`;
-        throw new Error(message);
+        throw new Error(genericScoreMessage(message));
     }
 
     if (!response.ok) {
@@ -515,7 +516,7 @@ export const importImslpPdfToStorage = async ({
         typeof body.byteLength !== 'number' ||
         typeof body.storagePath !== 'string'
     ) {
-        throw new Error('Unexpected response from IMSLP import');
+        throw new Error('Unexpected response from score import');
     }
     return {
         ok: true,

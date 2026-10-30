@@ -71,7 +71,13 @@ export const ScoreSourceDetails = ({ doc }: { doc: ProvenanceFields }) => {
     const fileUrl = fromImslp ? imslpFilePageUrl(doc.source_filename) : null;
     return (
         <div className="text-sm">
-            {fromImslp ? <p className="text-stone-600">Imported from IMSLP, the Petrucci Music Library.</p> : null}
+            {fromImslp ? (
+                <p className="text-xs text-stone-500">
+                    {doc.source_license?.trim().toLowerCase().startsWith('public domain')
+                        ? 'Public-domain scores via IMSLP'
+                        : 'Score via IMSLP'}
+                </p>
+            ) : null}
             <dl className="mt-3">
                 <Row term="Work" value={credit?.work} />
                 <Row term="Composer" value={credit?.composer} />
@@ -94,7 +100,7 @@ export const ScoreSourceDetails = ({ doc }: { doc: ProvenanceFields }) => {
                     rel="noreferrer"
                     className={`mt-3 inline-block text-sm ${linkClassName}`}
                 >
-                    View on IMSLP
+                    View source page
                 </a>
             ) : null}
         </div>

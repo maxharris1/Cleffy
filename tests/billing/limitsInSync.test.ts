@@ -167,8 +167,8 @@ describe('the pricing page describes the limits it actually enforces', () => {
         const copy = await cardCopy('free');
 
         expect(copy).toContain(`${TIER_LIMITS.free.cloud_scores} active cloud scores`);
-        // smart_imports is what an IMSLP import spends; vision_reads is Import marks' AI pass.
-        expect(copy).toContain(`${TIER_LIMITS.free.smart_imports} IMSLP imports a month`);
+        // smart_imports is what an import from Find a score spends; vision_reads is Import marks' AI pass.
+        expect(copy).toContain(`${TIER_LIMITS.free.smart_imports} imports a month from Find a score`);
         expect(copy).toContain(`${TIER_LIMITS.free.vision_reads} AI page reads for Import marks a month`);
         expect(copy).toContain(`${TIER_LIMITS.free.pdf_exports} PDF export a month`);
         // Nothing on this card may advertise a roster it does not have, the same
@@ -203,10 +203,10 @@ describe('the pricing page describes the limits it actually enforces', () => {
         }
     });
 
-    it('promises Personal exactly the IMSLP imports and AI page reads it enforces', async () => {
+    it('promises Personal exactly the imports from Find a score and AI page reads it enforces', async () => {
         const copy = await cardCopy('personal');
 
-        expect(copy).toContain('Unlimited IMSLP imports');
+        expect(copy).toContain('Unlimited imports from Find a score');
         expect(TIER_LIMITS.personal.smart_imports).toBe(UNLIMITED);
         // AI reads are a fair-use ceiling on paid plans, not unlimited.
         expect(copy).toContain(

@@ -1,5 +1,9 @@
 /** Presentation helpers for IMSLP titles and edition labels. */
 
+import { SEARCH_TIMEOUT_COPY, WORK_NOT_FOUND_COPY } from '../../../supabase/functions/_shared/scoreSearchCopy';
+
+export { SEARCH_TIMEOUT_COPY };
+
 export const formatBytes = (size: number | null): string => {
     if (size === null || size <= 0) {
         return '';
@@ -84,7 +88,26 @@ export const displayEditionName = (filename: string, meta?: EditionDisplayFields
 /** True when the query has a letter or digit — `%%%` is not a search. */
 export const hasSearchableQuery = (q: string): boolean => /[\p{L}\p{N}]/u.test(q);
 
-export const SEARCH_TIMEOUT_COPY = 'IMSLP took too long to answer.';
+/** Compatibility with older functions; source metadata and URLs never pass through here. */
+export const genericScoreMessage = (message: string): string =>
+    message
+        .replace(/^Work not found on (?:IMSLP|the source page)\.?$/, WORK_NOT_FOUND_COPY)
+        .replace(
+            /(so it wasn't imported\. Try again in a minute) — or (?:open it on IMSLP|view the source page)\./g,
+            '$1.',
+        )
+        .replace(/^IMSLP API timeout$/, 'The source page timed out')
+        .replace(/^IMSLP API HTTP (\d+)$/, 'The source page returned HTTP $1')
+        .replace(/^IMSLP API answer too large$/, 'The source page response is too large')
+        .replace(/^IMSLP API\b/, 'The source page')
+        .replace(/\bIMSLP work lookup failed\b/g, 'Could not load the source page')
+        .replace(/\bIMSLP (search|download) failed\b/g, 'Score $1 failed')
+        .replace(/^IMSLP (imports|downloads)\b/, 'Score $1')
+        .replace(/\bIMSLP (imports|downloads)\b/g, 'score $1')
+        .replace(/\bopen (?:it|the file) on IMSLP\b/g, 'view the source page')
+        .replace(/\bon IMSLP\b/g, 'on the source page')
+        .replace(/^IMSLP\b/, 'The source page')
+        .replace(/\bIMSLP\b/g, 'the source page');
 
 /** Map Postgres statement-timeout and abort timeouts to one friendly line. */
 export const friendlySearchError = (err: unknown): string => {
@@ -92,10 +115,10 @@ export const friendlySearchError = (err: unknown): string => {
         return SEARCH_TIMEOUT_COPY;
     }
     const raw = err instanceof Error ? err.message : 'Search failed';
-    if (/canceling statement|statement timeout|timed? out/i.test(raw)) {
+    if (/canceling statement|statement timeout|timed? out|took too long to answer/i.test(raw)) {
         return SEARCH_TIMEOUT_COPY;
     }
-    return raw;
+    return genericScoreMessage(raw);
 };
 
 interface EditionLicenseFields {

@@ -444,7 +444,9 @@ describe('LibraryShell', () => {
 
         await user.click(screen.getByRole('button', { name: 'import' }));
 
-        expect(await screen.findByText('You have used your 2 free IMSLP imports this month')).toBeInTheDocument();
+        expect(
+            await screen.findByText('You have used your 2 free imports from Find a score this month'),
+        ).toBeInTheDocument();
         expect(screen.getByText('imports spent')).toBeInTheDocument();
         // Uploading a PDF of one's own draws on a different allowance.
         expect(screen.queryByText('uploads blocked')).not.toBeInTheDocument();
@@ -623,7 +625,7 @@ describe('LibraryShell upload bar', () => {
         renderShell();
         pickFile();
         await elapse(0);
-        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        fireEvent.click(screen.getByRole('link', { name: /Find a score/ }));
         expect(screen.getByText('search page')).toBeInTheDocument();
 
         finish({ document: { id: 'd9', title: 'Nocturne' } });
@@ -647,7 +649,7 @@ describe('LibraryShell upload bar', () => {
         await elapse(60);
         expect(bar()).not.toHaveAttribute('data-done');
 
-        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        fireEvent.click(screen.getByRole('link', { name: /Find a score/ }));
         await elapse(500);
         expect(screen.getByText('search page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
@@ -668,7 +670,7 @@ describe('LibraryShell upload bar', () => {
         expect(bar()).toHaveAttribute('data-done');
 
         await elapse(75);
-        fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+        fireEvent.click(screen.getByRole('link', { name: /Find a score/ }));
         await elapse(500);
         expect(screen.getByText('search page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
@@ -743,7 +745,7 @@ describe('LibraryShell upload bar', () => {
             await elapse(0);
             await elapse(60);
 
-            fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+            fireEvent.click(screen.getByRole('link', { name: /Find a score/ }));
             await elapse(500);
             expect(offer()).not.toBeInTheDocument();
             expect(screen.getByText('search page')).toBeInTheDocument();
@@ -759,7 +761,7 @@ describe('LibraryShell upload bar', () => {
             expect(bar()).toHaveAttribute('data-done');
 
             await elapse(75);
-            fireEvent.click(screen.getByRole('link', { name: /Find on IMSLP/ }));
+            fireEvent.click(screen.getByRole('link', { name: /Find a score/ }));
             await elapse(500);
             expect(offer()).not.toBeInTheDocument();
             expect(screen.getByText('search page')).toBeInTheDocument();
@@ -772,12 +774,12 @@ describe('LibraryShell upload bar', () => {
         fireEvent.click(screen.getByRole('button', { name: 'import' }));
         await elapse(0);
 
-        expect(bar('Importing from IMSLP')).toHaveAttribute('aria-valuenow', '100');
+        expect(bar('Importing score')).toHaveAttribute('aria-valuenow', '100');
         await elapse(120);
-        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+        expect(bar('Importing score')).toHaveAttribute('data-done');
         await elapse(150);
         expect(screen.getByText('viewer page')).toBeInTheDocument();
-        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+        expect(toast.success).toHaveBeenCalledWith('Score imported', { description: 'Sonata' });
     });
 
     it('stays on the Library for a teacher who leaves Search during the hold', async () => {
@@ -786,7 +788,7 @@ describe('LibraryShell upload bar', () => {
         fireEvent.click(screen.getByRole('button', { name: 'import' }));
         await elapse(0);
         await elapse(60);
-        expect(bar('Importing from IMSLP')).not.toHaveAttribute('data-done');
+        expect(bar('Importing score')).not.toHaveAttribute('data-done');
 
         fireEvent.click(screen.getByRole('link', { name: 'Library' }));
         expect(importControl.controller.signal.aborted).toBe(true);
@@ -794,7 +796,7 @@ describe('LibraryShell upload bar', () => {
         expect(screen.getByText('library page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
         // The score is still theirs: the toast says where it went.
-        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+        expect(toast.success).toHaveBeenCalledWith('Score imported', { description: 'Sonata' });
     });
 
     it('stays on the Library for a teacher who leaves Search during the fade', async () => {
@@ -803,7 +805,7 @@ describe('LibraryShell upload bar', () => {
         fireEvent.click(screen.getByRole('button', { name: 'import' }));
         await elapse(0);
         await elapse(120);
-        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+        expect(bar('Importing score')).toHaveAttribute('data-done');
 
         await elapse(75);
         fireEvent.click(screen.getByRole('link', { name: 'Library' }));
@@ -811,7 +813,7 @@ describe('LibraryShell upload bar', () => {
         await elapse(500);
         expect(screen.getByText('library page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
-        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+        expect(toast.success).toHaveBeenCalledWith('Score imported', { description: 'Sonata' });
     });
 
     // The two cases above leave Search and abort at once. These pull the two
@@ -827,7 +829,7 @@ describe('LibraryShell upload bar', () => {
         await elapse(500);
         expect(screen.getByText('search page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
-        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+        expect(toast.success).toHaveBeenCalledWith('Score imported', { description: 'Sonata' });
     });
 
     it('does not open an IMSLP score from another page, even when the import was not cancelled', async () => {
@@ -846,7 +848,7 @@ describe('LibraryShell upload bar', () => {
         await elapse(500);
         expect(screen.getByText('library page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
-        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+        expect(toast.success).toHaveBeenCalledWith('Score imported', { description: 'Sonata' });
     });
 
     // Leaving the shell unmounts Search, which aborts the import too; these
@@ -866,7 +868,7 @@ describe('LibraryShell upload bar', () => {
         await elapse(500);
         expect(screen.getByText('score d1')).toBeInTheDocument();
         expect(screen.queryByText('score d3')).not.toBeInTheDocument();
-        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+        expect(toast.success).toHaveBeenCalledWith('Score imported', { description: 'Sonata' });
     });
 
     it('does not open an IMSLP score past a teacher who leaves the shell during the fade', async () => {
@@ -875,7 +877,7 @@ describe('LibraryShell upload bar', () => {
         fireEvent.click(screen.getByRole('button', { name: 'import' }));
         await elapse(0);
         await elapse(120);
-        expect(bar('Importing from IMSLP')).toHaveAttribute('data-done');
+        expect(bar('Importing score')).toHaveAttribute('data-done');
 
         await elapse(75);
         const { signal } = importControl.controller;
@@ -885,6 +887,6 @@ describe('LibraryShell upload bar', () => {
         await elapse(500);
         expect(screen.getByText('terms page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
-        expect(toast.success).toHaveBeenCalledWith('Imported from IMSLP', { description: 'Sonata' });
+        expect(toast.success).toHaveBeenCalledWith('Score imported', { description: 'Sonata' });
     });
 });

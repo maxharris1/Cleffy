@@ -19,10 +19,8 @@ export const SearchPage = () => {
     return (
         <div>
             <header>
-                <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Find on IMSLP</h1>
-                <p className="mt-1 text-sm text-stone-500">
-                    Search or browse popular scores, then add a PDF to your library.
-                </p>
+                <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Find a score</h1>
+                <p className="mt-1 text-sm text-stone-500">Search thousands of public-domain scores.</p>
             </header>
 
             {/* Quota refusals — and a cap the account is already at — get the

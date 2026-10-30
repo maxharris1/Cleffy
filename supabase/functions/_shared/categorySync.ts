@@ -501,8 +501,9 @@ export const walkCategoryBatch = async (fetchJson: MwFetchJson, opts: WalkBatchO
                 return page;
             } catch (err) {
                 lastError = err;
-                const message = err instanceof Error ? err.message : '';
-                if (attempt < 3 && /HTTP 429|timeout/i.test(message)) {
+                const retryable =
+                    err instanceof Error && 'code' in err && (err.code === 'rate_limited' || err.code === 'timeout');
+                if (attempt < 3 && retryable) {
                     await sleep(delayMs > 0 ? delayMs * attempt : 2000 * attempt);
                     continue;
                 }

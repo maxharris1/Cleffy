@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { ImslpFetchError } from '../../supabase/functions/_shared/imslpDownload';
 
 import {
     applyPageResult,
@@ -199,6 +201,52 @@ describe('mergeGeneratorPages', () => {
 });
 
 describe('walkCategoryBatch', () => {
+    afterEach(() => vi.useRealTimers());
+
+    it.each(['timeout', 'rate_limited'] as const)('retries by %s code regardless of message', async (code) => {
+        vi.useFakeTimers();
+        const fetchJson = vi
+            .fn()
+            .mockRejectedValueOnce(new ImslpFetchError(code, 'Please try later'))
+            .mockResolvedValue(chopinPage1Cl);
+        const result = walkCategoryBatch(fetchJson, {
+            category: 'For piano',
+            clcategories: ['For piano'],
+            gcmcontinue: null,
+        });
+        await vi.advanceTimersByTimeAsync(1999);
+        expect(fetchJson).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(result).resolves.toMatchObject({ members: parseGeneratorPage(chopinPage1Cl).members });
+        expect(fetchJson).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops after three attempts and preserves the last error', async () => {
+        vi.useFakeTimers();
+        const error = new ImslpFetchError('timeout', 'Please try later');
+        const fetchJson = vi.fn().mockRejectedValue(error);
+        const result = walkCategoryBatch(fetchJson, {
+            category: 'For piano',
+            clcategories: ['For piano'],
+            gcmcontinue: null,
+        });
+        const rejection = expect(result).rejects.toBe(error);
+        await vi.advanceTimersByTimeAsync(6000);
+        await rejection;
+        expect(fetchJson).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([new Error('HTTP 429 timeout'), new ImslpFetchError('network', 'HTTP 429 timeout')])(
+        'does not infer retries from the message: %s',
+        async (error) => {
+            const fetchJson = vi.fn().mockRejectedValue(error);
+            await expect(
+                walkCategoryBatch(fetchJson, { category: 'For piano', clcategories: ['For piano'], gcmcontinue: null }),
+            ).rejects.toBe(error);
+            expect(fetchJson).toHaveBeenCalledTimes(1);
+        },
+    );
+
     it('asks for the taxonomy in chunks of 50 per page set, follows clcontinue per chunk, and counts requests', async () => {
         // The 59-category taxonomy exceeds MediaWiki's 50-value cap for anonymous
         // callers; a single clcategories list silently lost C-sharp minor and every
@@ -554,12 +602,12 @@ describe('applyPageResult rollover', () => {
             cmcontinue: 'page|80',
             pages_done: 80,
         });
-        const decision = applyPageResult(mid, previous, [], 'page|80', 'IMSLP API HTTP 429');
+        const decision = applyPageResult(mid, previous, [], 'page|80', 'The source page returned HTTP 429');
         expect(decision.kind).toBe('failed');
         expect(decision.activeGeneration).toBe(1);
         expect(decision.buildingGeneration).toBe(2);
         expect(decision.cmcontinue).toBe('page|80');
-        expect(decision.lastError).toBe('IMSLP API HTTP 429');
+        expect(decision.lastError).toBe('The source page returned HTTP 429');
     });
 
     it('continue persists the cursor without rolling over', () => {

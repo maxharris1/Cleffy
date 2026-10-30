@@ -229,9 +229,9 @@ const METRIC_COPY: Record<UsageMetric, { spent: string; spentUnknown: string; up
         upgrade: `Upgrade for up to ${PAID_VISION_READS} AI page reads a month.`,
     },
     smart_imports: {
-        spent: 'You have used your {limit} free IMSLP imports this month',
-        spentUnknown: 'You have used this month’s IMSLP imports',
-        upgrade: 'Upgrade for unlimited IMSLP imports.',
+        spent: 'You have used your {limit} free imports from Find a score this month',
+        spentUnknown: 'You have used this month’s imports from Find a score',
+        upgrade: 'Upgrade for unlimited imports from Find a score.',
     },
     pdf_exports: {
         spent: 'You have used your {limit} free PDF export this month',

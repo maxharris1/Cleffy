@@ -155,7 +155,7 @@ export const DemoValueCard = ({ signUpTo, onDismiss }: { signUpTo: string; onDis
                     />
                 </div>
                 <ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-snug marker:text-stone-400">
-                    <li>Bring any score — upload your own PDF, or find one in IMSLP’s public-domain library.</li>
+                    <li>Bring any score — upload your own PDF, or search thousands of public-domain scores.</li>
                     <li>Mark it up, and it’s saved to your library on every device.</li>
                     <li>
                         Share one link, and your teacher, students or bandmates draw with you, live — like Google Docs
