@@ -9,7 +9,7 @@ TIP=e05f94a95b081ff14b89ca44d636eda265142916 PR=https://github.com/maxharris1/Cl
 
 ## What shipped
 
-There is one new control: **Full screen** in the viewer header (cloud viewer and local viewer). It sits on the title row (`ViewerHeader` `titleAction`) so the header keeps the same height at every width. It turns on *stand mode*, where all viewer chrome is hidden: the header, annotation toolbar, pager, zoom and columns controls, notices, play-along bar and history pill. The score shows one whole page at a time, fitted and centred, as a single column.
+There is one new control: **Full screen** in the viewer header (cloud viewer and local viewer). It sits on the title row (`ViewerHeader` `titleAction`) so the header keeps the same height at every width. It turns on _stand mode_, where all viewer chrome is hidden: the header, annotation toolbar, pager, zoom and columns controls, notices, play-along bar and history pill. The score shows one whole page at a time, fitted and centred, as a single column.
 
 - The Fullscreen API runs on the score element, with `webkitRequestFullscreen` / `webkitExitFullscreen` / `webkitfullscreenchange` for older iPadOS. Without the API (iPhone), the viewport is a fixed `inset-x-0 top-0 h-dvh z-[60]` overlay, and the viewer frame lifts itself with `has-[[data-stand-mode]]:z-[60]`. If the browser refuses full screen, the mode falls back to the overlay.
 - Taps: the left 35% goes to the previous page, the right 35% to the next, and the middle toggles a controls pill (Prev, "Page X / Y", Next, Exit) for 3 s. The pill also shows on entry, so the way out is visible. Keys: ArrowRight, PageDown and Space (and ArrowDown) go forward; ArrowLeft, PageUp and Shift+Space (and ArrowUp) go back. Escape exits, and so does leaving full screen the browser's way. A horizontal swipe of 60px or more also turns the page.
@@ -21,15 +21,16 @@ Files: `src/features/viewer/stand/{standMode.ts,StandOverlay.tsx,standMode.test.
 
 ## Checks (on the pushed tree)
 
-| Check | Exit | Result |
-| --- | --- | --- |
-| `npx prettier --check <changed files>` (after `--write`) | 0 | all formatted |
-| `npm run lint:check` | 0 | clean |
-| `npm run typecheck` | 0 | clean |
-| `npm run test` | 0 | 273 files passed (6 skipped); 4267 tests passed (22 skipped) |
-| `npm run build` | 0 | built |
+| Check                                                    | Exit | Result                                                       |
+| -------------------------------------------------------- | ---- | ------------------------------------------------------------ |
+| `npx prettier --check <changed files>` (after `--write`) | 0    | all formatted                                                |
+| `npm run lint:check`                                     | 0    | clean                                                        |
+| `npm run typecheck`                                      | 0    | clean                                                        |
+| `npm run test`                                           | 0    | 273 files passed (6 skipped); 4267 tests passed (22 skipped) |
+| `npm run build`                                          | 0    | built                                                        |
 
 The first full test run had two failures:
+
 - `src/lib/viewportZoom.test.tsx` failed because it matches the literal `className="ink-surface ` in `PdfViewport.tsx`. I fixed this by moving the stand classes to `data-stand-mode:` variants.
 - `tests/auth/turnstileField.test.tsx` passed when rerun alone and in the next full run. It is a timing flake under full-suite load and unrelated to this change.
 
@@ -42,6 +43,7 @@ New tests: 23 unit tests (tap zones at 35%, every key mapping, modifiers ignored
 Viewports: desktop-1440, ipad-landscape, ipad-portrait, iphone-14, iphone-se and iphone-landscape. The flow on each, all passing: open the cloud viewer → Full screen → ArrowRight → wait 3.5 s → tap/click at 85% width → tap the middle → tap at 10% width → Exit. Each viewport went into full screen (or the fixed 100dvh overlay with the Fullscreen API stubbed out on iPhone/Android), showed one page, turned pages, showed and hid the controls, and exited with the pager reading **p. 2 / 4** (the last page shown). No console errors.
 
 Extra runs:
+
 - iPad portrait with `reducedMotion: 'reduce'`: no animation (`animation-name: none`) vs `ui-fade-in 0.18s` without it.
 - A synthetic Pencil stroke on the page with ArrowRight/PageDown pressed mid-stroke: the page held (Page 1/4) and the stroke drew. After the pen lifted, ArrowRight turned to 2/4. I undid the test mark; the local DB shows 0 live annotations on that score.
 - Local (on-device) viewer on iPhone SE without the Fullscreen API: it entered, turned pages and exited.
@@ -55,7 +57,7 @@ Screenshots (session scratchpad, ephemeral): `/tmp/claude-0/-home-user-Cleffy/88
 
 ### Environment notes (not bugs in this change)
 
-- The seeded local scores have **no PDF in local storage**, so every seeded score opens as "Couldn't open this score" in the local stack. To exercise the cloud viewer, I uploaded generated 2- and 4-page staff-paper PDFs to the *local* storage paths of seeded scores 1 and 2 (`scores/b0000000-…-000000000001/original.pdf`, `…-000000000002/original.pdf`) with the local service role. No rows were renamed or deleted, and no hosted project was touched. It may be worth adding fixture PDFs to the seed.
+- The seeded local scores have **no PDF in local storage**, so every seeded score opens as "Couldn't open this score" in the local stack. To exercise the cloud viewer, I uploaded generated 2- and 4-page staff-paper PDFs to the _local_ storage paths of seeded scores 1 and 2 (`scores/b0000000-…-000000000001/original.pdf`, `…-000000000002/original.pdf`) with the local service role. No rows were renamed or deleted, and no hosted project was touched. It may be worth adding fixture PDFs to the seed.
 - Headless Chromium mobile emulation still has the Fullscreen API. The iPhone fallback was exercised by deleting `Element.prototype.requestFullscreen` and forcing `fullscreenEnabled = false` in an init script. Real iPhone and iPad Safari (the webkit path, the dvh overlay, the Pencil and the Wake Lock) were **not** tested on hardware.
 - The seeded student has no score memberships, so view-only was covered by a component test, not a live click-through.
 
@@ -72,7 +74,7 @@ Screenshots (session scratchpad, ephemeral): `/tmp/claude-0/-home-user-Cleffy/88
 
 ## Open questions
 
-1. **What does "return to the same page" mean?** I took it as *the page last shown on the stand* (if you paged to p. 5, exit leaves you on p. 5). If Max meant *the page you entered from*, that is a one-line change in `PdfViewport` (`standReturnRef`).
+1. **What does "return to the same page" mean?** I took it as _the page last shown on the stand_ (if you paged to p. 5, exit leaves you on p. 5). If Max meant _the page you entered from_, that is a one-line change in `PdfViewport` (`standReturnRef`).
 2. **The `/try` demo has no toggle.** It is a marketing surface; it would take one prop (`titleAction={<StandModeButton />}`) in `DemoViewer.tsx`. Should it get one?
 3. **Pen taps in stand mode.** On the page they draw; in the grey margin they turn pages. Is that right for Pencil users, or should the pen never turn pages?
 4. **Unhandled report step.** The packet asks that the result be sent to Cleffy (556e14b2-f903-48fc-aca8-b60bfbedde75). That id is not a session id this session can address, so it was not sent from here; this report and the PR are the hand-off.
