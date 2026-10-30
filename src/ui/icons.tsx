@@ -12,6 +12,7 @@ import {
     LayoutGrid,
     List,
     LocateFixed,
+    Maximize,
     Minus,
     Music,
     Pause,
@@ -83,4 +84,5 @@ export const RepeatIcon = withBrandStroke(Repeat);
 export const MetronomeIcon = withBrandStroke(Timer);
 export const FollowIcon = withBrandStroke(LocateFixed);
 export const MusicIcon = withBrandStroke(Music);
+export const FullScreenIcon = withBrandStroke(Maximize);
 export const RetryIcon = withBrandStroke(RefreshCw);
