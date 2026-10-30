@@ -1,11 +1,10 @@
 import { getDocument } from 'pdfjs-dist';
 
-import { safeFileBase, shareOrDownloadFile } from '@/features/export/shareFile';
+import { exportNotice, loadExportMarks } from '@/features/export/exportAnnotations';
+import { safeFileBase, shareOrDownloadFile, type ShareOutcome } from '@/features/export/shareFile';
 import { drawAnnotation, StrokePathCache } from '@/features/viewer/ink/strokeRenderer';
 import { createPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import { pdfDocumentOptions } from '@/features/viewer/pdf/pdfDocumentOptions';
-import { getDb } from '@/sync/db';
-import type { Annotation } from '@/types/models';
 
 /** Target longest side for exported page photos (CSS/device-independent). */
 const EXPORT_MAX_SIDE = 2048;
@@ -19,9 +18,12 @@ export const exportAnnotatedPageImage = async (
     sourceBytes: ArrayBuffer,
     pageIndex: number,
     title: string,
-): Promise<void> => {
-    const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title);
-    await shareOrDownloadFile(file, file.name);
+    userId: string | null,
+    onNotice?: (notice: string) => void,
+    lostAccess = false,
+): Promise<ShareOutcome> => {
+    const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title, userId, onNotice, lostAccess);
+    return shareOrDownloadFile(file, file.name);
 };
 
 export const buildAnnotatedPagePng = async (
@@ -29,11 +31,19 @@ export const buildAnnotatedPagePng = async (
     sourceBytes: ArrayBuffer,
     pageIndex: number,
     title: string,
+    /** The signed-in account: only the marks its viewer draws are baked in (see loadExportMarks). */
+    userId: string | null,
+    /** Told what the user must know about the marks baked in (exportNotice). */
+    onNotice?: (notice: string) => void,
+    /** The ink this tab kept of a score lost to this device (loadExportMarks). */
+    lostAccess = false,
 ): Promise<File> => {
-    const rows = await getDb().annotations.where('docId').equals(docId).toArray();
-    const annotations: Annotation[] = rows
-        .filter((row) => !row.deletedAt && row.page === pageIndex)
-        .map(({ pending: _pending, ...a }) => a);
+    const marks = await loadExportMarks(docId, userId, pageIndex, { lostAccess });
+    const { annotations } = marks;
+    const notice = exportNotice(marks);
+    if (notice) {
+        onNotice?.(notice);
+    }
 
     const worker = createPdfWorker();
     const loadingTask = getDocument({ data: sourceBytes.slice(0), worker, ...pdfDocumentOptions });

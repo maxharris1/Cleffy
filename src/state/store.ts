@@ -1,5 +1,15 @@
 import { create } from 'zustand';
 
+import type { PageColumns } from '@/features/viewer/geometry';
+import {
+    readPageColumns,
+    readPrintHandwriting,
+    readSpreadCover,
+    writePageColumns,
+    writePrintHandwriting,
+    writeSpreadCover,
+} from '@/features/viewer/viewerPrefs';
+import { features } from '@/lib/features';
 import type { PinchPreview, StrokeWidthKey, Tool, ViewState } from '@/types/models';
 
 /** Ink palette (StyleGuide equivalent): black, red, blue, green, yellow, orange, purple. */
@@ -51,6 +61,12 @@ interface PlaybackSlice {
     countInOn: boolean;
     loopRange: LoopRange | null;
     followMode: FollowMode;
+    /**
+     * Bumped whenever the engine's position jumps without playing (a seek,
+     * a rewind while paused): the playhead sleeps between such events.
+     */
+    playheadEpoch: number;
+    notePlayheadJump: () => void;
     setPlaybackStatus: (playbackStatus: PlaybackStatus) => void;
     setBpm: (bpm: number) => void;
     setCurrentMeasureIndex: (currentMeasureIndex: number | null) => void;
@@ -74,6 +90,16 @@ interface ViewerStore extends PlaybackSlice {
     focusedPageIndex: number;
     /** Accessibility: let a finger draw (no Apple Pencil / stylus available). */
     fingerDraws: boolean;
+    /**
+     * Opt-in: convert this writer's committed pen strokes to print (digits,
+     * dynamics, text notes). Per-user viewer setting, persisted per device —
+     * never a document flag, so a teacher cannot rewrite a pupil's handwriting.
+     */
+    printHandwriting: boolean;
+    /** Pages per row: 1 (stack) or 2 (facing pages). Persisted per device. */
+    pageColumns: PageColumns;
+    /** Two-page spreads open on a cover: page 1 alone, then 2|3. Persisted per device. */
+    spreadCover: boolean;
     setView: (view: ViewState) => void;
     setPinch: (pinch: PinchPreview | null) => void;
     resetView: (view?: Partial<ViewState>) => void;
@@ -82,6 +108,12 @@ interface ViewerStore extends PlaybackSlice {
     setWidthKey: (widthKey: StrokeWidthKey) => void;
     setFocusedPageIndex: (focusedPageIndex: number) => void;
     setFingerDraws: (fingerDraws: boolean) => void;
+    setPrintHandwriting: (printHandwriting: boolean) => void;
+    setPageColumns: (pageColumns: PageColumns) => void;
+    setSpreadCover: (spreadCover: boolean) => void;
+    /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
+    selectedTextId: string | null;
+    setSelectedTextId: (selectedTextId: string | null) => void;
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
@@ -98,6 +130,7 @@ const INITIAL_PLAYBACK = {
     countInOn: true,
     loopRange: null,
     followMode: 'on',
+    playheadEpoch: 0,
 } satisfies Partial<ViewerStore>;
 
 /**
@@ -114,6 +147,10 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     widthKey: 'medium',
     focusedPageIndex: 0,
     fingerDraws: false,
+    // Off unless the feature ships: with no toolbar toggle a stored "on" would be stuck on.
+    printHandwriting: features.printHandwriting && readPrintHandwriting(),
+    pageColumns: readPageColumns(),
+    spreadCover: readSpreadCover(),
     setView: (view) => set({ view }),
     setPinch: (pinch) => set({ pinch }),
     resetView: (view) => set({ view: { ...INITIAL_VIEW, ...view }, pinch: null, focusedPageIndex: 0 }),
@@ -122,6 +159,20 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setWidthKey: (widthKey) => set({ widthKey }),
     setFocusedPageIndex: (focusedPageIndex) => set({ focusedPageIndex }),
     setFingerDraws: (fingerDraws) => set({ fingerDraws }),
+    setPrintHandwriting: (printHandwriting) => {
+        writePrintHandwriting(printHandwriting);
+        set({ printHandwriting });
+    },
+    setPageColumns: (pageColumns) => {
+        writePageColumns(pageColumns);
+        set({ pageColumns });
+    },
+    setSpreadCover: (spreadCover) => {
+        writeSpreadCover(spreadCover);
+        set({ spreadCover });
+    },
+    selectedTextId: null,
+    setSelectedTextId: (selectedTextId) => set({ selectedTextId }),
     ...INITIAL_PLAYBACK,
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),
@@ -135,5 +186,6 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setCountInOn: (countInOn) => set({ countInOn }),
     setLoopRange: (loopRange) => set({ loopRange }),
     setFollowMode: (followMode) => set({ followMode }),
+    notePlayheadJump: () => set((state) => ({ playheadEpoch: state.playheadEpoch + 1 })),
     resetPlayback: () => set({ ...INITIAL_PLAYBACK }),
 }));

@@ -4,7 +4,8 @@ import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import { PlayheadController, playheadRect } from '@/features/playback/PlayheadController';
 import { measureIndexAtPagePoint } from '@/features/playback/scoreTime';
 import { computeDocumentLayout } from '@/features/viewer/geometry';
-import type { DocumentLayout } from '@/features/viewer/geometry';
+import type { DocumentLayout, ObscuredEdges } from '@/features/viewer/geometry';
+import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { useViewerStore } from '@/state/store';
 
 describe('playheadRect', () => {
@@ -104,6 +105,82 @@ describe('PlayheadController drawing', () => {
     });
 });
 
+describe('PlayheadController follow scroll', () => {
+    const frames: FrameRequestCallback[] = [];
+    const flushFrame = () => {
+        const pending = frames.splice(0, frames.length);
+        for (const callback of pending) {
+            callback(0);
+        }
+    };
+    const LAYOUT = computeDocumentLayout([
+        { width: 612, height: 792 },
+        { width: 612, height: 792 },
+    ]);
+    const VIEWPORT = { width: 800, height: 600 };
+    const LAST_TICK = 999999;
+
+    /** Follow the measure at `tick` from the top of the score; returns the settled view. */
+    const followTo = (tick: number, obscured?: ObscuredEdges) => {
+        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+        vi.stubGlobal('cancelAnimationFrame', () => {});
+        let now = 0;
+        vi.spyOn(performance, 'now').mockImplementation(() => now);
+        useViewerStore.getState().setView({ scale: 1, scrollX: 0, scrollY: 0 });
+        const controller = new PlayheadController({
+            getEngine: () => ({ getPositionTicks: () => tick }) as unknown as PlaybackEngine,
+            getScore: () => tinyScore,
+            lineEl: document.createElement('div'),
+            highlightEl: document.createElement('div'),
+            getLayout: () => LAYOUT,
+            getRenderScale: () => 1,
+            getViewportSize: () => VIEWPORT,
+            ...(obscured ? { getObscured: () => obscured } : {}),
+        });
+        flushFrame();
+        now = 10_000;
+        flushFrame();
+        controller.destroy();
+        return useViewerStore.getState().view;
+    };
+
+    afterEach(() => {
+        frames.length = 0;
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+        useViewerStore.getState().resetPlayback();
+        useViewerStore.getState().setView({ scale: 1, scrollX: 0, scrollY: 0 });
+    });
+
+    it('scrolls the last systems clear of a bottom toolbar, past the unobscured scroll limit', () => {
+        const rect = playheadRect(tinyScore, LAST_TICK)!;
+        const page = LAYOUT.layouts[rect.pageIndex]!;
+        const systemTop = page.top + rect.y0 * page.height;
+        const unobscuredMax = LAYOUT.contentHeight - VIEWPORT.height;
+
+        // Without the toolbar the follow target is clamped at the end of the content.
+        expect(followTo(LAST_TICK).scrollY).toBeCloseTo(unobscuredMax, 5);
+
+        // A 200px phone toolbar lets the view scroll 200px further, and the
+        // system lands near the top of the strip the toolbar leaves visible.
+        const view = followTo(LAST_TICK, { top: 0, bottom: 200 });
+        expect(view.scrollY).toBeGreaterThan(unobscuredMax);
+        expect(systemTop - view.scrollY).toBeCloseTo(400 * 0.12, 5);
+    });
+
+    it('keeps the opening system below a top toolbar instead of snapping the view back to 0', () => {
+        const rect = playheadRect(tinyScore, 0)!;
+        const page = LAYOUT.layouts[rect.pageIndex]!;
+        const systemTop = page.top + rect.y0 * page.height;
+        const view = followTo(0, { top: 80, bottom: 0 });
+        // Anchored below the toolbar: 80px + 12% of the 520px left visible,
+        // which takes a negative scroll offset clampScroll allows only when told
+        // about the toolbar.
+        expect(view.scrollY).toBeLessThan(0);
+        expect(systemTop - view.scrollY).toBeCloseTo(80 + 520 * 0.12, 5);
+    });
+});
+
 describe('measureIndexAtPagePoint (tap-to-seek)', () => {
     it('hits the measure under the point', () => {
         // Inside m1: system 0 band y 0.1–0.28, x 0.24–0.58.
@@ -119,3 +196,76 @@ describe('measureIndexAtPagePoint (tap-to-seek)', () => {
         expect(measureIndexAtPagePoint(tinyScore, 5, 0.5, 0.5)).toBe(-1); // no such page
     });
 });
+
+describe('PlayheadController frame loop', () => {
+    const frames: FrameRequestCallback[] = [];
+    const flushFrame = () => {
+        const pending = frames.splice(0, frames.length);
+        for (const callback of pending) {
+            callback(0);
+        }
+    };
+    const LAYOUT = computeDocumentLayout([
+        { width: 612, height: 792 },
+        { width: 612, height: 792 },
+    ]);
+
+    afterEach(() => {
+        frames.length = 0;
+        vi.unstubAllGlobals();
+        useViewerStore.getState().resetPlayback();
+    });
+
+    it('stops requesting frames while paused, and wakes for a seek or for play', () => {
+        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+        vi.stubGlobal('cancelAnimationFrame', () => {});
+        let tick = 0;
+        const lineEl = document.createElement('div');
+        const controller = new PlayheadController({
+            getEngine: () => ({ getPositionTicks: () => tick }) as unknown as PlaybackEngine,
+            getScore: () => tinyScore,
+            lineEl,
+            highlightEl: document.createElement('div'),
+            getLayout: () => LAYOUT,
+            getRenderScale: () => 1,
+            getViewportSize: () => ({ width: 800, height: 600 }),
+        });
+        // Following off: a follow glide is motion of its own and keeps frames coming.
+        useViewerStore.getState().setFollowMode('off');
+        useViewerStore.getState().setPlaybackStatus('paused');
+        flushFrame();
+        expect(lineEl.style.display).toBe('block');
+        const pausedAt = lineEl.style.transform;
+        // Asleep: drawing the paused frame scheduled nothing more.
+        expect(frames).toHaveLength(0);
+
+        // A seek while paused (the engine bumps playheadEpoch) draws once more.
+        tick = LAST_TICK_OF(tinyScore);
+        useViewerStore.getState().notePlayheadJump();
+        expect(frames).toHaveLength(1);
+        flushFrame();
+        expect(lineEl.style.transform).not.toBe(pausedAt);
+        expect(frames).toHaveLength(0);
+
+        // Playing keeps the loop alive frame after frame.
+        useViewerStore.getState().setPlaybackStatus('playing');
+        flushFrame();
+        expect(frames).toHaveLength(1);
+        flushFrame();
+        expect(frames).toHaveLength(1);
+
+        // Paused again: the next frame is the last.
+        useViewerStore.getState().setPlaybackStatus('paused');
+        flushFrame();
+        expect(frames).toHaveLength(0);
+
+        // New page geometry from the viewport wakes it too.
+        controller.wake();
+        expect(frames).toHaveLength(1);
+        controller.destroy();
+        flushFrame();
+        expect(frames).toHaveLength(0);
+    });
+});
+
+const LAST_TICK_OF = (score: typeof tinyScore) => score.measures[score.measures.length - 1]?.tick ?? 0;

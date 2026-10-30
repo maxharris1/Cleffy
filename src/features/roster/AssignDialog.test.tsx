@@ -7,6 +7,15 @@ import { AssignDialog } from '@/features/roster/AssignDialog';
 import type { RosterAssignment } from '@/features/roster/rosterService';
 import type { ManagedStudentRow } from '@/types/database';
 
+const toast = vi.hoisted(() => ({
+    success: vi.fn(),
+    saved: vi.fn(),
+    shared: vi.fn(),
+    error: vi.fn(),
+    promise: vi.fn(<T,>(promise: Promise<T>) => promise),
+}));
+vi.mock('@/ui/toast', async (importOriginal) => ({ ...(await importOriginal<object>()), toast }));
+
 const listRoster = vi.fn();
 const listAssignmentsForStudents = vi.fn();
 const assignScore = vi.fn();
@@ -30,6 +39,9 @@ const student = (id: string, displayName: string, archivedAt: string | null = nu
     archived_at: archivedAt,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
+    country: null,
+    age_attested_at: null,
+    age_attested_min_age: null,
 });
 
 const rosterAssignment = (documentId: string, studentUserId: string): RosterAssignment => ({
@@ -47,10 +59,10 @@ const rosterAssignment = (documentId: string, studentUserId: string): RosterAssi
     documentTitle: 'Prelude and Fugue',
 });
 
-const renderDialog = () =>
+const renderDialog = (onClose: () => void = vi.fn()) =>
     render(
         <MemoryRouter>
-            <AssignDialog documentId="doc-1" documentTitle="Prelude and Fugue" onClose={vi.fn()} />
+            <AssignDialog documentId="doc-1" documentTitle="Prelude and Fugue" onClose={onClose} />
         </MemoryRouter>,
     );
 
@@ -84,7 +96,7 @@ describe('AssignDialog', () => {
 
         // The roster load has landed by now; the list must still be waiting.
         await waitFor(() => expect(listRoster).toHaveBeenCalled());
-        expect(screen.getByText('Loading your roster…')).toBeInTheDocument();
+        expect(await screen.findByText('Loading your roster…')).toBeInTheDocument();
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 
         releaseAssignments(new Map([['s1-user', [rosterAssignment('doc-1', 's1-user')]]]));
@@ -106,5 +118,72 @@ describe('AssignDialog', () => {
 
         await waitFor(() => expect(assignScore).toHaveBeenCalledTimes(1));
         expect(assignScore).toHaveBeenCalledWith('doc-1', 's2-user', 'edit', null, null);
+    });
+
+    it('confirms one student by name, in the same tick as the close', async () => {
+        const user = userEvent.setup();
+        const onClose = vi.fn(() => {
+            // The toast has been fired by the time the dialog is told to close.
+            expect(toast.success).toHaveBeenCalledTimes(1);
+        });
+        renderDialog(onClose);
+
+        await user.click(await screen.findByRole('checkbox', { name: /Ada Lovelace/ }));
+        await user.click(screen.getByRole('button', { name: 'Assign' }));
+
+        await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+        expect(toast.success).toHaveBeenCalledWith('Assigned to Ada Lovelace', { description: 'Prelude and Fugue' });
+    });
+
+    it('counts several students', async () => {
+        const user = userEvent.setup();
+        listRoster.mockResolvedValue([
+            student('s1', 'Ada Lovelace'),
+            student('s2', 'Bo Diddley'),
+            student('s3', 'Clara Schumann'),
+        ]);
+        renderDialog();
+
+        for (const name of [/Ada Lovelace/, /Bo Diddley/, /Clara Schumann/]) {
+            await user.click(await screen.findByRole('checkbox', { name }));
+        }
+        await user.click(screen.getByRole('button', { name: 'Assign to 3 students' }));
+
+        await waitFor(() =>
+            expect(toast.success).toHaveBeenCalledWith('Assigned to 3 students', { description: 'Prelude and Fugue' }),
+        );
+    });
+
+    it('does not confirm a batch that failed part-way', async () => {
+        const user = userEvent.setup();
+        assignScore.mockResolvedValueOnce('assignment-1').mockRejectedValueOnce(new Error('offline'));
+        const onClose = vi.fn();
+        renderDialog(onClose);
+
+        await user.click(await screen.findByRole('checkbox', { name: /Ada Lovelace/ }));
+        await user.click(screen.getByRole('checkbox', { name: /Bo Diddley/ }));
+        await user.click(screen.getByRole('button', { name: 'Assign to 2 students' }));
+
+        expect(await screen.findByText(/Could not assign to Bo Diddley/)).toBeInTheDocument();
+        expect(toast.success).not.toHaveBeenCalled();
+        expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('says plainly that Edit reaches the teacher’s own marks too', async () => {
+        // One shared layer per score (owner decision): a student with Edit can
+        // erase the teacher's marks, so the choice must not read as "their own".
+        const user = userEvent.setup();
+        renderDialog();
+
+        await screen.findByRole('checkbox', { name: /Ada Lovelace/ });
+        expect(
+            screen.getByText('They can add, change and erase all marks on this score, including yours.'),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/their own fingerings/)).not.toBeInTheDocument();
+        // Students sign in with a username or email now; the code works once.
+        expect(screen.queryByText(/sign in with their code/)).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'View only' }));
+        expect(screen.getByText('They can read and play from it, but not mark it up.')).toBeInTheDocument();
     });
 });

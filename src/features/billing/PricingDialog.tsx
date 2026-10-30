@@ -1,18 +1,26 @@
 import { useState } from 'react';
 
-import { createCheckoutSession, redirectTo } from '@/features/billing/billingApi';
+import { createCheckoutSession, createPortalSession, redirectTo } from '@/features/billing/billingApi';
+import { useBillingCountry } from '@/features/billing/billingRegion';
+import { CheckoutReview } from '@/features/billing/CheckoutReview';
+import { CountryPicker } from '@/features/billing/CountryPicker';
+import { formatPlanDate, type OwnSubscription } from '@/features/billing/planStatus';
 import {
     TIER_CARDS,
     foundingPrice,
     isBillingConfigured,
     priceFor,
     type BillingInterval,
+    type PlanSlot,
 } from '@/features/billing/pricing';
+import { AgreementNote } from '@/features/legal/AgreementNote';
 import type { EffectiveTier } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
+
+import { currencyForCountry } from '../../../supabase/functions/_shared/billingTerms';
 
 export interface PricingDialogProps {
     onClose: () => void;
@@ -24,6 +32,13 @@ export interface PricingDialogProps {
     currentTier: EffectiveTier;
     /** Optional line explaining what prompted the upgrade prompt. */
     reason?: string;
+    /**
+     * The subscription this account already pays for (ownSubscriptionOf), if
+     * any. Then every plan change goes through the billing portal, which
+     * switches the one subscription: Checkout would start a SECOND one beside
+     * it and bill both.
+     */
+    subscription?: OwnSubscription | null;
 }
 
 /**
@@ -32,19 +47,46 @@ export interface PricingDialogProps {
  * of teachers — plus a monthly/annual toggle and the Founding Teacher price
  * when that launch offer is switched on.
  */
-export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogProps) => {
+export const PricingDialog = ({ onClose, currentTier, reason, subscription = null }: PricingDialogProps) => {
     const [interval, setInterval] = useState<BillingInterval>('annual');
     const [busyPrice, setBusyPrice] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const founding = foundingPrice();
+    const [country, setCountry] = useBillingCountry();
+    const currency = currencyForCountry(country);
+    /** The plan being reviewed before Checkout; null while the cards are shown. */
+    const [review, setReview] = useState<{ slot: PlanSlot; priceId: string } | null>(null);
+    // The portal cannot switch anyone onto the Founding price (DEPLOY.md §1), so
+    // for a subscriber it would only be reachable as a second subscription.
+    const founding = subscription ? null : foundingPrice(currency);
 
-    const startCheckout = async (priceId: string) => {
+    /** Choosing a plan opens the review step; only its Continue button reaches Stripe. */
+    const reviewPlan = (slot: PlanSlot | null, priceId: string | null) => {
+        if (!slot || !priceId) {
+            return;
+        }
+        setError(null);
+        setReview({ slot, priceId });
+    };
+
+    const startCheckout = async (priceId: string, consentText: string) => {
         setError(null);
         setBusyPrice(priceId);
         try {
-            redirectTo(await createCheckoutSession(priceId));
+            redirectTo(await createCheckoutSession(priceId, { accepted: true, country, text: consentText }));
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not start checkout.');
+            setBusyPrice(null);
+        }
+    };
+
+    /** Switching or resuming an existing subscription happens on Stripe's portal. */
+    const openPortal = async (busyKey: string) => {
+        setError(null);
+        setBusyPrice(busyKey);
+        try {
+            redirectTo(await createPortalSession());
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Could not open the billing portal.');
             setBusyPrice(null);
         }
     };
@@ -59,14 +101,45 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
         );
     }
 
+    if (review) {
+        return (
+            // Keyed apart from the cards' dialog so it mounts fresh at the top:
+            // reusing that instance kept the list's scroll position and opened
+            // the review with the price line scrolled out of view.
+            <Dialog key="review" label="Plans" onClose={onClose} sheet>
+                <CheckoutReview
+                    slot={review.slot}
+                    country={country}
+                    onCountryChange={setCountry}
+                    busy={busyPrice !== null}
+                    error={error}
+                    onBack={() => {
+                        setError(null);
+                        setReview(null);
+                    }}
+                    onConfirm={(consentText) => void startCheckout(review.priceId, consentText)}
+                />
+            </Dialog>
+        );
+    }
+
     return (
-        <Dialog label="Plans" onClose={onClose} sheet>
+        <Dialog key="plans" label="Plans" onClose={onClose} sheet>
             <div className="w-full">
                 {reason ? <p className="mb-4 text-sm text-stone-600">{reason}</p> : null}
 
                 <p className="mb-4 text-sm text-stone-600">
                     Personal is the practice tool. Teacher adds your students. Academy covers a team of teachers.
                 </p>
+
+                {subscription ? (
+                    <p className="mb-4 text-sm text-stone-600">
+                        You already have a subscription, so switching plans happens in the billing portal — the plan you
+                        have changes there, and you are never billed for two.
+                    </p>
+                ) : null}
+
+                <CountryPicker className="mb-3" value={country} onChange={setCountry} />
 
                 <div className="mb-5 flex items-center gap-2" role="group" aria-label="Billing interval">
                     {(['monthly', 'annual'] as const).map((option) => (
@@ -76,7 +149,7 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
                             aria-pressed={interval === option}
                             onClick={() => setInterval(option)}
                             className={[
-                                'cursor-pointer rounded-lg px-3 py-1.5 text-sm transition',
+                                'cursor-pointer rounded-lg px-3 py-1.5 text-sm transition-colors',
                                 interval === option
                                     ? 'bg-accent-soft font-medium text-accent'
                                     : 'text-stone-600 hover:bg-ink/5',
@@ -89,18 +162,18 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
 
                 <div className="flex flex-col gap-3">
                     {TIER_CARDS.map((card) => {
-                        const price = priceFor(card.tier, interval);
+                        const price = priceFor(card.tier, interval, currency);
                         const isCurrent = card.tier === currentTier;
                         return (
                             <section
                                 key={card.tier}
                                 className={[
-                                    'rounded-2xl border p-4 transition',
+                                    'rounded-2xl border p-4 transition-colors',
                                     isCurrent ? 'border-accent/40 bg-accent-soft/30' : 'border-stone-200 bg-white',
                                 ].join(' ')}
                             >
                                 <div className="flex items-baseline justify-between gap-3">
-                                    <h3 className="font-display text-lg font-semibold text-stone-900">
+                                    <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
                                         {card.name}
                                         {isCurrent ? (
                                             <Badge tone="accent" className="ml-2 align-middle">
@@ -110,16 +183,25 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
                                     </h3>
                                     {price ? (
                                         <p className="shrink-0 text-right">
-                                            <span className="font-display text-xl font-semibold text-stone-900">
+                                            <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
                                                 {price.amount}
                                             </span>
-                                            <span className="block text-xs text-stone-500">{price.caption}</span>
+                                            <span className="block text-xs tabular-nums text-stone-500">
+                                                {price.caption}
+                                            </span>
                                         </p>
                                     ) : null}
                                 </div>
 
                                 <p className="mt-1 text-sm text-stone-600">{card.tagline}</p>
                                 {price?.note ? <p className="mt-1 text-xs text-ok">{price.note}</p> : null}
+                                {isCurrent && subscription?.cancelling ? (
+                                    <p className="mt-1 text-sm text-amber-800">
+                                        {subscription.endsAt
+                                            ? `Ends ${formatPlanDate(subscription.endsAt)} — it won’t renew.`
+                                            : 'Cancelled — it won’t renew.'}
+                                    </p>
+                                ) : null}
 
                                 <ul className="mt-3 flex flex-col gap-1 text-sm text-stone-700">
                                     {card.features.map((feature) => (
@@ -127,14 +209,39 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
                                     ))}
                                 </ul>
 
-                                {price?.priceId && !isCurrent ? (
+                                {isCurrent && subscription?.cancelling ? (
                                     <Button
                                         size="sm"
                                         className="mt-4 w-full"
                                         disabled={busyPrice !== null}
-                                        onClick={() => void startCheckout(price.priceId as string)}
+                                        onClick={() => void openPortal(`resume:${card.tier}`)}
                                     >
-                                        {busyPrice === price.priceId ? 'Opening checkout…' : `Choose ${card.name}`}
+                                        {busyPrice === `resume:${card.tier}`
+                                            ? 'Opening billing portal…'
+                                            : 'Resume subscription'}
+                                    </Button>
+                                ) : price?.priceId && !isCurrent && subscription ? (
+                                    // Free has no price, so no card ever offers a
+                                    // portal "switch" down to it: cancelling is.
+                                    <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        className="mt-4 w-full"
+                                        disabled={busyPrice !== null}
+                                        onClick={() => void openPortal(`switch:${card.tier}`)}
+                                    >
+                                        {busyPrice === `switch:${card.tier}`
+                                            ? 'Opening billing portal…'
+                                            : `Switch to ${card.name}`}
+                                    </Button>
+                                ) : price?.priceId && !isCurrent ? (
+                                    <Button
+                                        size="sm"
+                                        className="mt-4 w-full"
+                                        disabled={busyPrice !== null}
+                                        onClick={() => reviewPlan(price.slot, price.priceId)}
+                                    >
+                                        {`Choose ${card.name}`}
                                     </Button>
                                 ) : null}
                             </section>
@@ -144,14 +251,14 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
                     {founding?.priceId ? (
                         <section className="rounded-2xl border border-amber-300/70 bg-amber-50/60 p-4">
                             <div className="flex items-baseline justify-between gap-3">
-                                <h3 className="font-display text-lg font-semibold text-stone-900">
+                                <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
                                     Founding Teacher
                                     <Badge tone="warn" className="ml-2 align-middle">
                                         Limited
                                     </Badge>
                                 </h3>
                                 <p className="shrink-0 text-right">
-                                    <span className="font-display text-xl font-semibold text-stone-900">
+                                    <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
                                         {founding.amount}
                                     </span>
                                     <span className="block text-xs text-stone-500">{founding.caption}</span>
@@ -162,15 +269,21 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
                                 size="sm"
                                 className="mt-4 w-full"
                                 disabled={busyPrice !== null}
-                                onClick={() => void startCheckout(founding.priceId as string)}
+                                onClick={() => reviewPlan(founding.slot, founding.priceId)}
                             >
-                                {busyPrice === founding.priceId ? 'Opening checkout…' : 'Become a Founding Teacher'}
+                                Become a Founding Teacher
                             </Button>
                         </section>
                     ) : null}
                 </div>
 
                 {error ? <ErrorText className="mt-4">{error}</ErrorText> : null}
+
+                <p className="mt-4 text-xs text-stone-500">
+                    Plans renew automatically until you cancel, which you can do at any time from your Account page or
+                    at cleffy.io/cancel. Full refund within 14 days of your first purchase.
+                </p>
+                <AgreementNote action="subscribing" className="mt-1" />
 
                 <p className="mt-4 text-xs text-stone-500">
                     Students never pay and never need an account — share links keep working on every plan.

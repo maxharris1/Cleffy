@@ -1,10 +1,37 @@
 import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
+import { readTeacherAttestation, type TeacherAttestation } from '../_shared/consentAge.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import {
+    ACCOUNT_DELETION_PENDING,
+    accountDeletionPending,
+    DELETION_CHECK_UNAVAILABLE,
+} from '../_shared/deletionPending.ts';
+import {
+    checkDistrictChoice,
+    DISTRICT_DELETION_PENDING,
+    type DistrictRpc,
+    isDistrictDeletionPending,
+} from '../_shared/districtProvision.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements } from '../_shared/entitlements.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
+import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { supabaseQuotaBackend } from '../_shared/quota.ts';
+import { mailLimit } from '../_shared/mailBudget.ts';
+import { loginThrottleSecret, refundRateLimit } from '../_shared/rateLimit.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
+import { reserveStudentAccountMail, studentMailRefusal } from '../_shared/studentAccountMail.ts';
+import {
+    type CodeResetOutcome,
+    type CodeResetPorts,
+    definiteRefusal,
+    MARKER_KEY,
+    type ReserveResetAnswer,
+    runCodeReset,
+} from '../_shared/studentCodeReset.ts';
+import { endStudentSessions, endStudentSessionsFenced } from '../_shared/studentSessions.ts';
 import {
     formatLoginCode,
     generateLoginCode,
@@ -14,7 +41,7 @@ import {
 } from '../_shared/studentCodes.ts';
 
 /**
- * Teacher-side roster management: create / reset / archive / restore.
+ * Teacher-side roster management: create / reset / archive / restore / delete.
  *
  * Provisioning a student means creating a real auth user, which no client may
  * do, so every write here runs under the service role — managed_students has no
@@ -34,9 +61,9 @@ import {
  *    password from the emailed link and signs in client-side like a teacher.
  *
  * 'reset' is the one recovery path for both, and it is a revocation before it is
- * anything else: the password is scrambled FIRST, then the row goes back to
- * Invited. A half-applied reset therefore always fails safe — access is already
- * gone — and re-running it repairs the rest.
+ * anything else: the password is scrambled and every open session ended FIRST,
+ * then the row goes back to Invited. A half-applied reset therefore always fails
+ * safe — access is already gone — and re-running it repairs the rest.
  *
  * The roster is a STOCK, not a flow: `students` never reaches usage_counters, it
  * is the live count of unarchived rows, checked here where a seat is claimed.
@@ -44,14 +71,46 @@ import {
  * archiving is what gives a seat back.
  *
  * 'archive' and 'restore' each touch TWO things, because the roster row and the
- * auth account are two halves of one student: the row decides the seat and what
- * student-login will match, and the account's ban decides whether the student's
- * password still opens a session at all. Archiving only the row would leave a
- * student who knows their own password working directly against /auth/v1/token —
- * more true now than when the credential was a code, not less.
+ * auth account are two halves of one student: the row decides the seat, what
+ * student-login will match and (through document_role()) whether a token the
+ * student already holds still reaches anything, and the account's ban decides
+ * whether the student's password still opens a session at all. Archiving only
+ * the row would leave a student who knows their own password working directly
+ * against /auth/v1/token — more true now than when the credential was a code,
+ * not less.
+ *
+ * Sessions already open are ended too, on 'archive' and on 'reset'
+ * (../_shared/studentSessions.ts): a ban or a new password only stops the next
+ * sign-in, while a signed-in device would otherwise keep its access token for
+ * up to an hour and, after a reset, its refresh token for good.
+ *
+ * AGE. A roster student never sees the age screen, so 'create' and 'restore'
+ * each need the teacher's attestation — the student's country and a ticked
+ * "at least N", N being consent_age() for that country
+ * (../_shared/consentAge.ts). It is checked before anything is written,
+ * stored on the roster row, logged in teacher_attestations
+ * (20261021120100_teacher_attestations.sql), and carried into the account's
+ * user_metadata as the same age_gate a self sign-up has, which is what the
+ * before_user_created hook checks on the invite path.
+ *
+ * DISTRICT. A student belongs to a district only when 'create' names it
+ * (`districtStudioId`) and the teacher owns or holds a seat in it
+ * (../_shared/districtProvision.ts). Naming none provisions a private student,
+ * seated teacher or not; the district's contract-end purge never touches one
+ * (20261021120800_district_student_attribution.sql). A district whose purge
+ * has begun takes no new students: 409 `district_deletion_pending`, from the
+ * check before any write or from the roster insert's trigger
+ * (20261022130300_district_retention_late_students.sql).
+ *
+ * 'delete' is for good: the student's markings are scrubbed (tombstoned, and
+ * cut out of lesson-history snapshots — 20261021120200), then the auth user
+ * goes, and its cascades take the roster row, assignments and practice notes.
  *
  * Nothing in this file consumes a metered budget. Students are never billed, and
- * a teacher's roster is paid for by occupancy rather than by activity.
+ * a teacher's roster is paid for by occupancy rather than by activity. The one
+ * thing counted is MAIL: an invitation or a reset link reserves its place in
+ * the studentAccountMail share, per teacher and per address
+ * (../_shared/studentAccountMail.ts), before GoTrue is asked to send it.
  */
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -66,9 +125,11 @@ const MAX_DISPLAY_NAME = 80;
  * format, set to a century because "until restored" has no spelling. 'none'
  * lifts it, which is what 'restore' sends.
  *
- * A ban is the revocation archiving needs and the archived_at stamp is not: it
- * refuses the password grant at /auth/v1/token AND every refresh, so a live
- * session dies with its current access token rather than lasting forever.
+ * A ban is the revocation archiving needs beyond the archived_at stamp: it
+ * refuses the password grant at /auth/v1/token AND every refresh. The stamp is
+ * what refuses the access token a live session still holds (document_role()
+ * reads it, migration 20261010120300), and ending the sessions is what tells
+ * that session's open viewer.
  */
 const ARCHIVE_BAN_DURATION = '876000h';
 
@@ -82,6 +143,15 @@ interface ProvisionBody {
     /** Where the invite / reset link lands. Required on the email path. */
     redirectTo?: string;
     studentId?: string;
+    /**
+     * On 'reset' only: the token a failed reset of this student handed back,
+     * so the same reset resumes its own reservation instead of waiting it out.
+     */
+    resetToken?: unknown;
+    /** On 'create' and 'restore': see readTeacherAttestation. */
+    attestation?: unknown;
+    /** On 'create' only: the district this student is provisioned for. Absent: a private student. */
+    districtStudioId?: unknown;
 }
 
 interface RosterRow {
@@ -97,12 +167,13 @@ type Gate = { ok: true } | { ok: false; response: Response };
 
 type OwnedRoster = { ok: true; row: RosterRow } | { ok: false; response: Response };
 
-const readBody = async (req: Request): Promise<ProvisionBody | null> => {
-    try {
-        return (await req.json()) as ProvisionBody;
-    } catch {
-        return null;
+/** The body, null when it is not a JSON object, or 'too_large' past the control cap. */
+const readBody = async (req: Request): Promise<ProvisionBody | null | 'too_large'> => {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413 ? 'too_large' : null;
     }
+    return isJsonObject(read.value) ? (read.value as ProvisionBody) : null;
 };
 
 /**
@@ -196,7 +267,57 @@ interface NewStudent {
     rosterId: string;
     displayName: string;
     parentEmail: string | null;
+    attestation: TeacherAttestation;
+    /** Checked by checkDistrictChoice, and again by the roster table's trigger. */
+    districtStudioId: string | null;
 }
+
+/** The account-side record of the attestation: the shape a self sign-up's age screen writes. */
+const ageGateOf = (attestation: TeacherAttestation) => ({
+    country: attestation.country,
+    min_age: attestation.minAge,
+    source: 'teacher',
+    v: 1,
+});
+
+/** The roster row's copy of the attestation. */
+const attestationColumns = (attestation: TeacherAttestation) => ({
+    country: attestation.country,
+    age_attested_at: new Date().toISOString(),
+    age_attested_min_age: attestation.minAge,
+});
+
+/** The history row: who vouched for which student, with which words, when. */
+const recordAttestation = async (
+    admin: SupabaseClient,
+    teacherId: string,
+    managedStudentId: string,
+    action: 'create' | 'restore',
+    attestation: TeacherAttestation,
+): Promise<boolean> => {
+    const { error } = await admin.from('teacher_attestations').insert({
+        teacher_id: teacherId,
+        managed_student_id: managedStudentId,
+        action,
+        country: attestation.country,
+        min_age: attestation.minAge,
+        wording: attestation.wording,
+        wording_version: attestation.version,
+    });
+    if (error) {
+        console.error(`could not record the age attestation for student ${managedStudentId}: ${error.message}`);
+        return false;
+    }
+    return true;
+};
+
+/** A refusal from readTeacherAttestation, as the response the form shows. */
+const attestationRefusal = (body: ProvisionBody): { attestation: TeacherAttestation } | { response: Response } => {
+    const checked = readTeacherAttestation(body.attestation);
+    return checked.ok
+        ? { attestation: checked.attestation }
+        : { response: jsonResponse({ error: checked.error, code: checked.code }, checked.status) };
+};
 
 /**
  * GoTrue refusing an address that already has an account. supabase-js v2 carries
@@ -210,13 +331,135 @@ const isEmailInUse = (error: { code?: string; message?: string }): boolean =>
     /already (been )?registered|already exists/i.test(error.message ?? '');
 
 /**
+ * The teacher's own account is being deleted (20261022110100_account_deletion_pending.sql):
+ * the database refuses a new roster row for it, and a student created now would
+ * outlive their teacher with nobody to manage them.
+ */
+const DELETION_PENDING = {
+    error: 'This account is being deleted, so no new students can be added.',
+    code: 'account_deletion_pending',
+} as const;
+
+/**
+ * What a reset that failed part-way tells the teacher (decision 49 item 5). The
+ * roster UI shows the same words for code 'reset_incomplete'.
+ */
+const RESET_INCOMPLETE_MESSAGE =
+    'The reset did not finish. The student’s current card is held for up to 10 minutes, so it cannot be used meanwhile. Try the reset again.';
+
+/**
+ * The same, when the password write may still land (20261022110800): a retry
+ * waits for it (decision 60(a)). The roster UI shows these words for code
+ * 'reset_unconfirmed'.
+ */
+const RESET_UNCONFIRMED_MESSAGE =
+    'The reset did not finish, and we could not confirm whether the student’s password was changed. Their current card is held for up to 10 minutes. Try the reset again in a few minutes.';
+
+/**
+ * The same two for an email-method student (20261022140800), who has no card.
+ * The roster UI shows these words when the answer says `method: 'email'`.
+ */
+const EMAIL_RESET_INCOMPLETE_MESSAGE =
+    'The reset did not finish and no new link was sent. The student’s account is held for up to 10 minutes, so another reset cannot start meanwhile. Try the reset again.';
+
+const EMAIL_RESET_UNCONFIRMED_MESSAGE =
+    'The reset did not finish, and we could not confirm whether the student’s password was changed. No new link was sent. Try the reset again in a few minutes.';
+
+/**
+ * account_deletion_pending() for the teacher, as the dispatcher asks it: null
+ * when clear, else the refusal (409 while pending; 503 when it cannot be
+ * answered, decision 60(b)). Asked again right before the Auth writes that give
+ * a student access back -- a reset's scramble, a restore's unban -- since the
+ * dispatcher's answer can be stale by then (decision 61). Revocations (an
+ * archive's ban) and the creation path (whose intent the deletion sees, and
+ * whose student flag must land so it can) are not re-asked.
+ */
+const deletionRefusal = async (admin: SupabaseClient, userId: string): Promise<Response | null> => {
+    const pending = await accountDeletionPending(admin, userId);
+    if (!pending.ok) {
+        console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+        return jsonResponse(DELETION_CHECK_UNAVAILABLE, 503);
+    }
+    return pending.pending ? jsonResponse(ACCOUNT_DELETION_PENDING, 409) : null;
+};
+
+/** Whether an insert was refused by the deletion-pending trigger. */
+const isDeletionPending = (error: { code?: string; message?: string } | null): boolean =>
+    error?.code === '55000' && /account_deletion_pending/.test(error.message ?? '');
+
+/**
+ * One invitation or reset link's place in the student-mail budget
+ * (_shared/studentAccountMail.ts), reserved before GoTrue is asked to send it.
+ */
+const reserveStudentMail = (teacherId: string, recipient: string) =>
+    reserveStudentAccountMail(
+        {
+            checkRateLimit,
+            refundRateLimit,
+            projectLimits: {
+                hour: mailLimit('studentAccountMail', 'hour', (name) => Deno.env.get(name)),
+                day: mailLimit('studentAccountMail', 'day', (name) => Deno.env.get(name)),
+            },
+        },
+        teacherId,
+        recipient,
+    );
+
+/**
+ * The provisioning ended with nothing left behind: its intent
+ * (20261022110600_account_deletion_barrier.sql) goes. Best effort: an intent
+ * left over is only a record a deletion or a person checks and drops.
+ */
+const finishProvision = async (admin: SupabaseClient, rosterId: string): Promise<void> => {
+    const { error } = await admin.rpc('finish_student_provision', { p_roster_id: rosterId });
+    if (error) {
+        console.error(`could not clear provisioning intent ${rosterId}: ${error.message}`);
+    }
+};
+
+/**
+ * Records the Auth account a provisioning just created on its intent, so a
+ * crash from here on leaves a row naming it. 'gone' when the intent was swept
+ * (the teacher's deletion began): the caller undoes the account.
+ */
+const attachProvision = async (
+    admin: SupabaseClient,
+    rosterId: string,
+    studentUserId: string,
+): Promise<'ok' | 'gone' | 'error'> => {
+    const { data, error } = await admin.rpc('attach_student_provision', {
+        p_roster_id: rosterId,
+        p_student_user: studentUserId,
+    });
+    if (error) {
+        console.error(`could not record the account of provisioning ${rosterId}: ${error.message}`);
+        return 'error';
+    }
+    return data === true ? 'ok' : 'gone';
+};
+
+/**
+ * Deletes an account create just made; its roster row, if any, goes with it by
+ * cascade. Once it is gone the provisioning's intent goes too; if it cannot be
+ * deleted the intent stays, naming the orphan.
+ */
+const undoCreatedStudent = async (admin: SupabaseClient, studentUserId: string, rosterId: string): Promise<void> => {
+    const { error } = await admin.auth.admin.deleteUser(studentUserId);
+    if (error) {
+        logError('student-provision', error, { code: 'orphaned_auth_user' });
+        return;
+    }
+    await finishProvision(admin, rosterId);
+};
+
+/**
  * The zero-email path. The account gets a scramble for a password —
  * generateProvisionPassword, generated, set and forgotten — so the printed code
  * is a claim token and nothing else: it selects this row once, in student-claim,
  * and until it does no sign-in path to the account exists for anyone.
  */
 const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: NewStudent): Promise<Response> => {
-    const { rosterId, displayName, parentEmail } = spec;
+    const { rosterId, displayName, parentEmail, attestation, districtStudioId } = spec;
     const code = generateLoginCode();
     // Generated codes are already in normalized form, which is exactly what
     // student-claim hashes after normalizeLoginCode() on what the student typed.
@@ -231,13 +474,25 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         // app_metadata is admin-only, which is what makes this flag trustworthy in
         // get_entitlements() and in the documents_insert policy.
         app_metadata: { user_type: 'student', teacher_id: userId },
-        user_metadata: { display_name: displayName },
+        // The admin API's createUser skips the before_user_created hook, so this
+        // is a record rather than a gate: the gate was readTeacherAttestation.
+        user_metadata: { display_name: displayName, age_gate: ageGateOf(attestation) },
     });
     if (createError || !created.user) {
         // Logged rather than returned: an auth error can name the synthetic
         // address, which is an implementation detail even the teacher never sees.
+        // The intent stays: if GoTrue did create the account, a deletion finds
+        // it by its address.
         console.error(`student account creation failed for ${userId}: ${createError?.message ?? 'no user returned'}`);
         return jsonResponse({ error: 'Could not create the student account' }, 502);
+    }
+
+    const attached = await attachProvision(admin, rosterId, created.user.id);
+    if (attached !== 'ok') {
+        await undoCreatedStudent(admin, created.user.id, rosterId);
+        return attached === 'gone'
+            ? jsonResponse(DELETION_PENDING, 409)
+            : jsonResponse({ error: 'Could not create the student account' }, 502);
     }
 
     const { error: insertError } = await admin.from('managed_students').insert({
@@ -250,6 +505,8 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         auth_method: 'code',
         login_code_hash: loginCodeHash,
         parent_email: parentEmail,
+        district_studio_id: districtStudioId,
+        ...attestationColumns(attestation),
     });
     if (insertError) {
         // An auth user with no roster row is unreachable forever: no teacher can
@@ -257,9 +514,22 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         // student_user_id against a later re-provision. Undo it.
         const { error: cleanupError } = await admin.auth.admin.deleteUser(created.user.id);
         if (cleanupError) {
-            console.error(`orphaned student auth user ${created.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: created.user.id });
+        } else {
+            await finishProvision(admin, rosterId);
         }
-        return jsonResponse({ error: 'Could not create the student roster row' }, 502);
+        return isDeletionPending(insertError)
+            ? jsonResponse(DELETION_PENDING, 409)
+            : isDistrictDeletionPending(insertError)
+              ? jsonResponse(DISTRICT_DELETION_PENDING, 409)
+              : jsonResponse({ error: 'Could not create the student roster row' }, 502);
+    }
+
+    // A student whose attestation went unrecorded is undone like a missing
+    // roster row: the record is the point of asking.
+    if (!(await recordAttestation(admin, userId, rosterId, 'create', attestation))) {
+        await undoCreatedStudent(admin, created.user.id, rosterId);
+        return jsonResponse({ error: 'Could not record the age confirmation' }, 502);
     }
 
     // The one and only time this code is readable. managed_students keeps the
@@ -281,10 +551,19 @@ const createEmailStudent = async (
     userId: string,
     spec: NewStudent & { studentEmail: string; redirectTo: string },
 ): Promise<Response> => {
-    const { rosterId, displayName, parentEmail, studentEmail, redirectTo } = spec;
+    const { rosterId, displayName, parentEmail, studentEmail, redirectTo, attestation, districtStudioId } = spec;
 
+    // The invitation's place in the mail budget, before GoTrue sends it.
+    const mail = await reserveStudentMail(userId, studentEmail);
+    if (!mail.ok) {
+        await finishProvision(admin, rosterId);
+        return jsonResponse(studentMailRefusal(mail), 429);
+    }
+
+    // The invite DOES pass through the before_user_created hook, which refuses
+    // a user without a passing age_gate — the teacher's, here.
     const { data: invited, error: inviteError } = await admin.auth.admin.inviteUserByEmail(studentEmail, {
-        data: { display_name: displayName },
+        data: { display_name: displayName, age_gate: ageGateOf(attestation) },
         redirectTo,
     });
     if (inviteError || !invited.user) {
@@ -292,6 +571,10 @@ const createEmailStudent = async (
         // student who already has a Cleffy account, and both are fixed in the
         // form rather than by retrying.
         if (inviteError && isEmailInUse(inviteError)) {
+            // GoTrue refused before sending anything (or creating an account):
+            // the place goes back, and so does the intent.
+            await mail.release();
+            await finishProvision(admin, rosterId);
             return jsonResponse(
                 { error: 'That email address already has a Cleffy account', code: 'email_in_use' },
                 409,
@@ -299,6 +582,14 @@ const createEmailStudent = async (
         }
         console.error(`student invite failed for ${userId}: ${inviteError?.message ?? 'no user returned'}`);
         return jsonResponse({ error: 'Could not send the invitation' }, 502);
+    }
+
+    const attached = await attachProvision(admin, rosterId, invited.user.id);
+    if (attached !== 'ok') {
+        await undoCreatedStudent(admin, invited.user.id, rosterId);
+        return attached === 'gone'
+            ? jsonResponse(DELETION_PENDING, 409)
+            : jsonResponse({ error: 'Could not create the student account' }, 502);
     }
 
     // inviteUserByEmail cannot set app_metadata, so the flag that makes this
@@ -314,7 +605,9 @@ const createEmailStudent = async (
         console.error(`could not flag invited student ${invited.user.id}: ${metadataError.message}`);
         const { error: cleanupError } = await admin.auth.admin.deleteUser(invited.user.id);
         if (cleanupError) {
-            console.error(`unflagged student auth user ${invited.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'unflagged_student', studentUserId: invited.user.id });
+        } else {
+            await finishProvision(admin, rosterId);
         }
         return jsonResponse({ error: 'Could not create the student account' }, 502);
     }
@@ -329,13 +622,26 @@ const createEmailStudent = async (
         // No code is ever minted on this path, and no username is ever chosen:
         // the state CHECK requires both to stay null for the life of the row.
         parent_email: parentEmail,
+        district_studio_id: districtStudioId,
+        ...attestationColumns(attestation),
     });
     if (insertError) {
         const { error: cleanupError } = await admin.auth.admin.deleteUser(invited.user.id);
         if (cleanupError) {
-            console.error(`orphaned student auth user ${invited.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: invited.user.id });
+        } else {
+            await finishProvision(admin, rosterId);
         }
-        return jsonResponse({ error: 'Could not create the student roster row' }, 502);
+        return isDeletionPending(insertError)
+            ? jsonResponse(DELETION_PENDING, 409)
+            : isDistrictDeletionPending(insertError)
+              ? jsonResponse(DISTRICT_DELETION_PENDING, 409)
+              : jsonResponse({ error: 'Could not create the student roster row' }, 502);
+    }
+
+    if (!(await recordAttestation(admin, userId, rosterId, 'create', attestation))) {
+        await undoCreatedStudent(admin, invited.user.id, rosterId);
+        return jsonResponse({ error: 'Could not record the age confirmation' }, 502);
     }
 
     // The address is echoed back so the teacher can see, prominently, exactly
@@ -386,6 +692,18 @@ const createStudent = async (admin: SupabaseClient, userId: string, body: Provis
         }
     }
 
+    const checked = attestationRefusal(body);
+    if ('response' in checked) {
+        return checked.response;
+    }
+
+    // Before any write too: a district the teacher is not in is refused here,
+    // not by the trigger after an account exists.
+    const district = await checkDistrictChoice(admin as unknown as DistrictRpc, userId, body.districtStudioId);
+    if (!district.ok) {
+        return jsonResponse({ error: district.error, code: district.code }, district.status);
+    }
+
     // Before any write, the auth user included: a refused teacher must not be
     // left with an account nothing points at.
     const gate = await checkRosterStock(admin, userId);
@@ -396,11 +714,208 @@ const createStudent = async (admin: SupabaseClient, userId: string, body: Provis
     // Minted here because the roster id names the synthetic auth address on the
     // code path: the account and the row it belongs to share one identifier.
     const rosterId = crypto.randomUUID();
-    const spec: NewStudent = { rosterId, displayName, parentEmail };
+    const spec: NewStudent = {
+        rosterId,
+        displayName,
+        parentEmail,
+        attestation: checked.attestation,
+        districtStudioId: district.districtStudioId,
+    };
+
+    // The intent, durably, BEFORE any Auth account exists
+    // (20261022110600_account_deletion_barrier.sql). Refused while the
+    // teacher's account is being deleted, so no student can be created that the
+    // deletion would not see; and a request that dies after the account is made
+    // leaves this row naming it, for the deletion (or a person) to clean up.
+    // The roster row clears it, by trigger, in the same transaction.
+    const { data: begun, error: beginError } = await admin.rpc('begin_student_provision', {
+        p_teacher: userId,
+        p_roster_id: rosterId,
+        p_auth_email: method === 'email' ? studentEmail : syntheticStudentEmail(rosterId),
+    });
+    if (beginError) {
+        console.error(`could not register the provisioning for ${userId}: ${beginError.message}`);
+        return jsonResponse({ error: 'Could not create the student account' }, 502);
+    }
+    if (begun !== 'ok') {
+        return jsonResponse(DELETION_PENDING, 409);
+    }
 
     return method === 'email'
         ? await createEmailStudent(admin, userId, { ...spec, studentEmail, redirectTo })
         : await createCodeStudent(admin, userId, spec);
+};
+
+/** The code reset's database and Auth calls (../_shared/studentCodeReset.ts). */
+const codeResetPorts = (admin: SupabaseClient, userId: string): CodeResetPorts => ({
+    reserveReset: async (studentId, resumeToken) => {
+        const { data, error } = await admin.rpc('reserve_student_code_reset', {
+            p_student: studentId,
+            p_reservation: resumeToken,
+        });
+        if (error) {
+            throw new Error(error.message);
+        }
+        return data && typeof data === 'object' ? (data as ReserveResetAnswer) : null;
+    },
+    fence: async (studentId, lease) => {
+        const { data, error } = await admin.rpc('fence_student_code_reset', {
+            p_student: studentId,
+            p_reservation: lease.reservation,
+            p_worker: lease.worker,
+            p_epoch: lease.epoch,
+        });
+        if (error) {
+            throw new Error(error.message);
+        }
+        return data === 'ok' ? 'ok' : 'lost';
+    },
+    deletionPending: async () => {
+        const pending = await accountDeletionPending(admin, userId);
+        if (!pending.ok) {
+            console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+            return 'unknown';
+        }
+        return pending.pending ? 'pending' : 'clear';
+    },
+    // The marker rides in the same Auth update as the password (one GoTrue
+    // transaction; app_metadata keys merge), so seeing it means the write landed.
+    scramblePassword: async (studentUserId, lease) => {
+        const { error } = await admin.auth.admin.updateUserById(studentUserId, {
+            password: generateProvisionPassword(),
+            app_metadata: { [MARKER_KEY]: lease.worker },
+        });
+        return error
+            ? { ok: false, message: error.message, definite: definiteRefusal((error as { status?: unknown }).status) }
+            : { ok: true };
+    },
+    passwordWriteLanded: async (studentUserId, worker) => {
+        const { data, error } = await admin.auth.admin.getUserById(studentUserId);
+        if (error || !data.user) {
+            throw new Error(error?.message ?? 'no user returned');
+        }
+        return data.user.app_metadata?.[MARKER_KEY] === worker;
+    },
+    endSessions: async (studentId, lease) => {
+        const ended = await endStudentSessionsFenced(admin, studentId, lease);
+        return ended === 'lost' ? 'lost' : ended.ok ? { ok: true } : ended;
+    },
+    mintCode: async () => {
+        const code = generateLoginCode();
+        return { code, hash: await hashLoginCode(code) };
+    },
+    complete: async (studentId, lease, codeHash) => {
+        const { data, error } = await admin.rpc('complete_student_code_reset', {
+            p_student: studentId,
+            p_reservation: lease.reservation,
+            p_worker: lease.worker,
+            p_epoch: lease.epoch,
+            p_code_hash: codeHash,
+        });
+        if (error) {
+            throw new Error(error.message);
+        }
+        return data === 'reset' ? 'reset' : 'lost';
+    },
+    stopWorker: async (studentId, lease) => {
+        const { error } = await admin.rpc('stop_student_code_reset_worker', {
+            p_student: studentId,
+            p_reservation: lease.reservation,
+            p_worker: lease.worker,
+            p_epoch: lease.epoch,
+        });
+        if (error) {
+            throw new Error(error.message);
+        }
+    },
+    log: (message) => console.error(message),
+});
+
+/**
+ * The email path's ports: a code reset's, except that there is no card to
+ * mint and the end is complete_student_email_reset() (20261022140800).
+ */
+const emailResetPorts = (admin: SupabaseClient, userId: string): CodeResetPorts => ({
+    ...codeResetPorts(admin, userId),
+    mintCode: async () => ({ code: '', hash: '' }),
+    complete: async (studentId, lease) => {
+        const { data, error } = await admin.rpc('complete_student_email_reset', {
+            p_student: studentId,
+            p_reservation: lease.reservation,
+            p_worker: lease.worker,
+            p_epoch: lease.epoch,
+        });
+        if (error) {
+            throw new Error(error.message);
+        }
+        return data === 'reset' ? 'reset' : 'lost';
+    },
+});
+
+/** What the teacher is told when a reset (either method) stopped short. */
+const resetOutcomeResponse = (
+    outcome: Exclude<CodeResetOutcome, { kind: 'reset' }>,
+    method: 'code' | 'email' = 'code',
+): Response => {
+    const email = method === 'email' ? { method: 'email' as const } : {};
+    switch (outcome.kind) {
+        case 'not_found':
+            return jsonResponse({ error: 'Student not found' }, 404);
+        case 'unavailable':
+            return jsonResponse({ error: 'Could not reset the login code' }, 502);
+        case 'busy':
+            return outcome.holder === 'reset'
+                ? jsonResponse(
+                      {
+                          error: 'Another reset of this student is still finishing. Try again in a few minutes.',
+                          code: 'reset_in_progress',
+                      },
+                      409,
+                  )
+                : jsonResponse(
+                      {
+                          error: 'This student is setting up their account with their current card right now. Try again in a few minutes.',
+                          code: 'claim_in_progress',
+                      },
+                      409,
+                  );
+        case 'incomplete':
+            // The hold stays (up to 10 minutes); the token lets this teacher's
+            // retry resume it at once.
+            return jsonResponse(
+                {
+                    error: method === 'email' ? EMAIL_RESET_INCOMPLETE_MESSAGE : RESET_INCOMPLETE_MESSAGE,
+                    code: 'reset_incomplete',
+                    resetToken: outcome.resetToken,
+                    ...email,
+                },
+                502,
+            );
+        case 'unconfirmed':
+            // Quarantined (20261022110800): the password write may still land,
+            // so the hold stays and a retry waits until it is confirmed or the
+            // hold runs out. The token is what lets that retry confirm it.
+            return jsonResponse(
+                {
+                    error: method === 'email' ? EMAIL_RESET_UNCONFIRMED_MESSAGE : RESET_UNCONFIRMED_MESSAGE,
+                    code: 'reset_unconfirmed',
+                    resetToken: outcome.resetToken,
+                    ...email,
+                },
+                502,
+            );
+        case 'deletion_pending':
+            return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
+        case 'deletion_unknown':
+            return jsonResponse({ ...DELETION_CHECK_UNAVAILABLE, resetToken: outcome.resetToken }, 503);
+        case 'lost':
+            // A newer try of this reset, or the student's claim, stands; this
+            // one stopped before touching anything it no longer owned.
+            return jsonResponse(
+                { error: 'This reset was overtaken by a newer one. Try the reset again.', code: 'reset_lost' },
+                409,
+            );
+    }
 };
 
 /**
@@ -428,12 +943,32 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
             return jsonResponse({ error: 'redirectTo is required to reset an invited student' }, 400);
         }
 
-        const { error: scrambleError } = await admin.auth.admin.updateUserById(row.student_user_id, {
-            password: generateProvisionPassword(),
+        // The link's place in the mail budget, BEFORE anything is revoked: a
+        // spent budget must not leave the student locked out and waiting for a
+        // link that never goes.
+        const mail = await reserveStudentMail(userId, row.student_email);
+        if (!mail.ok) {
+            return jsonResponse(studentMailRefusal(mail), 429);
+        }
+
+        // The same reservation, worker lease and fences as a code reset
+        // (20261022140800): two resets of one student never interleave their
+        // Auth writes, and a delayed scramble or session revocation from an
+        // earlier attempt touches nothing once a newer one owns the student. The
+        // deletion check runs inside, right before the scramble. Only the end
+        // differs: no card, so complete_student_email_reset() drops the
+        // reservation and sends the student back to Invited (claimed_at).
+        const resumeToken =
+            typeof body.resetToken === 'string' && uuidRe.test(body.resetToken) ? body.resetToken : null;
+        const outcome = await runCodeReset(emailResetPorts(admin, userId), {
+            studentId: row.id,
+            studentUserId: row.student_user_id,
+            resumeToken,
         });
-        if (scrambleError) {
-            console.error(`could not revoke the password for student ${row.id}: ${scrambleError.message}`);
-            return jsonResponse({ error: 'Could not reset the student' }, 502);
+        if (outcome.kind !== 'reset') {
+            // Nothing was sent: the link's place goes back.
+            await mail.release();
+            return resetOutcomeResponse(outcome, 'email');
         }
 
         // The ANON client, not the service role: this is the same magic link a
@@ -442,6 +977,7 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
         const supabaseUrl = Deno.env.get('SUPABASE_URL');
         const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
         if (!supabaseUrl || !anonKey) {
+            await mail.release();
             return jsonResponse({ error: 'Server misconfigured' }, 500);
         }
         const anonClient = createClient(supabaseUrl, anonKey, {
@@ -461,52 +997,47 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
             return jsonResponse({ error: 'Could not send the invitation' }, 502);
         }
 
-        const { error: updateError } = await admin
-            .from('managed_students')
-            .update({ claimed_at: null })
-            .eq('id', row.id);
-        if (updateError) {
-            // Cosmetic drift only — claimed_at is a setup-complete flag on this
-            // path, not a gate — but reported rather than swallowed, and a rerun
-            // repairs it.
-            console.error(`claimed_at out of step for student ${row.id}: ${updateError.message}`);
-            return jsonResponse({ error: 'Could not reset the student' }, 502);
-        }
-
         return jsonResponse({ invited: true, studentEmail: row.student_email });
     }
 
-    // The scramble is what revokes the password the student chose when they
-    // claimed. Minting a code without it would leave the OLD password working
-    // alongside the new card — a "reset" that resets nothing.
-    const { error: scrambleError } = await admin.auth.admin.updateUserById(row.student_user_id, {
-        password: generateProvisionPassword(),
-    });
-    if (scrambleError) {
-        console.error(`could not revoke the password for student ${row.id}: ${scrambleError.message}`);
-        return jsonResponse({ error: 'Could not reset the login code' }, 502);
-    }
-
-    const code = generateLoginCode();
-    const loginCodeHash = await hashLoginCode(code);
-
-    // Both columns in one statement, because the state CHECK admits no row that
-    // carries only half of them. `username` is deliberately left alone: the claim
-    // overwrites it, so whether to keep the old name is the student's choice and
-    // not something a reset should make for them.
+    // Reserve the row before anything is revoked
+    // (20261022110000_student_claim_reservation.sql). A claim in flight on the
+    // current card is about to set its own password; scrambling first would let
+    // that write land after ours and survive the reset. So a reset during a
+    // claim waits for it, and a claim during this reset waits for us. The
+    // reservation carries a resume token (20261022110500), and every attempt
+    // takes its own worker lease and is fenced before each Auth side effect
+    // (20261022110700_student_code_reset_worker.sql, ../_shared/studentCodeReset.ts),
+    // so two retries of one token can never both write the password.
     //
-    // Nothing here can land the scramble and this update atomically, and the old
-    // code exists only as a hash, so a half-applied reset cannot be rolled back
-    // either. It IS repairable — running 'reset' again rewrites both — which is
-    // why a partial failure is reported loudly instead of handing back a code
-    // that may not work.
-    const { error: updateError } = await admin
-        .from('managed_students')
-        .update({ login_code_hash: loginCodeHash, claimed_at: null })
-        .eq('id', row.id);
-    if (updateError) {
-        console.error(`login code hash out of step for student ${row.id}: ${updateError.message}`);
-        return jsonResponse({ error: 'Could not reset the login code' }, 502);
+    // The scramble is what revokes the password the student chose when they
+    // claimed, and ending the sessions is the other half: a device already
+    // signed in would otherwise keep refreshing its way past the reset. Both
+    // come before the new code exists, so a failure hands back no card that
+    // would suggest the reset took. Nothing can land them and the code
+    // atomically, and the old code exists only as a hash, so a half-applied
+    // reset cannot be rolled back; it IS repairable -- the token resumes it --
+    // which is why a partial failure is reported loudly. `username` is left
+    // alone: the claim overwrites it, so keeping the old name is the student's
+    // choice.
+    const resumeToken = typeof body.resetToken === 'string' && uuidRe.test(body.resetToken) ? body.resetToken : null;
+    const outcome = await runCodeReset(codeResetPorts(admin, userId), {
+        studentId: row.id,
+        studentUserId: row.student_user_id,
+        resumeToken,
+    });
+    if (outcome.kind !== 'reset') {
+        return resetOutcomeResponse(outcome);
+    }
+    const code = outcome.code;
+
+    // The teacher's reset is the way back for a student someone has been
+    // locking out by hammering their username, so it lifts student-login's
+    // limits on that name too (the claim does again, for whichever name the
+    // student ends up with). Best effort: the reset itself has happened, and a
+    // failure here only means the lock runs out on its own.
+    if (row.username) {
+        await forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, row.username);
     }
 
     // Resetting an archived student is allowed and changes nothing for them:
@@ -554,6 +1085,18 @@ const archiveStudent = async (admin: SupabaseClient, userId: string, body: Provi
         return jsonResponse({ error: 'Could not archive the student' }, 502);
     }
 
+    // Reported, not fatal. By now the stamp refuses every token the student
+    // holds and the ban refuses every refresh, so access is already gone; what
+    // this adds is the tidy end of those sessions and the ping that makes an
+    // open viewer notice now rather than on its next write.
+    const ended = await endStudentSessions(admin, owned.row.student_user_id);
+    if (!ended.ok) {
+        logError('student-provision', new Error(ended.message), {
+            code: 'archive_sessions_not_ended',
+            studentUserId: owned.row.student_user_id,
+        });
+    }
+
     // Idempotent: an already-archived row matches no update, is already in the
     // state the caller asked for, and is re-banned harmlessly.
     return jsonResponse({ ok: true });
@@ -572,6 +1115,13 @@ const restoreStudent = async (admin: SupabaseClient, userId: string, body: Provi
         return jsonResponse({ ok: true });
     }
 
+    // Asked again on every restore: the teacher is vouching for the student as
+    // they are now, and rows archived before attestations existed have none.
+    const checked = attestationRefusal(body);
+    if ('response' in checked) {
+        return checked.response;
+    }
+
     // A restore claims a seat exactly as a create does. Without this, archive +
     // restore would launder the free tier's cap into an unlimited roster.
     const gate = await checkRosterStock(admin, userId);
@@ -579,24 +1129,111 @@ const restoreStudent = async (admin: SupabaseClient, userId: string, body: Provi
         return gate.response;
     }
 
+    // Recorded before anything changes, so a restore never happens unrecorded.
+    if (!(await recordAttestation(admin, userId, owned.row.id, 'restore', checked.attestation))) {
+        return jsonResponse({ error: 'Could not record the age confirmation' }, 502);
+    }
+
+    // Asked again right before the unban, which gives the student access back.
+    const refused = await deletionRefusal(admin, userId);
+    if (refused) {
+        return refused;
+    }
+
     // The ban comes off BEFORE the row comes back, so the two can only ever fail
     // in the safe direction: a failure here leaves the student archived and still
     // revoked, where the reverse would leave an active roster row whose account
     // is silently banned — a student refused for a reason no teacher could see.
+    //
+    // The account carries the restore's attestation as its age_gate, the same
+    // shape create writes, so the account side never keeps a stale (or, for a
+    // student provisioned before attestations, missing) one. GoTrue merges
+    // user_metadata keys, so display_name is untouched.
     const { error: unbanError } = await admin.auth.admin.updateUserById(owned.row.student_user_id, {
         ban_duration: 'none',
+        user_metadata: { age_gate: ageGateOf(checked.attestation) },
     });
     if (unbanError) {
         console.error(`could not restore access for student ${owned.row.id}: ${unbanError.message}`);
         return jsonResponse({ error: 'Could not restore the student' }, 502);
     }
 
-    const { error } = await admin.from('managed_students').update({ archived_at: null }).eq('id', owned.row.id);
+    // Still archived, or nothing: the 12-month purge (20261021120500) locks the
+    // row it is about to delete, so a restore racing it either lands first (and
+    // the purge's re-check skips the student) or waits and then matches no row.
+    // That second case is reported, not answered ok for a student who is gone.
+    const { data: restored, error } = await admin
+        .from('managed_students')
+        .update({ archived_at: null, ...attestationColumns(checked.attestation) })
+        .eq('id', owned.row.id)
+        .not('archived_at', 'is', null)
+        .select('id');
     if (error) {
         return jsonResponse({ error: 'Could not restore the student' }, 502);
     }
+    if (!restored?.length) {
+        const { data: still } = await admin.from('managed_students').select('id').eq('id', owned.row.id).maybeSingle();
+        if (!still) {
+            return jsonResponse({ error: 'Student not found' }, 404);
+        }
+    }
 
     return jsonResponse({ ok: true });
+};
+
+/**
+ * Deletes a student for good: their markings first, then the account.
+ *
+ * The scrub comes FIRST because the account is what names the marks. Once the
+ * auth user is gone, annotations.created_by is cleared by its ON DELETE SET
+ * NULL (20261007120600) and nothing could tell this student's marks from
+ * anyone else's.
+ *
+ * revoke_and_scrub_student (20261021120400) archives the row, ends the
+ * student's sessions and scrubs their markings in ONE transaction, holding the
+ * roster row's lock that every student write also takes. A mark drawn while
+ * it runs is either committed before it and scrubbed, or refused after it; one
+ * drawn between a scrub and a later revocation can no longer slip through and
+ * lose its author when the account goes. A failure after it leaves a student
+ * who is archived, signed out and without markings, whose account still
+ * exists — a retry finishes it, and the second scrub is a no-op.
+ *
+ * Allowed on any plan, active or archived, like archive: it hands a seat
+ * back rather than claiming one.
+ */
+const deleteStudent = async (admin: SupabaseClient, userId: string, body: ProvisionBody): Promise<Response> => {
+    const owned = await loadOwnedRoster(admin, userId, body.studentId);
+    if (!owned.ok) {
+        return owned.response;
+    }
+    const row = owned.row;
+
+    const { data: scrubbed, error: scrubError } = await admin.rpc('revoke_and_scrub_student', {
+        p_student: row.student_user_id,
+    });
+    if (scrubError) {
+        console.error(`could not revoke and scrub student ${row.id}: ${scrubError.message}`);
+        return jsonResponse({ error: 'Could not delete the student' }, 502);
+    }
+
+    const { error: deleteError } = await admin.auth.admin.deleteUser(row.student_user_id);
+    if (deleteError && deleteError.status !== 404) {
+        console.error(`could not delete the account of student ${row.id}: ${deleteError.message}`);
+        return jsonResponse({ error: 'Could not delete the student' }, 502);
+    }
+
+    // The cascade normally took it; this covers an account that was already gone.
+    const { error: rowError } = await admin.from('managed_students').delete().eq('id', row.id);
+    if (rowError) {
+        console.error(`could not remove the roster row of student ${row.id}: ${rowError.message}`);
+        return jsonResponse({ error: 'Could not delete the student' }, 502);
+    }
+
+    if (row.username) {
+        await forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, row.username);
+    }
+
+    return jsonResponse({ ok: true, scrubbed });
 };
 
 Deno.serve(async (req) => {
@@ -634,11 +1271,26 @@ Deno.serve(async (req) => {
     }
 
     const body = await readBody(req);
+    if (body === 'too_large') {
+        return jsonResponse(PAYLOAD_TOO_LARGE, 413);
+    }
     if (!body) {
         return jsonResponse({ error: 'Invalid JSON body' }, 400);
     }
 
     const userId = auth.caller.userId;
+
+    // Nothing in a roster changes while its teacher's account is being deleted
+    // (../_shared/deletionPending.ts): every action here writes with the service
+    // role, much of it to Auth, where no database trigger can refuse it.
+    const pending = await accountDeletionPending(admin, userId);
+    if (!pending.ok) {
+        console.error(`could not check whether ${userId} is being deleted: ${pending.message}`);
+        return jsonResponse(DELETION_CHECK_UNAVAILABLE, 503);
+    }
+    if (pending.pending) {
+        return jsonResponse(ACCOUNT_DELETION_PENDING, 409);
+    }
 
     try {
         switch (body.action) {
@@ -650,6 +1302,8 @@ Deno.serve(async (req) => {
                 return await archiveStudent(admin, userId, body);
             case 'restore':
                 return await restoreStudent(admin, userId, body);
+            case 'delete':
+                return await deleteStudent(admin, userId, body);
             default:
                 return jsonResponse({ error: 'Unknown action' }, 400);
         }

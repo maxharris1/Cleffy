@@ -1,50 +1,159 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import {
+    lazy,
+    Suspense,
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+    useSyncExternalStore,
+    type ComponentProps,
+} from 'react';
 
 import { LoopRangeOverlay } from '@/features/playback/LoopRangeOverlay';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { PlayheadController } from '@/features/playback/PlayheadController';
 import { measureIndexAtPagePoint, measureStartTick } from '@/features/playback/scoreTime';
 import {
+    MAX_SCALE,
+    MIN_SCALE,
+    NO_OBSCURED,
+    PAGE_GAP,
+    bitmapBudgetFactor,
     clampScroll,
     computeDocumentLayout,
     fitPageWidthScale,
     focusedPageIndex,
+    mountedPageIndices,
+    pageTurnView,
+    reanchorView,
+    turnFromPageIndex,
     viewportToPagePoint,
     visiblePageRange,
     zoomAt,
     type DocumentLayout,
+    type ObscuredEdges,
+    type PageColumns,
 } from '@/features/viewer/geometry';
+import { installSnapshotRetry } from '@/features/viewer/history/snapshotService';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
+import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
+import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
+import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
+import { editedTextPayload, MIN_TEXT_NOTE_WIDTH, TEXT_NOTE_EDGE } from '@/features/viewer/ink/musicFont';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
+import { features } from '@/lib/features';
+import { prefersReducedMotion } from '@/lib/motion';
 import { getSupabase } from '@/lib/supabase';
 import { peerColor } from '@/lib/colors';
-import { AnnotationStore } from '@/sync/annotationStore';
+import { AnnotationStore, settleEdit } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
-import { DocRealtimeChannel } from '@/sync/realtimeChannel';
-import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/sync/syncEngine';
+import { DocRealtimeChannel, fetchRealtimeTopicEpoch } from '@/sync/realtimeChannel';
+import {
+    createSupabaseAnnotationsApi,
+    SyncEngine,
+    type SyncHold,
+    type SyncRejection,
+    type SyncStatus,
+} from '@/sync/syncEngine';
 import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
-import { isTextPayload } from '@/types/models';
+import { clampTextNote, isTextPayload, type ViewState } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
+import { isDialogOpen } from '@/ui/dialogStack';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
-import { ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
+import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, CoverPageIcon, ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
 
-/** Fingering feature loads on first use — keeps it out of the viewer bundle. */
+/**
+ * Fingering feature loads on first use — keeps it out of the viewer bundle.
+ * With VITE_FEATURE_FINGERING off (this release) nothing can select a region,
+ * so the chunk is never requested.
+ */
 const FingeringFlow = lazy(() =>
     import('@/features/fingering/FingeringFlow').then((m) => ({ default: m.FingeringFlow })),
 );
 
+/**
+ * Glide (ms) that takes the score up into the room a dismissed or shrunk
+ * notice leaves: short enough to read as the score settling, not scrolling.
+ */
+const SETTLE_GLIDE_MS = 180;
+
 /** Delay before re-rendering page bitmaps at a new zoom level (ms). */
 const RENDER_SETTLE_MS = 200;
 
+/**
+ * Quiet time (ms) after the last pan/zoom/follow step before React's copy of
+ * the view catches up. Until then the transform is written straight to the
+ * DOM from the store, and React only renders when the set of mounted pages
+ * changes.
+ */
+const VIEW_SETTLE_MS = 120;
+
+/** The page wrapper's transform: live scroll, plus the CSS stretch while bitmaps lag the zoom. */
+const wrapperTransform = (view: ViewState, renderScale: number): string =>
+    `translate(${-view.scrollX}px, ${-view.scrollY}px) scale(${view.scale / renderScale})`;
+
 /** Default text-note size as a fraction of page width. */
 const DEFAULT_TEXT_SIZE = 0.018;
+
+/** Tailwind's `sm` breakpoint (px): below it the viewer uses its phone layout. */
+const SM_BREAKPOINT = 640;
+
+/**
+ * Phones: the strip (px) the pager and zoom row cover at the top of the
+ * viewport (top-2 + one 44px control + 4px), kept clear of page 1 the way a
+ * toolbar docked at the top is.
+ */
+const PHONE_CONTROLS_STRIP = 56;
+
+/** Larger screens: the strip (px) the pager and zoom row cover above the bottom safe area. */
+const FLOATING_CONTROLS_STRIP = 60;
+
+/**
+ * A tap in the left/right margin strip of the viewport turns the page (the
+ * sheet-music-reader convention). Kept narrow so a tap on the first or last
+ * bar of a system still seeks during play-along.
+ */
+const edgeTapStripPx = (viewportWidth: number): number => Math.min(64, Math.max(36, viewportWidth * 0.08));
+
+/**
+ * Keys that turn pages — every mode a Bluetooth page-turner pedal ships in
+ * (arrows, PageUp/Down) plus Space, as on a keyboard.
+ */
+const pageTurnDirection = (e: KeyboardEvent): -1 | 1 | null => {
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+        return null;
+    }
+    switch (e.key) {
+        case 'ArrowRight':
+        case 'ArrowDown':
+        case 'PageDown':
+            return e.shiftKey ? null : 1;
+        case 'ArrowLeft':
+        case 'ArrowUp':
+        case 'PageUp':
+            return e.shiftKey ? null : -1;
+        case ' ':
+            return e.shiftKey ? -1 : 1;
+        default:
+            return null;
+    }
+};
+
+/** Keys aimed at a control or a dialog belong to it, not to page turning. */
+const keyTargetsControl = (target: EventTarget | null): boolean =>
+    target instanceof Element &&
+    target.closest(
+        'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="alertdialog"]',
+    ) !== null;
 
 interface ViewportSize {
     width: number;
@@ -65,18 +174,38 @@ export interface PdfViewportProps {
     onStoreReady?: (store: AnnotationStore) => void;
     /** Present when play-along is available: playhead + tap-to-seek + loop tint. */
     playback?: PlaybackFeature;
+    /**
+     * Px down from the viewport's top edge that the notices floating over the
+     * score reach (ViewerNoticeRegion): kept clear like a toolbar's strip, so
+     * follow, page turns and the first fit put the music below them.
+     */
+    noticeInset?: number;
+    /**
+     * The signed-in account, once known, whether or not the score syncs yet
+     * (a provisional offline open does not): whose queued marks are drawn.
+     * Defaults to sync.userId.
+     */
+    authorId?: string | null;
     /** Present for cloud documents: enables the sync engine + realtime channel. */
     sync?: {
         userId: string;
         name: string;
         isAnonymous: boolean;
         canWrite: boolean;
+        /** Only the document owner may fire the metered text-note transcribe. */
+        isOwner?: boolean;
         onStatus?: (status: SyncStatus) => void;
+        /** The server permanently refused a local change; it was rolled back. */
+        onRejected?: (rejection: SyncRejection) => void;
+        /** The server refuses the outbox but it is being kept (archived score). */
+        onHeld?: (hold: SyncHold) => void;
         onPeers?: (peers: PresencePeer[]) => void;
         /** Another member replaced the PDF bytes (smart-import cleanup). */
         onDocReplaced?: (contentRev: number) => void;
         /** Play-along analysis status changed. */
         onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
+        /** This user's access may have changed — re-read the role. */
+        onMembershipChanged?: () => void;
     };
 }
 
@@ -84,22 +213,63 @@ export interface PdfViewportProps {
  * The scrollable, zoomable, annotatable stack of PDF pages. Owns the gesture +
  * ink wiring and page virtualization. Remount (key) per document.
  */
-export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, sync }: PdfViewportProps) => {
+export const PdfViewport = ({
+    docId,
+    readOnly = false,
+    onStoreReady,
+    playback,
+    noticeInset = 0,
+    authorId,
+    sync,
+}: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
-    const view = useViewerStore((s) => s.view);
+    /**
+     * React's copy of the view: settled, not live. Pan, pinch, wheel and the
+     * follow glide write the store every frame; the subscription below puts
+     * each step on the page wrapper's transform directly and re-renders only
+     * when the mounted pages change or the motion stops (VIEW_SETTLE_MS).
+     * Imperative code reads the live view from the store, as before.
+     */
+    const [view, setSettledView] = useState(() => useViewerStore.getState().view);
+    const wrapperRef = useRef<HTMLDivElement | null>(null);
+    const mountedKeyRef = useRef('');
+    const preferredColumns = useViewerStore((s) => s.pageColumns);
+    const spreadCover = useViewerStore((s) => s.spreadCover);
     const containerRef = useRef<HTMLDivElement | null>(null);
+    const inkRef = useRef<InkController | null>(null);
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
+    /** Px of the viewport's edges the toolbar covers; scrolling extends past them by as much. */
+    const [obscured, setObscured] = useState<ObscuredEdges>(NO_OBSCURED);
     const [renderScale, setRenderScale] = useState(view.scale);
     const [textIntent, setTextIntent] = useState<TextIntent | null>(null);
     const [fingeringSel, setFingeringSel] = useState<FingeringSelection | null>(null);
     const textIntentHandled = useRef(false);
     const didFitRef = useRef(false);
+    /** Viewport the current view was last fitted/re-fitted for. */
+    const fittedViewportRef = useRef<ViewportSize | null>(null);
+    /** Columns of the layout that view was in (a rotation across `sm` changes them). */
+    const fittedColumnsRef = useRef<PageColumns | null>(null);
 
-    const layout: DocumentLayout = useMemo(() => computeDocumentLayout(pageSizes), [pageSizes]);
+    // Two pages side by side would be thumbnails on a phone: one column there,
+    // without touching the saved preference (a rotation back brings it back).
+    const narrow = viewportSize.width > 0 && viewportSize.width < SM_BREAKPOINT;
+    const pageColumns: PageColumns = narrow ? 1 : preferredColumns;
+
+    const layout: DocumentLayout = useMemo(
+        () => computeDocumentLayout(pageSizes, pageColumns, spreadCover),
+        [pageSizes, pageColumns, spreadCover],
+    );
 
     // Annotation store + canvas registry — stable per mounted document, safe to
-    // create during render (neither touches refs).
-    const [annotationStore] = useState(() => new AnnotationStore(getDb(), docId));
+    // create during render (neither touches refs). The author is set before
+    // the store hydrates, so a known account's queued marks are drawn from
+    // the first paint (see the setAuthor effect below).
+    const author = authorId !== undefined ? authorId : (sync?.userId ?? null);
+    const [annotationStore] = useState(() => {
+        const store = new AnnotationStore(getDb(), docId);
+        store.setAuthor(author);
+        return store;
+    });
     const [registry] = useState(() => new CanvasRegistry());
     const overlayMode = useSyncExternalStore(
         (cb) => annotationStore.subscribeMeta(cb),
@@ -110,6 +280,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     // Live refs so the imperative controllers always see current geometry.
     const layoutRef = useRef(layout);
     const viewportSizeRef = useRef(viewportSize);
+    const obscuredRef = useRef(obscured);
     const readOnlyRef = useRef(effectiveReadOnly);
     const renderScaleRef = useRef(renderScale);
     const playbackRef = useRef(playback);
@@ -120,6 +291,157 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         renderScaleRef.current = renderScale;
         playbackRef.current = playback;
     }, [layout, viewportSize, effectiveReadOnly, renderScale, playback]);
+
+    // The ref is written here and only here, at once: the toolbar mounts with
+    // the document and reports (child effects first) in the same commit as the
+    // first fit, which must already see it. Syncing it from state in the effect
+    // above would put the stale value back before the fit reads it.
+    // Phones add the pager/zoom strip to the top edge (see PHONE_CONTROLS_STRIP),
+    // and any notices floating over the score extend it (noticeInset).
+    const toolbarEdgesRef = useRef<ObscuredEdges>(NO_OBSCURED);
+    const controlsStripRef = useRef(0);
+    const noticeInsetRef = useRef(noticeInset);
+    const applyObscured = useCallback(() => {
+        const toolbar = toolbarEdgesRef.current;
+        const edges = {
+            top: Math.max(toolbar.top, controlsStripRef.current, noticeInsetRef.current),
+            bottom: toolbar.bottom,
+        };
+        obscuredRef.current = edges;
+        setObscured((prev) => (prev.top === edges.top && prev.bottom === edges.bottom ? prev : edges));
+    }, []);
+    const reportObscured = useCallback(
+        (edges: ObscuredEdges) => {
+            toolbarEdgesRef.current = edges;
+            applyObscured();
+        },
+        [applyObscured],
+    );
+    const gestureRef = useRef<GestureController | null>(null);
+    /**
+     * How far above the top bound a pan may keep the view while the bound
+     * tightened under it (a notice went away mid-gesture): never further out
+     * than it already was, so nothing jumps under the finger. Null otherwise.
+     */
+    const slackTopRef = useRef<number | null>(null);
+    /**
+     * A settle into the bounds that a pointer on the score held off (or cut
+     * short), in either direction: it resumes once the last pointer lifts.
+     */
+    const settlePendingRef = useRef(false);
+    const settleGlideRef = useRef<number | null>(null);
+    const cancelSettleGlide = useCallback(() => {
+        if (settleGlideRef.current !== null) {
+            cancelAnimationFrame(settleGlideRef.current);
+            settleGlideRef.current = null;
+        }
+    }, []);
+    /**
+     * Bring a view the scroll bounds no longer allow back inside them — the
+     * room a dismissed notice leaves at the top is not left blank until the
+     * next touch. Glides (jumps under reduced motion), gives way to any other
+     * move of the view, and waits for a pan, pinch or stroke under way to end.
+     */
+    const settleIntoBounds = useCallback(() => {
+        cancelSettleGlide();
+        const { width, height } = viewportSizeRef.current;
+        if (!didFitRef.current || width === 0 || height === 0) {
+            return;
+        }
+        const { view: from, setView } = useViewerStore.getState();
+        const target = clampScroll(from, layoutRef.current, width, height, obscuredRef.current);
+        if (Math.abs(target.scrollY - from.scrollY) < 0.5 && Math.abs(target.scrollX - from.scrollX) < 0.5) {
+            slackTopRef.current = null;
+            settlePendingRef.current = false;
+            return;
+        }
+        if (gestureRef.current?.pointerActive) {
+            // Settles once the last pointer lifts (below).
+            slackTopRef.current ??= from.scrollY;
+            settlePendingRef.current = true;
+            return;
+        }
+        slackTopRef.current = null;
+        settlePendingRef.current = false;
+        if (prefersReducedMotion()) {
+            setView(target);
+            return;
+        }
+        const startedAt = performance.now();
+        let last = from;
+        const step = () => {
+            const live = useViewerStore.getState().view;
+            if (live !== last) {
+                // A pan, turn or follow moved the view meanwhile: it clamps (a
+                // follow glide re-aims at the bounds as they are now).
+                settleGlideRef.current = null;
+                return;
+            }
+            const t = Math.min(1, (performance.now() - startedAt) / SETTLE_GLIDE_MS);
+            const ease = 1 - Math.pow(1 - t, 3);
+            last =
+                t >= 1
+                    ? target
+                    : {
+                          scale: from.scale,
+                          scrollX: from.scrollX + (target.scrollX - from.scrollX) * ease,
+                          scrollY: from.scrollY + (target.scrollY - from.scrollY) * ease,
+                      };
+            setView(last);
+            settleGlideRef.current = t >= 1 ? null : requestAnimationFrame(step);
+        };
+        settleGlideRef.current = requestAnimationFrame(step);
+    }, [cancelSettleGlide]);
+    useEffect(() => {
+        const el = containerRef.current;
+        // A finger, pen or mouse coming down on the score stops a settle where
+        // it is — a stroke must not start on a page gliding under the pen, nor
+        // a pan's first move snap the rest of the way — and leaves what is left
+        // to settle once the last pointer lifts (below), whichever way it was
+        // going; above the top bound, as slack too. Ahead of the gesture
+        // controller, so the slack is in place for its first move.
+        const onPointerDown = (e: PointerEvent) => {
+            if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
+                return;
+            }
+            cancelSettleGlide();
+            const { width, height } = viewportSizeRef.current;
+            if (!didFitRef.current || width === 0 || height === 0) {
+                return;
+            }
+            const v = useViewerStore.getState().view;
+            const bound = clampScroll(v, layoutRef.current, width, height, obscuredRef.current);
+            if (Math.abs(v.scrollY - bound.scrollY) >= 0.5 || Math.abs(v.scrollX - bound.scrollX) >= 0.5) {
+                settlePendingRef.current = true;
+            }
+            if (v.scrollY < bound.scrollY - 0.5) {
+                slackTopRef.current ??= v.scrollY;
+            }
+        };
+        // After the controller has seen the pointer go (it listens on the score).
+        const onPointerEnd = () => {
+            if (settlePendingRef.current || slackTopRef.current !== null) {
+                settleIntoBounds();
+            }
+        };
+        el?.addEventListener('pointerdown', onPointerDown, { capture: true });
+        window.addEventListener('pointerup', onPointerEnd);
+        window.addEventListener('pointercancel', onPointerEnd);
+        return () => {
+            el?.removeEventListener('pointerdown', onPointerDown, { capture: true });
+            window.removeEventListener('pointerup', onPointerEnd);
+            window.removeEventListener('pointercancel', onPointerEnd);
+            cancelSettleGlide();
+        };
+    }, [settleIntoBounds, cancelSettleGlide]);
+    // A notice coming moves only the edge: the view stays where it is, and the
+    // next follow step or page turn lands clear of the stack. One going (or
+    // shrinking) frees the room it took, and a view resting in it settles up.
+    useLayoutEffect(() => {
+        noticeInsetRef.current = Math.max(0, noticeInset);
+        applyObscured();
+        settleIntoBounds();
+    }, [noticeInset, applyObscured, settleIntoBounds]);
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
     // These live in state, not refs: the overlay divs only exist once the PDF
@@ -132,6 +454,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const [measureHighlightEl, setMeasureHighlightEl] = useState<HTMLDivElement | null>(null);
     const playheadControllerRef = useRef<PlayheadController | null>(null);
 
+    // Hydration is shared and merges: the sync engine started below awaits
+    // this same load before it pulls, so remote rows never race it.
     useEffect(() => {
         void annotationStore.load();
     }, [annotationStore]);
@@ -140,15 +464,32 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         onStoreReady?.(annotationStore);
     }, [annotationStore, onStoreReady]);
 
+    // Open while mounted: export falls back on this store's memory when the
+    // database cannot be read (inkRecovery). Ink it could not store outlives
+    // the unmount there, for the next open of the score to draw and retry.
+    useEffect(() => annotationStore.attach(), [annotationStore]);
+
     const syncUserId = sync?.userId;
     const syncName = sync?.name;
     const syncIsAnonymous = sync?.isAnonymous ?? false;
     const syncCanWrite = sync?.canWrite ?? false;
     const syncOnStatus = sync?.onStatus;
+    const syncOnRejected = sync?.onRejected;
+    const syncOnHeld = sync?.onHeld;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
     const syncOnScoreAnalysis = sync?.onScoreAnalysis;
+    const syncOnMembershipChanged = sync?.onMembershipChanged;
     const channelRef = useRef<DocRealtimeChannel | null>(null);
+
+    // Changes queued here are this account's: every engine uploads only those
+    // (PendingOp.userId), and the store draws no other account's queued marks
+    // — none at all until the session is known. ViewerPage lets a cloud score
+    // be edited only while it syncs, so the stamp is in place before the
+    // first stroke.
+    useEffect(() => {
+        annotationStore.setAuthor(author);
+    }, [annotationStore, author]);
 
     // Track viewport size.
     useEffect(() => {
@@ -156,13 +497,19 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         if (!el) {
             return;
         }
-        const observer = new ResizeObserver(() => {
-            setViewportSize({ width: el.clientWidth, height: el.clientHeight });
-        });
+        const measure = () => {
+            const width = el.clientWidth;
+            const height = el.clientHeight;
+            // Before the size reaches state, so the first fit already sees it.
+            controlsStripRef.current = width > 0 && width < SM_BREAKPOINT ? PHONE_CONTROLS_STRIP : 0;
+            applyObscured();
+            setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
+        };
+        const observer = new ResizeObserver(measure);
         observer.observe(el);
-        setViewportSize({ width: el.clientWidth, height: el.clientHeight });
+        measure();
         return () => observer.disconnect();
-    }, []);
+    }, [applyObscured]);
 
     // Fit the widest page to the viewport width once the document is ready.
     useEffect(() => {
@@ -170,11 +517,191 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             return;
         }
         didFitRef.current = true;
+        fittedViewportRef.current = viewportSize;
+        fittedColumnsRef.current = pageColumns;
         const scale = fitPageWidthScale(layout, viewportSize.width);
-        const fitted = clampScroll({ scale, scrollX: 0, scrollY: 0 }, layout, viewportSize.width, viewportSize.height);
+        // Start with the top of page 1 below a toolbar docked at the top.
+        const edges = obscuredRef.current;
+        const fitted = clampScroll(
+            { scale, scrollX: 0, scrollY: -edges.top },
+            layout,
+            viewportSize.width,
+            viewportSize.height,
+            edges,
+        );
         useViewerStore.getState().resetView(fitted);
         setRenderScale(scale);
-    }, [status, viewportSize, layout]);
+    }, [status, viewportSize, layout, pageColumns]);
+
+    // Rotation (or any later resize): keep the zoom RELATIVE to fit-width, so a
+    // spread fitted in landscape does not arrive in portrait 2× too large (and
+    // mount twice the bitmaps), nor a portrait fit turn into a ribbon in
+    // landscape. The content point under the old centre stays at the new
+    // centre. Ratios compose, so iOS's transient sizes mid-rotation land right.
+    useEffect(() => {
+        const prev = fittedViewportRef.current;
+        if (!didFitRef.current || !prev || viewportSize.width === 0 || viewportSize.height === 0) {
+            return;
+        }
+        if (prev.width === viewportSize.width && prev.height === viewportSize.height) {
+            return;
+        }
+        fittedViewportRef.current = viewportSize;
+        const { view: v, setView } = useViewerStore.getState();
+        const prevColumns = fittedColumnsRef.current ?? pageColumns;
+        fittedColumnsRef.current = pageColumns;
+        let next: ViewState;
+        if (prevColumns !== pageColumns) {
+            // A rotation across `sm` switched between one and two columns: the
+            // page that was being read starts the view, as a layout switch
+            // does, at the same multiple of fit-width.
+            const prevLayout = computeDocumentLayout(pageSizes, prevColumns, spreadCover);
+            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts, obscuredRef.current);
+            const relative = v.scale / fitPageWidthScale(prevLayout, prev.width);
+            const scale = Math.min(
+                MAX_SCALE,
+                Math.max(MIN_SCALE, fitPageWidthScale(layout, viewportSize.width) * relative),
+            );
+            const top = layout.layouts[focused]?.top ?? PAGE_GAP;
+            next = { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - obscuredRef.current.top };
+        } else {
+            const ratio = fitPageWidthScale(layout, viewportSize.width) / fitPageWidthScale(layout, prev.width);
+            const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * ratio));
+            const cx = (v.scrollX + prev.width / 2) / v.scale;
+            const cy = (v.scrollY + prev.height / 2) / v.scale;
+            next = {
+                scale,
+                scrollX: cx * scale - viewportSize.width / 2,
+                scrollY: cy * scale - viewportSize.height / 2,
+            };
+        }
+        next = clampScroll(next, layout, viewportSize.width, viewportSize.height, obscuredRef.current);
+        setView(next);
+        setRenderScale(next.scale);
+    }, [viewportSize, layout, pageColumns, pageSizes, spreadCover]);
+
+    // Page sizes changing under a loaded document (a streamed first open
+    // corrects the pages whose size differs from page 1's as pdf.js reads
+    // them): keep the reader's place and the zoom relative to fit-width.
+    // Before paint, so the jump to the old offset in the new layout never
+    // shows. Layout switches (relayout) set their own view and only update
+    // the ref here.
+    const sizedLayoutRef = useRef({ pageSizes, layout });
+    useLayoutEffect(() => {
+        const prev = sizedLayoutRef.current;
+        sizedLayoutRef.current = { pageSizes, layout };
+        if (prev.pageSizes === pageSizes || prev.pageSizes.length !== pageSizes.length || !didFitRef.current) {
+            return;
+        }
+        const { width, height } = viewportSizeRef.current;
+        if (width === 0 || height === 0) {
+            return;
+        }
+        const { view: v, setView } = useViewerStore.getState();
+        const next = clampScroll(
+            reanchorView(v, prev.layout, layout, width, height, obscuredRef.current),
+            layout,
+            width,
+            height,
+            obscuredRef.current,
+        );
+        setView(next);
+        setRenderScale(next.scale);
+    }, [pageSizes, layout]);
+
+    /**
+     * Turn one row of pages. Reads live refs so the once-bound gesture
+     * controller and the keyboard listener always run the current geometry.
+     * Counts as a user gesture for auto-follow, exactly like a manual pan.
+     * The page it turns from is the row at the top of the uncovered part of
+     * the viewport (turnFromPageIndex): a tall notice stack must not pin it to
+     * page 1, and zoomed out it must not be the centre row, which skipped one.
+     */
+    const turnPage = useCallback((direction: -1 | 1) => {
+        const { view: v, setView } = useViewerStore.getState();
+        const { width, height } = viewportSizeRef.current;
+        const current = turnFromPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current);
+        const next = pageTurnView(v, layoutRef.current, current, direction, width, height, obscuredRef.current);
+        if (!next) {
+            return;
+        }
+        playheadControllerRef.current?.notifyUserGesture();
+        setView(next.view);
+    }, []);
+
+    /**
+     * Re-lay the document out, keeping the reader's place: the page nearest the
+     * viewport centre lands at the top of the re-fitted view. Shared by both
+     * layout switches — the page nearest the centre stays the page in view
+     * whether its row changed shape or moved down by one.
+     */
+    const relayout = (columns: PageColumns, coverPage: boolean) => {
+        const { view: v, setView, setPageColumns, setSpreadCover } = useViewerStore.getState();
+        const { width, height } = viewportSize;
+        const nextLayout = computeDocumentLayout(pageSizes, columns, coverPage);
+        const focused = focusedPageIndex(v, height, layout.layouts, obscured);
+        const scale = fitPageWidthScale(nextLayout, width);
+        const top = nextLayout.layouts[focused]?.top ?? PAGE_GAP;
+        fittedViewportRef.current = viewportSize;
+        fittedColumnsRef.current = columns;
+        setPageColumns(columns);
+        setSpreadCover(coverPage);
+        setView(
+            clampScroll(
+                { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - obscured.top },
+                nextLayout,
+                width,
+                height,
+                obscured,
+            ),
+        );
+        setRenderScale(scale);
+    };
+
+    /** Switch between one and two pages per row. */
+    const togglePageColumns = () => relayout(pageColumns === 1 ? 2 : 1, spreadCover);
+
+    /** Hold the first page back as a cover, so spreads pair 2|3 as printed music does. */
+    const toggleSpreadCover = () => relayout(pageColumns, !spreadCover);
+
+    // Live view → DOM. Subscribed in a layout effect, before the first fit
+    // (a plain effect) writes the store, so no step is missed.
+    useLayoutEffect(() => {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const settle = () => {
+            if (timer !== null) {
+                clearTimeout(timer);
+                timer = null;
+            }
+            setSettledView(useViewerStore.getState().view);
+        };
+        const unsubscribe = useViewerStore.subscribe((state, prev) => {
+            if (state.view === prev.view) {
+                return;
+            }
+            const wrapper = wrapperRef.current;
+            if (wrapper) {
+                // The bitmaps' scale is read off the element React last rendered.
+                wrapper.style.transform = wrapperTransform(state.view, Number(wrapper.dataset.renderScale) || 1);
+            }
+            const { width, height } = viewportSizeRef.current;
+            if (mountedPageIndices(state.view, layoutRef.current, width, height).join(',') !== mountedKeyRef.current) {
+                // A page is scrolling into (or out of) the mounted window: render now.
+                settle();
+                return;
+            }
+            if (timer !== null) {
+                clearTimeout(timer);
+            }
+            timer = setTimeout(settle, VIEW_SETTLE_MS);
+        });
+        return () => {
+            unsubscribe();
+            if (timer !== null) {
+                clearTimeout(timer);
+            }
+        };
+    }, []);
 
     // Crisp bitmap re-render shortly after zoom settles (canvases CSS-stretch meanwhile).
     useEffect(() => {
@@ -196,6 +723,20 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             const rect = el.getBoundingClientRect();
             return { x: e.clientX - rect.left, y: e.clientY - rect.top };
         };
+        // Opt-in on-device print of THIS writer's committed pen strokes.
+        // Digits and symbols only. Letters stay ink. No cloud convert.
+        const handwriting = new HandwritingController({
+            store: annotationStore,
+            recognizer: recognizeOnDevice,
+            isEnabled: () => useViewerStore.getState().printHandwriting && !readOnlyRef.current,
+            getAspect: (pageIndex) => {
+                const pageLayout = layoutRef.current.layouts[pageIndex];
+                return pageLayout ? pageLayout.height / pageLayout.width : null;
+            },
+        });
+        if (useViewerStore.getState().printHandwriting) {
+            warmPrintPipeline();
+        }
         const ink = new InkController({
             store: annotationStore,
             registry,
@@ -205,13 +746,41 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             toLocal,
             onTextIntent: (intent) => {
                 textIntentHandled.current = false;
-                setTextIntent(intent);
+                // A new note tapped near the right edge starts far enough in to
+                // wrap inside the page rather than in a sliver beside it.
+                const maxNx = 1 - TEXT_NOTE_EDGE - MIN_TEXT_NOTE_WIDTH;
+                setTextIntent(intent.existing || intent.nx <= maxNx ? intent : { ...intent, nx: maxNx });
             },
-            onFingeringSelect: (selection) => setFingeringSel(selection),
+            // The fingering tool is unreachable with the feature off (no toolbar
+            // button, no view-only pill); dropping the callback too means a stray
+            // 'fingering' tool state still can't open the flow.
+            onFingeringSelect: (selection) => {
+                if (features.fingering) {
+                    setFingeringSel(selection);
+                }
+            },
+            onStrokeCommitted: (annotation) => handwriting.onStrokeCommitted(annotation),
         });
+        inkRef.current = ink;
 
-        const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
-            clampScroll(v, layoutRef.current, viewportSizeRef.current.width, viewportSizeRef.current.height);
+        const clamp = (v: { scale: number; scrollX: number; scrollY: number }) => {
+            const clamped = clampScroll(
+                v,
+                layoutRef.current,
+                viewportSizeRef.current.width,
+                viewportSizeRef.current.height,
+                obscuredRef.current,
+            );
+            const slack = slackTopRef.current;
+            if (slack === null || v.scrollY >= clamped.scrollY) {
+                return clamped;
+            }
+            // Above a top bound that tightened mid-gesture: free to move back
+            // in, never further out. The rest settles when the gesture ends.
+            const scrollY = Math.max(slack, v.scrollY);
+            slackTopRef.current = scrollY;
+            return { ...clamped, scrollY };
+        };
 
         const controller = new GestureController(el, {
             onPan: (dx, dy) => {
@@ -233,6 +802,17 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 // Bitmap refresh is handled by the settle timer on scale change.
             },
             onTap: (x, y) => {
+                // A tap in the margin strip turns the page, whatever the tool:
+                // only pointers the ink layer declined get here.
+                const strip = edgeTapStripPx(viewportSizeRef.current.width);
+                if (x < strip) {
+                    turnPage(-1);
+                    return;
+                }
+                if (x > viewportSizeRef.current.width - strip) {
+                    turnPage(1);
+                    return;
+                }
                 // Tap a measure to seek there — with the pan tool (or as a
                 // read-only viewer, whose taps can't mean anything else).
                 const feature = playbackRef.current;
@@ -263,6 +843,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             },
         });
         controller.setInkDelegate(ink.delegate);
+        gestureRef.current = controller;
 
         // Cloud documents additionally get the sync engine + realtime channel,
         // wired to the same store and ink controller (plan §realtime).
@@ -276,6 +857,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 docId,
                 getUserId: () => syncUserId,
                 onStatus: syncOnStatus,
+                onRejected: syncOnRejected,
+                onHeld: syncOnHeld,
             });
             channel = new DocRealtimeChannel({
                 supabase: getSupabase(),
@@ -295,16 +878,33 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 onPeers: (peers) => syncOnPeers?.(peers),
                 onReconnect: () => {
                     ink.clearRemoteInk();
+                    // Committed rows may have gone unheard meanwhile (a drop, or
+                    // a takedown moving the score's topics): live rows must not
+                    // move the watermark past them before this pull lands.
+                    engine?.noteGap();
+                    void engine?.sync();
+                    installSnapshotRetry();
+                    // A role change made while the connection was down sent
+                    // its broadcast to nobody.
+                    syncOnMembershipChanged?.();
+                },
+                onResync: () => {
+                    engine?.noteGap();
                     void engine?.sync();
                 },
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
                 onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
+                onMembershipChanged: () => syncOnMembershipChanged?.(),
+                fetchTopicEpoch: () => fetchRealtimeTopicEpoch(getSupabase(), docId),
             });
             if (syncCanWrite) {
                 ink.setLivePublisher(channel.publisher);
             }
             engine.start();
             channel.start();
+            // Lesson-history snapshots whose upload failed earlier (offline,
+            // a closed tab) go up now, and again whenever the browser is back online.
+            installSnapshotRetry();
             channelRef.current = channel;
         }
 
@@ -312,21 +912,28 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             channelRef.current = null;
             channel?.stop();
             engine?.stop();
+            gestureRef.current = null;
             controller.destroy();
             ink.destroy();
+            inkRef.current = null;
+            handwriting.dispose();
         };
     }, [
         annotationStore,
         registry,
         docId,
+        turnPage,
         syncUserId,
         syncName,
         syncIsAnonymous,
         syncCanWrite,
         syncOnStatus,
+        syncOnRejected,
+        syncOnHeld,
         syncOnPeers,
         syncOnDocReplaced,
         syncOnScoreAnalysis,
+        syncOnMembershipChanged,
     ]);
 
     // Playhead: imperative rAF controller over the two overlay divs below.
@@ -344,6 +951,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             getLayout: () => layoutRef.current,
             getRenderScale: () => renderScaleRef.current,
             getViewportSize: () => viewportSizeRef.current,
+            getObscured: () => obscuredRef.current,
         });
         playheadControllerRef.current = controller;
         return () => {
@@ -352,51 +960,77 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         };
     }, [playbackScore, playbackGetEngine, playheadLineEl, measureHighlightEl]);
 
+    // The playhead sleeps while paused; new page geometry is drawn on wake.
+    useEffect(() => {
+        playheadControllerRef.current?.wake();
+    }, [layout, renderScale]);
+
     // Presence: report the top visible page (debounced against scroll churn).
     useEffect(() => {
         const timer = setTimeout(() => {
             const range = visiblePageRange(view, viewportSize.height, layout.layouts, 0);
             channelRef.current?.setPage(Math.max(0, range.start));
-            useViewerStore.getState().setFocusedPageIndex(focusedPageIndex(view, viewportSize.height, layout.layouts));
+            useViewerStore
+                .getState()
+                .setFocusedPageIndex(focusedPageIndex(view, viewportSize.height, layout.layouts, obscured));
         }, 400);
         return () => clearTimeout(timer);
-    }, [view, viewportSize.height, layout]);
+    }, [view, viewportSize.height, layout, obscured]);
 
-    // Undo/redo keyboard shortcuts.
+    // Keyboard: page turns (any role — pedals send these keys) and undo/redo.
+    // None while a dialog is open, wherever its keys land: a page turned or a
+    // mark undone under a confirm is a change made behind the user's back.
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
+            if (e.defaultPrevented || isDialogOpen() || keyTargetsControl(e.target)) {
+                return;
+            }
+            const direction = pageTurnDirection(e);
+            if (direction !== null) {
+                e.preventDefault();
+                turnPage(direction);
+                return;
+            }
             if (readOnlyRef.current || !(e.metaKey || e.ctrlKey)) {
                 return;
             }
             const key = e.key.toLowerCase();
             if (key === 'z' && !e.shiftKey) {
                 e.preventDefault();
-                void annotationStore.undoLast();
+                settleEdit(annotationStore.undoLast());
             } else if ((key === 'z' && e.shiftKey) || key === 'y') {
                 e.preventDefault();
-                void annotationStore.redoLast();
+                settleEdit(annotationStore.redoLast());
             }
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [annotationStore]);
+    }, [annotationStore, turnPage]);
 
-    const commitText = (text: string) => {
+    const commitText = (text: string, at?: { nx: number; ny: number }) => {
         if (!textIntent || textIntentHandled.current) {
             return;
         }
         textIntentHandled.current = true;
         setTextIntent(null);
-        const trimmed = text.trim();
+        // maxLength stops typing and pasting past the server's cap; this is the
+        // backstop for anything that reaches the textarea some other way.
+        const trimmed = clampTextNote(text.trim());
         const { existing } = textIntent;
         if (existing) {
-            if (!isTextPayload(existing.payload)) {
+            const live = annotationStore.get(existing.id);
+            const base = live && isTextPayload(live.payload) ? live.payload : existing.payload;
+            if (!isTextPayload(base)) {
                 return;
             }
-            if (trimmed === '') {
-                void annotationStore.delete(existing.id);
-            } else if (trimmed !== existing.payload.text) {
-                void annotationStore.update(existing.id, { payload: { ...existing.payload, text: trimmed } });
+            // Live payload keeps a font change made while this editor is open.
+            const edited = editedTextPayload(base, trimmed);
+            // Typed in an editor moved in from the edge: the note goes where it was typed.
+            const next = at && typeof edited === 'object' ? { ...edited, x: at.nx, y: at.ny } : edited;
+            if (next === 'delete') {
+                settleEdit(annotationStore.delete(existing.id));
+            } else if (next !== 'unchanged') {
+                settleEdit(annotationStore.update(existing.id, { payload: next }));
             }
             return;
         }
@@ -404,25 +1038,47 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             return;
         }
         const now = new Date().toISOString();
-        void annotationStore.create({
-            id: crypto.randomUUID(),
-            docId,
-            page: textIntent.pageIndex,
-            kind: 'text',
-            color: useViewerStore.getState().color,
-            payload: { x: textIntent.nx, y: textIntent.ny, text: trimmed, size: DEFAULT_TEXT_SIZE },
-            createdBy: null,
-            createdAt: now,
-            updatedAt: now,
-            deletedAt: null,
-            seq: 0,
-        });
+        const id = crypto.randomUUID();
+        settleEdit(
+            annotationStore.create({
+                id,
+                docId,
+                page: textIntent.pageIndex,
+                kind: 'text',
+                color: useViewerStore.getState().color,
+                payload: {
+                    x: at?.nx ?? textIntent.nx,
+                    y: at?.ny ?? textIntent.ny,
+                    text: trimmed,
+                    size: DEFAULT_TEXT_SIZE,
+                },
+                createdBy: null,
+                createdAt: now,
+                updatedAt: now,
+                deletedAt: null,
+                seq: 0,
+            }),
+        );
+        inkRef.current?.selectTextNote(id, textIntent.pageIndex);
     };
 
+    // Device pixels per CSS pixel for page bitmaps, reduced when everything
+    // that can be mounted at this zoom would blow the canvas budget (iOS kills
+    // the tab well before the OS reports memory pressure).
+    const pixelRatio = useMemo(() => {
+        const dpr = Math.min(window.devicePixelRatio || 1, 3);
+        return dpr * bitmapBudgetFactor(layout, pageColumns, renderScale, dpr, viewportSize.width, viewportSize.height);
+    }, [layout, pageColumns, renderScale, viewportSize.width, viewportSize.height]);
+
+    const mounted = mountedPageIndices(view, layout, viewportSize.width, viewportSize.height);
+    const mountedKey = mounted.join(',');
+    // What the live-view subscription compares against to decide it must render.
+    useLayoutEffect(() => {
+        mountedKeyRef.current = mountedKey;
+    }, [mountedKey]);
     const pages = [];
     if (doc) {
-        const range = visiblePageRange(view, viewportSize.height, layout.layouts);
-        for (let i = range.start; i <= range.end; i++) {
+        for (const i of mounted) {
             const pageLayout = layout.layouts[i];
             if (pageLayout) {
                 pages.push(
@@ -432,6 +1088,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                         pageIndex={i}
                         layout={pageLayout}
                         scale={renderScale}
+                        pixelRatio={pixelRatio}
                         registry={registry}
                     />,
                 );
@@ -441,14 +1098,17 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
 
     // Positions use the live scale; bitmaps use the settled renderScale. While they
     // differ, canvases are CSS-stretched by wrapping pages in a scaling transform.
-    const previewFactor = view.scale / renderScale;
+    // Rendered from the live view, so a render mid-gesture never steps it back.
+    const liveTransform = wrapperTransform(useViewerStore.getState().view, renderScale);
     const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
     const fingeringLayout = fingeringSel ? layout.layouts[fingeringSel.pageIndex] : undefined;
 
     // NOTE: the ref'd container must render in every state — the ResizeObserver
     // and GestureController bind once and would otherwise attach to nothing.
     return (
-        <div ref={containerRef} className="ink-surface relative h-full overflow-hidden bg-stone-200">
+        // overflow-clip, not -hidden: a hidden box still scrolls to show a focused
+        // caret, which slid the whole viewer sideways while typing a note.
+        <div ref={containerRef} className="ink-surface relative h-full overflow-clip bg-stone-200">
             {status === 'loading' ? (
                 <div className="flex h-full items-center justify-center">
                     <LoadingText>Loading score…</LoadingText>
@@ -460,9 +1120,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             ) : (
                 <>
                     <div
+                        ref={wrapperRef}
+                        data-render-scale={renderScale}
                         className="absolute left-0 top-0"
                         style={{
-                            transform: `translate(${-view.scrollX}px, ${-view.scrollY}px) scale(${previewFactor})`,
+                            transform: liveTransform,
                             transformOrigin: '0 0',
                             width: layout.contentWidth * renderScale,
                             height: layout.contentHeight * renderScale,
@@ -490,7 +1152,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                     {overlayMode === 'history' ? (
                         <div
                             data-ui-overlay
-                            className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center"
+                            // Phones: below the pager/zoom strip (PHONE_CONTROLS_STRIP), not over it.
+                            className="pointer-events-none absolute inset-x-0 top-14 z-20 flex justify-center sm:top-3"
                         >
                             <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950 shadow">
                                 <span>Viewing day starting point</span>
@@ -504,13 +1167,22 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             </div>
                         </div>
                     ) : null}
-                    {effectiveReadOnly ? null : <Toolbar store={annotationStore} />}
-                    {readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
+                    {effectiveReadOnly ? null : <Toolbar store={annotationStore} onObscuredChange={reportObscured} />}
+                    {features.fingering && readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
                     {!effectiveReadOnly && textIntent && textIntentLayout ? (
-                        <TextEditorOverlay
+                        <LiveTextEditorOverlay
                             intent={textIntent}
                             layout={textIntentLayout}
-                            view={view}
+                            store={annotationStore}
+                            viewportWidth={viewportSize.width}
+                            viewportHeight={viewportSize.height}
+                            // Larger screens float the pager and zoom row at the
+                            // bottom (1rem above the safe area, one 44px control).
+                            bottomInset={Math.max(
+                                obscured.bottom,
+                                viewportSize.width >= SM_BREAKPOINT ? FLOATING_CONTROLS_STRIP : 0,
+                            )}
+                            bottomInsetSafe={viewportSize.width >= SM_BREAKPOINT}
                             onCommit={commitText}
                             onCancel={() => {
                                 textIntentHandled.current = true;
@@ -518,7 +1190,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             }}
                         />
                     ) : null}
-                    {fingeringSel && fingeringLayout ? (
+                    {features.fingering && fingeringSel && fingeringLayout ? (
                         <Suspense fallback={null}>
                             <FingeringFlow
                                 key={`${fingeringSel.pageIndex}:${fingeringSel.rect.x.toFixed(4)}:${fingeringSel.rect.y.toFixed(4)}`}
@@ -536,14 +1208,29 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                         onZoomBy={(factor) => {
                             const { view: v, setView } = useViewerStore.getState();
                             const zoomed = zoomAt(v, v.scale * factor, viewportSize.width / 2, viewportSize.height / 2);
-                            setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height));
+                            setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height, obscured));
                         }}
+                        pageColumns={layout.layouts.length > 1 && !narrow ? pageColumns : null}
+                        onTogglePageColumns={togglePageColumns}
+                        spreadCover={spreadCover}
+                        onToggleSpreadCover={toggleSpreadCover}
                     />
-                    {layout.layouts.length > 1 ? <PageChip pageCount={layout.layouts.length} /> : null}
+                    {layout.layouts.length > 1 ? (
+                        <Pager layout={layout} viewportSize={viewportSize} obscured={obscured} onTurn={turnPage} />
+                    ) : null}
                 </>
             )}
         </div>
     );
+};
+
+/**
+ * The text editor follows the live view itself: it has to move with the page
+ * wrapper during a pan, which PdfViewport no longer renders for.
+ */
+const LiveTextEditorOverlay = (props: Omit<ComponentProps<typeof TextEditorOverlay>, 'view'>) => {
+    const view = useViewerStore((s) => s.view);
+    return <TextEditorOverlay {...props} view={view} />;
 };
 
 /**
@@ -563,13 +1250,20 @@ const ReadOnlyFingeringToggle = () => {
                 aria-pressed={active}
                 title={active ? 'Stop selecting' : 'Fingering — drag over a chord or phrase'}
                 onClick={() => useViewerStore.getState().setTool(active ? 'pan' : 'fingering')}
-                className={`pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg backdrop-blur transition ${
+                className={`chrome-glass pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg ${
                     active
                         ? 'border-accent bg-accent-soft text-accent'
                         : 'border-stone-200 bg-white/95 text-stone-600 hover:bg-white'
                 }`}
             >
-                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+                <svg
+                    viewBox="0 0 24 24"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    aria-hidden
+                >
                     <rect x="4" y="5" width="16" height="14" rx="1.5" />
                     <path strokeLinecap="round" strokeWidth="2.5" d="M9.33 5.5v6M14.67 5.5v6" />
                 </svg>
@@ -579,41 +1273,121 @@ const ReadOnlyFingeringToggle = () => {
     );
 };
 
-/** Floating "p. 3 / 12" position chip — reads the debounced focused page. */
-const PageChip = ({ pageCount }: { pageCount: number }) => {
-    const pageIndex = useViewerStore((s) => s.focusedPageIndex);
+/**
+ * Floating pager: previous / "p. 3 / 12" / next. Big round targets so a
+ * player can hit them without looking away from the music. Reads the focused
+ * page off the live view with the strips that cover it, exactly as a turn
+ * does, so the ends it disables are the turns that would do nothing.
+ */
+const Pager = ({
+    layout,
+    viewportSize,
+    obscured,
+    onTurn,
+}: {
+    layout: DocumentLayout;
+    viewportSize: ViewportSize;
+    obscured: ObscuredEdges;
+    onTurn: (direction: -1 | 1) => void;
+}) => {
+    const view = useViewerStore((s) => s.view);
+    const pageIndex = focusedPageIndex(view, viewportSize.height, layout.layouts, obscured);
+    const pageCount = layout.layouts.length;
+    // Turns step from the row at the top (see turnPage), not the labelled one.
+    const turnFrom = turnFromPageIndex(view, viewportSize.height, layout.layouts, obscured);
+    const canTurn = (direction: -1 | 1) =>
+        pageTurnView(view, layout, turnFrom, direction, viewportSize.width, viewportSize.height, obscured) !== null;
     return (
         <div
             data-ui-overlay
-            className="pointer-events-none absolute left-2 top-2 z-10 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-4 sm:top-auto"
+            className="absolute left-[max(0.5rem,var(--safe-left))] top-2 z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-[max(1rem,var(--safe-left))] sm:top-auto"
         >
+            <button
+                type="button"
+                aria-label="Previous page"
+                disabled={!canTurn(-1)}
+                onClick={() => onTurn(-1)}
+                className={pagerButtonClassName}
+            >
+                <ChevronLeftIcon size={20} />
+            </button>
             <span className="rounded-full border border-stone-200 bg-white/95 px-2.5 py-1 text-xs font-medium tabular-nums text-stone-600 shadow-sm">
                 p. {Math.min(pageIndex + 1, pageCount)} / {pageCount}
             </span>
+            <button
+                type="button"
+                aria-label="Next page"
+                disabled={!canTurn(1)}
+                onClick={() => onTurn(1)}
+                className={pagerButtonClassName}
+            >
+                <ChevronRightIcon size={20} />
+            </button>
         </div>
     );
 };
 
-const ZoomControls = ({ onZoomBy }: { onZoomBy: (factor: number) => void }) => {
+/*
+ * Pager and zoom keys: a press dips the key (scale .97) as well as greying it.
+ * The aria-pressed toggles switch colour at once — a mode change, not a fade.
+ */
+const roundControlClassName =
+    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition-[scale] duration-(--duration-press) ease-out active:scale-[0.97] active:bg-stone-100';
+
+const pagerButtonClassName = `${roundControlClassName} disabled:opacity-40 disabled:active:scale-100 disabled:active:bg-white`;
+
+const ZoomControls = ({
+    onZoomBy,
+    pageColumns,
+    onTogglePageColumns,
+    spreadCover,
+    onToggleSpreadCover,
+}: {
+    onZoomBy: (factor: number) => void;
+    /** Null hides the one/two-page toggle (single-page documents, phones). */
+    pageColumns: 1 | 2 | null;
+    onTogglePageColumns: () => void;
+    spreadCover: boolean;
+    onToggleSpreadCover: () => void;
+}) => {
     return (
         <div
             data-ui-overlay
-            className="absolute bottom-[calc(4.5rem+var(--safe-bottom))] right-4 flex flex-col gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))]"
+            // Phones: a row at the top-right, beside the pager, clear of the
+            // bottom toolbar; page 1 starts below the strip they share
+            // (PHONE_CONTROLS_STRIP). Larger screens: a column at the
+            // bottom-right — a row again on short landscape screens, where the
+            // column would climb under the toolbar.
+            className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-[max(1rem,var(--safe-right))] sm:top-auto sm:flex-col sm:[@media(max-height:500px)]:flex-row"
         >
-            <button
-                type="button"
-                aria-label="Zoom in"
-                onClick={() => onZoomBy(1.25)}
-                className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition active:bg-stone-100"
-            >
+            {pageColumns !== null ? (
+                <button
+                    type="button"
+                    aria-label={pageColumns === 2 ? 'Show one page' : 'Show two pages side by side'}
+                    title={pageColumns === 2 ? 'Show one page' : 'Show two pages side by side'}
+                    aria-pressed={pageColumns === 2}
+                    onClick={onTogglePageColumns}
+                    className={`${roundControlClassName} aria-pressed:bg-accent-soft aria-pressed:text-accent`}
+                >
+                    <Columns2Icon size={20} />
+                </button>
+            ) : null}
+            {pageColumns === 2 ? (
+                <button
+                    type="button"
+                    aria-label="Cover page first"
+                    title="Show the first page alone, so spreads pair 2|3"
+                    aria-pressed={spreadCover}
+                    onClick={onToggleSpreadCover}
+                    className={`${roundControlClassName} aria-pressed:bg-accent-soft aria-pressed:text-accent`}
+                >
+                    <CoverPageIcon size={20} />
+                </button>
+            ) : null}
+            <button type="button" aria-label="Zoom in" onClick={() => onZoomBy(1.25)} className={roundControlClassName}>
                 <ZoomInIcon size={20} />
             </button>
-            <button
-                type="button"
-                aria-label="Zoom out"
-                onClick={() => onZoomBy(0.8)}
-                className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition active:bg-stone-100"
-            >
+            <button type="button" aria-label="Zoom out" onClick={() => onZoomBy(0.8)} className={roundControlClassName}>
                 <ZoomOutIcon size={20} />
             </button>
         </div>

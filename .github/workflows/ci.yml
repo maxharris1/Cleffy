@@ -15,10 +15,134 @@ jobs:
                   node-version: 22
                   cache: npm
             - run: npm ci
+            # Runtime dependencies only, high and critical: everything in
+            # `dependencies` ships to the browser (pdf.js parses every untrusted
+            # score), so a known hole there blocks the build. Dev tooling never
+            # reaches users and is left to routine upgrades.
+            - name: Audit production dependencies
+              run: npm audit --omit=dev --audit-level=high
             - run: npm run lint:check
             - run: npm run typecheck
             - run: npm run test
             - run: npm run build
+
+    # The checkout and cancel-link proofs that need a real database (decision
+    # 30 on #62): the store test runs billingCancelStore.ts against PostgREST,
+    # and the SQL proofs exercise the triggers, grants, row locks and the
+    # database clock that the mocked unit tests cannot.
+    #
+    # LOCAL stack only: `supabase start` on this runner, the migrations it
+    # applies, and the demo keys it prints. No repository secrets, no hosted
+    # project, no link. Every SQL proof runs here (decision 37 / SF-16). No
+    # browser is installed or run.
+    supabase-local:
+        runs-on: ubuntu-latest
+        timeout-minutes: 25
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+            - run: npm ci
+            - uses: supabase/setup-cli@v1
+              with:
+                  version: 2.121.0
+            # Only what the proofs touch: Postgres, Auth (the store test
+            # creates accounts), PostgREST and the gateway in front of them,
+            # Realtime (it creates the day's realtime.messages partition the
+            # broadcast checks read, as on a developer's stack) and Storage
+            # (its own migrations bring storage.objects to the schema the
+            # storage checks write, as on every hosted project).
+            - name: Start the local Supabase stack and apply every migration
+              run: supabase start -x studio,imgproxy,mailpit,edge-runtime,logflare,vector,supavisor,postgres-meta
+            # The proofs need Realtime running, not only its schema: it creates
+            # the day's realtime.messages partition the broadcast checks write
+            # (sharing_access_control, district_read_only_seats, and launchfix
+            # P4's realtime_revocation_rotation and content_moderation). Fail
+            # here, by name, if it ever stops starting -- rather than as a
+            # proof that silently finds no partition.
+            - name: Realtime is running and has created today's messages partition
+              run: |
+                  DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
+                  docker ps --format '{{.Names}}' | grep -E '^supabase_realtime_' || { echo "::error::the Realtime container is not running"; exit 1; }
+                  for attempt in $(seq 1 30); do
+                      if [ "$(psql "$DB_URL" -tAc "select to_regclass('realtime.messages_' || to_char(now() at time zone 'utc', 'YYYY_MM_DD')) is not null")" = "t" ]; then
+                          echo "Realtime is up: today's realtime.messages partition exists"
+                          exit 0
+                      fi
+                      sleep 2
+                  done
+                  echo "::error::Realtime did not create today's realtime.messages partition"
+                  exit 1
+            # A recovery replays migrations over a database that already has
+            # them; these must apply again cleanly, in order. The cancel-link
+            # five, then every migration from launchfix P1 (20261022100000)
+            # to the newest, in filename order: P1, P3, P4, P5 and the
+            # follow-ups. Replaying through the newest leaves the latest
+            # definition of every function a later migration redefines, so the
+            # proofs below run against the schema a recovery ends on.
+            - name: Re-apply the cancel-link migrations and every migration from launchfix P1 on
+              run: |
+                  DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
+                  for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock; do
+                      psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "supabase/migrations/${migration}.sql"
+                  done
+                  for file in supabase/migrations/*.sql; do
+                      if [[ "$(basename "$file")" < 20261022100000 ]]; then
+                          continue
+                      fi
+                      echo "re-applying ${file}"
+                      psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$file"
+                  done
+            - name: Cancel-link store test (billingCancelStore.ts against the local stack)
+              run: |
+                  eval "$(supabase status -o env | grep -E '^(API_URL|SERVICE_ROLE_KEY)=')"
+                  CLEFFY_REQUIRE_LOCAL_DB=1 \
+                  CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
+                  CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+                      npx vitest run tests/billing/cancelLinkStore.test.ts
+            # Storage accounting and the thumbnail lifecycle through the real
+            # Storage API (its policy test, then its service-path write), which
+            # the SQL proofs can only imitate (20261022100900, 20261022101000).
+            - name: Storage API test (storageLifecycle.test.ts against the local stack)
+              run: |
+                  eval "$(supabase status -o env | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY)=')"
+                  CLEFFY_REQUIRE_LOCAL_DB=1 \
+                  CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
+                  CLEFFY_LOCAL_ANON_KEY="$ANON_KEY" \
+                  CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+                      npx vitest run tests/storage/storageLifecycle.test.ts
+            # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
+            # sharing proof beside the migrations. A new proof runs by being
+            # added -- this file changes only to skip one, which needs a reason.
+            # Every proof runs even after one fails, and the step fails at the
+            # end, so one red run shows them all. Any failing check fails the
+            # job: there is no list of tolerated failures.
+            - name: SQL proofs (tests/sql/*.sql and supabase/sql-tests/sharing_access_control.sql)
+              run: |
+                  DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
+
+                  # Whole proofs not run here: name -> reason. None today.
+                  declare -A SKIP=()
+
+                  failed=""
+                  for proof in tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql; do
+                      name="$(basename "$proof" .sql)"
+                      if [ -n "${SKIP[$name]+x}" ]; then
+                          echo "::notice file=${proof}::skipped: ${SKIP[$name]}"
+                          continue
+                      fi
+                      echo "::group::${proof}"
+                      if ! bash scripts/ci/sql-proof.sh "$DB_URL" "$proof"; then
+                          failed="${failed} ${proof}"
+                      fi
+                      echo "::endgroup::"
+                  done
+                  if [ -n "$failed" ]; then
+                      echo "::error::SQL proofs failed:${failed}"
+                      exit 1
+                  fi
 
     omr-service:
         runs-on: ubuntu-latest
@@ -79,3 +203,22 @@ jobs:
                       exit 0
                   fi
                   node scripts/check-supabase-drift.mjs
+
+    # The Edge Functions type-checked the way Deno loads them (launchfix P3,
+    # Codex r2 on #70). supabase/functions/deno.json sets nodeModulesDir
+    # "none", so npm: specifiers resolve from Deno's own cache: no npm ci, and
+    # the repo-root package.json no longer puts Deno in node_modules mode.
+    # Deno 2.1.4: the version the local edge runtime (1.77.4) is built on.
+    # Every entry point, score-analyze included since its client type was fixed
+    # (P3 fix round 3).
+    edge-functions-deno:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: denoland/setup-deno@v2
+              with:
+                  deno-version: v2.1.4
+            - name: deno check the Edge Function entry points
+              run: deno check --config supabase/functions/deno.json supabase/functions/*/index.ts
+            - name: Shared IMSLP cache Deno regression tests
+              run: deno test --config supabase/functions/deno.json supabase/functions/_shared/imslpPdfCacheStore_test.ts

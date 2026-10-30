@@ -1,4 +1,5 @@
 import { pointSegmentDistanceSq, strokeBbox, type Bbox } from '@/features/viewer/geometry';
+import { textBoundsNorm } from '@/features/viewer/ink/musicFont';
 import { isTextPayload, type Annotation } from '@/types/models';
 
 /**
@@ -18,16 +19,13 @@ export const hitTestAnnotation = (
     const py = ny * pageHpx;
 
     if (isTextPayload(annotation.payload)) {
-        const { x, y, text, size } = annotation.payload;
-        const fontPx = size * pageWpx;
-        const lines = text.split('\n');
-        const widthPx = Math.max(...lines.map((l) => l.length), 1) * fontPx * 0.6;
-        const heightPx = lines.length * fontPx * 1.25;
+        // The glyphs' own box, so a small accent is not picked from an em away.
+        const [minX, minY, maxX, maxY] = textBoundsNorm(annotation.payload, pageHpx / pageWpx);
         return (
-            px >= x * pageWpx - radiusPx &&
-            px <= x * pageWpx + widthPx + radiusPx &&
-            py >= y * pageHpx - radiusPx &&
-            py <= y * pageHpx + heightPx + radiusPx
+            px >= minX * pageWpx - radiusPx &&
+            px <= maxX * pageWpx + radiusPx &&
+            py >= minY * pageHpx - radiusPx &&
+            py <= maxY * pageHpx + radiusPx
         );
     }
 
@@ -67,15 +65,12 @@ export const hitTestAnnotation = (
  * Approximate normalized bounding box of an annotation. `aspect` is the page's
  * width/height ratio — scalar sizes (stroke w, text size) are normalized
  * against page WIDTH, so projecting them onto the y axis multiplies by it.
- * Text extents use the same per-char heuristic as hitTestAnnotation.
+ * Text extents are the measured glyph bounds, as in hitTestAnnotation.
  */
 export const annotationBboxNorm = (annotation: Annotation, aspect: number): Bbox => {
     if (isTextPayload(annotation.payload)) {
-        const { x, y, text, size } = annotation.payload;
-        const lines = text.split('\n');
-        const widthN = Math.max(...lines.map((l) => l.length), 1) * size * 0.6;
-        const heightN = lines.length * size * 1.25 * aspect;
-        return [x, y, x + widthN, y + heightN];
+        // textBoundsNorm takes height / width.
+        return textBoundsNorm(annotation.payload, 1 / aspect);
     }
     const [minX, minY, maxX, maxY] = strokeBbox(annotation.payload.pts);
     const rx = annotation.payload.w / 2;

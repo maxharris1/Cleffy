@@ -36,9 +36,13 @@ const note = (partial: Partial<RecognizedNote> & Pick<RecognizedNote, 'midi' | '
     confidence: partial.confidence ?? 'high',
 });
 
+/** The panel is a Dialog, which mounts once its lazy chunk is in. */
+const openPanel = () => screen.findByRole('dialog', { name: 'Notes in selection' });
+
 describe('FingeringReviewPanel', () => {
-    it('disables Show diagram until a note exists', () => {
+    it('disables Show diagram until a note exists', async () => {
         render(<FingeringReviewPanel initial={seed()} {...spanProps} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+        await openPanel();
         expect(screen.getByRole('button', { name: 'Show diagram' })).toBeDisabled();
     });
 
@@ -46,6 +50,7 @@ describe('FingeringReviewPanel', () => {
         const user = userEvent.setup();
         const onConfirm = vi.fn();
         render(<FingeringReviewPanel initial={seed()} {...spanProps} onConfirm={onConfirm} onCancel={vi.fn()} />);
+        await openPanel();
 
         await user.click(screen.getByRole('button', { name: 'C4' }));
         await user.click(screen.getByRole('button', { name: 'Finger 3' }));
@@ -63,6 +68,7 @@ describe('FingeringReviewPanel', () => {
     it('toggles a note off when its key is tapped again', async () => {
         const user = userEvent.setup();
         render(<FingeringReviewPanel initial={seed()} {...spanProps} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+        await openPanel();
 
         await user.click(screen.getByRole('button', { name: 'C4' }));
         // Now pressed — accessible name includes hand and suggested finger.
@@ -74,6 +80,7 @@ describe('FingeringReviewPanel', () => {
         const user = userEvent.setup();
         const onConfirm = vi.fn();
         render(<FingeringReviewPanel initial={seed()} {...spanProps} onConfirm={onConfirm} onCancel={vi.fn()} />);
+        await openPanel();
 
         // A left-hand note ABOVE middle C — the old midi>=60 heuristic would
         // have mis-assigned this to the right hand.
@@ -90,6 +97,7 @@ describe('FingeringReviewPanel', () => {
         const user = userEvent.setup();
         const onConfirm = vi.fn();
         render(<FingeringReviewPanel initial={seed()} {...spanProps} onConfirm={onConfirm} onCancel={vi.fn()} />);
+        await openPanel();
 
         await user.click(screen.getByRole('button', { name: 'C4' }));
         await user.click(screen.getByRole('button', { name: 'Swap hands' }));
@@ -103,6 +111,7 @@ describe('FingeringReviewPanel', () => {
         const user = userEvent.setup();
         const onConfirm = vi.fn();
         render(<FingeringReviewPanel initial={seed()} {...spanProps} onConfirm={onConfirm} onCancel={vi.fn()} />);
+        await openPanel();
 
         await user.click(screen.getByRole('button', { name: 'C4' }));
         await user.click(screen.getByRole('button', { name: '+ step' }));
@@ -128,6 +137,7 @@ describe('FingeringReviewPanel', () => {
             source: 'omr',
         };
         render(<FingeringReviewPanel initial={region} {...spanProps} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+        await openPanel();
 
         expect(screen.getByRole('button', { name: 'Step 1' })).toHaveAttribute('aria-pressed', 'true');
         await user.click(screen.getByRole('button', { name: 'Hear this step' }));
@@ -139,7 +149,7 @@ describe('FingeringReviewPanel', () => {
         expect(auditionNotes).toHaveBeenLastCalledWith([59, 62, 66]);
     });
 
-    it('shows suggested fingers on an unmarked triad', () => {
+    it('shows suggested fingers on an unmarked triad', async () => {
         const region: RecognizedRegion = {
             ...seed(),
             notes: [
@@ -150,13 +160,14 @@ describe('FingeringReviewPanel', () => {
             source: 'omr',
         };
         render(<FingeringReviewPanel initial={region} {...spanProps} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+        await openPanel();
         // Interactive keys use hand in the label; badges still encode fingers via chip text.
         expect(screen.getByText(/C4 · 1/)).toBeInTheDocument();
         expect(screen.getByText(/E4 · 3/)).toBeInTheDocument();
         expect(screen.getByText(/G4 · 5/)).toBeInTheDocument();
     });
 
-    it('suggests fingers for a Gymnopédie-style RH pack after redistribute', () => {
+    it('suggests fingers for a Gymnopédie-style RH pack after redistribute', async () => {
         const region: RecognizedRegion = {
             ...seed(),
             notes: [
@@ -168,12 +179,13 @@ describe('FingeringReviewPanel', () => {
             source: 'omr',
         };
         render(<FingeringReviewPanel initial={region} {...spanProps} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+        await openPanel();
         expect(screen.queryByText(/ · \?/)).not.toBeInTheDocument();
         expect(screen.getByText(/B3 · /)).toBeInTheDocument();
         expect(screen.getByText(/F#5 · /)).toBeInTheDocument();
     });
 
-    it('colors snapshot markers by redistributed fingering hand', () => {
+    it('colors snapshot markers by redistributed fingering hand', async () => {
         const region: RecognizedRegion = {
             ...seed(),
             notes: [
@@ -221,6 +233,7 @@ describe('FingeringReviewPanel', () => {
                 onCancel={vi.fn()}
             />,
         );
+        await openPanel();
         // Melody peel sends F#5 to RH; triad to LH — markers must match keyboard, not staff.
         expect(screen.getByRole('button', { name: 'Select note F#5' })).toHaveStyle({
             backgroundColor: 'rgb(67, 56, 202)',
@@ -242,6 +255,7 @@ describe('FingeringReviewPanel', () => {
                 onCancel={vi.fn()}
             />,
         );
+        await openPanel();
 
         await user.click(screen.getByRole('button', { name: 'large' }));
         expect(onHandSpanChange).toHaveBeenCalledWith('large');

@@ -152,3 +152,21 @@ values (
     'b0000000-0000-4000-8000-000000000001',
     'a0000000-0000-4000-8000-000000000001'
 );
+
+-- ---------------------------------------------------------------------------
+-- Vault: the copyright strike pepper (20261022130100_content_strikes_survive_deletion.sql)
+-- ---------------------------------------------------------------------------
+-- A fixed, NON-SECRET development value, so a local stack and CI key and match
+-- strikes the way production does. Production sets its own random value in
+-- Vault (the migration's DEPLOY note); this one must never be used there.
+do $$
+begin
+    if not exists (select 1 from vault.secrets where name = 'content_strike_pepper') then
+        perform vault.create_secret (
+            'cleffy-local-dev-content-strike-pepper-not-a-secret',
+            'content_strike_pepper',
+            'Local development only (supabase/seed.sql)'
+        );
+    end if;
+end;
+$$;

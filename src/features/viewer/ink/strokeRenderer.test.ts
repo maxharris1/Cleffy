@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { getSvgPathFromStroke, strokeInputPoints } from '@/features/viewer/ink/strokeRenderer';
+import { getSvgPathFromStroke, sameInk, strokeInputPoints } from '@/features/viewer/ink/strokeRenderer';
 import { decimateStroke, strokeBbox, viewportToPagePoint } from '@/features/viewer/geometry';
+import type { Annotation } from '@/types/models';
 
 describe('getSvgPathFromStroke', () => {
     it('produces a closed smooth path', () => {
@@ -74,5 +75,39 @@ describe('viewportToPagePoint', () => {
         const p = viewportToPagePoint(view, layouts, 300, 1182);
         expect(p?.pageIndex).toBe(1);
         expect(p?.nx).toBeCloseTo(0.5);
+    });
+});
+
+describe('sameInk', () => {
+    const mark: Annotation = {
+        id: 'a',
+        docId: 'd',
+        page: 0,
+        kind: 'stroke',
+        color: '#111827',
+        payload: { pts: [0.1, 0.2, 0.5, 0.3, 0.4, 0.5], w: 0.003, sp: 1 },
+        createdBy: null,
+        createdAt: '2026-10-10T00:00:00Z',
+        updatedAt: '2026-10-10T00:00:00Z',
+        deletedAt: null,
+        seq: 0,
+    };
+
+    it('ignores sync bookkeeping and object identity', () => {
+        const echo = { ...mark, createdBy: 'u', seq: 7, payload: JSON.parse(JSON.stringify(mark.payload)) };
+        expect(sameInk(mark, echo)).toBe(true);
+    });
+
+    it('sees any change that draws differently', () => {
+        expect(sameInk(mark, { ...mark, color: '#dc2626' })).toBe(false);
+        expect(sameInk(mark, { ...mark, kind: 'highlight' })).toBe(false);
+        expect(sameInk(mark, { ...mark, id: 'b' })).toBe(false);
+        expect(sameInk(mark, { ...mark, payload: { pts: [0.1, 0.2, 0.5, 0.3, 0.41, 0.5], w: 0.003, sp: 1 } })).toBe(
+            false,
+        );
+        expect(sameInk(mark, { ...mark, payload: { pts: [0.1, 0.2, 0.5, 0.3, 0.4, 0.5], w: 0.003 } })).toBe(false);
+        const note = { ...mark, kind: 'text' as const, payload: { x: 0.1, y: 0.1, text: 'p', size: 0.02 } };
+        expect(sameInk(note, { ...note, payload: { ...note.payload, bold: 1 as const } })).toBe(false);
+        expect(sameInk(note, { ...note, payload: { ...note.payload } })).toBe(true);
     });
 });

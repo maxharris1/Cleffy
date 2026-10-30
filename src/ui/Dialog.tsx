@@ -1,13 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { CloseIcon } from '@/ui/icons';
-
-const FOCUSABLE_SELECTOR =
-    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-/** Open dialogs, oldest first — Escape and the focus trap act on the top one only. */
-const dialogStack: symbol[] = [];
+import { dialogStack } from '@/ui/dialogStack';
+import { dialogPanelModule as dialogPanel } from '@/ui/lazyPrimitives';
 
 export interface DialogProps {
     /** Accessible name; also the visible title when withHeader is set. */
@@ -18,110 +13,97 @@ export interface DialogProps {
     withHeader?: boolean;
     /** Bottom sheet on phones, centered on sm+. */
     sheet?: boolean;
+    /**
+     * An alertdialog: a decision the user has to make (ConfirmDialog). A press
+     * on the scrim does not dismiss it; Escape and Cancel do.
+     */
+    alert?: boolean;
 }
 
+const LazyDialogPanel = lazy(() => dialogPanel.load().then((module) => ({ default: module.DialogPanel })));
+
 /**
- * The app modal: unified scrim, aria-modal semantics, Escape-to-close, focus
- * trap with restore. The scrim root carries data-ui-overlay so the viewer's
- * gesture layer ignores pointer events that land on dialog chrome.
+ * Rendered after the panel, inside its Suspense boundary: commits when the
+ * panel does, never before, and its effect runs after the panel's own (Base
+ * UI's Escape listener among them).
  */
-export const Dialog = ({ label, onClose, children, withHeader = true, sheet = false }: DialogProps) => {
-    const panelRef = useRef<HTMLDivElement | null>(null);
-    const onCloseRef = useRef(onClose);
-    const idRef = useRef<symbol | null>(null);
-    if (idRef.current === null) {
-        idRef.current = Symbol('dialog');
-    }
+const OnPanelCommit = ({ onCommit }: { onCommit: () => void }) => {
+    useEffect(onCommit, [onCommit]);
+    return null;
+};
 
+/**
+ * The app modal (ui/DialogPanel has the details): portalled to <body>, focus
+ * trapped and returned to where it was, Escape to close, page scroll locked
+ * and the rest of the page inert while it is open. Open while mounted —
+ * callers render it conditionally, as before.
+ *
+ * The panel is a lazy chunk, usually prefetched on idle or on the first
+ * hover or focus (ui/lazyPrimitives). This wrapper is what callers mount, and it takes its place
+ * on dialogStack in the same commit, before the panel has loaded: a key that
+ * arrives while the chunk is still on its way already finds isDialogOpen()
+ * true, so the viewer's shortcuts stand down from the very first open. Until
+ * the panel is in, nothing renders (no flash of a fallback); once the chunk
+ * has loaded, later dialogs render the panel at once.
+ *
+ * Escape closes a dialog whose panel is still loading, as it closes the panel
+ * (an alertdialog too, which ignores only the scrim), and only the top dialog
+ * on the stack. The panel never shows up afterwards for a dialog its
+ * caller has taken down.
+ */
+export const Dialog = (props: DialogProps) => {
+    const [stackId] = useState(() => Symbol('dialog'));
+    // Picked once per dialog: switching from the lazy component to the loaded
+    // one later would remount the panel and throw its focus away.
+    const [Panel] = useState(() => dialogPanel.get()?.DialogPanel ?? LazyDialogPanel);
+    const pending = Panel === LazyDialogPanel;
+    /** The panel has committed; Base UI handles Escape from then on. */
+    const panelIn = useRef(!pending);
+    const markPanelIn = useCallback(() => {
+        panelIn.current = true;
+    }, []);
+    const onCloseRef = useRef(props.onClose);
     useEffect(() => {
-        onCloseRef.current = onClose;
-    }, [onClose]);
+        onCloseRef.current = props.onClose;
+    }, [props.onClose]);
 
-    useEffect(() => {
-        const id = idRef.current as symbol;
-        dialogStack.push(id);
-        const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        panelRef.current?.focus();
-
-        const onKeyDown = (event: KeyboardEvent) => {
-            if (dialogStack[dialogStack.length - 1] !== id) {
-                return;
-            }
-            if (event.key === 'Escape') {
-                event.stopPropagation();
-                onCloseRef.current();
-                return;
-            }
-            if (event.key !== 'Tab') {
-                return;
-            }
-            const panel = panelRef.current;
-            if (!panel) {
-                return;
-            }
-            const focusables = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
-            const first = focusables[0];
-            const last = focusables[focusables.length - 1];
-            if (!first || !last) {
-                event.preventDefault();
-                panel.focus();
-                return;
-            }
-            const active = document.activeElement;
-            if (event.shiftKey) {
-                if (active === first || !panel.contains(active)) {
-                    event.preventDefault();
-                    last.focus();
-                }
-            } else if (active === last || !panel.contains(active)) {
-                event.preventDefault();
-                first.focus();
-            }
-        };
-
-        document.addEventListener('keydown', onKeyDown);
+    // A layout effect: registered with the commit itself, not after paint.
+    useLayoutEffect(() => {
+        dialogStack.push(stackId);
         return () => {
-            document.removeEventListener('keydown', onKeyDown);
-            const index = dialogStack.indexOf(id);
+            const index = dialogStack.indexOf(stackId);
             if (index !== -1) {
                 dialogStack.splice(index, 1);
             }
-            previouslyFocused?.focus();
         };
-    }, []);
+    }, [stackId]);
+
+    useLayoutEffect(() => {
+        if (!pending) {
+            return undefined;
+        }
+        // As Base UI's own Escape handling: not mid-composition, and the key stops here.
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (
+                event.key !== 'Escape' ||
+                event.isComposing ||
+                panelIn.current ||
+                dialogStack[dialogStack.length - 1] !== stackId
+            ) {
+                return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            onCloseRef.current();
+        };
+        document.addEventListener('keydown', onKeyDown);
+        return () => document.removeEventListener('keydown', onKeyDown);
+    }, [pending, stackId]);
 
     return (
-        <div
-            data-ui-overlay
-            className={`fixed inset-0 z-40 flex justify-center bg-scrim p-4 ${sheet ? 'items-end sm:items-center' : 'items-center'}`}
-            onClick={onClose}
-        >
-            <div
-                ref={panelRef}
-                role="dialog"
-                aria-modal="true"
-                aria-label={label}
-                tabIndex={-1}
-                onClick={(event) => event.stopPropagation()}
-                className={`w-full max-w-md rounded-2xl border border-stone-200 bg-white p-5 shadow-xl outline-none ${
-                    sheet ? 'max-h-[80vh] overflow-auto' : ''
-                }`}
-            >
-                {withHeader ? (
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                        <h2 className="text-lg font-semibold text-stone-800">{label}</h2>
-                        <button
-                            type="button"
-                            aria-label="Close"
-                            onClick={onClose}
-                            className="rounded-lg p-1.5 text-stone-500 transition hover:bg-stone-100"
-                        >
-                            <CloseIcon size={18} />
-                        </button>
-                    </div>
-                ) : null}
-                {children}
-            </div>
-        </div>
+        <Suspense fallback={null}>
+            <Panel {...props} stackId={stackId} />
+            {pending ? <OnPanelCommit onCommit={markPanelIn} /> : null}
+        </Suspense>
     );
 };

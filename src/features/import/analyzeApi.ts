@@ -1,8 +1,8 @@
-import { z } from 'zod';
-
+import { parseLimitResponse } from '@/features/billing/limitErrors';
+import { z } from '@/lib/zod';
 import { encodeCropJpeg, encodePageJpeg } from '@/features/import/pageRaster';
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
-import type { ClassifyFn, ClassifyResult } from '@/features/import/importTypes';
+import type { ClassifyFn, ClassifyRefused, ClassifyResult } from '@/features/import/importTypes';
 
 /**
  * Client for the analyze-annotations edge function. Raw fetch (imslpApi
@@ -36,7 +36,7 @@ export const MAX_CLUSTERS_PER_CALL = 60;
 
 /** Build the per-page ClassifyFn for a cloud document the caller owns. */
 export const makeCloudClassifyFn = (docId: string): ClassifyFn => {
-    return async (seg, raster, signal): Promise<ClassifyResult | null> => {
+    return async (seg, raster, signal): Promise<ClassifyResult | ClassifyRefused | null> => {
         try {
             const supabase = getSupabase();
             const { data: sessionData } = await supabase.auth.getSession();
@@ -93,7 +93,10 @@ export const makeCloudClassifyFn = (docId: string): ClassifyFn => {
                 }),
             });
             if (!response.ok) {
-                return null;
+                // Out of AI page reads is not "unavailable": say which, so the
+                // review offers the plans rather than a retry that is refused.
+                const limit = await parseLimitResponse(response);
+                return limit ? { refused: limit } : null;
             }
             const parsed = classifyResponseSchema.safeParse(await response.json());
             if (!parsed.success) {

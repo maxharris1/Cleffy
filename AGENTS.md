@@ -1,0 +1,67 @@
+# Cleffy: agent notes
+
+Coding rules, commands and how to run the app are in `CLAUDE.md`. This file holds the factory settings and the pstack router.
+
+## Factory
+
+```factory
+base_branch: dev
+branch_pattern: agent/{slug}
+tracker: chat
+local_suites: none
+verify: off
+stages: none
+review: loop
+review_skill: none
+direct_push: none
+envs: claude=env_01WAd3yiz3qpSnsofpyEwCh2
+owner_bot: Cleffy
+plan: auto
+small_ticket: files<=3, no:supabase/migrations|supabase/functions
+tests_self: npm run lint:check && npm run typecheck && npm run test && npm run build
+tests_gate: ci-only
+ci: required
+reviewers: a+b
+fixer: codex-local overflow:claude-cloud
+qa: browser:click-through
+qa_runner: desktop:Max's Assistant
+qa_depth: full-always
+judge: claude
+judge_session: claude-cloud
+ship: automerge:dev
+max_rounds: 3
+feature_branches: no
+merge_requires_max: no
+```
+
+Notes for agents:
+
+- Work comes from the Cleffy project bot's chat. The PR description is the record: what was asked, when and in which chat, the acceptance points, and what is out of scope.
+- PRs target `dev` (`dev.cleffy.io`, Supabase branch `qdbnlrgylelelvwbkvnm`). `main` is production (`cleffy.io`); the Supabase GitHub integration deploys migrations on merge to `main`. Never push to `dev` or `main` directly. The factory merges a PR into `dev` once it is ready (Max 2026-10-28: `ship: automerge:dev`, `merge_requires_max: no`): Judge SHIP, green CI and a passing QA click-through. `dev` -> `main` stays Max's merge.
+- Claude Code cloud env: `Cleffy` (`env_01WAd3yiz3qpSnsofpyEwCh2`). The SessionStart hook installs dependencies and starts Docker; `npm run cloud:up` boots local Supabase, Edge Functions and Vite on http://localhost:5173.
+- Before pushing, run what CI's `checks` job runs: `npm run lint:check`, `npm run typecheck`, `npm run test`, `npm run build`. CI also runs `supabase-local` (local stack, SQL proofs), `omr-service`, `supabase-drift` and `edge-functions-deno`.
+- UI changes: check them with the repo's `ui-check` skill (`scripts/ui/uifuzz.mjs`, desktop, iPad and phone viewports) during the build. Backend changes: read `supabase-ops` first.
+- QA (Max 2026-10-29): a browser click-through of the PR's acceptance points, run by Max's Assistant on its own box desktop against the PR's preview or a local `npm run cloud:up` stack, before the Judge. It reports pass/fail per point with screenshots; a fail is a fix round inside the 3-round cap.
+- Judge (Max 2026-10-29): a blind Claude Judge, launched only through Claude Bot's launchers (`judge_session: claude-cloud`). Only it writes SHIP. Its REVISE rounds count inside the 3-round cap.
+- Risky areas: migrations, RLS and Edge Functions under `supabase/`, and billing (Stripe). Never apply migrations or change config on a hosted Supabase project from an agent session; CI runs the proofs on a local stack.
+- Codex runs locally, not in a cloud env: `codex exec -m gpt-6.1-sol -c model_reasoning_effort="high"`. There is no Codex env for Cleffy.
+- Privacy: Cleffy's privacy policy forbids tracking pixels. Never add analytics pixels or third-party trackers.
+- Marketing surfaces (landing, demo, ads landing pages): public-domain repertoire only. Never surface play-along, the fingering tool, AI-generated marks or the Founding offer. The primary CTA is always "Start free".
+- Approver: Max only; there is no co-reviewer. He merges `dev` -> `main` (production). PRs into `dev` merge on the factory's SHIP (Max 2026-10-28).
+
+### pstack (vendored, MIT — see .claude/vendor/pstack/)
+
+pstack skills are vendored in `.claude/skills/` (shared by Cursor and Claude Code) and linked for Codex in `.agents/skills/`. They are explicit-only: use one when the task packet names it.
+
+| Need                                       | Skill                                                                                                                                   |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Default way of working on a ticket         | `poteto-mode` is not vendored here (held upstream, see `scripts/vendor-pstack.sh`); follow the task packet and the `principle-*` skills |
+| Adversarial review of a plan or diff       | `interrogate`                                                                                                                           |
+| What could this change break               | `blast-radius`                                                                                                                          |
+| Build or refresh a repo verification skill | `create-verification-skill`, `maintain-verification-skill`                                                                              |
+| Agents repeating mistakes                  | `correct`, `reflect`                                                                                                                    |
+| Competing candidates / parallel work       | `arena`, `swarm` (Cursor or Claude Code only)                                                                                           |
+| Design principles                          | `principle-*`                                                                                                                           |
+
+Harness adapters: Claude Code reads `.claude/docs/harness/claude-code.md`; Codex reads `.claude/docs/harness/codex.md`. Rules in this file, including the Factory section, win over pstack.
+Update: rerun `scripts/vendor-pstack.sh . <cursor/plugins SHA>`; never hand-edit files that contain `.pstack-vendored`.

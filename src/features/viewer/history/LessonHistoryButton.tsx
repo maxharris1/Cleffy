@@ -8,6 +8,7 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { toast } from '@/ui/toast';
 import { buttonClassName } from '@/ui/classNames';
 
 interface LessonHistoryButtonProps {
@@ -94,6 +95,11 @@ const LessonHistoryDialog = ({
                 return;
             }
             await store.restoreFromSnapshot(snap.payload);
+            // Fired with the close, so the dialog's exit and the toast's
+            // entrance read as one hand-off.
+            toast.success('Marks restored', {
+                description: `To the starting point of ${formatDay(snap.capturedOn)}. Undo brings back what was there.`,
+            });
             onClose();
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Restore failed');
@@ -118,7 +124,7 @@ const LessonHistoryDialog = ({
                     <button
                         type="button"
                         onClick={exitView}
-                        className="mt-2 rounded-lg bg-amber-800 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-amber-700"
+                        className="mt-2 rounded-lg bg-amber-800 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-amber-700"
                     >
                         Back to current
                     </button>
@@ -159,7 +165,7 @@ const LessonHistoryDialog = ({
                                         type="button"
                                         disabled={busy}
                                         onClick={() => void viewDay(row.id)}
-                                        className="rounded-lg px-2.5 py-1 text-sm text-accent transition hover:bg-accent-soft disabled:opacity-50"
+                                        className="rounded-lg px-2.5 py-1 text-sm text-accent transition-colors hover:bg-accent-soft disabled:opacity-50 pointer-coarse:min-h-11"
                                     >
                                         View
                                     </button>
@@ -169,7 +175,7 @@ const LessonHistoryDialog = ({
                                             size="sm"
                                             disabled={busy}
                                             onClick={() => setConfirmRestoreId(row.id)}
-                                            className="px-2.5 py-1"
+                                            className="px-2.5 py-1 pointer-coarse:min-h-11"
                                         >
                                             Restore
                                         </Button>
