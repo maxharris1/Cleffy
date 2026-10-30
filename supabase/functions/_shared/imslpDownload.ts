@@ -307,6 +307,19 @@ export const fetchImslpBytes = async (url: string, options: BoundedFetchOptions)
                 });
             }
             const bytes = await readBodyCapped(res, options.maxBytes);
+            // Fetch decompresses encoded responses, whose Content-Length is the
+            // compressed size. For an unencoded transfer, any mismatch is an
+            // incomplete/invalid response and must never become a cached original.
+            const rawLength = res.headers.get('content-length');
+            const encoding = res.headers.get('content-encoding');
+            if (
+                rawLength &&
+                /^\d+$/.test(rawLength) &&
+                (!encoding || encoding === 'identity') &&
+                declared !== bytes.byteLength
+            ) {
+                throw new ImslpFetchError('network', 'IMSLP response length did not match Content-Length');
+            }
             return { bytes, contentType: res.headers.get('content-type'), finalUrl: current };
         }
     } catch (err) {

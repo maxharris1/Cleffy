@@ -249,6 +249,7 @@ const thenable = <T, X extends object>(result: T, extra: X): Promise<T> & X =>
 const makeStub = (options: StubOptions = {}) => {
     const calls = {
         download: vi.fn(),
+        createSignedUrl: vi.fn(),
         upload: vi.fn(),
         remove: vi.fn(),
         removeFrom: vi.fn(),
@@ -315,17 +316,25 @@ const makeStub = (options: StubOptions = {}) => {
                 error: null,
             });
         },
-        createSignedUrl: (path: string) =>
-            Promise.resolve(
+        createSignedUrl: (path: string) => {
+            calls.createSignedUrl(path);
+            return Promise.resolve(
                 options.signError
                     ? { data: null, error: { message: options.signError } }
                     : { data: { signedUrl: `https://storage.test/sign/${path}` }, error: null },
-            ),
+            );
+        },
     });
     const supabase = {
         storage: { from: (bucket: string) => storageApi(bucket) },
         rpc: (fn: string, args: unknown) => {
             calls.rpc(fn, args);
+            if (fn === 'commit_pdf_replacement') {
+                return {
+                    single: () =>
+                        Promise.resolve({ data: options.updatedRow ?? null, error: options.rpcError ?? null }),
+                };
+            }
             if (fn === 'finish_document_storage_cleanup') {
                 calls.events.push('tombstone:finish');
                 return Promise.resolve(
@@ -645,11 +654,27 @@ describe('loadDocumentSource (viewer open)', () => {
         const d = doc();
         const prefetch = prefetchScoreUrl(d.id);
         expect(prefetch.path).toBe(d.storage_path);
+        // Signing has started before the row is handed to the source loader.
+        expect(calls.createSignedUrl).toHaveBeenCalled();
         const source = await loadDocumentSource(d, { prefetch, userId: 'user-1', role: 'owner' });
         expect(source).toEqual({ url: `https://storage.test/sign/${d.storage_path}` });
         // Nothing downloaded, and nothing cached until the stream ends.
         expect(calls.download).not.toHaveBeenCalled();
         expect(memCache.has(d.id)).toBe(false);
+    });
+
+    it('signs a known shared path and discards a speculative private URL on a shared row', async () => {
+        makeStub();
+        const d = doc({ storage_path: `00000000-0000-0000-0000-000000000000/${'a'.repeat(64)}.pdf` });
+        const unknownPath = prefetchScoreUrl(d.id);
+        expect(await unknownPath.url).toBe(`https://storage.test/sign/${d.id}/original.pdf`);
+        expect(await loadDocumentSource(d, { prefetch: unknownPath })).toEqual({
+            url: `https://storage.test/sign/${d.storage_path}`,
+        });
+        const knownPath = prefetchScoreUrl(d.id, d.storage_path);
+        expect(knownPath.path).toBe(d.storage_path);
+        expect(await knownPath.url).toBe(`https://storage.test/sign/${d.storage_path}`);
+        expect(await loadDocumentSource(d, { prefetch: knownPath })).toEqual({ url: await knownPath.url });
     });
 
     it('mints a URL for the row’s own path when the early one was for another', async () => {
@@ -818,6 +843,21 @@ describe('cacheStreamedDocument (a first open closed mid-download)', () => {
 });
 
 describe('replaceDocumentPdf', () => {
+    it.each([true, false])(
+        'commits replacement server-side even with a stale private path (shared path known: %s)',
+        async (known) => {
+            const sharedPath = `00000000-0000-0000-0000-000000000000/${'a'.repeat(64)}.pdf`;
+            const d = known ? doc({ storage_path: sharedPath }) : doc();
+            const privatePath = `${d.id}/original.pdf`;
+            const calls = makeStub({ updatedRow: doc({ storage_path: privatePath, content_rev: 1 }) });
+            const updated = await replaceDocumentPdf(d, new ArrayBuffer(4), new Uint8Array([1, 2, 3]));
+            expect(vi.mocked(uploadPdfToStorage)).toHaveBeenCalledWith(privatePath, expect.anything(), undefined);
+            expect(calls.rpc).toHaveBeenCalledWith('commit_pdf_replacement', { p_document_id: d.id, p_content_rev: 0 });
+            expect(updated.storage_path).toBe(privatePath);
+            expect(calls.upload.mock.calls.every(([path]) => path !== sharedPath)).toBe(true);
+        },
+    );
+
     it('backs up the original once, uploads the replacement, bumps content_rev, refreshes the cache', async () => {
         const calls = makeStub({ updatedRow: doc({ content_rev: 1 }) });
         const d = doc();
@@ -829,7 +869,7 @@ describe('replaceDocumentPdf', () => {
             expect.objectContaining({ upsert: false }),
         );
         expect(vi.mocked(uploadPdfToStorage)).toHaveBeenCalledWith(d.storage_path, expect.anything(), undefined);
-        expect(calls.update).toHaveBeenCalledWith('documents', { content_rev: 1 });
+        expect(calls.rpc).toHaveBeenCalledWith('commit_pdf_replacement', { p_document_id: d.id, p_content_rev: 0 });
         expect(updated.content_rev).toBe(1);
 
         const cached = await getDb().pdfCache.get(d.id);
@@ -999,6 +1039,18 @@ describe('leaveSharedDocument', () => {
 });
 
 describe('deleteDocument ordering (row first, bytes after)', () => {
+    it('keeps the shared original when deleting a library reference and its private backups', async () => {
+        const sharedPath = `00000000-0000-0000-0000-000000000000/${'b'.repeat(64)}.pdf`;
+        const d = doc({ storage_path: sharedPath });
+        const calls = makeStub({ listNames: ['pre-import-original.pdf'] });
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
+        expect(calls.removeFrom).toHaveBeenCalledWith('scores', [`${d.id}/pre-import-original.pdf`]);
+        expect(calls.remove.mock.calls.every(([paths]) => !paths.includes(sharedPath))).toBe(true);
+        expect(calls.events).toContain('tombstone:finish');
+    });
+
     it('deletes the row before any stored file is touched, then has the server clear the tombstone', async () => {
         const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: ['0.jpg'] });
         await (

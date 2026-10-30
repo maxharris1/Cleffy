@@ -74,6 +74,7 @@ const TransportBar = lazy(() => import('@/features/playback/TransportBar').then(
  * cannot carry (the viewer's Source button reads it).
  */
 const confirmedMeta = (doc: DocumentRow) => ({
+    storage_path: doc.storage_path,
     archived_at: doc.archived_at,
     source_url: doc.source_url ?? null,
     source_filename: doc.source_filename ?? null,
@@ -507,8 +508,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
             // Warm open: paint from Dexie immediately with the role stored
             // there (see CloudDocState), then confirm in the background.
-            // The signed URL for a cold open is minted in the same tick as the
-            // Dexie read; a hit ignores it, a miss streams from it.
+            // Speculate on the private original alongside the row fetch. The
+            // confirmed row's path decides whether that URL can be reused.
             const prefetch = current ? undefined : prefetchScoreUrl(docId);
             if (!current) {
                 // Its script loads alongside these lookups, not after them.
