@@ -26,6 +26,8 @@ import {
     fitPageWidthScale,
     focusedPageIndex,
     mountedPageIndices,
+    pageFitView,
+    pageTopView,
     pageTurnView,
     reanchorView,
     turnFromPageIndex,
@@ -47,6 +49,18 @@ import { editedTextPayload, MIN_TEXT_NOTE_WIDTH, TEXT_NOTE_EDGE } from '@/featur
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
+import {
+    exitStandMode,
+    setStandTarget,
+    STAND_MENU_MS,
+    standKeyAction,
+    standMayInk,
+    standPageAfter,
+    standTapZone,
+    standTurnAllowed,
+    useStandSession,
+} from '@/features/viewer/stand/standMode';
+import { StandOverlay } from '@/features/viewer/stand/StandOverlay';
 import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
 import { features } from '@/lib/features';
 import { prefersReducedMotion } from '@/lib/motion';
@@ -148,6 +162,15 @@ const pageTurnDirection = (e: KeyboardEvent): -1 | 1 | null => {
     }
 };
 
+/** A horizontal drag this far (px), and mostly sideways, turns the page in stand mode. */
+const STAND_SWIPE_PX = 60;
+
+/**
+ * How long (ms) after leaving stand mode each resize (full screen and the
+ * header going away take a few) still puts the page it showed back in view.
+ */
+const STAND_RETURN_SETTLE_MS = 1000;
+
 /** Keys aimed at a control or a dialog belong to it, not to page turning. */
 const keyTargetsControl = (target: EventTarget | null): boolean =>
     target instanceof Element &&
@@ -235,6 +258,7 @@ export const PdfViewport = ({
     const mountedKeyRef = useRef('');
     const preferredColumns = useViewerStore((s) => s.pageColumns);
     const spreadCover = useViewerStore((s) => s.spreadCover);
+    const standMode = useViewerStore((s) => s.standMode);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const inkRef = useRef<InkController | null>(null);
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
@@ -252,8 +276,13 @@ export const PdfViewport = ({
 
     // Two pages side by side would be thumbnails on a phone: one column there,
     // without touching the saved preference (a rotation back brings it back).
+    // Stand mode shows one page at a time.
     const narrow = viewportSize.width > 0 && viewportSize.width < SM_BREAKPOINT;
-    const pageColumns: PageColumns = narrow ? 1 : preferredColumns;
+    const pageColumns: PageColumns = narrow || standMode ? 1 : preferredColumns;
+    /** The page stand mode shows (0-based). */
+    const [standPage, setStandPage] = useState(0);
+    /** Stand mode's controls: up, and a counter that restarts their timer. */
+    const [standMenu, setStandMenu] = useState({ open: false, nonce: 0 });
 
     const layout: DocumentLayout = useMemo(
         () => computeDocumentLayout(pageSizes, pageColumns, spreadCover),
@@ -284,13 +313,42 @@ export const PdfViewport = ({
     const readOnlyRef = useRef(effectiveReadOnly);
     const renderScaleRef = useRef(renderScale);
     const playbackRef = useRef(playback);
+    const textIntentRef = useRef(textIntent);
     useEffect(() => {
         layoutRef.current = layout;
         viewportSizeRef.current = viewportSize;
         readOnlyRef.current = effectiveReadOnly;
         renderScaleRef.current = renderScale;
         playbackRef.current = playback;
-    }, [layout, viewportSize, effectiveReadOnly, renderScale, playback]);
+        textIntentRef.current = textIntent;
+    }, [layout, viewportSize, effectiveReadOnly, renderScale, playback, textIntent]);
+    // Before paint: a tap or key in the frame after the mode changed must see it.
+    const standModeRef = useRef(standMode);
+    const standPageRef = useRef(standPage);
+    useLayoutEffect(() => {
+        standModeRef.current = standMode;
+        standPageRef.current = standPage;
+    }, [standMode, standPage]);
+    /** Where the view was when stand mode began, in the layout it had then. */
+    const standEntryRef = useRef<{
+        view: ViewState;
+        page: number;
+        /** The zoom as a multiple of fit-width. */
+        relative: number;
+        size: ViewportSize;
+    } | null>(null);
+    /**
+     * Just left stand mode: the page it was showing, put back at the top of
+     * the view on each resize until the reader moves the view (or
+     * STAND_RETURN_SETTLE_MS passes). The exact view from before, if the
+     * page never changed and the viewport is the size it was.
+     */
+    const standReturnRef = useRef<{
+        page: number;
+        entry: NonNullable<typeof standEntryRef.current>;
+    } | null>(null);
+    /** A drag in stand mode: how far it went, and whether it became a pinch. */
+    const standSwipeRef = useRef({ dx: 0, dy: 0, pinch: false });
 
     // The ref is written here and only here, at once: the toolbar mounts with
     // the document and reports (child effects first) in the same commit as the
@@ -404,6 +462,8 @@ export const PdfViewport = ({
             if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
                 return;
             }
+            // The reader has the view now: leaving stand mode is done placing it.
+            standReturnRef.current = null;
             cancelSettleGlide();
             const { width, height } = viewportSizeRef.current;
             if (!didFitRef.current || width === 0 || height === 0) {
@@ -501,7 +561,9 @@ export const PdfViewport = ({
             const width = el.clientWidth;
             const height = el.clientHeight;
             // Before the size reaches state, so the first fit already sees it.
-            controlsStripRef.current = width > 0 && width < SM_BREAKPOINT ? PHONE_CONTROLS_STRIP : 0;
+            // Stand mode hides the pager and zoom row.
+            controlsStripRef.current =
+                width > 0 && width < SM_BREAKPOINT && !standModeRef.current ? PHONE_CONTROLS_STRIP : 0;
             applyObscured();
             setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
         };
@@ -550,6 +612,10 @@ export const PdfViewport = ({
         const { view: v, setView } = useViewerStore.getState();
         const prevColumns = fittedColumnsRef.current ?? pageColumns;
         fittedColumnsRef.current = pageColumns;
+        if (standMode || standReturnRef.current) {
+            // Stand mode places the view itself, and so does leaving it (below).
+            return;
+        }
         let next: ViewState;
         if (prevColumns !== pageColumns) {
             // A rotation across `sm` switched between one and two columns: the
@@ -578,7 +644,116 @@ export const PdfViewport = ({
         next = clampScroll(next, layout, viewportSize.width, viewportSize.height, obscuredRef.current);
         setView(next);
         setRenderScale(next.scale);
-    }, [viewportSize, layout, pageColumns, pageSizes, spreadCover]);
+    }, [viewportSize, layout, pageColumns, pageSizes, spreadCover, standMode]);
+
+    // Entering stand mode starts on the page being read; leaving it comes
+    // back to the page it was showing. Before paint, and before the refs
+    // below catch up: they still hold the layout, size and strips from
+    // before the switch, which is what the entry is measured in.
+    useLayoutEffect(() => {
+        if (standMode) {
+            const v = useViewerStore.getState().view;
+            const before = layoutRef.current;
+            const size = viewportSizeRef.current;
+            const page = focusedPageIndex(v, size.height, before.layouts, obscuredRef.current);
+            standEntryRef.current = { view: v, page, relative: v.scale / fitPageWidthScale(before, size.width), size };
+            standReturnRef.current = null;
+            standPageRef.current = page;
+            setStandPage(page);
+            setStandMenu((m) => ({ open: true, nonce: m.nonce + 1 }));
+            // The header button that was pressed is covered now; a pedal's
+            // Space must not press it again.
+            const active = document.activeElement;
+            if (active instanceof HTMLElement && !containerRef.current?.contains(active)) {
+                active.blur();
+            }
+            return;
+        }
+        const entry = standEntryRef.current;
+        if (entry) {
+            standEntryRef.current = null;
+            standReturnRef.current = { page: standPageRef.current, entry };
+            setStandMenu((m) => ({ ...m, open: false }));
+        }
+    }, [standMode]);
+
+    // Stand mode: the page, whole and centred, at every size full screen
+    // passes through. Then, once it ends, that page back at the top of the
+    // view at the zoom it had before (see standReturnRef).
+    useEffect(() => {
+        const { width, height } = viewportSize;
+        if (status !== 'ready' || width === 0 || height === 0 || layout.layouts.length === 0) {
+            return;
+        }
+        const { setView } = useViewerStore.getState();
+        if (standMode) {
+            const next = pageFitView(layout, Math.min(standPage, layout.layouts.length - 1), width, height);
+            if (next) {
+                // The bitmaps catch up once it settles, as after a zoom.
+                setView(next);
+            }
+            return;
+        }
+        const back = standReturnRef.current;
+        if (!back) {
+            return;
+        }
+        const { entry } = back;
+        const next =
+            back.page === entry.page && entry.size.width === width && entry.size.height === height
+                ? clampScroll(entry.view, layout, width, height, obscuredRef.current)
+                : pageTopView(layout, back.page, entry.relative, width, height, obscuredRef.current);
+        setView(next);
+        setRenderScale(next.scale);
+        const timer = setTimeout(() => {
+            standReturnRef.current = null;
+        }, STAND_RETURN_SETTLE_MS);
+        return () => clearTimeout(timer);
+    }, [standMode, standPage, viewportSize, layout, status]);
+
+    /**
+     * Stand mode's page turn: one page, never past either end, and never
+     * while the score is being marked.
+     */
+    const standTurn = useCallback((direction: -1 | 1) => {
+        const allowed = standTurnAllowed({
+            inking: gestureRef.current?.inkActive ?? false,
+            editingText: textIntentRef.current !== null,
+            dialogOpen: isDialogOpen(),
+        });
+        const next = standPageAfter(standPageRef.current, direction, layoutRef.current.layouts.length);
+        if (!allowed || next === null) {
+            return;
+        }
+        standPageRef.current = next;
+        setStandPage(next);
+    }, []);
+
+    /** A tap in the middle: the controls come up (or go, if they are up). */
+    const toggleStandMenu = useCallback(
+        () => setStandMenu((m) => (m.open ? { ...m, open: false } : { open: true, nonce: m.nonce + 1 })),
+        [],
+    );
+    const keepStandMenu = useCallback(() => setStandMenu((m) => ({ open: true, nonce: m.nonce + 1 })), []);
+    useEffect(() => {
+        if (!standMenu.open) {
+            return;
+        }
+        const timer = setTimeout(() => setStandMenu((m) => ({ ...m, open: false })), STAND_MENU_MS);
+        return () => clearTimeout(timer);
+    }, [standMenu]);
+
+    useStandSession(standMode);
+
+    // The element stand mode shows full screen; unmounting (another score, a
+    // lost access) ends the mode.
+    useEffect(() => {
+        setStandTarget(containerRef.current);
+        return () => {
+            setStandTarget(null);
+            exitStandMode();
+        };
+    }, []);
 
     // Page sizes changing under a loaded document (a streamed first open
     // corrects the pages whose size differs from page 1's as pdf.js reads
@@ -618,6 +793,7 @@ export const PdfViewport = ({
      * page 1, and zoomed out it must not be the centre row, which skipped one.
      */
     const turnPage = useCallback((direction: -1 | 1) => {
+        standReturnRef.current = null;
         const { view: v, setView } = useViewerStore.getState();
         const { width, height } = viewportSizeRef.current;
         const current = turnFromPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current);
@@ -784,24 +960,57 @@ export const PdfViewport = ({
 
         const controller = new GestureController(el, {
             onPan: (dx, dy) => {
+                if (standModeRef.current) {
+                    // The page stays put on the stand; a swipe turns it.
+                    standSwipeRef.current.dx += dx;
+                    standSwipeRef.current.dy += dy;
+                    return;
+                }
                 playheadControllerRef.current?.notifyUserGesture();
                 const { view: v, setView } = useViewerStore.getState();
                 setView(clamp({ ...v, scrollX: v.scrollX - dx, scrollY: v.scrollY - dy }));
             },
             onZoomBy: (factor, cx, cy) => {
+                if (standModeRef.current) {
+                    standSwipeRef.current.pinch = true;
+                    return;
+                }
                 playheadControllerRef.current?.notifyUserGesture();
                 const { view: v, setView } = useViewerStore.getState();
                 setView(clamp(zoomAt(v, v.scale * factor, cx, cy)));
             },
             onWheelScroll: (dx, dy) => {
+                if (standModeRef.current) {
+                    return;
+                }
+                standReturnRef.current = null;
                 playheadControllerRef.current?.notifyUserGesture();
                 const { view: v, setView } = useViewerStore.getState();
                 setView(clamp({ ...v, scrollX: v.scrollX + dx, scrollY: v.scrollY + dy }));
             },
             onGestureEnd: () => {
                 // Bitmap refresh is handled by the settle timer on scale change.
+                const swipe = standSwipeRef.current;
+                standSwipeRef.current = { dx: 0, dy: 0, pinch: false };
+                if (
+                    standModeRef.current &&
+                    !swipe.pinch &&
+                    Math.abs(swipe.dx) >= STAND_SWIPE_PX &&
+                    Math.abs(swipe.dx) > Math.abs(swipe.dy) * 1.5
+                ) {
+                    standTurn(swipe.dx < 0 ? 1 : -1);
+                }
             },
             onTap: (x, y) => {
+                if (standModeRef.current) {
+                    const zone = standTapZone(x, viewportSizeRef.current.width);
+                    if (zone === 'menu') {
+                        toggleStandMenu();
+                    } else {
+                        standTurn(zone === 'next' ? 1 : -1);
+                    }
+                    return;
+                }
                 // A tap in the margin strip turns the page, whatever the tool:
                 // only pointers the ink layer declined get here.
                 const strip = edgeTapStripPx(viewportSizeRef.current.width);
@@ -842,7 +1051,13 @@ export const PdfViewport = ({
                 feature.getEngine()?.seek(measureStartTick(feature.score.measures, index));
             },
         });
-        controller.setInkDelegate(ink.delegate);
+        // On the stand a finger or a click turns pages; only a pen writes.
+        controller.setInkDelegate({
+            ...ink.delegate,
+            shouldInk: (e) =>
+                (!standModeRef.current || standMayInk(e.pointerType, useViewerStore.getState().tool)) &&
+                ink.delegate.shouldInk(e),
+        });
         gestureRef.current = controller;
 
         // Cloud documents additionally get the sync engine + realtime channel,
@@ -923,6 +1138,8 @@ export const PdfViewport = ({
         registry,
         docId,
         turnPage,
+        standTurn,
+        toggleStandMenu,
         syncUserId,
         syncName,
         syncIsAnonymous,
@@ -982,7 +1199,28 @@ export const PdfViewport = ({
     // mark undone under a confirm is a change made behind the user's back.
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.defaultPrevented || isDialogOpen() || keyTargetsControl(e.target)) {
+            if (e.defaultPrevented || isDialogOpen()) {
+                return;
+            }
+            if (standModeRef.current) {
+                const action = standKeyAction(e);
+                // A field on the score (a text note) keeps its keys; stand
+                // mode's own buttons do not take a pedal's Space.
+                const ownTarget =
+                    e.target instanceof Node &&
+                    containerRef.current?.contains(e.target) === true &&
+                    !(e.target instanceof Element && e.target.closest('[data-stand-overlay]'));
+                if (action !== null && !(ownTarget && keyTargetsControl(e.target))) {
+                    e.preventDefault();
+                    if (action === 'exit') {
+                        exitStandMode();
+                    } else {
+                        standTurn(action === 'next' ? 1 : -1);
+                    }
+                    return;
+                }
+            }
+            if (keyTargetsControl(e.target)) {
                 return;
             }
             const direction = pageTurnDirection(e);
@@ -1005,7 +1243,7 @@ export const PdfViewport = ({
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [annotationStore, turnPage]);
+    }, [annotationStore, turnPage, standTurn]);
 
     const commitText = (text: string, at?: { nx: number; ny: number }) => {
         if (!textIntent || textIntentHandled.current) {
@@ -1070,7 +1308,10 @@ export const PdfViewport = ({
         return dpr * bitmapBudgetFactor(layout, pageColumns, renderScale, dpr, viewportSize.width, viewportSize.height);
     }, [layout, pageColumns, renderScale, viewportSize.width, viewportSize.height]);
 
-    const mounted = mountedPageIndices(view, layout, viewportSize.width, viewportSize.height);
+    // Stand mode shows its page alone: no neighbour peeking in at the margins.
+    const mounted = standMode
+        ? [Math.min(standPage, layout.layouts.length - 1)].filter((i) => i >= 0)
+        : mountedPageIndices(view, layout, viewportSize.width, viewportSize.height);
     const mountedKey = mounted.join(',');
     // What the live-view subscription compares against to decide it must render.
     useLayoutEffect(() => {
@@ -1108,7 +1349,14 @@ export const PdfViewport = ({
     return (
         // overflow-clip, not -hidden: a hidden box still scrolls to show a focused
         // caret, which slid the whole viewer sideways while typing a note.
-        <div ref={containerRef} className="ink-surface relative h-full overflow-clip bg-stone-200">
+        // In stand mode it is the element shown full screen, or (no Fullscreen
+        // API: iPhone) a fixed overlay over the whole window, 100dvh tall; the
+        // viewer frames lift themselves over other floating UI while it is.
+        <div
+            ref={containerRef}
+            data-stand-mode={standMode || undefined}
+            className="ink-surface relative h-full overflow-clip bg-stone-200 data-stand-mode:fixed data-stand-mode:inset-x-0 data-stand-mode:top-0 data-stand-mode:z-[60] data-stand-mode:h-dvh"
+        >
             {status === 'loading' ? (
                 <div className="flex h-full items-center justify-center">
                     <LoadingText>Loading score…</LoadingText>
@@ -1149,7 +1397,7 @@ export const PdfViewport = ({
                             </>
                         ) : null}
                     </div>
-                    {overlayMode === 'history' ? (
+                    {overlayMode === 'history' && !standMode ? (
                         <div
                             data-ui-overlay
                             // Phones: below the pager/zoom strip (PHONE_CONTROLS_STRIP), not over it.
@@ -1167,8 +1415,12 @@ export const PdfViewport = ({
                             </div>
                         </div>
                     ) : null}
-                    {effectiveReadOnly ? null : <Toolbar store={annotationStore} onObscuredChange={reportObscured} />}
-                    {features.fingering && readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
+                    {effectiveReadOnly || standMode ? null : (
+                        <Toolbar store={annotationStore} onObscuredChange={reportObscured} />
+                    )}
+                    {features.fingering && readOnly && overlayMode === null && !standMode ? (
+                        <ReadOnlyFingeringToggle />
+                    ) : null}
                     {!effectiveReadOnly && textIntent && textIntentLayout ? (
                         <LiveTextEditorOverlay
                             intent={textIntent}
@@ -1190,7 +1442,7 @@ export const PdfViewport = ({
                             }}
                         />
                     ) : null}
-                    {features.fingering && fingeringSel && fingeringLayout ? (
+                    {features.fingering && fingeringSel && fingeringLayout && !standMode ? (
                         <Suspense fallback={null}>
                             <FingeringFlow
                                 key={`${fingeringSel.pageIndex}:${fingeringSel.rect.x.toFixed(4)}:${fingeringSel.rect.y.toFixed(4)}`}
@@ -1204,18 +1456,34 @@ export const PdfViewport = ({
                             />
                         </Suspense>
                     ) : null}
-                    <ZoomControls
-                        onZoomBy={(factor) => {
-                            const { view: v, setView } = useViewerStore.getState();
-                            const zoomed = zoomAt(v, v.scale * factor, viewportSize.width / 2, viewportSize.height / 2);
-                            setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height, obscured));
-                        }}
-                        pageColumns={layout.layouts.length > 1 && !narrow ? pageColumns : null}
-                        onTogglePageColumns={togglePageColumns}
-                        spreadCover={spreadCover}
-                        onToggleSpreadCover={toggleSpreadCover}
-                    />
-                    {layout.layouts.length > 1 ? (
+                    {standMode ? (
+                        standMenu.open ? (
+                            <StandOverlay
+                                page={standPage}
+                                pageCount={layout.layouts.length}
+                                onTurn={standTurn}
+                                onInteract={keepStandMenu}
+                            />
+                        ) : null
+                    ) : (
+                        <ZoomControls
+                            onZoomBy={(factor) => {
+                                const { view: v, setView } = useViewerStore.getState();
+                                const zoomed = zoomAt(
+                                    v,
+                                    v.scale * factor,
+                                    viewportSize.width / 2,
+                                    viewportSize.height / 2,
+                                );
+                                setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height, obscured));
+                            }}
+                            pageColumns={layout.layouts.length > 1 && !narrow ? pageColumns : null}
+                            onTogglePageColumns={togglePageColumns}
+                            spreadCover={spreadCover}
+                            onToggleSpreadCover={toggleSpreadCover}
+                        />
+                    )}
+                    {layout.layouts.length > 1 && !standMode ? (
                         <Pager layout={layout} viewportSize={viewportSize} obscured={obscured} onTurn={turnPage} />
                     ) : null}
                 </>

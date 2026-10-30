@@ -111,6 +111,13 @@ interface ViewerStore extends PlaybackSlice {
     setPrintHandwriting: (printHandwriting: boolean) => void;
     setPageColumns: (pageColumns: PageColumns) => void;
     setSpreadCover: (spreadCover: boolean) => void;
+    /**
+     * Stand mode: the score alone, full screen, one page at a time (see
+     * features/viewer/stand). Never persisted; entered with enterStandMode,
+     * which asks for full screen inside the click.
+     */
+    standMode: boolean;
+    setStandMode: (standMode: boolean) => void;
     /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
     selectedTextId: string | null;
     setSelectedTextId: (selectedTextId: string | null) => void;
@@ -171,6 +178,8 @@ export const useViewerStore = create<ViewerStore>((set) => ({
         writeSpreadCover(spreadCover);
         set({ spreadCover });
     },
+    standMode: false,
+    setStandMode: (standMode) => set({ standMode }),
     selectedTextId: null,
     setSelectedTextId: (selectedTextId) => set({ selectedTextId }),
     ...INITIAL_PLAYBACK,

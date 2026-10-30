@@ -137,6 +137,11 @@ export class GestureController {
         this.inkDelegate = delegate;
     }
 
+    /** The ink layer holds a pointer: a stroke (or an erase, a note drag) is under way. */
+    get inkActive(): boolean {
+        return this.inkPointerId !== null;
+    }
+
     /** A finger, pen or mouse button is down on the score: a pan, pinch or stroke is under way. */
     get pointerActive(): boolean {
         return this.pointers.size > 0 || this.inkPointerId !== null;

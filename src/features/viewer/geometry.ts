@@ -371,6 +371,54 @@ export const fitPageWidthScale = (layout: DocumentLayout, viewportWidth: number)
 };
 
 /**
+ * Stand mode's view of one page: the whole page, as large as the viewport
+ * allows with a PAGE_GAP margin, centred both ways. Unclamped: the page is
+ * centred even where clampScroll would pin page 1 to the top.
+ */
+export const pageFitView = (
+    layout: DocumentLayout,
+    pageIndex: number,
+    viewportWidth: number,
+    viewportHeight: number,
+): ViewState | null => {
+    const page = layout.layouts[pageIndex];
+    if (!page || page.width <= 0 || page.height <= 0) {
+        return null;
+    }
+    const fit = Math.min((viewportWidth - PAGE_GAP * 2) / page.width, (viewportHeight - PAGE_GAP * 2) / page.height);
+    const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, fit));
+    return {
+        scale,
+        scrollX: page.left * scale - (viewportWidth - page.width * scale) / 2,
+        scrollY: page.top * scale - (viewportHeight - page.height * scale) / 2,
+    };
+};
+
+/**
+ * `pageIndex`'s row at the top of the uncovered viewport, at `relativeScale`
+ * times fit-width — where a layout switch puts the page being read, and where
+ * leaving stand mode puts the page it was showing. Clamped.
+ */
+export const pageTopView = (
+    layout: DocumentLayout,
+    pageIndex: number,
+    relativeScale: number,
+    viewportWidth: number,
+    viewportHeight: number,
+    obscured: ObscuredEdges = NO_OBSCURED,
+): ViewState => {
+    const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, fitPageWidthScale(layout, viewportWidth) * relativeScale));
+    const top = layout.layouts[pageIndex]?.top ?? PAGE_GAP;
+    return clampScroll(
+        { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - Math.max(0, obscured.top) },
+        layout,
+        viewportWidth,
+        viewportHeight,
+        obscured,
+    );
+};
+
+/**
  * The view after the page sizes change under it (a streamed first open lays
  * every page out at page 1's size, then corrects the ones that differ). The
  * same point of the page at the viewport centre stays at the centre, so a
