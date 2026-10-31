@@ -104,6 +104,8 @@ const expectExitStaysUp = () => {
     expect(useViewerStore.getState().standMode).toBe(true);
     expect(surface()).toHaveAttribute('data-stand-mode');
     expect(exitButton()).toBeInTheDocument();
+    // No pager over nothing.
+    expect(screen.queryByText(/^Page /)).not.toBeInTheDocument();
     // Long past the controls' timeout.
     act(() => vi.advanceTimersByTime(STAND_MENU_MS * 3));
     expect(exitButton()).toBeInTheDocument();

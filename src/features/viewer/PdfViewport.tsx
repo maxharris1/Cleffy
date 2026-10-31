@@ -402,6 +402,12 @@ export const PdfViewport = ({
      */
     const settleIntoBounds = useCallback(() => {
         cancelSettleGlide();
+        if (standModeRef.current) {
+            // Stand mode places its page whole and centred, outside these bounds.
+            slackTopRef.current = null;
+            settlePendingRef.current = false;
+            return;
+        }
         const { width, height } = viewportSizeRef.current;
         if (!didFitRef.current || width === 0 || height === 0) {
             return;
@@ -466,7 +472,7 @@ export const PdfViewport = ({
             standReturnRef.current = null;
             cancelSettleGlide();
             const { width, height } = viewportSizeRef.current;
-            if (!didFitRef.current || width === 0 || height === 0) {
+            if (!didFitRef.current || width === 0 || height === 0 || standModeRef.current) {
                 return;
             }
             const v = useViewerStore.getState().view;
@@ -658,6 +664,11 @@ export const PdfViewport = ({
             const page = focusedPageIndex(v, size.height, before.layouts, obscuredRef.current);
             standEntryRef.current = { view: v, page, relative: v.scale / fitPageWidthScale(before, size.width), size };
             standReturnRef.current = null;
+            // Nothing else moves the view while stand mode has it: a settle
+            // under way stops here (a follow glide, on its next frame).
+            cancelSettleGlide();
+            slackTopRef.current = null;
+            settlePendingRef.current = false;
             standPageRef.current = page;
             setStandPage(page);
             setStandMenu((m) => ({ open: true, nonce: m.nonce + 1 }));
@@ -675,7 +686,7 @@ export const PdfViewport = ({
             standReturnRef.current = { page: standPageRef.current, entry };
             setStandMenu((m) => ({ ...m, open: false }));
         }
-    }, [standMode]);
+    }, [standMode, cancelSettleGlide]);
 
     // Stand mode: the page, whole and centred, at every size full screen
     // passes through. Then, once it ends, that page back at the top of the
@@ -769,7 +780,8 @@ export const PdfViewport = ({
             return;
         }
         const { width, height } = viewportSizeRef.current;
-        if (width === 0 || height === 0) {
+        // Stand mode fits its page to the new layout itself.
+        if (width === 0 || height === 0 || standModeRef.current) {
             return;
         }
         const { view: v, setView } = useViewerStore.getState();
@@ -1051,12 +1063,16 @@ export const PdfViewport = ({
                 feature.getEngine()?.seek(measureStartTick(feature.score.measures, index));
             },
         });
-        // On the stand a finger or a click turns pages; only a pen writes.
+        // On the stand a finger or a click turns pages; only a pen writes. A
+        // pinch neither zooms nor resizes a text note the text tool still
+        // has selected from before.
         controller.setInkDelegate({
             ...ink.delegate,
             shouldInk: (e) =>
                 (!standModeRef.current || standMayInk(e.pointerType, useViewerStore.getState().tool)) &&
                 ink.delegate.shouldInk(e),
+            canPinch: () => !standModeRef.current && (ink.delegate.canPinch?.() ?? false),
+            onPinch: (factor) => !standModeRef.current && (ink.delegate.onPinch?.(factor) ?? false),
         });
         gestureRef.current = controller;
 
@@ -1169,6 +1185,7 @@ export const PdfViewport = ({
             getRenderScale: () => renderScaleRef.current,
             getViewportSize: () => viewportSizeRef.current,
             getObscured: () => obscuredRef.current,
+            isViewHeld: () => standModeRef.current,
         });
         playheadControllerRef.current = controller;
         return () => {
@@ -1344,6 +1361,8 @@ export const PdfViewport = ({
     const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
     const fingeringLayout = fingeringSel ? layout.layouts[fingeringSel.pageIndex] : undefined;
 
+    const scoreShown = status === 'ready' && doc !== null;
+
     // NOTE: the ref'd container must render in every state — the ResizeObserver
     // and GestureController bind once and would otherwise attach to nothing.
     return (
@@ -1361,7 +1380,7 @@ export const PdfViewport = ({
                 <div className="flex h-full items-center justify-center">
                     <LoadingText>Loading score…</LoadingText>
                 </div>
-            ) : status === 'error' || !doc ? (
+            ) : !scoreShown ? (
                 <div className="flex h-full items-center justify-center p-8">
                     <ErrorText>Could not open this PDF{error ? `: ${error}` : '.'}</ErrorText>
                 </div>
@@ -1456,16 +1475,7 @@ export const PdfViewport = ({
                             />
                         </Suspense>
                     ) : null}
-                    {standMode ? (
-                        standMenu.open ? (
-                            <StandOverlay
-                                page={standPage}
-                                pageCount={layout.layouts.length}
-                                onTurn={standTurn}
-                                onInteract={keepStandMenu}
-                            />
-                        ) : null
-                    ) : (
+                    {standMode ? null : (
                         <ZoomControls
                             onZoomBy={(factor) => {
                                 const { view: v, setView } = useViewerStore.getState();
@@ -1488,6 +1498,15 @@ export const PdfViewport = ({
                     ) : null}
                 </>
             )}
+            {/* With no score to show (still loading, or it failed) the way out stays up. */}
+            {standMode && (standMenu.open || !scoreShown) ? (
+                <StandOverlay
+                    page={standPage}
+                    pageCount={scoreShown ? layout.layouts.length : 0}
+                    onTurn={standTurn}
+                    onInteract={keepStandMenu}
+                />
+            ) : null}
         </div>
     );
 };

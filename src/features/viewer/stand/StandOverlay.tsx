@@ -9,7 +9,8 @@ const roundButtonClassName =
 /**
  * Stand mode's controls, up for a few seconds after a tap in the middle of the
  * score (and on entering): previous, the page, next, and Exit. Fades in,
- * instantly under reduced motion; gone at once when it goes.
+ * instantly under reduced motion; gone at once when it goes. With no pages
+ * (the score still loading, or failed) only Exit.
  */
 export const StandOverlay = ({
     page,
@@ -19,6 +20,7 @@ export const StandOverlay = ({
 }: {
     /** 0-based page on screen. */
     page: number;
+    /** 0 while there is no score to page through. */
     pageCount: number;
     onTurn: (direction: -1 | 1) => void;
     /** A control was used: keep the overlay up a while longer. */
@@ -34,34 +36,38 @@ export const StandOverlay = ({
             aria-label="Full screen controls"
             className="chrome-glass pointer-events-auto flex items-center gap-1 rounded-full border border-stone-200 bg-white/95 p-1 shadow-lg motion-safe:animate-[ui-fade-in_var(--duration-dialog)_var(--ease-out)]"
         >
-            <button
-                type="button"
-                aria-label="Previous page"
-                disabled={page <= 0}
-                onClick={() => {
-                    onInteract();
-                    onTurn(-1);
-                }}
-                className={roundButtonClassName}
-            >
-                <ChevronLeftIcon size={22} />
-            </button>
-            <span aria-live="polite" className="px-2 text-sm font-medium tabular-nums text-stone-700">
-                Page {Math.min(page + 1, pageCount)} / {pageCount}
-            </span>
-            <button
-                type="button"
-                aria-label="Next page"
-                disabled={page >= pageCount - 1}
-                onClick={() => {
-                    onInteract();
-                    onTurn(1);
-                }}
-                className={roundButtonClassName}
-            >
-                <ChevronRightIcon size={22} />
-            </button>
-            <span aria-hidden="true" className="mx-1 h-6 w-px bg-stone-200" />
+            {pageCount > 0 ? (
+                <>
+                    <button
+                        type="button"
+                        aria-label="Previous page"
+                        disabled={page <= 0}
+                        onClick={() => {
+                            onInteract();
+                            onTurn(-1);
+                        }}
+                        className={roundButtonClassName}
+                    >
+                        <ChevronLeftIcon size={22} />
+                    </button>
+                    <span aria-live="polite" className="px-2 text-sm font-medium tabular-nums text-stone-700">
+                        Page {Math.min(page + 1, pageCount)} / {pageCount}
+                    </span>
+                    <button
+                        type="button"
+                        aria-label="Next page"
+                        disabled={page >= pageCount - 1}
+                        onClick={() => {
+                            onInteract();
+                            onTurn(1);
+                        }}
+                        className={roundButtonClassName}
+                    >
+                        <ChevronRightIcon size={22} />
+                    </button>
+                    <span aria-hidden="true" className="mx-1 h-6 w-px bg-stone-200" />
+                </>
+            ) : null}
             <button
                 type="button"
                 onClick={exitStandMode}
