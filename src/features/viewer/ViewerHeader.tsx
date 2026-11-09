@@ -7,6 +7,11 @@ interface ViewerHeaderProps {
     backTo: string;
     backLabel: string;
     title: string;
+    /**
+     * A control kept on the title's row (the stand-mode toggle): on a phone it
+     * costs the title some width rather than the score another header row.
+     */
+    titleAction?: ReactNode;
     /** Right-side chrome: presence, sync status, badges, actions. */
     children?: ReactNode;
 }
@@ -18,7 +23,7 @@ interface ViewerHeaderProps {
  * / Notes stay on-screen on a phone or a ~768px tablet. A single nowrap row at
  * md clipped the title to unreadable crumbs beside the actions.
  */
-export const ViewerHeader = ({ backTo, backLabel, title, children }: ViewerHeaderProps) => {
+export const ViewerHeader = ({ backTo, backLabel, title, titleAction, children }: ViewerHeaderProps) => {
     const [titleOpen, setTitleOpen] = useState(false);
     return (
         <header className="border-b border-stone-200 bg-white pb-2 pl-[max(0.75rem,var(--safe-left))] pr-[max(0.75rem,var(--safe-right))] pt-[max(0.5rem,var(--safe-top))] shadow-sm">
@@ -47,6 +52,7 @@ export const ViewerHeader = ({ backTo, backLabel, title, children }: ViewerHeade
                     >
                         {title}
                     </button>
+                    {titleAction}
                 </div>
                 {children ? (
                     <nav

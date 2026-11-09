@@ -70,6 +70,12 @@ export interface PlayheadDeps {
     getViewportSize: () => { width: number; height: number };
     /** Viewport strips under the toolbars: following keeps the system clear of them. */
     getObscured?: () => ObscuredEdges;
+    /**
+     * Something else places the view (stand mode shows one page whole): the
+     * playhead still draws, but following leaves the view alone and a glide
+     * under way stops.
+     */
+    isViewHeld?: () => boolean;
 }
 
 /** Viewport band the current system is kept inside while following. */
@@ -239,6 +245,10 @@ export class PlayheadController {
 
     /** Glide the view so the playhead's system sits near the top of the viewport. */
     private followTo(rect: PlayheadRect): void {
+        if (this.deps.isViewHeld?.()) {
+            this.anim = null;
+            return;
+        }
         const layout = this.deps.getLayout();
         const pageLayout = layout.layouts[rect.pageIndex];
         if (!pageLayout) {
@@ -290,6 +300,10 @@ export class PlayheadController {
 
     private stepFollowAnimation(): void {
         if (!this.anim) {
+            return;
+        }
+        if (this.deps.isViewHeld?.()) {
+            this.anim = null;
             return;
         }
         const store = useViewerStore.getState();

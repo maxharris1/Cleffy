@@ -38,6 +38,7 @@ import { PdfProvider, type PdfSource, type StreamedPdfSource } from '@/features/
 import { warmPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
 import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
+import { StandModeButton } from '@/features/viewer/stand/StandOverlay';
 import { InkSaveFailedNotice } from '@/features/viewer/InkSaveFailedNotice';
 import { LocalViewerFrame } from '@/features/viewer/LocalViewerFrame';
 import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
@@ -937,8 +938,14 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const ownBytes = state.bytes;
 
     return (
-        <div className="fixed inset-0 flex flex-col">
-            <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
+        // Lifted over floating UI while the score is in stand mode (PdfViewport).
+        <div className="fixed inset-0 flex flex-col has-[[data-stand-mode]]:z-[60]">
+            <ViewerHeader
+                backTo={backTo}
+                backLabel={backLabel}
+                title={state.doc.title}
+                titleAction={<StandModeButton />}
+            >
                 <PresenceBar peers={peers} selfUserId={resolvedUserId} />
                 {/* No engine yet (no role to sync under): say whether that is the network, or the server not having answered. */}
                 <SyncDot status={syncing ? syncStatus : !online ? 'offline' : awaitingServer ? 'waiting' : 'syncing'} />
@@ -1331,7 +1338,7 @@ const LocalViewer = ({ docId }: { docId: string }) => {
             bytes={bytes}
             onStoreReady={onStoreReady}
             header={
-                <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
+                <ViewerHeader backTo="/" backLabel="Back to home" title="Local score" titleAction={<StandModeButton />}>
                     <Badge>this device only</Badge>
                     {features.smartImport && annotationStore ? (
                         <ImportScanButton

@@ -56,8 +56,9 @@ export const LocalViewerFrame = ({
         // Fixed, so the whole viewer is one stack: UI floating over it from
         // outside (the demo's value card, z-40) would cover a toolbar popup
         // whatever the toolbar's own z-index. While one is open (Toolbar marks
-        // it data-toolbar-popup) the viewer is lifted over that UI.
-        <div className="fixed inset-0 flex flex-col has-[[data-toolbar-popup]]:z-50">
+        // it data-toolbar-popup) the viewer is lifted over that UI, and higher
+        // still while the score is in stand mode (PdfViewport).
+        <div className="fixed inset-0 flex flex-col has-[[data-toolbar-popup]]:z-50 has-[[data-stand-mode]]:z-[60]">
             {header}
             <main className="flex min-h-0 flex-1 flex-col">
                 <div className="relative min-h-0 flex-1">
