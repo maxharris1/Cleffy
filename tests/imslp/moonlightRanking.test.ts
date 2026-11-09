@@ -1,12 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-    editionListSummary,
+    isTaggedUrtext,
     rankEditions,
     recommendEdition,
-    recommendedBadge,
     splitEditions,
-    urtextBadge,
     urtextConfidence,
 } from '@/features/imslp/imslpDisplay';
 import { canonicalImslpFilename } from '../../supabase/functions/_shared/imslpLicense';
@@ -35,12 +33,12 @@ describe('Moonlight ranking fixture', () => {
         const ranked = rankEditions(work.editions);
         expect(ranked[0]?.filename).toBe(names.schirmer);
         expect(recommendEdition(work.editions)?.filename).toBe(names.schirmer);
-        expect(recommendedBadge(ranked[0]!)).toBe('Recommended');
+        expect(isTaggedUrtext(ranked[0]!)).toBe(false);
         expect(ranked.map((e) => e.filename)).not.toContainEqual(undefined);
         expect(ranked.slice(-2).map((e) => e.filename)).toEqual([names.henleII, names.henleI]);
         expect(ranked.findIndex((e) => e.filename === names.weiner)).toBeLessThan(ranked.length - 2);
-        expect(urtextBadge(ranked.at(-2)!)).toBe('Urtext · Henle · 1976');
-        expect(urtextBadge(ranked.at(-1)!)).toBe('Urtext · Henle · 1976');
+        expect(urtextConfidence(ranked.at(-2)!)).toBe('high');
+        expect(urtextConfidence(ranked.at(-1)!)).toBe('high');
         const { importable, unavailable } = splitEditions(work.editions);
         expect(unavailable.map((e) => e.filename)).toEqual([names.henleII, names.henleI]);
         expect(importable).toHaveLength(work.editions.length - 2);
@@ -50,21 +48,6 @@ describe('Moonlight ranking fixture', () => {
         const ranked = rankEditions(work.editions).map((e) => e.filename);
         expect(ranked.indexOf(names.dump)).toBeLessThan(ranked.indexOf(names.guitar));
         expect(ranked.indexOf(names.guitar)).toBeLessThan(ranked.indexOf(names.henleII));
-    });
-
-    it('counts the downloadable list and says Urtext first only when a tagged file leads it', () => {
-        const downloadable = work.editions.length - 2;
-        expect(editionListSummary(work.editions)).toBe(`${downloadable} downloadable PDFs — scroll for others.`);
-        const henleCleared = work.editions.map((e) =>
-            e.filename === names.henleII ? { ...e, downloadable: true, restriction: null } : e,
-        );
-        expect(editionListSummary(henleCleared)).toBe(
-            `${downloadable + 1} downloadable PDFs · Urtext first — scroll for others.`,
-        );
-        const allCleared = work.editions.map((e) => ({ ...e, downloadable: true, restriction: null }));
-        expect(editionListSummary(allCleared)).toBe(`${work.editions.length} PDFs · Urtext first — scroll for others.`);
-        const noTag = allCleared.map((e) => ({ ...e, urtext: false }));
-        expect(editionListSummary(noTag)).toBe(`${work.editions.length} PDFs — scroll for others.`);
     });
 
     it('gives publisher-only Henle a low-confidence house hint', () => {
