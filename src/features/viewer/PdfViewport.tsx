@@ -27,6 +27,7 @@ import {
     focusedPageIndex,
     mountedPageIndices,
     pageFitView,
+    pageRow,
     pageTopView,
     pageTurnView,
     reanchorView,
@@ -276,10 +277,15 @@ export const PdfViewport = ({
 
     // Two pages side by side would be thumbnails on a phone: one column there,
     // without touching the saved preference (a rotation back brings it back).
-    // Stand mode shows one page at a time.
+    // Stand mode shows a row of this same layout at a time: a page, or a
+    // spread; a score of one page has no spread to show.
     const narrow = viewportSize.width > 0 && viewportSize.width < SM_BREAKPOINT;
-    const pageColumns: PageColumns = narrow || standMode ? 1 : preferredColumns;
-    /** The page stand mode shows (0-based). */
+    const pageColumns: PageColumns = narrow || (standMode && pageSizes.length < 2) ? 1 : preferredColumns;
+    /**
+     * The page stand mode is on (0-based); it shows that page's row. Kept
+     * across layout changes (a rotation across `sm`), so the reader's page
+     * stays on screen in both; a turn moves it to the first page of a row.
+     */
     const [standPage, setStandPage] = useState(0);
     /** Stand mode's controls: up, and a counter that restarts their timer. */
     const [standMenu, setStandMenu] = useState({ open: false, nonce: 0 });
@@ -688,8 +694,8 @@ export const PdfViewport = ({
         }
     }, [standMode, cancelSettleGlide]);
 
-    // Stand mode: the page, whole and centred, at every size full screen
-    // passes through. Then, once it ends, that page back at the top of the
+    // Stand mode: the page or spread, whole and centred, at every size full
+    // screen passes through. Then, once it ends, that page back at the top of the
     // view at the zoom it had before (see standReturnRef).
     useEffect(() => {
         const { width, height } = viewportSize;
@@ -698,7 +704,8 @@ export const PdfViewport = ({
         }
         const { setView } = useViewerStore.getState();
         if (standMode) {
-            const next = pageFitView(layout, Math.min(standPage, layout.layouts.length - 1), width, height);
+            const page = Math.min(standPage, layout.layouts.length - 1);
+            const next = pageFitView(layout, page, width, height, pageColumns);
             if (next) {
                 // The bitmaps catch up once it settles, as after a zoom.
                 setView(next);
@@ -720,11 +727,11 @@ export const PdfViewport = ({
             standReturnRef.current = null;
         }, STAND_RETURN_SETTLE_MS);
         return () => clearTimeout(timer);
-    }, [standMode, standPage, viewportSize, layout, status]);
+    }, [standMode, standPage, viewportSize, layout, pageColumns, status]);
 
     /**
-     * Stand mode's page turn: one page, never past either end, and never
-     * while the score is being marked.
+     * Stand mode's page turn: one row (a page, or a whole spread), never past
+     * either end, and never while the score is being marked.
      */
     const standTurn = useCallback((direction: -1 | 1) => {
         const allowed = standTurnAllowed({
@@ -732,7 +739,7 @@ export const PdfViewport = ({
             editingText: textIntentRef.current !== null,
             dialogOpen: isDialogOpen(),
         });
-        const next = standPageAfter(standPageRef.current, direction, layoutRef.current.layouts.length);
+        const next = standPageAfter(layoutRef.current.layouts, standPageRef.current, direction);
         if (!allowed || next === null) {
             return;
         }
@@ -1325,9 +1332,10 @@ export const PdfViewport = ({
         return dpr * bitmapBudgetFactor(layout, pageColumns, renderScale, dpr, viewportSize.width, viewportSize.height);
     }, [layout, pageColumns, renderScale, viewportSize.width, viewportSize.height]);
 
-    // Stand mode shows its page alone: no neighbour peeking in at the margins.
+    // Stand mode shows its page or spread alone: no neighbour peeking in at the margins.
+    const standRow = pageRow(layout.layouts, Math.min(standPage, layout.layouts.length - 1));
     const mounted = standMode
-        ? [Math.min(standPage, layout.layouts.length - 1)].filter((i) => i >= 0)
+        ? Array.from({ length: standRow.last - standRow.first + 1 }, (_, i) => standRow.first + i)
         : mountedPageIndices(view, layout, viewportSize.width, viewportSize.height);
     const mountedKey = mounted.join(',');
     // What the live-view subscription compares against to decide it must render.
@@ -1501,7 +1509,7 @@ export const PdfViewport = ({
             {/* With no score to show (still loading, or it failed) the way out stays up. */}
             {standMode && (standMenu.open || !scoreShown) ? (
                 <StandOverlay
-                    page={standPage}
+                    pages={standRow}
                     pageCount={scoreShown ? layout.layouts.length : 0}
                     onTurn={standTurn}
                     onInteract={keepStandMenu}

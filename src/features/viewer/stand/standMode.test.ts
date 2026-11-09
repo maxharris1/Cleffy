@@ -1,6 +1,7 @@
 import { cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { computeDocumentLayout } from '@/features/viewer/geometry';
 import {
     enterStandMode,
     exitStandMode,
@@ -61,16 +62,20 @@ describe('standKeyAction', () => {
 });
 
 describe('standPageAfter', () => {
+    const page = { width: 600, height: 800 };
+    const three = computeDocumentLayout([page, page, page], 1).layouts;
+    const one = computeDocumentLayout([page], 1).layouts;
+
     it('steps one page either way', () => {
-        expect(standPageAfter(0, 1, 3)).toBe(1);
-        expect(standPageAfter(2, -1, 3)).toBe(1);
+        expect(standPageAfter(three, 0, 1)).toBe(1);
+        expect(standPageAfter(three, 2, -1)).toBe(1);
     });
 
     it('never wraps at the first or last page', () => {
-        expect(standPageAfter(0, -1, 3)).toBeNull();
-        expect(standPageAfter(2, 1, 3)).toBeNull();
-        expect(standPageAfter(0, 1, 1)).toBeNull();
-        expect(standPageAfter(0, -1, 1)).toBeNull();
+        expect(standPageAfter(three, 0, -1)).toBeNull();
+        expect(standPageAfter(three, 2, 1)).toBeNull();
+        expect(standPageAfter(one, 0, 1)).toBeNull();
+        expect(standPageAfter(one, 0, -1)).toBeNull();
     });
 });
 

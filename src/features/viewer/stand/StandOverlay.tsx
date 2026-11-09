@@ -8,18 +8,19 @@ const roundButtonClassName =
 
 /**
  * Stand mode's controls, up for a few seconds after a tap in the middle of the
- * score (and on entering): previous, the page, next, and Exit. Fades in,
+ * score (and on entering): previous, the page (or the spread's pages), next,
+ * and Exit. Fades in,
  * instantly under reduced motion; gone at once when it goes. With no pages
  * (the score still loading, or failed) only Exit.
  */
 export const StandOverlay = ({
-    page,
+    pages,
     pageCount,
     onTurn,
     onInteract,
 }: {
-    /** 0-based page on screen. */
-    page: number;
+    /** 0-based pages on screen, first to last: one page, or a spread. */
+    pages: { first: number; last: number };
     /** 0 while there is no score to page through. */
     pageCount: number;
     onTurn: (direction: -1 | 1) => void;
@@ -41,7 +42,7 @@ export const StandOverlay = ({
                     <button
                         type="button"
                         aria-label="Previous page"
-                        disabled={page <= 0}
+                        disabled={pages.first <= 0}
                         onClick={() => {
                             onInteract();
                             onTurn(-1);
@@ -51,12 +52,14 @@ export const StandOverlay = ({
                         <ChevronLeftIcon size={22} />
                     </button>
                     <span aria-live="polite" className="px-2 text-sm font-medium tabular-nums text-stone-700">
-                        Page {Math.min(page + 1, pageCount)} / {pageCount}
+                        {pages.last > pages.first
+                            ? `Pages ${pages.first + 1}–${pages.last + 1} / ${pageCount}`
+                            : `Page ${Math.min(pages.first + 1, pageCount)} / ${pageCount}`}
                     </span>
                     <button
                         type="button"
                         aria-label="Next page"
-                        disabled={page >= pageCount - 1}
+                        disabled={pages.last >= pageCount - 1}
                         onClick={() => {
                             onInteract();
                             onTurn(1);

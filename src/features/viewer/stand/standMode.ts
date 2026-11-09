@@ -1,13 +1,14 @@
 import { useEffect } from 'react';
 
+import { type PageLayout, pageRow } from '@/features/viewer/geometry';
 import { useViewerStore } from '@/state/store';
 import type { Tool } from '@/types/models';
 
 /**
- * Stand mode: the score alone, one whole page at a time, for playing from a
- * music stand. A tap on either side turns the page, a tap in the middle shows
- * a few controls for a moment, and the pedal keys turn pages as they always
- * do. Full screen through the Fullscreen API where there is one (prefixed on
+ * Stand mode: the score alone, one whole page (or, with two pages side by
+ * side, one whole spread) at a time, for playing from a music stand. A tap
+ * on either side turns the page, a tap in the middle shows a few controls
+ * for a moment, and the pedal keys turn pages as they always do. Full screen through the Fullscreen API where there is one (prefixed on
  * older iPadOS); where there is none (iPhone) the viewport covers the window
  * as a fixed overlay 100dvh tall, which is as much as Safari gives a page.
  */
@@ -63,10 +64,21 @@ export const standKeyAction = (
     }
 };
 
-/** The page a turn lands on, or null at either end: stand mode never wraps. */
-export const standPageAfter = (page: number, direction: -1 | 1, pageCount: number): number | null => {
-    const next = page + direction;
-    return next >= 0 && next < pageCount ? next : null;
+/**
+ * The page a turn lands on: the first page of the row after (or before) the
+ * one `page` sits in, so two pages side by side turn as a whole spread and a
+ * turn from either half of one lands on the same spread. Null at either end:
+ * stand mode never wraps.
+ */
+export const standPageAfter = (layouts: readonly PageLayout[], page: number, direction: -1 | 1): number | null => {
+    const row = pageRow(layouts, page);
+    if (row.last < row.first) {
+        return null;
+    }
+    if (direction === 1) {
+        return row.last + 1 < layouts.length ? row.last + 1 : null;
+    }
+    return row.first > 0 ? pageRow(layouts, row.first - 1).first : null;
 };
 
 /** What could make a page turn land in the middle of marking the score. */

@@ -148,13 +148,7 @@ export const pageTurnView = (
         pageIndex: i,
         scrollY: ((layouts[i]?.top ?? PAGE_GAP) - PAGE_GAP) * view.scale - Math.max(0, obscured.top),
     });
-    const firstOfRow = (i: number) => {
-        let first = i;
-        while (first > 0 && layouts[first - 1]?.top === layouts[i]?.top) {
-            first--;
-        }
-        return first;
-    };
+    const firstOfRow = (i: number) => pageRow(layouts, i).first;
     // Rows past the current one, nearest first.
     const targets: { pageIndex: number; scrollY: number }[] = [];
     if (direction === 1) {
@@ -371,26 +365,55 @@ export const fitPageWidthScale = (layout: DocumentLayout, viewportWidth: number)
 };
 
 /**
- * Stand mode's view of one page: the whole page, as large as the viewport
- * allows with a PAGE_GAP margin, centred both ways. Unclamped: the page is
- * centred even where clampScroll would pin page 1 to the top.
+ * The pages sharing `pageIndex`'s row (inclusive 0-based range): the page
+ * alone in one column, its spread in two. Empty ({0, -1}) past the end.
+ */
+export const pageRow = (layouts: readonly PageLayout[], pageIndex: number): { first: number; last: number } => {
+    const top = layouts[pageIndex]?.top;
+    if (top === undefined) {
+        return { first: 0, last: -1 };
+    }
+    let first = pageIndex;
+    while (first > 0 && layouts[first - 1]?.top === top) {
+        first--;
+    }
+    let last = pageIndex;
+    while (last < layouts.length - 1 && layouts[last + 1]?.top === top) {
+        last++;
+    }
+    return { first, last };
+};
+
+/**
+ * Stand mode's view of `pageIndex`'s row: the whole row, as large as the
+ * viewport allows with a PAGE_GAP margin, centred both ways. One column fits
+ * the page itself; two fit the full width of a spread, so a cover or a last
+ * page alone keeps its side, as in a book, and every turn keeps one zoom.
+ * Unclamped: the row is centred even where clampScroll would pin page 1 to
+ * the top.
  */
 export const pageFitView = (
     layout: DocumentLayout,
     pageIndex: number,
     viewportWidth: number,
     viewportHeight: number,
+    columns: PageColumns = 1,
 ): ViewState | null => {
-    const page = layout.layouts[pageIndex];
-    if (!page || page.width <= 0 || page.height <= 0) {
+    const { first, last } = pageRow(layout.layouts, pageIndex);
+    const row = layout.layouts.slice(first, last + 1);
+    const page = row[0];
+    if (!page || row.some((p) => p.width <= 0 || p.height <= 0)) {
         return null;
     }
-    const fit = Math.min((viewportWidth - PAGE_GAP * 2) / page.width, (viewportHeight - PAGE_GAP * 2) / page.height);
+    const left = columns === 2 ? 0 : page.left;
+    const width = columns === 2 ? layout.contentWidth : page.width;
+    const height = row.reduce((max, p) => Math.max(max, p.height), 0);
+    const fit = Math.min((viewportWidth - PAGE_GAP * 2) / width, (viewportHeight - PAGE_GAP * 2) / height);
     const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, fit));
     return {
         scale,
-        scrollX: page.left * scale - (viewportWidth - page.width * scale) / 2,
-        scrollY: page.top * scale - (viewportHeight - page.height * scale) / 2,
+        scrollX: left * scale - (viewportWidth - width * scale) / 2,
+        scrollY: page.top * scale - (viewportHeight - height * scale) / 2,
     };
 };
 
