@@ -1099,8 +1099,19 @@ export const PdfViewport = ({
 
     // Positions use the live scale; bitmaps use the settled renderScale. While they
     // differ, canvases are CSS-stretched by wrapping pages in a scaling transform.
-    // Rendered from the live view, so a render mid-gesture never steps it back.
-    const liveTransform = wrapperTransform(useViewerStore.getState().view, renderScale);
+    // The transform has one writer, the DOM: the live-view subscription writes
+    // each step, and this rewrites it after every commit from the live view and
+    // the renderScale just committed. As a style prop, React diffed it against
+    // its own last string, not the DOM: a layout switch at the top of the score
+    // renders the same string as before while the subscription had already
+    // stretched the old bitmaps to the new scale, and that stretch stayed (2×
+    // going to one page, half width going to two).
+    useLayoutEffect(() => {
+        const wrapper = wrapperRef.current;
+        if (wrapper) {
+            wrapper.style.transform = wrapperTransform(useViewerStore.getState().view, renderScale);
+        }
+    });
     const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
     const fingeringLayout = fingeringSel ? layout.layouts[fingeringSel.pageIndex] : undefined;
 
@@ -1125,7 +1136,6 @@ export const PdfViewport = ({
                         data-render-scale={renderScale}
                         className="absolute left-0 top-0"
                         style={{
-                            transform: liveTransform,
                             transformOrigin: '0 0',
                             width: layout.contentWidth * renderScale,
                             height: layout.contentHeight * renderScale,
