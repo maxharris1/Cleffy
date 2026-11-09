@@ -390,7 +390,9 @@ export const pageRow = (layouts: readonly PageLayout[], pageIndex: number): { fi
  * the page itself; two fit the full width of a spread, so a cover or a last
  * page alone keeps its side, as in a book, and every turn keeps one zoom.
  * Unclamped: the row is centred even where clampScroll would pin page 1 to
- * the top.
+ * the top, and shrunk below the manual zoom floor if that is what it takes
+ * to show every page whole. Null when nothing fits (a viewport no wider or
+ * taller than the margins).
  */
 export const pageFitView = (
     layout: DocumentLayout,
@@ -409,7 +411,12 @@ export const pageFitView = (
     const width = columns === 2 ? layout.contentWidth : page.width;
     const height = row.reduce((max, p) => Math.max(max, p.height), 0);
     const fit = Math.min((viewportWidth - PAGE_GAP * 2) / width, (viewportHeight - PAGE_GAP * 2) / height);
-    const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, fit));
+    if (fit <= 0) {
+        return null;
+    }
+    // No MIN_SCALE floor: that bounds manual zoom, and stand mode can neither
+    // pan nor zoom, so a large spread clamped up to it would lose its edges.
+    const scale = Math.min(MAX_SCALE, fit);
     return {
         scale,
         scrollX: left * scale - (viewportWidth - width * scale) / 2,
