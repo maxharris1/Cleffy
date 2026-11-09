@@ -61,11 +61,7 @@ There is no `liveTransform` variable and no `transform` style prop on the wrappe
 
 Prettier was run on every changed file.
 
-CI on c2d3021 when this report was pushed:
-
-- **Passed:** `supabase-local`, `supabase-drift`, `omr-service` and `edge-functions-deno` in both workflow runs; Vercel deploy and Vercel Preview Comments.
-- **Skipped:** Supabase Preview, as expected.
-- **Still running:** `checks` in both runs. It runs the same four commands that passed locally above.
+CI on c2d3021: **all green.** `checks`, `supabase-local`, `supabase-drift`, `omr-service` and `edge-functions-deno` passed in both workflow runs, and the Vercel deploy and Vercel Preview Comments passed. Supabase Preview was skipped, as expected.
 
 CI on a6364529 (the resume head) was all green.
 
