@@ -4,25 +4,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImslpBrowserProps } from '@/features/imslp/ImslpBrowser';
 import type { ImslpEdition, ImslpSearchResponse, ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import {
-    displayEditionName,
     displayWorkTitle,
     editionAvailability,
-    editionListSummary,
-    formatBytes,
+    editionFileLabel,
+    editionHeadline,
+    editionScopeTag,
+    editionsNeedingFileLabel,
     friendlySearchError,
     genericScoreMessage,
     hasSearchableQuery,
     highlightRanges,
     isEditionImportable,
+    isTaggedUrtext,
     rankEditions,
     recommendEdition,
-    recommendedBadge,
     SEARCH_TIMEOUT_COPY,
     searchTokens,
     splitEditions,
     splitSearchResults,
     suggestedPdfName,
-    urtextBadge,
 } from '@/features/imslp/imslpDisplay';
 import { moonlightFilenames, moonlightWorkDetail } from '../../../tests/imslp/moonlightEditions';
 import { groupPopularByComposer, POPULAR_WORKS, popularWorkTags } from '@/features/imslp/popularWorks';
@@ -133,13 +133,6 @@ describe('imslp display helpers', () => {
         expect(friendlySearchError(error)).toBe(SEARCH_TIMEOUT_COPY);
     });
 
-    it('formats byte sizes', () => {
-        expect(formatBytes(null)).toBe('');
-        expect(formatBytes(500)).toBe('500 B');
-        expect(formatBytes(2048)).toBe('2 KB');
-        expect(formatBytes(3 * 1024 * 1024)).toBe('3.0 MB');
-    });
-
     it('builds a safe suggested PDF name from the work title', () => {
         expect(suggestedPdfName('Piano Sonata No.14 (Beethoven, Ludwig van)', 'x.pdf')).toBe(
             'Piano Sonata No.14 (Beethoven, Ludwig van).pdf',
@@ -155,16 +148,37 @@ describe('imslp display helpers', () => {
         expect(displayWorkTitle('Untitled')).toEqual({ work: 'Untitled', composer: null });
     });
 
-    it('prefers publisher or a real description over dump filenames', () => {
-        expect(displayEditionName('PMLP01458-Beethoven_Moonlight.pdf')).toBe('Beethoven Moonlight');
-        expect(displayEditionName('WIMA.8c48-FESCo.pdf', { publisher: 'Breitkopf und Härtel', year: 1870 })).toBe(
-            'Breitkopf und Härtel 1870',
+    it('names an edition by publisher and year, never by its IMSLP file name', () => {
+        expect(
+            editionHeadline({ filename: 'WIMA.8c48-FESCo.pdf', publisher: 'Breitkopf und Härtel', year: 1870 }),
+        ).toBe('Breitkopf und Härtel, 1870');
+        expect(editionHeadline({ filename: 'Btsn312.pdf', publisher: ' G. Henle Verlag ' })).toBe('G. Henle Verlag');
+        expect(editionHeadline({ filename: 'wier_ihml_1.pdf', year: 1880 })).toBe('Unknown publisher, 1880');
+        expect(editionHeadline({ filename: 'joined_document.pdf', publisher: '  ' })).toBe('Unknown publisher');
+        expect(editionFileLabel('PMLP01458-Beethoven_Moonlight.pdf')).toBe('Beethoven Moonlight');
+        expect(editionFileLabel('.pdf')).toBe('.pdf');
+    });
+
+    it('tags only what is not the complete score', () => {
+        expect(editionScopeTag({ filename: 'a.pdf', description: 'Complete Score' })).toBeNull();
+        expect(editionScopeTag({ filename: 'a.pdf', description: 'Complete Score (filtered)' })).toBeNull();
+        expect(editionScopeTag({ filename: 'a.pdf', description: 'Score' })).toBeNull();
+        expect(editionScopeTag({ filename: 'a.pdf' })).toBeNull();
+        expect(editionScopeTag({ filename: 'a.pdf', description: 'Parts' })).toBe('Parts');
+        expect(editionScopeTag({ filename: 'a.pdf', description: 'Movement 1' })).toBe('Movement 1');
+        expect(editionScopeTag({ filename: 'a.pdf', description: 'Complete Score', arrangement: true })).toBe(
+            'Arrangement',
         );
-        expect(displayEditionName('Btsn312.pdf', { publisher: 'G. Henle Verlag', year: 1976 })).toBe(
-            'G. Henle Verlag 1976',
-        );
-        expect(displayEditionName('Fuer_E.pdf', { description: 'Für Elise' })).toBe('Für Elise');
-        expect(displayEditionName('clean-scan.pdf', { publisher: 'Schirmer' })).toBe('clean-scan');
+    });
+
+    it('needs the file name only for editions that otherwise read the same', () => {
+        const twins = editionsNeedingFileLabel([
+            { filename: 'a.pdf', publisher: 'Peters', year: 1900, description: 'Complete Score' },
+            { filename: 'b.pdf', publisher: 'Peters', year: 1900 },
+            { filename: 'c.pdf', publisher: 'Peters', year: 1900, description: 'Parts' },
+            { filename: 'd.pdf', publisher: 'Schott', year: 1900 },
+        ]);
+        expect([...twins].sort()).toEqual(['a.pdf', 'b.pdf']);
     });
 
     it('treats punctuation-only strings as not searchable', () => {
@@ -205,12 +219,10 @@ describe('imslp display helpers', () => {
             'plain-scan.pdf',
             'schirmer-bulow.pdf',
         ]);
-        expect(recommendedBadge(ranked[0]!)).toBe('Urtext · Henle · 1976');
-        expect(urtextBadge(ranked[0]!)).toBe('Urtext · Henle · 1976');
-        expect(urtextBadge(ranked[1]!)).toBe('Urtext · 1993');
+        expect(isTaggedUrtext(ranked[0]!)).toBe(true);
+        expect(isTaggedUrtext(ranked[1]!)).toBe(true);
         // Filename-only hints never claim the Urtext badge.
-        expect(urtextBadge(edition('henle-urtext-scan.pdf'))).toBeNull();
-        expect(recommendedBadge(edition('henle-urtext-scan.pdf'))).toBe('Recommended');
+        expect(isTaggedUrtext(edition('henle-urtext-scan.pdf'))).toBe(false);
     });
 
     it('no longer prefers Schirmer, Breitkopf, typeset or edited filenames', () => {
@@ -242,7 +254,7 @@ describe('imslp display helpers', () => {
             'sonata-no14.pdf',
             'moonlight-arr-cello.pdf',
         ]);
-        expect(recommendedBadge(ranked[0]!)).toBe('Recommended');
+        expect(isTaggedUrtext(ranked[0]!)).toBe(false);
         expect(recommendEdition(ranked)?.filename).toBe('beethoven.moonlight.wiener.pdf');
     });
 
@@ -335,12 +347,6 @@ describe('imslp display helpers', () => {
                 edition('plain-scan.pdf', { size: 900_000 }),
             ])?.filename,
         ).toBe('plain-scan.pdf');
-    });
-
-    it('omits "Urtext first" from the count line when nothing is tagged', () => {
-        const editions = [edition('a.pdf'), edition('b.pdf'), edition('c.pdf'), edition('d.pdf')];
-        expect(editionListSummary(editions)).toBe('4 PDFs — scroll for others.');
-        expect(editionListSummary(editions.slice(0, 2))).toBe('2 PDFs');
     });
 
     it('returns null when nothing is downloadable — no auto-selection', () => {
@@ -732,7 +738,28 @@ describe('ImslpBrowser', () => {
         expect(screen.getByText('Fresh Result')).toBeInTheDocument();
     });
 
-    it('opens Moonlight with a downloadable edition pre-selected and the restricted Henle files listed apart', async () => {
+    /** The work view is open once its Back is (the search view has none). */
+    const waitForWork = async () => {
+        const { screen } = await import('@testing-library/react');
+        return screen.findByRole('button', { name: 'Back' });
+    };
+
+    /** The full list is one click away; open it. */
+    const openEditionList = async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        await userEvent.click(screen.getByRole('button', { name: /^Choose a different edition/ }));
+        return screen.getByRole('list', { name: 'PDF editions' });
+    };
+
+    /** The card above the toggle: the edition Add will import. */
+    const editionCard = async () => {
+        const { screen } = await import('@testing-library/react');
+        return screen.getByRole('button', { name: /^Choose a different edition/ }).closest('.rounded-xl')!
+            .firstElementChild as HTMLElement;
+    };
+
+    it('opens Moonlight on one recommended edition and Add, with every other choice one click away', async () => {
         // Henle used to lead the list with nothing selected and Add disabled:
         // the first screen of every popular work was greyed-out rows.
         const { screen, waitFor, within } = await import('@testing-library/react');
@@ -745,66 +772,61 @@ describe('ImslpBrowser', () => {
         const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
-
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
         const downloadable = work.editions.length - 2;
-        expect(screen.getByText(`${downloadable} downloadable PDFs — scroll for others.`)).toBeInTheDocument();
-        expect(screen.queryByText('No Urtext file tagged on this source page.')).not.toBeInTheDocument();
-        expect(screen.getByText(/Files are not guaranteed/)).toBeInTheDocument();
+
+        // The piece title leads, with Back beside it in the panel — only one Back.
+        const panel = screen.getByRole('heading', { level: 2, name: 'Piano Sonata No.14, Op.27 No.2' });
+        expect(panel.closest('.imslp-panel-view')).not.toBeNull();
+        expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
         expect(
             screen.getAllByText('Public-domain scores via IMSLP').filter((line) => !line.closest('[hidden]')),
         ).toHaveLength(1);
 
-        // Back belongs to the panel, beside the work title — and there is only one.
-        const panel = screen.getByText('Choose a PDF edition').closest<HTMLElement>('.imslp-panel-view');
-        expect(panel).not.toBeNull();
-        expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
-        expect(within(panel!).getByText('Piano Sonata No.14, Op.27 No.2')).toBeInTheDocument();
-        expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
-
-        const list = screen.getByRole('list', { name: 'PDF editions' });
-        const rows = within(list).getAllByRole('listitem');
-        expect(rows.length).toBe(downloadable);
-        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: /Show all/ })).not.toBeInTheDocument();
-
-        // The best downloadable edition is chosen, so Add works straight away.
-        const first = within(rows[0]!);
-        expect(first.getByRole('radio')).toBeChecked();
-        expect(rows[0]).toHaveTextContent('Schirmer');
-        expect(first.getByText('Recommended')).toBeInTheDocument();
+        // One card: the recommended edition by publisher and year, then Add.
+        const card = within(await editionCard());
+        expect(card.getByText('Schirmer, 1895')).toBeInTheDocument();
+        expect(card.getByText('Recommended')).toBeInTheDocument();
         const add = screen.getByRole('button', { name: 'Add to my library' });
         expect(add).toBeEnabled();
         expect(screen.queryByText('Select a downloadable edition to add.')).not.toBeInTheDocument();
-        expect(screen.getAllByRole('link', { name: /^View source page$/ })).toHaveLength(2);
-        expect(within(list).queryByText('Urtext · Henle · 1976')).not.toBeInTheDocument();
+
+        // Nothing else by default: no radios, no restricted section, one source link,
+        // no sizes, licenses or "Complete Score".
+        expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+        expect(screen.queryByText(/Not downloadable here/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Henle/)).not.toBeInTheDocument();
+        expect(screen.getAllByRole('link', { name: 'View source page' })).toHaveLength(1);
+        expect(screen.queryByText(/\d (KB|MB)\b/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Public domain$/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Complete Score/)).not.toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
 
-        // Henle stays visible, below, with its own way to IMSLP — never selectable.
-        expect(screen.getByRole('heading', { name: 'Not downloadable here (2)' })).toBeInTheDocument();
-        const restricted = within(screen.getByRole('list', { name: 'Not downloadable here' })).getAllByRole('listitem');
-        expect(restricted).toHaveLength(2);
-        for (const row of restricted) {
-            const henle = within(row);
-            expect(henle.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
-            expect(henle.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
-            expect(henle.getByText('Restricted')).toBeInTheDocument();
-            expect(henle.getByRole('link', { name: /^view source page$/ })).toBeInTheDocument();
-            expect(henle.queryByRole('radio')).not.toBeInTheDocument();
-        }
-        expect(within(restricted[0]!).getByText(/Complete Score/)).toBeInTheDocument();
+        const toggle = screen.getByRole('button', { name: `Choose a different edition (${downloadable - 1})` });
+        expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        const list = await openEditionList();
+        expect(toggle).toHaveAttribute('aria-expanded', 'true');
+        const rows = within(list).getAllByRole('listitem');
+        expect(rows).toHaveLength(downloadable);
+        expect(within(rows[0]!).getByRole('radio')).toBeChecked();
+        expect(rows[0]).toHaveTextContent('Schirmer, 1895');
+        // The restricted Henle files stay out of the list: one muted line points to the source.
+        expect(within(list).queryByText(/Henle/)).not.toBeInTheDocument();
+        const restrictedLine = screen.getByText(/2 more editions can’t be downloaded here\./);
+        expect(within(restrictedLine).getByRole('link', { name: 'View source page' })).toHaveAttribute(
+            'href',
+            work.imslpUrl,
+        );
 
-        const weinerRadio = screen.getByRole('radio', {
-            name: /Select .*moonlight\.wiener/i,
-        });
+        const weinerRadio = screen.getByRole('radio', { name: /Editio Musica Budapest, 1959/ });
         expect(weinerRadio).not.toBeChecked();
-        // Importable rows carry no per-row Open; the footer link follows the selection.
-        expect(
-            within(weinerRadio.closest('li')!).queryByRole('link', { name: /source page/i }),
-        ).not.toBeInTheDocument();
-
         await userEvent.click(weinerRadio);
         expect(weinerRadio).toBeChecked();
+        // The card follows the choice; the same Add imports it.
+        const chosen = within(await editionCard());
+        expect(chosen.getByText('Editio Musica Budapest, 1959')).toBeInTheDocument();
+        expect(chosen.queryByText('Recommended')).not.toBeInTheDocument();
         expect(add).toBeEnabled();
         await userEvent.click(add);
         await waitFor(() => {
@@ -844,28 +866,24 @@ describe('ImslpBrowser', () => {
         const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await waitForWork();
 
-        await screen.findByText('Choose a PDF edition');
-        expect(screen.getByText('3 downloadable PDFs')).toBeInTheDocument();
+        const card = within(await editionCard());
+        expect(card.getByText('G. Henle Verlag, 1976')).toBeInTheDocument();
+        expect(card.getByText('Urtext')).toBeInTheDocument();
+        expect(card.getByText('Recommended')).toBeInTheDocument();
+        // A complete score needs no tag, and the file name adds nothing here.
+        expect(screen.queryByText(/Complete Score/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/beethoven sonatas-vol1/)).not.toBeInTheDocument();
 
-        const list = screen.getByRole('list', { name: 'PDF editions' });
+        const list = await openEditionList();
         const rows = within(list).getAllByRole('listitem');
         expect(rows).toHaveLength(3);
-
         const henleRadio = within(rows[0]!).getByRole('radio');
         expect(henleRadio).toBeChecked();
-        expect(within(rows[0]!).getByText('Urtext · Henle · 1976')).toBeInTheDocument();
-        expect(within(rows[0]!).getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
-        expect(within(rows[0]!).getByText(/Complete Score/)).toBeInTheDocument();
-        expect(within(rows[0]!).queryByRole('link', { name: /source page/i })).not.toBeInTheDocument();
-        expect(screen.getAllByRole('link', { name: /^View source page$/ })).toHaveLength(2);
-        const peters = within(screen.getByRole('list', { name: 'Not downloadable here' }));
-        expect(peters.queryByRole('radio')).not.toBeInTheDocument();
-        expect(peters.getByText('Non-PD US')).toBeInTheDocument();
-        expect(peters.getByRole('link', { name: /^view source page$/ })).toBeInTheDocument();
+        expect(within(list).queryByText(/peters/)).not.toBeInTheDocument();
+        expect(screen.getByText(/1 more edition can’t be downloaded here\./)).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
-
-        expect(screen.getByText(/Files are not guaranteed/)).toBeInTheDocument();
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 
         await userEvent.click(within(rows[2]!).getByRole('radio'));
@@ -884,7 +902,7 @@ describe('ImslpBrowser', () => {
         expect(onImportImslp).toHaveBeenCalledTimes(1);
     });
 
-    it('says when no Urtext is tagged and falls back to a Recommended badge', async () => {
+    it('marks the recommendation without an Urtext badge when nothing is tagged', async () => {
         const { screen, within } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');
 
@@ -902,17 +920,20 @@ describe('ImslpBrowser', () => {
         vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
 
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+        await waitForWork();
 
-        await screen.findByText('Choose a PDF edition');
-        expect(screen.getByText('4 PDFs — scroll for others.')).toBeInTheDocument();
-        expect(screen.queryByText(/Urtext first/)).not.toBeInTheDocument();
-        expect(screen.getByText('No Urtext file tagged on this source page.')).toBeInTheDocument();
-        const badge = screen.getByText('Recommended');
-        const recommendedRow = badge.closest('li');
+        // Four publisher-less scans: the file name is the only thing telling them apart.
+        const card = within(await editionCard());
+        expect(card.getByText('Unknown publisher')).toBeInTheDocument();
+        expect(card.getByText('clean-scan')).toBeInTheDocument();
+        expect(card.getByText('Recommended')).toBeInTheDocument();
+        expect(screen.queryByText('Urtext')).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add to my library' })).toBeEnabled();
+
+        const list = await openEditionList();
+        const recommendedRow = within(list).getByText('Recommended').closest('li');
         expect(recommendedRow).toHaveTextContent('clean-scan');
         expect(within(recommendedRow!).getByRole('radio')).toBeChecked();
-        expect(screen.getByRole('button', { name: 'Add to my library' })).toBeEnabled();
-        expect(screen.queryByText(/Urtext ·/)).not.toBeInTheDocument();
     });
 
     it('freezes the rows while a download is in flight and ignores a second click in the same tick', async () => {
@@ -929,9 +950,9 @@ describe('ImslpBrowser', () => {
         const onImportImslp = vi.fn().mockImplementation(() => new Promise(() => {}));
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
 
-        const list = screen.getByRole('list', { name: 'PDF editions' });
+        const list = await openEditionList();
         const radios = within(list).getAllByRole('radio');
         expect(radios).toHaveLength(2);
         expect(radios[0]).toBeChecked();
@@ -956,8 +977,8 @@ describe('ImslpBrowser', () => {
             expect.any(Function),
             expect.any(AbortSignal),
         );
-        expect(within(list).queryByRole('link', { name: /source page/i })).not.toBeInTheDocument();
-        expect(screen.getAllByRole('link', { name: /^View source page$/ })).toHaveLength(2);
+        expect(within(list).queryByRole('link')).not.toBeInTheDocument();
+        expect(screen.getAllByRole('link', { name: 'View source page' })).toHaveLength(1);
     });
 
     it('shows a paced download as queued, then downloading, while the client retries on its own', async () => {
@@ -983,7 +1004,7 @@ describe('ImslpBrowser', () => {
         );
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
         expect(await screen.findByRole('button', { name: 'Downloading score…' })).toBeDisabled();
 
@@ -991,7 +1012,6 @@ describe('ImslpBrowser', () => {
         // Honest progress, not an error: the Add button stays locked and says why.
         expect(screen.getByRole('button', { name: 'Queued for download…' })).toBeDisabled();
         expect(screen.getByRole('status')).toHaveTextContent('Queued — score downloads are paced');
-        expect(screen.getByRole('radio', { name: /Select a/i })).toBeDisabled();
         expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
         act(() => report?.('downloading'));
@@ -1033,7 +1053,7 @@ describe('ImslpBrowser', () => {
         );
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
         // No cancel while a request is out: the function would finish regardless.
         expect(screen.queryByRole('button', { name: 'Cancel import' })).not.toBeInTheDocument();
@@ -1071,7 +1091,7 @@ describe('ImslpBrowser', () => {
             );
 
         const { unmount } = await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
         expect(signal?.aborted).toBe(false);
 
@@ -1079,8 +1099,8 @@ describe('ImslpBrowser', () => {
         expect(signal?.aborted).toBe(true);
     });
 
-    it('says "view source page" when the license lookup itself was unavailable', async () => {
-        const { screen, within } = await import('@testing-library/react');
+    it('sends the user to the source page when the license lookup itself was unavailable', async () => {
+        const { screen } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');
 
         const work: ImslpWorkDetail = {
@@ -1099,17 +1119,14 @@ describe('ImslpBrowser', () => {
         vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
 
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByRole('heading', { name: 'Not downloadable here (1)' });
+        await screen.findByText(/Couldn’t check the licenses just now/);
 
         expect(screen.queryByRole('list', { name: 'PDF editions' })).not.toBeInTheDocument();
-        const list = screen.getByRole('list', { name: 'Not downloadable here' });
-        expect(within(list).queryByRole('radio')).not.toBeInTheDocument();
-        expect(within(list).getByText('License check unavailable')).toBeInTheDocument();
-        expect(within(list).getByText(/Couldn’t check the license just now/)).toBeInTheDocument();
-        expect(within(list).getByRole('link', { name: 'view source page' })).toHaveAttribute(
-            'href',
-            'https://imslp.org/wiki/Special:ImagefromIndex/unchecked.pdf',
-        );
+        expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+        expect(screen.queryByText('unchecked')).not.toBeInTheDocument();
+        for (const link of screen.getAllByRole('link', { name: 'View source page' })) {
+            expect(link).toHaveAttribute('href', work.imslpUrl);
+        }
         expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
     });
 
@@ -1122,24 +1139,23 @@ describe('ImslpBrowser', () => {
             composer: 'Chopin, Frédéric',
             imslpUrl: 'https://imslp.org/wiki/Nocturnes',
             editions: [
-                edition('known.pdf', { description: 'Complete Score' }),
+                edition('known.pdf', { publisher: 'Peters', description: 'Complete Score' }),
                 edition('mystery.pdf', { license: 'unknown', licenseLabel: null, description: 'Complete Score' }),
+                edition('also-known.pdf', { publisher: 'Schott', description: 'Complete Score' }),
             ],
         };
         vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
         const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
 
-        const list = screen.getByRole('list', { name: 'PDF editions' });
+        const list = await openEditionList();
         const radios = within(list).getAllByRole('radio');
-        expect(radios).toHaveLength(1);
-        expect(within(list).getByRole('radio', { name: /Select known/i })).toBeChecked();
-        const unavailable = screen.getByRole('list', { name: 'Not downloadable here' });
-        expect(within(unavailable).getByText('mystery')).toBeInTheDocument();
-        expect(within(unavailable).queryByRole('radio')).not.toBeInTheDocument();
-        expect(within(unavailable).getByText('License unknown')).toBeInTheDocument();
+        expect(radios).toHaveLength(2);
+        expect(within(list).getByRole('radio', { name: /Peters/ })).toBeChecked();
+        expect(screen.queryByText('mystery')).not.toBeInTheDocument();
+        expect(screen.getByText(/1 more edition can’t be downloaded here\./)).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
     });
 
@@ -1161,13 +1177,16 @@ describe('ImslpBrowser', () => {
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
 
         await screen.findByText(/None of these editions can be imported automatically/);
-        expect(screen.queryByText('Choose a PDF edition')).not.toBeInTheDocument();
-        // Both stay listed, each with its own way to IMSLP.
-        expect(screen.getByRole('heading', { name: 'Not downloadable here (2)' })).toBeInTheDocument();
-        expect(screen.getAllByRole('link', { name: 'view source page' })).toHaveLength(2);
+        // No per-file restricted cards: the work's source page is the way on.
+        expect(screen.queryByText(/eu-only/)).not.toBeInTheDocument();
+        expect(screen.queryByText('Non-PD US')).not.toBeInTheDocument();
+        for (const link of screen.getAllByRole('link', { name: 'View source page' })) {
+            expect(link).toHaveAttribute('href', work.imslpUrl);
+        }
         expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
         // No import button, no consent checkbox — there is nothing to import.
         expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Choose a different edition/ })).not.toBeInTheDocument();
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     });
 
@@ -1186,9 +1205,9 @@ describe('ImslpBrowser', () => {
         const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
 
-        expect(screen.getByRole('radio', { name: /Select clean-scan/i })).toBeChecked();
+        expect(await editionCard()).toHaveTextContent('clean-scan');
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
         await waitFor(() => {
@@ -1217,7 +1236,7 @@ describe('ImslpBrowser', () => {
         const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
 
         await renderBrowser({ onImportImslp, quotaExhausted: true }, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
 
         const add = screen.getByRole('button', { name: 'Add to my library' });
         expect(add).toBeDisabled();
@@ -1241,7 +1260,7 @@ describe('ImslpBrowser', () => {
         const onUpgrade = vi.fn();
 
         await renderBrowser({ quotaExhausted: true, onUpgrade }, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
 
         await userEvent.click(screen.getByRole('button', { name: 'upgrade to add this edition' }));
         expect(onUpgrade).toHaveBeenCalledTimes(1);
@@ -1273,7 +1292,7 @@ describe('ImslpBrowser', () => {
             { onImportImslp, importLimit, onUpgrade },
             `/search?work=${encodeURIComponent(work.title)}`,
         );
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
 
         expect(screen.getByRole('button', { name: 'Add to my library' })).toBeDisabled();
         expect(screen.getByText(/You have used your 2 free imports from Find a score this month/)).toBeInTheDocument();
@@ -1283,8 +1302,8 @@ describe('ImslpBrowser', () => {
         expect(onImportImslp).not.toHaveBeenCalled();
     });
 
-    it('does not repeat the display-name fallback as a second line', async () => {
-        const { screen } = await import('@testing-library/react');
+    it('names editions by publisher and year, tags only what is not the complete score, and shows a file name only to tell twins apart', async () => {
+        const { screen, within } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');
 
         const work: ImslpWorkDetail = {
@@ -1298,22 +1317,29 @@ describe('ImslpBrowser', () => {
                     description: 'Complete Score',
                 }),
                 edition('Fuer_E.pdf', { description: 'Für Elise' }),
+                edition('PMLP1-wier_ihml_1.pdf', { publisher: 'Peters', year: 1900, description: 'Complete Score' }),
+                edition('PMLP1-joined_document.pdf', { publisher: 'Peters', year: 1900 }),
+                edition('cello.pdf', { publisher: 'Schott', year: 1910, arrangement: true }),
             ],
         };
         vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
 
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
+        const list = await openEditionList();
+        const row = (name: RegExp) => within(list).getByRole('radio', { name }).closest('li')!;
 
-        expect(
-            screen.queryAllByText('Breitkopf und Härtel 1870').filter((el) => el.classList.contains('block')),
-        ).toHaveLength(0);
-        expect(screen.queryAllByText('Für Elise').filter((el) => el.classList.contains('block'))).toHaveLength(0);
-        expect(screen.getByRole('radio', { name: 'Select Breitkopf und Härtel 1870' })).toBeInTheDocument();
-        expect(screen.getByRole('radio', { name: 'Select Für Elise' })).toBeInTheDocument();
+        expect(row(/Breitkopf und Härtel, 1870/)).not.toHaveTextContent('WIMA');
+        expect(within(row(/Für Elise/)).getByText('Unknown publisher')).toBeInTheDocument();
+        expect(within(row(/Für Elise/)).getByText('Für Elise')).toBeInTheDocument();
+        expect(within(row(/wier ihml 1/)).getByText('Peters, 1900')).toBeInTheDocument();
+        expect(within(row(/joined document/)).getByText('Peters, 1900')).toBeInTheDocument();
+        expect(within(row(/Schott, 1910/)).getByText('Arrangement')).toBeInTheDocument();
+        expect(row(/Schott, 1910/)).not.toHaveTextContent('cello');
+        expect(screen.queryByText(/Complete Score/)).not.toBeInTheDocument();
     });
 
-    it('keeps a single Back inside the work panel, not in the page chrome', async () => {
+    it('keeps a single Back with the title at the top of the work panel, not in the page chrome', async () => {
         const { screen, within } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');
 
@@ -1326,13 +1352,89 @@ describe('ImslpBrowser', () => {
         vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
 
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await waitForWork();
 
-        // Parentage is layout detail; what matters is one Back, owned by the panel.
         expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
-        const panel = screen.getByText('Nocturnes, Op.9').closest<HTMLElement>('.imslp-panel-view');
+        const title = screen.getByRole('heading', { level: 2, name: 'Nocturnes, Op.9' });
+        const panel = title.closest<HTMLElement>('.imslp-panel-view');
         expect(panel).not.toBeNull();
-        expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
+        const back = within(panel!).getByRole('button', { name: 'Back' });
+        // Back comes first in the panel, right before the title.
+        expect(panel!.firstElementChild).toBe(back);
+        expect(back.nextElementSibling).toBe(title);
+        // One edition: nothing else to choose, so no toggle.
+        expect(screen.queryByRole('button', { name: /Choose a different edition/ })).not.toBeInTheDocument();
+    });
+
+    it('keeps the full legal wording one disclosure away, beside Add', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('clean-scan.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+        await waitForWork();
+
+        expect(screen.getByText(/Public-domain status varies by country\./)).toBeVisible();
+        const learnMore = screen.getByRole('button', { name: 'Learn more' });
+        const full = screen.getByText(/Files are not guaranteed to be public domain in your country/);
+        expect(learnMore).toHaveAttribute('aria-expanded', 'false');
+        expect(learnMore).toHaveAttribute('aria-controls', full.id);
+        expect(full).not.toBeVisible();
+
+        await userEvent.click(learnMore);
+        expect(learnMore).toHaveAttribute('aria-expanded', 'true');
+        expect(full).toBeVisible();
+        expect(full).toHaveTextContent(
+            'By downloading you acknowledge you understand and agree to obey the copyright laws of your country.',
+        );
+    });
+
+    it('opens and closes the other editions from the keyboard, and the toggle names the list it controls', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [
+                edition('a.pdf', { publisher: 'Peters' }),
+                edition('b.pdf', { publisher: 'Schott' }),
+                edition('c.pdf', { publisher: 'Durand' }),
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+        await waitForWork();
+
+        const toggle = screen.getByRole('button', { name: 'Choose a different edition (2)' });
+        toggle.focus();
+        await userEvent.keyboard('{Enter}');
+        expect(toggle).toHaveAttribute('aria-expanded', 'true');
+        const group = screen.getByRole('group', { name: 'PDF editions' });
+        expect(toggle).toHaveAttribute('aria-controls', group.id);
+
+        // Tab moves into the radio group; arrows change the choice, which the card follows.
+        await userEvent.tab();
+        expect(screen.getByRole('radio', { name: /Peters/ })).toHaveFocus();
+        await userEvent.keyboard('{ArrowDown}');
+        expect(screen.getByRole('radio', { name: /Schott/ })).toBeChecked();
+        expect(await editionCard()).toHaveTextContent('Schott');
+
+        await userEvent.click(toggle);
+        expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+        expect(await editionCard()).toHaveTextContent('Schott');
     });
 
     it('searches when Nocturne is added and names both chips plus total', async () => {
@@ -1663,8 +1765,9 @@ describe('ImslpBrowser', () => {
         expect(screen.getByText('Préludes, Livre 2').querySelector('mark')).toBeNull();
     });
 
-    it('keeps the disclaimer, Add and a queued Cancel together in the sticky action footer', async () => {
+    it('keeps Add, the legal line and a queued Cancel together in the sticky action footer', async () => {
         const { render, screen, within } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
         const { ImslpWorkPanel } = await import('@/features/imslp/ImslpWorkPanel');
         const work: ImslpWorkDetail = {
             title: 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)',
@@ -1690,10 +1793,15 @@ describe('ImslpBrowser', () => {
         const footer = screen.getByRole('button', { name: 'Queued for download…' }).closest('.imslp-action-footer');
         expect(footer).not.toBeNull();
         const inFooter = within(footer as HTMLElement);
+        expect(inFooter.getByText(/Public-domain status varies by country/)).toBeInTheDocument();
+        expect(inFooter.getByRole('button', { name: 'Learn more' })).toBeInTheDocument();
         expect(inFooter.getByText(/Files are not guaranteed/)).toBeInTheDocument();
         expect(inFooter.getByRole('button', { name: 'Cancel import' })).toBeInTheDocument();
-        // The edition list scrolls on its own and stays out of the footer.
-        expect(footer!.contains(screen.getByRole('list', { name: 'PDF editions' }))).toBe(false);
+        // The open edition list scrolls with the page, past the footer — never inside it.
+        await userEvent.click(screen.getByRole('button', { name: /Choose a different edition/ }));
+        const list = screen.getByRole('list', { name: 'PDF editions' });
+        expect(footer!.contains(list)).toBe(false);
+        expect(list.closest('[class*="overflow-y-auto"]')).toBeNull();
 
         // jsdom has no layout, so pin the rule that does the work: below sm
         // (390x667 put Add ~30px under the fold) the footer sticks to the bottom.
@@ -1767,7 +1875,7 @@ describe('ImslpBrowser', () => {
             await renderBrowser();
             await userEvent.click(screen.getByRole('button', { name: /Moonlight Sonata/ }));
 
-            await screen.findByText('Choose a PDF edition');
+            await screen.findByRole('button', { name: 'Back' });
             expect(workSpy).toHaveBeenCalledWith(title);
         });
 

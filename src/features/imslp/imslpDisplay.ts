@@ -4,19 +4,6 @@ import { SEARCH_TIMEOUT_COPY, WORK_NOT_FOUND_COPY } from '../../../supabase/func
 
 export { SEARCH_TIMEOUT_COPY };
 
-export const formatBytes = (size: number | null): string => {
-    if (size === null || size <= 0) {
-        return '';
-    }
-    if (size < 1024) {
-        return `${size} B`;
-    }
-    if (size < 1024 * 1024) {
-        return `${(size / 1024).toFixed(0)} KB`;
-    }
-    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-};
-
 export const suggestedPdfName = (workTitle: string, filename: string): string => {
     const base = workTitle.replace(/[\\/:*?"<>|]/g, '').trim() || filename.replace(/\.pdf$/i, '');
     return `${base}.pdf`;
@@ -32,57 +19,60 @@ export const displayWorkTitle = (title: string): { work: string; composer: strin
 };
 
 export interface EditionDisplayFields {
+    filename: string;
     publisher?: string | null;
     description?: string | null;
     year?: number | null;
+    arrangement?: boolean;
 }
 
-/** Generic IMSLP file-block descriptions — not a human edition name. */
-const GENERIC_FILE_DESCRIPTION = /^(complete score|score|parts?|piano reduction|vocal score)\b/i;
+const isCompleteScore = (description: string): boolean => /^complete score\b/i.test(description.trim());
 
-const fromFilename = (filename: string): string => {
-    const withoutExt = filename.replace(/\.pdf$/i, '');
-    const cleaned = withoutExt
+/**
+ * How a musician names an edition: publisher and year. IMSLP file names
+ * ("wier ihml 1", "joined document") are never the headline.
+ */
+export const editionHeadline = (edition: EditionDisplayFields): string => {
+    const publisher = edition.publisher?.trim();
+    if (publisher) {
+        return [publisher, edition.year].filter(Boolean).join(', ');
+    }
+    return edition.year ? `Unknown publisher, ${edition.year}` : 'Unknown publisher';
+};
+
+/**
+ * What the file holds when it is not the complete score: parts, one
+ * movement, an arrangement. Null for a complete score, which needs no tag.
+ */
+export const editionScopeTag = (edition: EditionDisplayFields): string | null => {
+    const description = edition.description?.trim() ?? '';
+    if (description && !isCompleteScore(description) && !/^score$/i.test(description)) {
+        return description;
+    }
+    return edition.arrangement ? 'Arrangement' : null;
+};
+
+/** The IMSLP file name without its PMLP prefix, underscores or extension. */
+export const editionFileLabel = (filename: string): string => {
+    const cleaned = filename
+        .replace(/\.pdf$/i, '')
         .replace(/^PMLP\d+-?/i, '')
         .replace(/_/g, ' ')
         .trim();
     return cleaned || filename;
 };
 
-/** Dump slugs: WIMA ids, catalog stubs like Btsn312, or a few leftover characters. */
-const looksLikeDumpName = (name: string): boolean => {
-    const trimmed = name.trim();
-    if (!trimmed) {
-        return true;
-    }
-    if (/^WIMA\b/i.test(trimmed)) {
-        return true;
-    }
-    const compact = trimmed.replace(/[\s._-]+/g, '');
-    if (compact.length < 8) {
-        return true;
-    }
-    return /^[A-Za-z]{1,8}\d{2,}$/.test(compact);
-};
-
 /**
- * Drop noisy PMLP prefixes from edition filenames. When the leftover still
- * looks like a dump slug, prefer publisher / a non-generic description.
+ * Files whose headline and tag match another edition's, so only the file
+ * name tells them apart. Everything else hides the file name.
  */
-export const displayEditionName = (filename: string, meta?: EditionDisplayFields): string => {
-    const fromFile = fromFilename(filename);
-    if (!looksLikeDumpName(fromFile)) {
-        return fromFile;
+export const editionsNeedingFileLabel = (editions: EditionDisplayFields[]): Set<string> => {
+    const key = (e: EditionDisplayFields) => `${editionHeadline(e)}\u0000${editionScopeTag(e) ?? ''}`;
+    const counts = new Map<string, number>();
+    for (const e of editions) {
+        counts.set(key(e), (counts.get(key(e)) ?? 0) + 1);
     }
-    const description = meta?.description?.trim() ?? '';
-    if (description && !GENERIC_FILE_DESCRIPTION.test(description) && !looksLikeDumpName(description)) {
-        return description;
-    }
-    const publisher = meta?.publisher?.trim() ?? '';
-    if (publisher) {
-        return [publisher, meta?.year].filter(Boolean).join(' ');
-    }
-    return fromFile;
+    return new Set(editions.filter((e) => (counts.get(key(e)) ?? 0) > 1).map((e) => e.filename));
 };
 
 /** True when the query has a letter or digit — `%%%` is not a search. */
@@ -227,8 +217,6 @@ const sizeScore = (size: number, index: number): number => {
     return size < 400_000 ? 20 : 40;
 };
 
-const isCompleteScore = (description: string): boolean => /^complete score\b/i.test(description.trim());
-
 const isArrangement = (edition: EditionRankFields, description: string): boolean =>
     edition.arrangement === true || ARRANGEMENT_HINT.test(`${description} ${edition.filename}`);
 
@@ -311,49 +299,11 @@ export const splitEditions = <T extends EditionRankFields>(editions: T[]): { imp
 export const recommendEdition = <T extends EditionRankFields>(editions: T[]): T | null =>
     splitEditions(editions).importable[0] ?? null;
 
-const VISIBLE_ROWS = 3;
-
-/**
- * Count line for the importable list: never claims "Urtext first" when tagged
- * files are last or absent, and says "downloadable" when some files are listed
- * separately as not.
- */
-export const editionListSummary = (editions: EditionRankFields[], visibleRows = VISIBLE_ROWS): string | null => {
-    const { importable, unavailable } = splitEditions(editions);
-    const total = importable.length;
-    if (total === 0) {
-        return null;
-    }
-    const noun = `${unavailable.length > 0 ? 'downloadable ' : ''}${total === 1 ? 'PDF' : 'PDFs'}`;
-    if (total <= visibleRows) {
-        return `${total} ${noun}`;
-    }
-    if (importable.slice(0, visibleRows).some((e) => e.urtext)) {
-        return `${total} ${noun} · Urtext first — scroll for others.`;
-    }
-    return `${total} ${noun} — scroll for others.`;
-};
-
-/** "Urtext · Henle · 1976" on every high-confidence hit; "Urtext · year" on other `{{Urtext}}`. */
-export const urtextBadge = (edition: EditionRankFields): string | null => {
+/** IMSLP tagged the file `{{Urtext}}` — a filename hint alone never earns the badge. */
+export const isTaggedUrtext = (edition: EditionRankFields): boolean => {
     const confidence = urtextConfidence(edition);
-    switch (confidence) {
-        case 'high':
-            return ['Urtext', urtextHouse(edition.publisher), edition.year].filter(Boolean).join(' · ');
-        case 'medium':
-            return ['Urtext', edition.year].filter(Boolean).join(' · ');
-        case 'low':
-        case 'none':
-            return null;
-        default: {
-            const _exhaustive: never = confidence;
-            return _exhaustive;
-        }
-    }
+    return confidence === 'high' || confidence === 'medium';
 };
-
-/** Badge for a recommended (non-Urtext) row, or the Urtext badge when confidence is high/medium. */
-export const recommendedBadge = (edition: EditionRankFields): string => urtextBadge(edition) ?? 'Recommended';
 
 /** One character folded for matching: accents off, lower case ("É" → "e"). */
 const foldChar = (c: string): string => c.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();

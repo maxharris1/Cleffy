@@ -1,4 +1,4 @@
-import { useOutletContext } from 'react-router';
+import { useOutletContext, useSearchParams } from 'react-router';
 
 import { ImslpBrowser } from '@/features/imslp/ImslpBrowser';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
@@ -15,12 +15,23 @@ export const SearchPage = () => {
         quotaUpgradeHint,
         openPricing,
     } = useOutletContext<LibraryOutletContext>();
+    // An open work's title is the page's subject: the page name steps back to
+    // a quiet label so the piece title is the strongest text on screen.
+    const workOpen = useSearchParams()[0].has('work');
 
     return (
         <div>
             <header>
-                <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Find a score</h1>
-                <p className="mt-1 text-sm text-stone-500">Search thousands of public-domain scores.</p>
+                {workOpen ? (
+                    <h1 className="text-sm font-medium text-stone-500">Find a score</h1>
+                ) : (
+                    <>
+                        <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">
+                            Find a score
+                        </h1>
+                        <p className="mt-1 text-sm text-stone-500">Search thousands of public-domain scores.</p>
+                    </>
+                )}
             </header>
 
             {/* Quota refusals — and a cap the account is already at — get the
