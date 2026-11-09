@@ -48,6 +48,7 @@ import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
 import { editedTextPayload, MIN_TEXT_NOTE_WIDTH, TEXT_NOTE_EDGE } from '@/features/viewer/ink/musicFont';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
+import { PageLayoutControls } from '@/features/viewer/PageLayoutControls';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import {
@@ -84,7 +85,7 @@ import type { ScoreData } from '@/types/scoreData';
 import { isDialogOpen } from '@/ui/dialogStack';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
-import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, CoverPageIcon, ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
+import { ChevronLeftIcon, ChevronRightIcon, ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
 
 /**
  * Fingering feature loads on first use — keeps it out of the viewer bundle.
@@ -853,11 +854,11 @@ export const PdfViewport = ({
         setRenderScale(scale);
     };
 
-    /** Switch between one and two pages per row. */
-    const togglePageColumns = () => relayout(pageColumns === 1 ? 2 : 1, spreadCover);
+    /** Show one or two pages per row. */
+    const changePageColumns = (columns: PageColumns) => relayout(columns, spreadCover);
 
     /** Hold the first page back as a cover, so spreads pair 2|3 as printed music does. */
-    const toggleSpreadCover = () => relayout(pageColumns, !spreadCover);
+    const changeSpreadCover = (coverPage: boolean) => relayout(pageColumns, coverPage);
 
     // Live view → DOM. Subscribed in a layout effect, before the first fit
     // (a plain effect) writes the store, so no step is missed.
@@ -1364,8 +1365,19 @@ export const PdfViewport = ({
 
     // Positions use the live scale; bitmaps use the settled renderScale. While they
     // differ, canvases are CSS-stretched by wrapping pages in a scaling transform.
-    // Rendered from the live view, so a render mid-gesture never steps it back.
-    const liveTransform = wrapperTransform(useViewerStore.getState().view, renderScale);
+    // The transform has one writer, the DOM: the live-view subscription writes
+    // each step, and this rewrites it after every commit from the live view and
+    // the renderScale just committed. As a style prop, React diffed it against
+    // its own last string, not the DOM: a layout switch at the top of the score
+    // renders the same string as before while the subscription had already
+    // stretched the old bitmaps to the new scale, and that stretch stayed (2×
+    // going to one page, half width going to two).
+    useLayoutEffect(() => {
+        const wrapper = wrapperRef.current;
+        if (wrapper) {
+            wrapper.style.transform = wrapperTransform(useViewerStore.getState().view, renderScale);
+        }
+    });
     const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
     const fingeringLayout = fingeringSel ? layout.layouts[fingeringSel.pageIndex] : undefined;
 
@@ -1399,7 +1411,6 @@ export const PdfViewport = ({
                         data-render-scale={renderScale}
                         className="absolute left-0 top-0"
                         style={{
-                            transform: liveTransform,
                             transformOrigin: '0 0',
                             width: layout.contentWidth * renderScale,
                             height: layout.contentHeight * renderScale,
@@ -1496,9 +1507,9 @@ export const PdfViewport = ({
                                 setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height, obscured));
                             }}
                             pageColumns={layout.layouts.length > 1 && !narrow ? pageColumns : null}
-                            onTogglePageColumns={togglePageColumns}
+                            onPageColumnsChange={changePageColumns}
                             spreadCover={spreadCover}
-                            onToggleSpreadCover={toggleSpreadCover}
+                            onSpreadCoverChange={changeSpreadCover}
                         />
                     )}
                     {layout.layouts.length > 1 && !standMode ? (
@@ -1622,10 +1633,7 @@ const Pager = ({
     );
 };
 
-/*
- * Pager and zoom keys: a press dips the key (scale .97) as well as greying it.
- * The aria-pressed toggles switch colour at once — a mode change, not a fade.
- */
+/* Pager and zoom keys: a press dips the key (scale .97) as well as greying it. */
 const roundControlClassName =
     'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition-[scale] duration-(--duration-press) ease-out active:scale-[0.97] active:bg-stone-100';
 
@@ -1634,16 +1642,16 @@ const pagerButtonClassName = `${roundControlClassName} disabled:opacity-40 disab
 const ZoomControls = ({
     onZoomBy,
     pageColumns,
-    onTogglePageColumns,
+    onPageColumnsChange,
     spreadCover,
-    onToggleSpreadCover,
+    onSpreadCoverChange,
 }: {
     onZoomBy: (factor: number) => void;
-    /** Null hides the one/two-page toggle (single-page documents, phones). */
-    pageColumns: 1 | 2 | null;
-    onTogglePageColumns: () => void;
+    /** Null hides the page layout controls (single-page documents, phones). */
+    pageColumns: PageColumns | null;
+    onPageColumnsChange: (columns: PageColumns) => void;
     spreadCover: boolean;
-    onToggleSpreadCover: () => void;
+    onSpreadCoverChange: (spreadCover: boolean) => void;
 }) => {
     return (
         <div
@@ -1653,31 +1661,15 @@ const ZoomControls = ({
             // (PHONE_CONTROLS_STRIP). Larger screens: a column at the
             // bottom-right — a row again on short landscape screens, where the
             // column would climb under the toolbar.
-            className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-[max(1rem,var(--safe-right))] sm:top-auto sm:flex-col sm:[@media(max-height:500px)]:flex-row"
+            className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row items-center gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-[max(1rem,var(--safe-right))] sm:top-auto sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
         >
             {pageColumns !== null ? (
-                <button
-                    type="button"
-                    aria-label={pageColumns === 2 ? 'Show one page' : 'Show two pages side by side'}
-                    title={pageColumns === 2 ? 'Show one page' : 'Show two pages side by side'}
-                    aria-pressed={pageColumns === 2}
-                    onClick={onTogglePageColumns}
-                    className={`${roundControlClassName} aria-pressed:bg-accent-soft aria-pressed:text-accent`}
-                >
-                    <Columns2Icon size={20} />
-                </button>
-            ) : null}
-            {pageColumns === 2 ? (
-                <button
-                    type="button"
-                    aria-label="Cover page first"
-                    title="Show the first page alone, so spreads pair 2|3"
-                    aria-pressed={spreadCover}
-                    onClick={onToggleSpreadCover}
-                    className={`${roundControlClassName} aria-pressed:bg-accent-soft aria-pressed:text-accent`}
-                >
-                    <CoverPageIcon size={20} />
-                </button>
+                <PageLayoutControls
+                    pageColumns={pageColumns}
+                    onPageColumnsChange={onPageColumnsChange}
+                    spreadCover={spreadCover}
+                    onSpreadCoverChange={onSpreadCoverChange}
+                />
             ) : null}
             <button type="button" aria-label="Zoom in" onClick={() => onZoomBy(1.25)} className={roundControlClassName}>
                 <ZoomInIcon size={20} />

@@ -841,3 +841,40 @@ describe('PdfViewport when a notice comes up over a score that fits', () => {
         expect(frames.pending()).toHaveLength(0);
     });
 });
+
+describe('PdfViewport page layout controls', () => {
+    afterEach(() => {
+        useViewerStore.setState({ pageColumns: 1, spreadCover: false });
+        window.localStorage.clear();
+    });
+
+    const radio = (name: string) => screen.getByRole('radio', { name });
+
+    it('opens in single page with Single page chosen, and switches to two pages and back', async () => {
+        render(<PdfViewport docId="doc-layout" />);
+        await waitFor(() => expect(radio('Single page')).toHaveAttribute('aria-checked', 'true'));
+        expect(radio('Two pages side by side')).toHaveAttribute('aria-checked', 'false');
+        expect(screen.queryByRole('button', { name: 'Start with cover page' })).toBeNull();
+
+        fireEvent.click(radio('Two pages side by side'));
+        expect(useViewerStore.getState().pageColumns).toBe(2);
+        expect(window.localStorage.getItem('cleffy:page-columns')).toBe('2');
+        expect(radio('Two pages side by side')).toHaveAttribute('aria-checked', 'true');
+        expect(radio('Single page')).toHaveAttribute('aria-checked', 'false');
+
+        fireEvent.click(screen.getByRole('button', { name: 'Start with cover page' }));
+        expect(useViewerStore.getState().spreadCover).toBe(true);
+        expect(useViewerStore.getState().pageColumns).toBe(2);
+
+        fireEvent.click(radio('Single page'));
+        expect(useViewerStore.getState().pageColumns).toBe(1);
+        expect(screen.queryByRole('button', { name: 'Start with cover page' })).toBeNull();
+    });
+
+    it('hides the layout choice on a phone', async () => {
+        viewport = { width: 375, height: 667 };
+        render(<PdfViewport docId="doc-layout-phone" />);
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Zoom in' })).toBeInTheDocument());
+        expect(screen.queryByRole('radiogroup', { name: 'Page layout' })).toBeNull();
+    });
+});
