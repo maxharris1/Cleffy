@@ -1,6 +1,5 @@
 import {
     ArrowLeft,
-    BookOpen,
     Check,
     ChevronDown,
     ChevronLeft,
@@ -18,6 +17,7 @@ import {
     Play,
     Plus,
     Pointer,
+    RectangleVertical,
     Redo2,
     RefreshCw,
     Repeat,
@@ -25,6 +25,7 @@ import {
     Share,
     SkipBack,
     Square,
+    SquareCheck,
     Star,
     Tags,
     Timer,
@@ -54,8 +55,10 @@ export const UndoIcon = withBrandStroke(Undo2);
 export const RedoIcon = withBrandStroke(Redo2);
 export const ZoomInIcon = withBrandStroke(Plus);
 export const ZoomOutIcon = withBrandStroke(Minus);
-export const Columns2Icon = withBrandStroke(Columns2);
-export const CoverPageIcon = withBrandStroke(BookOpen);
+export const SinglePageIcon = withBrandStroke(RectangleVertical);
+export const TwoPagesIcon = withBrandStroke(Columns2);
+export const CheckboxIcon = withBrandStroke(Square);
+export const CheckboxCheckedIcon = withBrandStroke(SquareCheck);
 export const PointerIcon = withBrandStroke(Pointer);
 export const PrintHandwritingIcon = withBrandStroke(WandSparkles);
 export const StarIcon = withBrandStroke(Star);
