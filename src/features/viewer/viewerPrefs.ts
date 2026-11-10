@@ -9,6 +9,10 @@ const COVER_STORAGE_KEY = 'cleffy:spread-cover';
 /** A single column reads best on a phone or a portrait tablet — the common case. */
 const DEFAULT_COLUMNS: PageColumns = 1;
 
+/** What "Start with cover page" does, for the viewer's layout menu and Account preferences alike. */
+export const COVER_PAGE_HINT =
+    'Show the first page on its own, so the spreads pair pages 2|3, 4|5 as in a printed score';
+
 /** Most PDFs start on music, not a title page — pair from page 1 until told otherwise. */
 const DEFAULT_SPREAD_COVER = false;
 

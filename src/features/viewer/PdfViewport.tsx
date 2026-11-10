@@ -48,7 +48,7 @@ import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
 import { editedTextPayload, MIN_TEXT_NOTE_WIDTH, TEXT_NOTE_EDGE } from '@/features/viewer/ink/musicFont';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
-import { PageLayoutControls } from '@/features/viewer/PageLayoutControls';
+import { PageLayoutMenu } from '@/features/viewer/PageLayoutMenu';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import {
@@ -1647,7 +1647,7 @@ const ZoomControls = ({
     onSpreadCoverChange,
 }: {
     onZoomBy: (factor: number) => void;
-    /** Null hides the page layout controls (single-page documents, phones). */
+    /** Null hides the page layout button (single-page documents, phones). */
     pageColumns: PageColumns | null;
     onPageColumnsChange: (columns: PageColumns) => void;
     spreadCover: boolean;
@@ -1664,11 +1664,12 @@ const ZoomControls = ({
             className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row items-center gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-[max(1rem,var(--safe-right))] sm:top-auto sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
         >
             {pageColumns !== null ? (
-                <PageLayoutControls
+                <PageLayoutMenu
                     pageColumns={pageColumns}
                     onPageColumnsChange={onPageColumnsChange}
                     spreadCover={spreadCover}
                     onSpreadCoverChange={onSpreadCoverChange}
+                    triggerClassName={`${roundControlClassName} data-popup-open:bg-stone-100`}
                 />
             ) : null}
             <button type="button" aria-label="Zoom in" onClick={() => onZoomBy(1.25)} className={roundControlClassName}>

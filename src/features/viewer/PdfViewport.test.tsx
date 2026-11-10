@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
@@ -13,6 +13,7 @@ import { useViewerStore } from '@/state/store';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
+import { menuBaseModule } from '@/ui/lazyPrimitives';
 
 const PAGE_SIZES = [
     { width: 612, height: 792 },
@@ -842,39 +843,68 @@ describe('PdfViewport when a notice comes up over a score that fits', () => {
     });
 });
 
-describe('PdfViewport page layout controls', () => {
+describe('PdfViewport page layout button', () => {
+    beforeAll(async () => {
+        await menuBaseModule.load();
+    });
+
     afterEach(() => {
         useViewerStore.setState({ pageColumns: 1, spreadCover: false });
         window.localStorage.clear();
     });
 
-    const radio = (name: string) => screen.getByRole('radio', { name });
+    const layoutButton = () => screen.getByRole('button', { name: /^Page layout/ });
+    /** Open the layout menu (once rendered, outside any act) and return the named item. */
+    const menuItem = (role: 'menuitemradio' | 'menuitemcheckbox', name: string) => {
+        if (layoutButton().getAttribute('aria-expanded') !== 'true') {
+            fireEvent.click(layoutButton());
+        }
+        return screen.getByRole(role, { name });
+    };
 
-    it('opens in single page with Single page chosen, and switches to two pages and back', async () => {
+    it('folds the layout into one button beside the zoom keys, and switches to two pages and back', async () => {
         render(<PdfViewport docId="doc-layout" />);
-        await waitFor(() => expect(radio('Single page')).toHaveAttribute('aria-checked', 'true'));
-        expect(radio('Two pages side by side')).toHaveAttribute('aria-checked', 'false');
-        expect(screen.queryByRole('button', { name: 'Start with cover page' })).toBeNull();
+        await waitFor(() => expect(layoutButton()).toHaveAccessibleName('Page layout: Single page'));
+        // Nothing about layout floats over the score until the button is pressed.
+        expect(screen.queryByRole('radiogroup')).toBeNull();
+        expect(screen.queryByRole('menuitemcheckbox', { name: 'Start with cover page' })).toBeNull();
+        expect(layoutButton().parentElement).toBe(screen.getByRole('button', { name: 'Zoom in' }).parentElement);
 
-        fireEvent.click(radio('Two pages side by side'));
+        expect(menuItem('menuitemradio', 'Single page')).toHaveAttribute('aria-checked', 'true');
+        expect(screen.queryByRole('menuitemcheckbox', { name: 'Start with cover page' })).toBeNull();
+        fireEvent.click(menuItem('menuitemradio', 'Two pages'));
         expect(useViewerStore.getState().pageColumns).toBe(2);
         expect(window.localStorage.getItem('cleffy:page-columns')).toBe('2');
-        expect(radio('Two pages side by side')).toHaveAttribute('aria-checked', 'true');
-        expect(radio('Single page')).toHaveAttribute('aria-checked', 'false');
+        expect(layoutButton()).toHaveAccessibleName('Page layout: Two pages');
 
-        fireEvent.click(screen.getByRole('button', { name: 'Start with cover page' }));
+        fireEvent.click(menuItem('menuitemcheckbox', 'Start with cover page'));
         expect(useViewerStore.getState().spreadCover).toBe(true);
+        expect(window.localStorage.getItem('cleffy:spread-cover')).toBe('1');
         expect(useViewerStore.getState().pageColumns).toBe(2);
 
-        fireEvent.click(radio('Single page'));
+        fireEvent.click(menuItem('menuitemradio', 'Single page'));
         expect(useViewerStore.getState().pageColumns).toBe(1);
-        expect(screen.queryByRole('button', { name: 'Start with cover page' })).toBeNull();
+        expect(menuItem('menuitemradio', 'Single page')).toHaveAttribute('aria-checked', 'true');
+        expect(screen.queryByRole('menuitemcheckbox', { name: 'Start with cover page' })).toBeNull();
     });
 
     it('hides the layout choice on a phone', async () => {
         viewport = { width: 375, height: 667 };
         render(<PdfViewport docId="doc-layout-phone" />);
         await waitFor(() => expect(screen.getByRole('button', { name: 'Zoom in' })).toBeInTheDocument());
-        expect(screen.queryByRole('radiogroup', { name: 'Page layout' })).toBeNull();
+        expect(screen.queryByRole('button', { name: /^Page layout/ })).toBeNull();
+    });
+
+    it('keeps the layout the reader chose across a reload', async () => {
+        render(<PdfViewport docId="doc-layout-reload" />);
+        await waitFor(() => expect(layoutButton()).toHaveAccessibleName('Page layout: Single page'));
+        fireEvent.click(menuItem('menuitemradio', 'Two pages'));
+        fireEvent.click(menuItem('menuitemcheckbox', 'Start with cover page'));
+
+        // A reload: a fresh store, initialised from what this browser saved.
+        vi.resetModules();
+        const { useViewerStore: reloaded } = await import('@/state/store');
+        expect(reloaded.getState().pageColumns).toBe(2);
+        expect(reloaded.getState().spreadCover).toBe(true);
     });
 });
