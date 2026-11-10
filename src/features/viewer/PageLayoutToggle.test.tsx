@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     PAGE_GAP,
@@ -10,6 +10,7 @@ import {
 } from '@/features/viewer/geometry';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { useViewerStore } from '@/state/store';
+import { menuBaseModule } from '@/ui/lazyPrimitives';
 
 /** Letter-size pages, enough of them that the reader can be somewhere in the middle. */
 const PAGE_SIZES = Array.from({ length: 8 }, () => ({ width: 612, height: 792 }));
@@ -28,6 +29,10 @@ const VIEWPORTS = [
 ];
 
 let viewport = { width: 1024, height: 700 };
+
+beforeAll(async () => {
+    await menuBaseModule.load();
+});
 
 beforeEach(() => {
     vi.stubGlobal(
@@ -52,10 +57,17 @@ afterEach(() => {
     window.localStorage.clear();
 });
 
-const radio = (name: string) => screen.getByRole('radio', { name });
-const singlePage = () => radio('Single page');
-const twoPages = () => radio('Two pages side by side');
-const coverChip = () => screen.getByRole('button', { name: 'Start with cover page' });
+/** The layout choices live in the layout button's menu: open it to reach one. */
+const inLayoutMenu = (role: 'menuitemradio' | 'menuitemcheckbox', name: string) => {
+    const button = screen.getByRole('button', { name: /^Page layout/ });
+    if (button.getAttribute('aria-expanded') !== 'true') {
+        fireEvent.click(button);
+    }
+    return screen.getByRole(role, { name });
+};
+const singlePage = () => inLayoutMenu('menuitemradio', 'Single page');
+const twoPages = () => inLayoutMenu('menuitemradio', 'Two pages');
+const coverChip = () => inLayoutMenu('menuitemcheckbox', 'Start with cover page');
 
 /** The page wrapper: laid out at renderScale, CSS-scaled to the live view. */
 const wrapper = (): HTMLElement => {
@@ -99,9 +111,18 @@ const expectFitWidth = (columns: PageColumns, cover: boolean) => {
     return layout;
 };
 
+/** Reach the item first: the menu has to open (and render) before its item can be pressed. */
 const toggleColumns = (columns: PageColumns) => {
+    const item = columns === 1 ? singlePage() : twoPages();
     act(() => {
-        fireEvent.click(columns === 1 ? singlePage() : twoPages());
+        fireEvent.click(item);
+    });
+};
+
+const toggleCover = () => {
+    const item = coverChip();
+    act(() => {
+        fireEvent.click(item);
     });
 };
 
@@ -119,9 +140,7 @@ describe.each(VIEWPORTS)('switching Single page / Two pages at $name', ({ width,
 
             toggleColumns(2);
             if (cover) {
-                act(() => {
-                    fireEvent.click(coverChip());
-                });
+                toggleCover();
             }
             for (let round = 0; round < 3; round++) {
                 expectFitWidth(2, cover);
@@ -171,13 +190,9 @@ describe.each(VIEWPORTS)('switching Single page / Two pages at $name', ({ width,
         await waitFor(() => expect(singlePage()).toHaveAttribute('aria-checked', 'true'));
         toggleColumns(2);
         for (let round = 0; round < 3; round++) {
-            act(() => {
-                fireEvent.click(coverChip());
-            });
+            toggleCover();
             expectFitWidth(2, true);
-            act(() => {
-                fireEvent.click(coverChip());
-            });
+            toggleCover();
             expectFitWidth(2, false);
         }
     });
