@@ -8,7 +8,7 @@ pstack ships adapters for Cursor and Claude Code only. In Codex (CLI or Codex cl
 - Model slugs and reasoning levels in skills (`claude-*`, `gpt-*`, `composer-*`, `fast`, `high`): ignore. Use the session's model.
 - Cursor-only features — Canvas, AskQuestion, Cursor rules (`.cursor/rules`, `pstack-models.mdc`), worktree tools, browser MCP, background/cloud agents: skip, and write one line "Skipped in Codex: <feature>".
 - Codex cloud has no internet in the agent phase and no git remote: skip any step that fetches, pushes, opens PRs or reads GitHub; report it instead.
-- Repo rules in AGENTS.md, including its Factory section, win over pstack when they conflict (no force-push, Max merges, review caps).
+- Repo rules in AGENTS.md, including `factory.md`, win over pstack when they conflict (no force-push, Max merges, review caps).
 
 ## Not vendored here
 

@@ -16,5 +16,5 @@ pstack skills are vendored in `.claude/skills/` (shared by Cursor and Claude Cod
 | Competing candidates / parallel work       | `arena`, `swarm` (Cursor or Claude Code only)                                                                                           |
 | Design principles                          | `principle-*`                                                                                                                           |
 
-Harness adapters: Claude Code reads `.claude/docs/harness/claude-code.md`; Codex reads `.claude/docs/harness/codex.md`. Rules in this file, including the Factory section, win over pstack.
+Harness adapters: Claude Code reads `.claude/docs/harness/claude-code.md`; Codex reads `.claude/docs/harness/codex.md`. Rules in this file, including `factory.md`, win over pstack.
 Update: rerun `scripts/vendor-pstack.sh . <cursor/plugins SHA>`; never hand-edit files that contain `.pstack-vendored`.
