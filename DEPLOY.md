@@ -56,20 +56,27 @@ hand, all behind a maintenance freeze. It replaces the _Release checklist —
 launch fixes (20261007\*)_ below, which was written for pushing pending
 migrations onto production's existing data.
 
-**Counts, from the repository at `dev` 47e9b38f:** 96 migrations
-(`ls supabase/migrations | wc -l`) and 23 Edge Functions (the directories under
-`supabase/functions/` other than `_shared`). `main` has 26 migrations and 13
-functions. `main`'s 26 files are an unchanged prefix of `dev`'s
+**Counts, from the repository at `dev` `b768be1` (2026-11-10):** 137
+migrations (`ls supabase/migrations | wc -l`) and 23 Edge Functions (the
+directories under `supabase/functions/` other than `_shared`). `main`
+(`cf1e968`) has 26 migrations and 13 functions. `main`'s 26 files are an
+unchanged prefix of `dev`'s
 (`git diff --name-status origin/main origin/dev -- supabase/migrations` shows
-only additions), and every function on `main` still exists on `dev`. So:
+only additions, 111 of them), and every function on `main` still exists on
+`dev`. So:
 
 - the reset in step 8 replays `main`'s 26 migrations;
-- step 11 pushes the other 70, in three batches: 4, then 60, then 6 (34 in
-  the third at `d387b69f`, below);
+- step 11 pushes the other 111, in three batches: 4, then 60, then 47;
 - step 12 deploys all 23 functions.
 
-Count again on the go-live commit. P1 to P5 are merged into `dev`
-(`d387b69f`, 2026-10-22), and they add 28 migrations:
+Count again on the go-live commit. How the third batch grew to 47:
+
+- 6 at `dev` 47e9b38f, where `dev` had 96 migrations;
+- 34 at `d387b69f`, with P1 to P5's 28 (124 migrations, below);
+- 47 at `b768be1`, with 13 more (137 migrations, below).
+
+P1 to P5 are merged into `dev` (`d387b69f`, 2026-10-22), and they add 28
+migrations:
 
 - P1 adds 11, `20261022100000` to `20261022101000`;
 - P3 adds 9, `20261022110000` to `20261022110800`;
@@ -86,6 +93,19 @@ schedule a cron job, and both land in the third batch:
 - P3's `support-inbound-retry`, every five minutes.
 
 That is **12** cron jobs in all at `d387b69f`, against 10 at 47e9b38f.
+
+After P1 to P5, 13 more migrations reached `dev`. They make **137** at
+`b768be1`, and step 11's third batch **47**:
+
+- the launch-fix follow-ups (PR #72), 11: `20261022140000` to
+  `20261022141000`;
+- launch-fix item 16, 1: `20261022160000_cancel_link_release_for_deletion`;
+- the shared IMSLP PDF cache, 1: `20261028120000_imslp_shared_pdf_cache`.
+
+All 13 sort after `20261021120300`, so all 13 land in the third batch. None
+of them schedules a cron job, so the count stays **12** at `b768be1`.
+`20261022141000` only prints a commented-out `account-deletions-sweep` line,
+which is scheduled by hand if at all (_Recovery runbooks_).
 
 **The deploy is manual and gated.** The Supabase GitHub integration's
 **Deploy to production** stays **off** from step 0 until the smoke tests pass
@@ -114,9 +134,10 @@ again from step 8 (_Abort and recovery_).
 
 Steps 6 to 20 are one sitting. P1 to P5 were still open when this was first
 written. Every name that was not yet settled on `dev` has since been checked
-against `dev` at `d387b69f`, with all five merged. If `GOLIVE_SHA` is a later
-commit, check the migrations, functions, secrets and cron jobs named here
-against it again (step 1) before you start.
+against `dev` at `d387b69f`, with all five merged. The migrations, functions
+and cron jobs were counted again at `b768be1` (2026-11-10). If `GOLIVE_SHA` is
+a later commit, check the migrations, functions, secrets and cron jobs named
+here against it again (step 1) before you start.
 
 **If anything fails, stop.** Do not improvise around a failed check. _Abort
 and recovery_, at the end of this section, says what to do at each point.
@@ -167,8 +188,10 @@ It is turned back on in step 19, after the smoke tests pass.
 
     The commented-out `retention-district` example is not one of them. P3 adds
     `support-inbound-retry` and P5 adds `retention-content-strikes`, which makes 12
-    at `d387b69f`. Any other new job changes step 11's batches and step 13's
-    expected list.
+    at `d387b69f`. At `b768be1` there are still 12, but the `git grep` prints 14
+    lines: the other two are commented-out examples, `retention-district`
+    (`20261021120700`) and `account-deletions-sweep` (`20261022141000`). Any
+    other new job changes step 11's batches and step 13's expected list.
 
 - Update #54's body. The draft is in this PR's report. The current body still
   says 48 migrations and 15 functions.
@@ -465,10 +488,13 @@ add three more (`thumbnails_enforce_folder_cap`,
 `storage_objects_charge_insert` and `thumbnails_keep_published_cover`). P1's
 `20261022101000_storage_quota_lock_and_cover_reuse.sql` also locks
 `storage.objects` rows with `SELECT … FOR UPDATE` inside the security-definer
-quota function, whose owner needs `UPDATE` as well as read access. Both land in
-step 11's third batch. On hosted Supabase, `storage.objects` belongs to
-`supabase_storage_admin`, so check both privileges now, in production's SQL
-editor:
+quota function, whose owner needs `UPDATE` as well as read access.
+`20261022140500_thumbnail_publish_lock_order.sql` (PR #72) takes a
+`storage.objects` row `FOR KEY SHARE NOWAIT` in the security-definer
+thumbnail publish, and PostgreSQL asks for `UPDATE` for that lock too. All of
+them land in step 11's third batch. On hosted Supabase, `storage.objects`
+belongs to `supabase_storage_admin`, so check both privileges now, in
+production's SQL editor:
 
 ```sql
 select has_table_privilege('postgres', 'storage.objects', 'TRIGGER') as can_create_storage_triggers;
@@ -1218,15 +1244,16 @@ select has_table_privilege('postgres', 'storage.objects', 'UPDATE');
 ```
 
 If either is `f`, stop before applying any migration, and resolve the hosted
-privilege first. P1's storage triggers (`20261022100800`) and its row lock in
-the quota function (`20261022101000`), both in batch 3, need them.
+privilege first. P1's storage triggers (`20261022100800`), its row lock in
+the quota function (`20261022101000`) and PR #72's thumbnail-publish row lock
+(`20261022140500`), all in batch 3, need them.
 
 Each scheduling migration first unschedules its job by name, then schedules it
 again. A job re-created that way comes back **active**, so a pause only holds
-if no later migration schedules the same job again. None does, at 47e9b38f
-or at `d387b69f` with P1 to P5 merged (step 1's `git grep`). On the local
-stack (pg_cron 1.6.4), a plain `cron.schedule` over a paused job's name kept
-it paused.
+if no later migration schedules the same job again. None does, at 47e9b38f,
+at `d387b69f` with P1 to P5 merged, or at `b768be1` (step 1's `git grep`). On
+the local stack (pg_cron 1.6.4), a plain `cron.schedule` over a paused job's
+name kept it paused.
 
 1. **Batch 1: 4 migrations**, up to `20260902120000_imslp_category_index`,
    which schedules `imslp-sync`.
@@ -1272,15 +1299,21 @@ it paused.
     are scheduled in this batch and stay active. The first two skip without
     their Vault pair, and the third only recomputes seat state, which is empty.
 
-3. **Batch 3: the rest.** That is 6 at 47e9b38f, plus P1 to P5's 28: 34 in
-   all at `d387b69f`. It includes P3's `20261022110700` and `20261022110800`
-   and P5's `20261022130000` to `20261022130400`, which must be in before the
-   new `student-provision` is deployed (below, and step 12). It runs from the
-   worktree itself:
+3. **Batch 3: the rest.** At `b768be1` that is 47 migrations:
+    - 6 from 47e9b38f;
+    - P1 to P5's 28;
+    - PR #72's 11;
+    - launch-fix item 16's `20261022160000`;
+    - the shared IMSLP PDF cache, `20261028120000`.
+
+    It includes P3's `20261022110700` and `20261022110800` and P5's
+    `20261022130000` to `20261022130400`. Those must be in before the new
+    `student-provision` is deployed (below, and step 12). It runs from the
+    worktree itself:
 
     ```bash
     test "$(cat supabase/.temp/project-ref)" = jibgwgosihadbjgxdsfe || exit 1
-    supabase db push --linked --dry-run   # from 20261021120400 to the newest file
+    supabase db push --linked --dry-run   # 20261021120400 to the newest file: 47 at b768be1, ending 20261028120000
     supabase db push --linked
     supabase migration list --linked      # every local version is also remote
     rm -rf "$(dirname "$GOLIVE_STAGE")"
@@ -1297,9 +1330,11 @@ it paused.
 
     P3's `support-inbound-retry` is also scheduled in this batch, and it
     stays active. Like `content-notice-retry`, it skips without its Vault
-    pair (`support_inbound_url` / `support_inbound_secret`, step 14). P1 to
-    P5 schedule no other job at `d387b69f`. If `GOLIVE_SHA` schedules one,
-    pause it the same way if it deletes data or calls out.
+    pair (`support_inbound_url` / `support_inbound_secret`, step 14). No
+    other migration schedules a job at `b768be1`. `20261022141000` only
+    prints an `account-deletions-sweep` example, and that job stays
+    unscheduled (_Recovery runbooks_). If `GOLIVE_SHA` schedules one, pause
+    it the same way if it deletes data or calls out.
 
     `retention-district` is not scheduled by any migration, and stays
     unscheduled: `retention_district_run()` does not run until Max has
@@ -1345,8 +1380,8 @@ it paused.
     any function** (step 12). Fix forward as in _Abort and recovery_, and run
     the check again. There is no `20261022130200` (top of this section).
 
-    **The launch-fix follow-ups (PR #72), when merged before the sitting.**
-    Batch 3 pushes them too (they sort after P5). Check them the same way:
+    **The launch-fix follow-ups (PR #72), on `dev` at `b768be1`.** Batch 3
+    pushes them too (they sort after P5). Check them the same way:
 
     ```sql
     select version, name from supabase_migrations.schema_migrations
@@ -1371,7 +1406,7 @@ it paused.
     three. Nothing in them is scheduled.
 
     **Launch-fix item 16 (deletion-pending policy per writer, decision 70(1)),
-    when merged.** One migration,
+    on `dev` at `b768be1`.** One migration,
     `20261022160000_cancel_link_release_for_deletion` (decision 72(1)): the
     cancel-link guard's one exception,
     `release_cancel_link_token_for_deletion()`, and the link's kept refund
@@ -1396,6 +1431,62 @@ it paused.
     `deletion_check_unavailable` when the check fails) instead of a portal
     session while the account is being deleted (decision 71(6)); the
     frontend shows any refusal's message as it does today.
+
+    **The shared IMSLP PDF cache, on `dev` at `b768be1`.** One migration,
+    `20261028120000_imslp_shared_pdf_cache`. Its header says no hosted
+    project has it yet, so the step 2 rehearsal on `GOLIVE_SHA` is its first
+    hosted apply. It does the following:
+    - It creates `imslp_pdf_cache` and `imslp_pdf_claims`. Both are service
+      role only (step 13.3).
+    - It creates the service-role RPCs `claim_imslp_pdf`, `release_imslp_pdf`,
+      `publish_imslp_pdf`, `is_shared_imslp_pdf` and `block_imslp_pdf`, and the
+      `authenticated` RPCs `can_import_imslp` and `commit_pdf_replacement`
+      (plus `detach_imslp_pdf`, an alias for older clients).
+    - It creates a schema, `imslp_private`, for the policy helpers.
+    - It puts shared originals in a reserved folder of the private `scores`
+      bucket, `00000000-0000-0000-0000-000000000000/<sha256>.pdf`.
+
+    Why it needs care:
+    - **`storage.objects`.** It adds four policies to `storage.objects`: one
+      permissive select policy and three restrictive ones, for select, update
+      and delete, on the reserved folder. `main`'s
+      `20260801160754_rls.sql` already creates policies there, and step 8's
+      reset replayed it, so the privilege is proven by then. Its RPCs read
+      `storage.objects` and lock no row of it, so step 4's preflight needs
+      no new check.
+    - **Locks.** It replaces `documents_storage_path_derived` and adds
+      `documents_cache_folder_reserved`. Each `ADD CONSTRAINT` takes
+      `ACCESS EXCLUSIVE` on `public.documents` and checks every row. It also
+      builds a plain, not concurrent, partial index on
+      `documents.storage_path`, and adds triggers on `documents` and
+      `content_takedowns`. After the wipe `documents` is empty, so all of
+      this is instant. Do not apply it to a populated production outside a
+      freeze.
+    - **No backfill.** The cache starts empty. Its first row comes from the
+      first IMSLP import (step 18).
+    - **Deploy order.** Apply it before the new `imslp-download` and before
+      the new frontend. Step 12's order (migrations first) and step 16's
+      give both:
+        - `imslp-download` asks `can_import_imslp()` before anything else.
+          Without the migration, every import answers
+          `503 Could not check import permissions`.
+        - The frontend's PDF replacement calls `commit_pdf_replacement()`.
+    - **Takedowns.** A takedown on copyright grounds of a score that points
+      at a shared file sets `imslp_pdf_cache.blocked_at`. That blocks the
+      file in every library. Lifting the takedown does **not** clear the
+      block: a person must clear it after review. Step 18's moderation test
+      uses an uploaded score for that reason.
+    - **Cron.** Nothing in it is scheduled.
+
+    Check both of the newest versions:
+
+    ```sql
+    select version, name from supabase_migrations.schema_migrations
+    where version in ('20261022160000', '20261028120000')
+    order by 1;
+    -- exactly 2 rows: 20261022160000 cancel_link_release_for_deletion,
+    --                 20261028120000 imslp_shared_pdf_cache
+    ```
 
     **P3's code reset: `20261022110700` / `20261022110800` and the
     `student-provision` deploy go back to back, inside the freeze** (decision
@@ -1535,7 +1626,8 @@ stated.
         ('student_claim_reservations'), ('account_deletions'),   -- P3
         ('account_deletion_attempts'), ('student_provision_intents'), -- P3
         ('document_realtime_rotation_queue'),                    -- P4
-        ('district_retention_restores')                          -- P5
+        ('district_retention_restores'),                         -- P5
+        ('imslp_pdf_cache'), ('imslp_pdf_claims')                -- 20261028120000
     ),
     client_read (t) as (values
         ('documents'), ('annotations'), ('document_members'), ('share_links'), ('subscriptions'),
@@ -1560,7 +1652,13 @@ stated.
 
     `server_only` is every public table that a migration explicitly revokes
     from `anon` / `authenticated`. The marked lines are the tables P1 to P5
-    create, all nine of them at `d387b69f`. On a local stack with the 111
+    create, all nine of them at `d387b69f`, and the two that
+    `20261028120000` creates. PR #72 and launch-fix item 16 create no table.
+    On a local stack with all 137 migrations at `b768be1`, the check returned
+    0 rows. With `grant select on public.imslp_pdf_claims to anon` inside a
+    rolled-back transaction, it reported exactly that grant. Step 13.4's check
+    returned 0 rows there too, once `imslp-sync` and the six `retention-*`
+    jobs were paused. On a local stack with the 111
     migrations of P1 to P5's earlier branch heads, the check returned 0 rows.
     `account_deletion_attempts` and `student_provision_intents` (P3) were
     added to the list after that run, from their migrations' revokes. An
@@ -1568,7 +1666,8 @@ stated.
     a failure.
 
 4. **`cron.job`, with the pauses required.** Zero rows is a pass. Twelve jobs
-   are expected: 10 from 47e9b38f, plus P3's and P5's. At this point,
+   are expected: 10 from 47e9b38f, plus P3's and P5's. No later migration adds
+   one (still 12 at `b768be1`). At this point,
    `imslp-sync` and the six `retention-*` jobs must be **paused**, and the
    other five active. `retention-district` must be **absent**: it is scheduled
    only by hand, after _Before scheduling `retention-district`_. A job in the
@@ -1789,8 +1888,24 @@ recovery_.
   (`auth.users.is_anonymous` is `false` for it), and keeps the score's
   membership.
 - **Export and IMSLP.** On a free account, export a PDF twice: the second is
-  refused. Import from IMSLP and open its Source dialog.
-- **Moderation.** Report a throwaway score at `/report` signed out. The
+  refused. Import from IMSLP and open its Source dialog. The score opens.
+  Imports now go through the shared cache (`20261028120000`, step 11.3), so
+  check that the import made one unblocked cache row, and that the score
+  points at it:
+
+    ```sql
+    select c.imslp_file_id, c.storage_path, c.blocked_at, count(d.id) as scores
+    from public.imslp_pdf_cache c
+    left join public.documents d on d.storage_path = c.storage_path
+    group by 1, 2, 3;
+    -- one row per imported edition: storage_path under
+    -- 00000000-0000-0000-0000-000000000000/, blocked_at null, scores at least 1
+    ```
+
+- **Moderation.** Use a score uploaded from a file here, not the IMSLP
+  import. A copyright takedown of a shared IMSLP file blocks it in every
+  library, and lifting the takedown does not clear the block (step 11.3).
+  Report a throwaway score at `/report` signed out. The
   acknowledgment arrives with a `CR-…` reference. Take it down from
   `/admin/reports`, then lift it.
 - **Inbound alias tagging.** From an outside mailbox, send one mail each to
