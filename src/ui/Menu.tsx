@@ -27,6 +27,8 @@ export interface MenuProps {
     menuLabel?: string;
     /** Width and any extras for the popup. */
     popupClassName?: string;
+    /** Which side of the trigger the popup opens on (it flips if it would not fit). Below by default. */
+    side?: 'top' | 'bottom';
     /** Controlled open state (the account menu closes on navigation). */
     open?: boolean;
     onOpenChange?: (open: boolean) => void;
@@ -272,4 +274,42 @@ export const MenuItem = (props: MenuItemProps) => {
 export const MenuSeparator = () => {
     const loaded = useSyncExternalStore(menuBase.subscribe, menuBase.get, menuBase.get);
     return loaded ? <loaded.MenuBaseSeparator /> : null;
+};
+
+export interface MenuRadioGroupProps {
+    /** Names the group of choices. */
+    label: string;
+    value: string;
+    onValueChange: (value: string) => void;
+    children: ReactNode;
+}
+
+/** A labelled group of menuitemradio choices, one of them checked. */
+export const MenuRadioGroup = (props: MenuRadioGroupProps) => {
+    const loaded = useSyncExternalStore(menuBase.subscribe, menuBase.get, menuBase.get);
+    return loaded ? <loaded.MenuBaseRadioGroup {...props} /> : null;
+};
+
+export interface MenuRadioItemProps {
+    value: string;
+    children: ReactNode;
+}
+
+/** One choice in a MenuRadioGroup. */
+export const MenuRadioItem = (props: MenuRadioItemProps) => {
+    const loaded = useSyncExternalStore(menuBase.subscribe, menuBase.get, menuBase.get);
+    return loaded ? <loaded.MenuBaseRadioItem {...props} /> : null;
+};
+
+export interface MenuCheckboxItemProps {
+    checked: boolean;
+    onCheckedChange: (checked: boolean) => void;
+    title?: string;
+    children: ReactNode;
+}
+
+/** An on/off option in a menu (menuitemcheckbox). */
+export const MenuCheckboxItem = (props: MenuCheckboxItemProps) => {
+    const loaded = useSyncExternalStore(menuBase.subscribe, menuBase.get, menuBase.get);
+    return loaded ? <loaded.MenuBaseCheckboxItem {...props} /> : null;
 };

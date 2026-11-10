@@ -2,7 +2,14 @@ import { Menu as BaseMenu } from '@base-ui/react/menu';
 import { useLayoutEffect, useRef } from 'react';
 
 import { menuItemClassName } from '@/ui/classNames';
-import type { MenuItemProps, MenuProps } from '@/ui/Menu';
+import { CheckIcon } from '@/ui/icons';
+import type {
+    MenuCheckboxItemProps,
+    MenuItemProps,
+    MenuProps,
+    MenuRadioGroupProps,
+    MenuRadioItemProps,
+} from '@/ui/Menu';
 
 /** The keys a closed trigger opens on, as far as where the highlight lands goes. */
 export type MenuOpenKey = 'ArrowDown' | 'ArrowUp';
@@ -33,6 +40,7 @@ export const MenuBase = ({
     disabled = false,
     menuLabel,
     popupClassName = 'w-48',
+    side = 'bottom',
     open,
     onOpenChange,
     defaultOpen = false,
@@ -73,7 +81,7 @@ export const MenuBase = ({
                 {triggerContent}
             </BaseMenu.Trigger>
             <BaseMenu.Portal>
-                <BaseMenu.Positioner side="bottom" align="end" sideOffset={4} collisionPadding={16} className="z-50">
+                <BaseMenu.Positioner side={side} align="end" sideOffset={4} collisionPadding={16} className="z-50">
                     <BaseMenu.Popup
                         aria-label={menuLabel}
                         className={`ui-menu-pop max-h-[var(--available-height)] overflow-y-auto overscroll-contain rounded-xl border border-stone-200 bg-white py-1 shadow-lg outline-none ${popupClassName}`}
@@ -107,3 +115,40 @@ export const MenuBaseItem = ({
 );
 
 export const MenuBaseSeparator = () => <BaseMenu.Separator className="my-1 border-t border-stone-200" />;
+
+/** One choice of several, inside the menu: Base UI's radio group, labelled. */
+export const MenuBaseRadioGroup = ({ label, value, onValueChange, children }: MenuRadioGroupProps) => (
+    <BaseMenu.RadioGroup aria-label={label} value={value} onValueChange={(next: string) => onValueChange(next)}>
+        {children}
+    </BaseMenu.RadioGroup>
+);
+
+/** A menuitemradio: a check mark at the end of the chosen one. Choosing one closes the menu. */
+export const MenuBaseRadioItem = ({ value, children }: MenuRadioItemProps) => (
+    <BaseMenu.RadioItem
+        value={value}
+        closeOnClick
+        className={menuItemClassName(false, 'gap-2.5 data-checked:text-accent')}
+    >
+        {children}
+        <BaseMenu.RadioItemIndicator className="ml-auto">
+            <CheckIcon size={16} />
+        </BaseMenu.RadioItemIndicator>
+    </BaseMenu.RadioItem>
+);
+
+/** A menuitemcheckbox: a check mark at the end while on. Toggling it closes the menu. */
+export const MenuBaseCheckboxItem = ({ checked, onCheckedChange, title, children }: MenuCheckboxItemProps) => (
+    <BaseMenu.CheckboxItem
+        checked={checked}
+        onCheckedChange={(next) => onCheckedChange(next)}
+        closeOnClick
+        title={title}
+        className={menuItemClassName(false, 'gap-2.5 data-checked:text-accent')}
+    >
+        {children}
+        <BaseMenu.CheckboxItemIndicator className="ml-auto">
+            <CheckIcon size={16} />
+        </BaseMenu.CheckboxItemIndicator>
+    </BaseMenu.CheckboxItem>
+);

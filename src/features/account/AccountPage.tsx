@@ -28,6 +28,7 @@ import { useEntitlements } from '@/features/billing/useEntitlements';
 import { CancelSubscriptionLink } from '@/features/billing/CancelSubscriptionLink';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { ScoreLayoutPreferences } from '@/features/viewer/ScoreLayoutPreferences';
 import { features } from '@/lib/features';
 import type { UsageMetric } from '@/types/database';
 import { Button } from '@/ui/Button';
@@ -555,6 +556,8 @@ export const AccountPage = () => {
                 <h2 className={SECTION_HEADING}>Preferences</h2>
 
                 <HomeScreenPreferences />
+
+                <ScoreLayoutPreferences />
 
                 <h3 className={`${SUB_HEADING} mt-6`}>Offline storage</h3>
                 <p className="mt-1.5 text-sm text-stone-600">
