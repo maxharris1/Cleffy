@@ -47,7 +47,12 @@ const must = <T>(result: { data: T; error: { message: string } | null }, what: s
 };
 
 export const signIn = async (admin: SupabaseClient, email: string): Promise<LiveUser> => {
-    const created = await admin.auth.admin.createUser({ email, password: PASSWORD, email_confirm: true });
+    const created = await admin.auth.admin.createUser({
+        email,
+        password: PASSWORD,
+        email_confirm: true,
+        user_metadata: { age_gate: { country: 'US', min_age: 13, source: 'self', v: 1 } },
+    });
     if (created.error || !created.data.user) {
         throw new Error(`createUser ${email}: ${created.error?.message}`);
     }

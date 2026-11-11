@@ -150,7 +150,12 @@ relay.on('connection', (client, req) => {
 const admin = createClient(URL_, SECRET, { global: { fetch: proxiedFetch } });
 const email = `teacher-${Date.now()}@example.com`;
 const password = 'test-password-1234';
-const { error: createErr } = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+const { error: createErr } = await admin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { age_gate: { country: 'US', min_age: 13, source: 'self', v: 1 } },
+});
 if (createErr) throw new Error('admin createUser: ' + createErr.message);
 const teacherAuth = createClient(URL_, ANON, { global: { fetch: proxiedFetch } });
 const { data: signIn, error: signInErr } = await teacherAuth.auth.signInWithPassword({ email, password });

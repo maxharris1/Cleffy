@@ -66,7 +66,12 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Sign in as a fresh account on its own client (its own realtime socket). */
 const signedIn = async (admin: SupabaseClient, email: string): Promise<{ client: SupabaseClient; id: string }> => {
-    const { data, error } = await admin.auth.admin.createUser({ email, password: PASSWORD, email_confirm: true });
+    const { data, error } = await admin.auth.admin.createUser({
+        email,
+        password: PASSWORD,
+        email_confirm: true,
+        user_metadata: { age_gate: { country: 'US', min_age: 13, source: 'self', v: 1 } },
+    });
     if (error || !data.user) {
         throw new Error(`createUser ${email}: ${error?.message}`);
     }

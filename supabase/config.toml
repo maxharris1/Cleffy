@@ -357,11 +357,12 @@ max_frequency = "5s"
 # This hook runs before a new user is created and allows developers to reject the request based on the incoming user object.
 #
 # ON for the local stack: public.hook_before_user_created
-# (migrations/20261021120000_consent_age.sql) refuses any new user — sign-up,
-# share-link guest, or a student-provision create/invite — whose user_metadata
-# lacks an age_gate at or above the consent age for its country. OFF for
-# [remotes.dev] below until Max switches it on in the dashboard, so the branch
-# deploy never flips a hosted auth setting by itself.
+# (migrations/20261021120000_consent_age.sql) refuses sign-up and share-link
+# guests whose user_metadata lacks an age_gate at or above the consent age.
+# Admin API createUser skips that hook; 20261111170000_age_gate_auth_users_insert
+# is the INSERT trigger backstop on auth.users for supabase_auth_admin.
+# OFF for [remotes.dev] below until Max switches it on in the dashboard, so the
+# branch deploy never flips a hosted auth setting by itself.
 [auth.hook.before_user_created]
 enabled = true
 uri = "pg-functions://postgres/public/hook_before_user_created"

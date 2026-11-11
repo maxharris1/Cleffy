@@ -422,6 +422,14 @@ Use the helpers at the top of the file:
 
 Write each SQL argument in `$q$ … $q$` so it needs no escaping.
 
+`age_gate_admin_backstop.sql` proves `20261111170000_age_gate_auth_users_insert.sql`:
+the INSERT trigger on `auth.users` that closes the admin `createUser` hole
+(GoTrue skips `before_user_created` there). Inserts as `supabase_auth_admin`
+without a passing `age_gate` are refused (missing/malformed `22023`, under-age
+`42501` naming no digit); a self gate, a teacher gate (student-provision), and
+an anonymous guest with a gate are allowed; `postgres` inserting without a gate
+is the documented exemption for seed and SQL fixtures.
+
 `launch_consent.sql` proves the launch consent and retention migrations
 (`20261021120000` through `20261021120300`, and the fix pass's `120400` to `120600`): `consent_age()` answers the
 EU/EEA ages and 13 elsewhere; `hook_before_user_created` lets a passing

@@ -230,6 +230,7 @@ set constraints all immediate;
 \ir ../../supabase/migrations/20261022160000_cancel_link_release_for_deletion.sql
 \ir ../../supabase/migrations/20261028120000_imslp_shared_pdf_cache.sql
 \ir ../../supabase/migrations/20261111124000_restrict_student_write_allowed_execute.sql
+\ir ../../supabase/migrations/20261111170000_age_gate_auth_users_insert.sql
 
 reset client_min_messages;
 
