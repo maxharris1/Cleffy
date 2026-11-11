@@ -202,6 +202,14 @@ select pg_temp.holds (
 );
 
 select pg_temp.holds (
+    'hook: a country-only or null min_age is refused (NULL must not fail open)',
+    $q$select public.age_gate_problem ('{"age_gate":{"country":"DE"}}') = 'age_check_missing'
+       and public.age_gate_problem ('{"age_gate":{"country":"DE","min_age":null}}') = 'age_check_missing'
+       and (public.hook_before_user_created (
+           '{"user":{"user_metadata":{"age_gate":{"country":"DE"}}}}') #>> '{error,http_code}') = '400'$q$
+);
+
+select pg_temp.holds (
     'hook: only supabase_auth_admin may call it',
     $q$select has_function_privilege ('supabase_auth_admin', 'public.hook_before_user_created(jsonb)', 'execute')
        and not has_function_privilege ('authenticated', 'public.hook_before_user_created(jsonb)', 'execute')

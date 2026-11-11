@@ -124,6 +124,7 @@ describe.skipIf(!REQUIRED && (!URL || !ANON_KEY || !SERVICE_KEY))('Storage accou
             email,
             password,
             email_confirm: true,
+            user_metadata: { age_gate: { country: 'US', min_age: 13, source: 'self', v: 1 } },
         });
         expect(createError).toBeNull();
         userId = created.user!.id;

@@ -474,8 +474,9 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         // app_metadata is admin-only, which is what makes this flag trustworthy in
         // get_entitlements() and in the documents_insert policy.
         app_metadata: { user_type: 'student', teacher_id: userId },
-        // The admin API's createUser skips the before_user_created hook, so this
-        // is a record rather than a gate: the gate was readTeacherAttestation.
+        // createUser skips before_user_created; enforce_age_gate_on_user
+        // (INSERT on auth.users) is the database backstop, and this age_gate
+        // is what it accepts. readTeacherAttestation was the app-level gate.
         user_metadata: { display_name: displayName, age_gate: ageGateOf(attestation) },
     });
     if (createError || !created.user) {

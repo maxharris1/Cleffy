@@ -113,6 +113,16 @@ jobs:
                   CLEFFY_LOCAL_ANON_KEY="$ANON_KEY" \
                   CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
                       npx vitest run tests/storage/storageLifecycle.test.ts
+            # Admin createUser skips before_user_created; this is the HTTP path
+            # the 2026-11-11 prod smoke test used. The SQL proof covers the
+            # trigger; this covers GoTrue actually hitting it.
+            - name: Admin createUser age-gate backstop (ageGateAdminCreateUser.test.ts)
+              run: |
+                  eval "$(supabase status -o env | grep -E '^(API_URL|SERVICE_ROLE_KEY)=')"
+                  CLEFFY_REQUIRE_LOCAL_DB=1 \
+                  CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
+                  CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+                      npx vitest run tests/auth/ageGateAdminCreateUser.test.ts
             # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
             # sharing proof beside the migrations. A new proof runs by being
             # added -- this file changes only to skip one, which needs a reason.

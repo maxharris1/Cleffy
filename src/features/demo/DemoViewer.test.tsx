@@ -173,7 +173,8 @@ describe('DemoViewer, opening a session', () => {
         gate.resolve();
 
         expect(await screen.findByTestId('viewport')).toBeInTheDocument();
-        expect(h.events).toEqual(['purge', 'purged', 'mount']);
+        // mount is recorded in useEffect, after the viewport is in the DOM.
+        await waitFor(() => expect(h.events).toEqual(['purge', 'purged', 'mount']));
         await latestStore().load();
         expect(latestStore().annotatedPages()).toEqual([]);
         expect(window.sessionStorage.getItem(DEMO_SESSION_KEY)).toBe('1');
@@ -305,7 +306,8 @@ describe('DemoViewer, Start over', () => {
         gate.resolve();
 
         expect(await screen.findByTestId('viewport')).toBeInTheDocument();
-        expect(h.events).toEqual(['unmount', 'purge', 'purged', 'mount']);
+        // mount is recorded in useEffect, after the viewport is in the DOM.
+        await waitFor(() => expect(h.events).toEqual(['unmount', 'purge', 'purged', 'mount']));
         const fresh = latestStore();
         expect(fresh).not.toBe(first);
         await fresh.load();

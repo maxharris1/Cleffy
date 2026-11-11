@@ -151,7 +151,11 @@ describe.skipIf(!REQUIRED && (!URL || !SERVICE_KEY))('the cancel link against th
     /** A subscriber, and their cancel-link request written down as billing-cancel does. */
     const subscriber = async () => {
         const email = `lc-${randomUUID().slice(0, 8)}@cancel-link-store.test`;
-        const created = await db.auth.admin.createUser({ email, email_confirm: true });
+        const created = await db.auth.admin.createUser({
+            email,
+            email_confirm: true,
+            user_metadata: { age_gate: { country: 'US', min_age: 13, source: 'self', v: 1 } },
+        });
         if (created.error || !created.data.user) {
             throw new Error(`create user: ${created.error?.message ?? 'no user'}`);
         }
