@@ -1,4 +1,5 @@
--- Behaviour proof for 20261111170000_age_gate_auth_users_insert.sql: the
+-- Behaviour proof for 20261111170000_age_gate_auth_users_insert.sql and
+-- 20261111180000_age_gate_problem_missing_min_age.sql: the
 -- age-gate INSERT trigger on auth.users, which is the database backstop for
 -- GoTrue's admin API createUser (that path skips before_user_created).
 --
@@ -137,6 +138,28 @@ select pg_temp.chk('23 the under-age refusal names no digit', $q$
     from t_results
     where name = '22 gotrue insert below the country age is refused, naming no age'
 $q$);
+
+select pg_temp.gotrue_check(
+    '24 gotrue insert with country-only age_gate is refused',
+    $i$
+        insert into auth.users (id, aud, role, email, raw_user_meta_data)
+        values ('a9e00000-0000-4000-8000-000000000024', 'authenticated', 'authenticated',
+                'ag-admin-country-only@example.invalid',
+                '{"age_gate":{"country":"DE"}}')
+    $i$,
+    '%Sign-up needs the age check first%'
+);
+
+select pg_temp.gotrue_check(
+    '25 gotrue insert with a null min_age is refused',
+    $i$
+        insert into auth.users (id, aud, role, email, raw_user_meta_data)
+        values ('a9e00000-0000-4000-8000-000000000025', 'authenticated', 'authenticated',
+                'ag-admin-null-age@example.invalid',
+                '{"age_gate":{"country":"DE","min_age":null}}')
+    $i$,
+    '%Sign-up needs the age check first%'
+);
 
 -- ---- passing gates, including the student-provision and guest shapes
 select pg_temp.gotrue_check(
