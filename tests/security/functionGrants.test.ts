@@ -5,16 +5,18 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * Two function grants the Supabase security advisor flags as low priority, and
- * why neither should be changed — recorded as tests so the question is settled
- * in the tree rather than re-asked by the next hardening pass.
+ * Function grants the Supabase security advisor flags, and whether to act.
+ * Recorded as tests so the question is settled in the tree rather than
+ * re-asked by the next hardening pass.
  *
  * The advisor's heuristic is "a SECURITY DEFINER function that looks internal
  * should not be callable by anon or authenticated", and it is a good heuristic.
- * It is wrong about both of these, for different reasons, and in one case
- * acting on it would be an outage rather than a tightening. The reasoning lives
- * next to the assertions because an assertion alone would just read as an
- * arbitrary rule to someone who inherits it.
+ * It is wrong about document_storage_cleanup_pending and peek_share_link, for
+ * different reasons, and in one case acting on it would be an outage rather
+ * than a tightening. It is right about student_write_allowed: that one is
+ * revoked from anon. The reasoning lives next to the assertions because an
+ * assertion alone would just read as an arbitrary rule to someone who inherits
+ * it.
  *
  * Parsed out of the migration SQL, the technique tests/billing/limitsInSync.ts
  * uses — and resolved as "the migration that most recently defines this
@@ -197,5 +199,58 @@ describe('peek_share_link is meant to be callable by anon', () => {
         // whichever file they happen to open.
         const service = readFileSync(resolve(process.cwd(), 'src/features/share/shareService.ts'), 'utf8');
         expect(service).toMatch(/no session at all/i);
+    });
+});
+
+describe('student_write_allowed is not executable by anon', () => {
+    const grants = (() => {
+        const defining = readdirSync(MIGRATIONS_DIR)
+            .filter((file) => file.endsWith('.sql'))
+            .sort()
+            .filter((file) =>
+                /grant\s+execute\s+on\s+function\s+public\.student_write_allowed/i.test(
+                    readFileSync(resolve(MIGRATIONS_DIR, file), 'utf8'),
+                ),
+            );
+        const latest = defining.at(-1);
+        if (!latest) {
+            throw new Error('no migration grants public.student_write_allowed()');
+        }
+        return readFileSync(resolve(MIGRATIONS_DIR, latest), 'utf8');
+    })();
+    const trigger = latestDefining('refuse_revoked_student_write');
+
+    it('revokes PUBLIC and anon, and grants only authenticated and service_role', () => {
+        // The advisor is right about this one. The function is SECURITY
+        // DEFINER, it is not an RPC, and it is not used in any RLS policy.
+        // The only caller is refuse_revoked_student_write(), which runs as
+        // the writing role. Anon has no INSERT/UPDATE on annotations or
+        // annotation_snapshots, and student_write_allowed() returns true when
+        // auth.uid() is null, so signed-out traffic never depended on EXECUTE.
+        expect(grants).toMatch(
+            /revoke\s+all\s+on\s+function\s+public\.student_write_allowed\s*\(\s*\)\s+from\s+public\s*;/i,
+        );
+        expect(grants).toMatch(
+            /revoke\s+all\s+on\s+function\s+public\.student_write_allowed\s*\(\s*\)\s+from\s+anon\s*;/i,
+        );
+        expect(grants).toMatch(
+            /grant\s+execute\s+on\s+function\s+public\.student_write_allowed\s*\(\s*\)\s+to\s+authenticated\s*,\s*service_role\s*;/i,
+        );
+        expect(grants).not.toMatch(
+            /grant\s+execute\s+on\s+function\s+public\.student_write_allowed\s*\(\s*\)\s+to\s+[^;]*\banon\b/i,
+        );
+    });
+
+    it('the statement trigger skips the call unless the writer is authenticated', () => {
+        // So a later table grant to anon cannot turn a write into
+        // `permission denied for function student_write_allowed`. The old
+        // outcome for anon was the same: uid is null, the function returned
+        // true, the trigger never refused.
+        const body =
+            trigger.match(/create\s+or\s+replace\s+function\s+public\.refuse_revoked_student_write[\s\S]*?\$\$;/i)?.[0] ??
+            '';
+        expect(body).toMatch(/current_user\s*=\s*'authenticated'/);
+        expect(body).not.toMatch(/\banon\b/);
+        expect(body).toMatch(/student_write_allowed/);
     });
 });

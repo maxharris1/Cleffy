@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
  */
 const read = (path: string): string => readFileSync(resolve(process.cwd(), path), 'utf8');
 const migration = read('supabase/migrations/20261021120400_delete_student_one_transaction.sql');
+const restrictExecute = read('supabase/migrations/20261111124000_restrict_student_write_allowed_execute.sql');
 const provision = read('supabase/functions/student-provision/index.ts');
 
 const fnBody = (sql: string, name: string): string =>
@@ -52,5 +53,15 @@ describe('Delete student', () => {
             /revoke all on function public\.revoke_and_scrub_student \(uuid\) from public, anon, authenticated;/,
         );
         expect(fnBody(migration, 'revoke_and_scrub_student')).toContain(`<> 'service_role'`);
+    });
+
+    it('takes student_write_allowed execute off PUBLIC and anon', () => {
+        expect(restrictExecute).toMatch(/revoke all on function public\.student_write_allowed \(\) from public;/);
+        expect(restrictExecute).toMatch(/revoke all on function public\.student_write_allowed \(\) from anon;/);
+        expect(restrictExecute).toMatch(
+            /grant execute on function public\.student_write_allowed \(\) to authenticated, service_role;/,
+        );
+        expect(fnBody(restrictExecute, 'refuse_revoked_student_write')).toContain("current_user = 'authenticated'");
+        expect(fnBody(restrictExecute, 'refuse_revoked_student_write')).not.toContain('anon');
     });
 });

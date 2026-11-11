@@ -515,6 +515,13 @@ select pg_temp.holds (
        and not has_function_privilege ('authenticated', 'public.revoke_and_scrub_student(uuid)', 'execute')$q$
 );
 
+select pg_temp.holds (
+    'student_write_allowed is authenticated and service_role, not anon',
+    $q$select has_function_privilege ('authenticated', 'public.student_write_allowed()', 'execute')
+       and has_function_privilege ('service_role', 'public.student_write_allowed()', 'execute')
+       and not has_function_privilege ('anon', 'public.student_write_allowed()', 'execute')$q$
+);
+
 -- ---------------------------------------------------------------------------
 -- Report
 -- ---------------------------------------------------------------------------
