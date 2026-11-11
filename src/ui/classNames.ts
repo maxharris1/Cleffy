@@ -7,8 +7,12 @@
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'dangerGhost';
 export type ButtonSize = 'md' | 'sm';
 
+/*
+ * Pressed buttons give a little (scale .97 over --duration-press): feedback
+ * the hand feels before the result arrives. Disabled ones do not move.
+ */
 const BUTTON_BASE =
-    'inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap font-medium transition disabled:cursor-default disabled:opacity-50';
+    'inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50 disabled:active:scale-100';
 
 const BUTTON_SIZE_CLASSES: Record<ButtonSize, string> = {
     md: 'rounded-xl px-5 py-3',
@@ -19,18 +23,29 @@ const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
     primary: 'landing-cta text-white',
     secondary: 'border border-stone-300/90 bg-white/70 text-stone-800 hover:bg-white',
     ghost: 'text-stone-600 hover:bg-ink/5',
-    danger: 'bg-danger text-white hover:bg-red-500',
+    danger: 'bg-danger text-white hover:bg-red-800',
     dangerGhost: 'text-danger hover:bg-red-50',
 };
 
 export const buttonClassName = (variant: ButtonVariant, size: ButtonSize = 'md', extra = ''): string =>
     `${BUTTON_BASE} ${BUTTON_SIZE_CLASSES[size]} ${BUTTON_VARIANT_CLASSES[variant]}${extra ? ` ${extra}` : ''}`;
 
-export type FieldSize = 'md' | 'sm';
+/**
+ * md: forms. sm: compact rows. xs: the 32px filter-row selects. inline: a
+ * number set into a control row (the tempo); the caller gives it a width.
+ */
+export type FieldSize = 'md' | 'sm' | 'xs' | 'inline';
 
+/*
+ * Text is 16px wherever the pointer is coarse: iOS zooms the whole page into
+ * any field set smaller, and leaves it zoomed. The compact sizes come back
+ * only under a fine pointer.
+ */
 const FIELD_SIZE_CLASSES: Record<FieldSize, string> = {
-    md: 'rounded-xl px-3.5 py-3',
-    sm: 'rounded-lg px-3 py-2 text-sm',
+    md: 'w-full rounded-xl px-3.5 py-3',
+    sm: 'w-full rounded-lg px-3 py-2 text-base pointer-fine:text-sm',
+    xs: 'w-full rounded-lg px-3 py-0 text-base pointer-fine:text-xs',
+    inline: 'rounded-md px-1 py-0.5 text-center text-base tabular-nums pointer-fine:text-sm',
 };
 
 /**
@@ -38,7 +53,7 @@ const FIELD_SIZE_CLASSES: Record<FieldSize, string> = {
  * in index.css (accent border + soft ring), which replaces the default outline.
  */
 export const fieldClassName = (size: FieldSize = 'md', extra = ''): string =>
-    `landing-input w-full border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
+    `landing-input border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition-colors placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
 
 /**
  * Filter/facet chip — pill toggle matching the transport bar's pill language.
@@ -47,7 +62,7 @@ export const fieldClassName = (size: FieldSize = 'md', extra = ''): string =>
  */
 export const chipClassName = (active: boolean, extra = ''): string =>
     [
-        'inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-xs font-medium transition',
+        'inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-xs font-medium transition-colors',
         active ? 'border-accent bg-accent-soft text-accent' : 'border-stone-200 text-stone-600 hover:bg-ink/5',
         extra,
     ]
@@ -56,5 +71,16 @@ export const chipClassName = (active: boolean, extra = ''): string =>
 
 export const fieldLabelClassName = 'block text-xs font-medium uppercase tracking-[0.08em] text-stone-600';
 
+/**
+ * Inline text link. On touch screens an invisible ::after widens the hit area
+ * to ~44px tall without moving the text, so callers' own margins and display
+ * still hold and desktop is unchanged.
+ */
 export const linkClassName =
-    'text-sm text-accent underline decoration-accent/30 underline-offset-2 transition hover:text-accent-hover hover:decoration-accent/60';
+    'relative text-sm text-accent underline decoration-accent/30 underline-offset-2 transition-colors hover:text-accent-hover hover:decoration-accent/60 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';
+
+/** One row: 44px tall on touch, highlighted by pointer or keyboard alike. */
+export const menuItemClassName = (danger = false, extra = ''): string =>
+    `flex w-full cursor-pointer items-center px-3 py-2 text-left text-sm outline-none select-none data-highlighted:bg-ink/5 data-disabled:cursor-default data-disabled:text-stone-400 pointer-coarse:min-h-11 ${
+        danger ? 'text-danger' : 'text-stone-800'
+    }${extra ? ` ${extra}` : ''}`;

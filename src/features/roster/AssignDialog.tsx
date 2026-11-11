@@ -10,6 +10,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { TextField } from '@/ui/TextField';
+import { toast } from '@/ui/toast';
 import { buttonClassName } from '@/ui/classNames';
 
 export interface AssignDialogProps {
@@ -32,6 +33,12 @@ export interface AssignDialogProps {
  * Archived students are absent entirely. Their seat is freed and their login is
  * refused, and assign_score would reject them anyway.
  */
+/** "Assigned to Maya" for one student, "Assigned to 3 students" for more. */
+const assignedHeadline = (students: readonly ManagedStudentRow[]): string =>
+    students.length === 1 && students[0]
+        ? `Assigned to ${students[0].display_name}`
+        : `Assigned to ${students.length} students`;
+
 export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }: AssignDialogProps) => {
     const [roster, setRoster] = useState<ManagedStudentRow[] | null>(null);
     const [assigned, setAssigned] = useState<Set<string>>(new Set());
@@ -111,6 +118,9 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
         }
         setBusy(false);
         onAssigned?.();
+        // In the same tick as the close, so the dialog's exit and the toast's
+        // entrance overlap and read as one hand-off.
+        toast.success(assignedHeadline(targets), { description: documentTitle });
         onClose();
     };
 
@@ -121,8 +131,7 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
     return (
         <Dialog label="Assign to students" onClose={onClose} sheet>
             <p className="text-sm text-stone-600">
-                Give “{documentTitle}” to students on your roster. They will find it waiting when they sign in with
-                their code.
+                Give “{documentTitle}” to students on your roster. They will find it waiting the next time they sign in.
             </p>
 
             {roster === null && error ? (
@@ -133,7 +142,7 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                 <EmptyState
                     className="mt-6 mb-2"
                     title="No students yet"
-                    body="Add a student and they get a printed login code — no email address, no password to remember."
+                    body="Add a student and they get a printed setup code to choose their own sign-in — no email address needed."
                 >
                     <Link to="/students" className={buttonClassName('primary', 'sm')}>
                         Add a student
@@ -141,13 +150,13 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                 </EmptyState>
             ) : (
                 <>
-                    <ul className="mt-4 max-h-52 overflow-auto">
+                    <ul className="mt-4 max-h-52 overflow-auto overscroll-contain">
                         {roster.map((student) => {
                             const already = assigned.has(student.student_user_id);
                             return (
                                 <li key={student.id}>
                                     <label
-                                        className={`flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition ${
+                                        className={`flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition-colors ${
                                             already ? 'text-stone-500' : 'cursor-pointer text-stone-800 hover:bg-ink/5'
                                         }`}
                                     >
@@ -175,7 +184,7 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                                     type="button"
                                     aria-pressed={access === value}
                                     onClick={() => setAccess(value)}
-                                    className={`rounded-md px-3 py-1.5 text-sm transition ${
+                                    className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
                                         access === value ? 'bg-accent text-white' : 'text-stone-600 hover:bg-ink/5'
                                     }`}
                                 >
@@ -184,11 +193,10 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                             ))}
                         </div>
                     </div>
-                    <p className="mt-1.5 text-xs text-stone-500">
-                        {access === 'edit'
-                            ? 'They can add their own fingerings and practice marks.'
-                            : 'They can read and play from it, but not mark it up.'}
-                    </p>
+                    {/* One shared layer of marks per score (an owner decision): an
+                        editor edits all of it, the teacher's marks included, so
+                        the choice is said plainly here rather than discovered. */}
+                    <p className="mt-1.5 text-xs text-stone-500">{ACCESS_HINT[access]}</p>
 
                     <div className="mt-4">
                         <TextField
@@ -226,6 +234,15 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
             )}
         </Dialog>
     );
+};
+
+/**
+ * What each access level lets a student do, said where the teacher picks it.
+ * Marks live on one shared layer, so Edit reaches every mark on the score.
+ */
+const ACCESS_HINT: Record<AssignmentAccess, string> = {
+    edit: 'They can add, change and erase all marks on this score, including yours.',
+    view: 'They can read and play from it, but not mark it up.',
 };
 
 /**

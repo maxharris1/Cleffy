@@ -1,240 +1,224 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { serviceClient } from '../_shared/rateLimit.ts';
-import { isOwnForward } from '../_shared/supportMail.ts';
-import { type SvixFailure, verifySvixSignature } from '../_shared/svixSignature.ts';
+import { logError } from '../_shared/errorReporting.ts';
+import { mailLimit, MAIL_WINDOWS } from '../_shared/mailBudget.ts';
+import { checkRateLimit, refundRateLimit, serviceClient } from '../_shared/rateLimit.ts';
+import { readCappedText } from '../_shared/readCappedJson.ts';
+import { RESEND_TIMEOUT_MS, resendIdempotencyKey, sendViaResend } from '../_shared/resendDelivery.ts';
+import { secretsEqual } from '../_shared/secretCompare.ts';
+import { forwardedSubject, inboxTagFor, isOwnForward } from '../_shared/supportMail.ts';
+import { verifySvixSignature } from '../_shared/svixSignature.ts';
+import {
+    type BudgetReservation,
+    handleResendInbound,
+    type InboundMessage,
+    type InboundStore,
+    supportInboundBudgetKey,
+} from './handler.ts';
 
 /**
- * Inbound support mail, delivered by Resend as an `email.received` webhook.
- *
- * Deployed with `verify_jwt = false` (see supabase/config.toml) for the same
- * structural reason `stripe-webhook` is: the caller has no Supabase JWT to
- * present. The Svix signature is the whole of the authentication, so a failure
- * to verify has to be a refusal rather than a warning.
- *
- * Deliberately no rate limit: throttling here would drop Svix's retries, and a
- * dropped retry is a support request nobody ever sees.
- *
- * The webhook carries metadata only — Resend's docs are explicit that the body,
- * headers and attachments are not in it — so the message itself is fetched from
- * the Received Emails API before anything is stored or forwarded.
- *
- * Order matters: **persist, then forward.** Storing first means a forward that
- * fails leaves a row with `forwarded_at` null, which is a visible, replayable
- * "arrived but nobody was told". Forwarding first and failing to store would
- * lose the message entirely on a retry that then no-ops.
+ * Inbound support mail. The control flow — the lease, the budget, the order of
+ * persist and forward — lives in handler.ts, which says why; this file is only
+ * what it runs against.
  */
-
-interface ReceivedEvent {
-    type?: string;
-    data?: {
-        email_id?: string;
-        created_at?: string;
-        from?: string;
-        to?: string[];
-        received_for?: string[];
-        message_id?: string;
-        subject?: string;
-        attachments?: unknown[];
-    };
-}
-
-interface FetchedEmail {
-    from?: string;
-    to?: string[];
-    subject?: string;
-    text?: string;
-    html?: string;
-}
 
 const RESEND_API = 'https://api.resend.com';
 
-/** Where forwarded mail lands. Unset means store-only, which is a valid mode. */
-const forwardTo = (): string | null => Deno.env.get('SUPPORT_FORWARD_TO') ?? null;
+/** The retry batch's lease: RETRY_BATCH messages, each a fetch and a send of up to RESEND_TIMEOUT_MS. */
+const RETRY_BATCH_LEASE_SECONDS = 600;
+
+const env = (name: string): string | undefined => Deno.env.get(name);
 
 /**
  * The address forwards are sent FROM. It must be on a domain verified for
  * sending — `send.cleffy.io` is, the apex is not — and it must NOT be an address
  * this endpoint also receives at, or a forward would arrive back here and loop.
  */
-const forwardFrom = (): string => Deno.env.get('SUPPORT_FORWARD_FROM') ?? 'Cleffy support <support@send.cleffy.io>';
+const forwardFrom = (): string => env('SUPPORT_FORWARD_FROM') ?? 'Cleffy support <support@send.cleffy.io>';
 
-const truncate = (value: string | undefined, max = 100_000): string | null => {
-    if (!value) {
-        return null;
+/** The forward's share of the mail split: supportInbound, every window, in buckets of its own. */
+const BUDGET = MAIL_WINDOWS.map(
+    (window) => [supportInboundBudgetKey(window), mailLimit('supportInbound', window, env)] as const,
+);
+
+const reserveBudget = async (): Promise<BudgetReservation> => {
+    const reserved: string[] = [];
+    const release = async (): Promise<void> => {
+        await Promise.all(reserved.map((key) => refundRateLimit(key).catch(() => undefined)));
+    };
+    for (const [key, { limit, windowMs }] of BUDGET) {
+        const gate = await checkRateLimit(key, limit, windowMs);
+        if (!gate.ok) {
+            await release();
+            return { ok: false, retryAfterSec: gate.retryAfterSec };
+        }
+        reserved.push(key);
     }
-    return value.length > max ? `${value.slice(0, max)}\n\n[truncated]` : value;
+    return { ok: true, release };
 };
 
-Deno.serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return optionsResponse();
-    }
-    if (req.method !== 'POST') {
-        return jsonResponse({ error: 'Method not allowed' }, 405);
-    }
+const strings = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 
-    const signingSecret = Deno.env.get('RESEND_WEBHOOK_SECRET');
-    const apiKey = Deno.env.get('RESEND_API_KEY');
-    if (!signingSecret || !apiKey) {
-        // 500 so Svix retries once we are configured again.
-        return jsonResponse({ error: 'Server misconfigured' }, 500);
-    }
+const toMessage = (row: Record<string, unknown>, holder: string): InboundMessage => ({
+    id: String(row['id']),
+    holder,
+    resendEmailId: String(row['resend_email_id']),
+    fromAddress: typeof row['from_address'] === 'string' ? row['from_address'] : 'unknown',
+    toAddresses: strings(row['to_addresses']),
+    receivedFor: strings(row['received_for']),
+    subject: typeof row['subject'] === 'string' ? row['subject'] : null,
+    textBody: typeof row['text_body'] === 'string' ? row['text_body'] : null,
+    htmlBody: typeof row['html_body'] === 'string' ? row['html_body'] : null,
+});
 
-    // The RAW body — verification is over the exact bytes Svix signed, so this
-    // must be read before (and instead of) any JSON parsing.
-    const rawBody = await req.text();
-    const check = await verifySvixSignature(
-        rawBody,
-        {
-            id: req.headers.get('svix-id'),
-            timestamp: req.headers.get('svix-timestamp'),
-            signature: req.headers.get('svix-signature'),
-        },
-        signingSecret,
-        Math.floor(Date.now() / 1000),
-    );
-    if (!check.ok) {
-        // 400, not 401: Svix treats 4xx as "do not retry", which is right for a
-        // signature that will never become valid.
-        return jsonResponse({ error: 'Invalid signature', code: check.reason satisfies SvixFailure }, 400);
-    }
-
-    let event: ReceivedEvent;
-    try {
-        event = JSON.parse(rawBody) as ReceivedEvent;
-    } catch {
-        return jsonResponse({ error: 'Invalid JSON body' }, 400);
-    }
-
-    // Resend sends other event types to the same endpoint if it is subscribed to
-    // them; acknowledge and ignore rather than 4xx, which would look like a
-    // delivery failure on their side.
-    if (event.type !== 'email.received') {
-        return jsonResponse({ ignored: event.type ?? 'unknown' }, 200);
-    }
-
-    const emailId = event.data?.email_id;
-    if (!emailId) {
-        return jsonResponse({ error: 'Malformed event' }, 400);
-    }
-
+const store = (): InboundStore | null => {
     const admin = serviceClient();
     if (!admin) {
-        return jsonResponse({ error: 'Server misconfigured' }, 500);
+        return null;
     }
+    return {
+        claim: async (meta) => {
+            const { data, error } = await admin.rpc('claim_support_message', {
+                p_email_id: meta.emailId,
+                p_message_id: meta.messageId,
+                p_from: meta.from,
+                p_to: meta.to,
+                p_received_for: meta.receivedFor,
+                p_subject: meta.subject,
+                p_attachments: meta.attachments,
+                p_received_at: meta.receivedAt,
+            });
+            if (error || !data || typeof data !== 'object') {
+                console.error(`claim_support_message failed for ${meta.emailId}: ${error?.message ?? 'no answer'}`);
+                return null;
+            }
+            const row = data as Record<string, unknown>;
+            if (row['status'] === 'duplicate') {
+                return { status: 'duplicate' };
+            }
+            if (row['status'] === 'busy') {
+                return { status: 'busy', retryAfterSec: Number(row['retry_after_seconds']) || 60 };
+            }
+            return { status: 'claimed', message: toMessage(row, String(row['holder'])) };
+        },
+        claimDue: async (limit) => {
+            // A lease long enough for the whole batch: it is processed one
+            // message after another, each up to a fetch and a send.
+            const { data, error } = await admin.rpc('claim_due_support_messages', {
+                p_limit: limit,
+                p_lease_seconds: RETRY_BATCH_LEASE_SECONDS,
+            });
+            if (error) {
+                console.error(`claim_due_support_messages failed: ${error.message}`);
+                return null;
+            }
+            return ((data ?? []) as Array<Record<string, unknown>>).map((row) =>
+                toMessage(row, String(row['lease_holder'])),
+            );
+        },
+        saveBody: async (id, holder, text, html) => {
+            const { data, error } = await admin.rpc('save_support_message_body', {
+                p_id: id,
+                p_holder: holder,
+                p_text: text,
+                p_html: html,
+            });
+            if (error) {
+                console.error(`save_support_message_body failed for ${id}: ${error.message}`);
+                return null;
+            }
+            return data === true;
+        },
+        finish: async (id, holder, outcome, detail = {}) => {
+            const { data, error } = await admin.rpc('finish_support_message', {
+                p_id: id,
+                p_holder: holder,
+                p_outcome: outcome,
+                p_error: detail.error ?? null,
+                p_retry_after_seconds: detail.retryAfterSec ?? null,
+                p_forward_id: detail.forwardId ?? null,
+                p_budget_held: detail.budgetHeld ?? null,
+            });
+            if (error) {
+                console.error(`finish_support_message failed for ${id}: ${error.message}`);
+                return null;
+            }
+            return data === true;
+        },
+        beginSend: async (id, holder) => {
+            const { data, error } = await admin.rpc('begin_support_forward', { p_id: id, p_holder: holder });
+            if (error) {
+                console.error(`begin_support_forward failed for ${id}: ${error.message}`);
+                return null;
+            }
+            return data === 'send' || data === 'expired' || data === 'lost' ? data : null;
+        },
+    };
+};
 
-    // Claim first. A duplicate delivery loses the insert and returns here, which
-    // is what stops a retry sending a second copy of the same email.
-    const { data: claimed, error: claimError } = await admin
-        .from('support_messages')
-        .upsert(
-            {
-                resend_email_id: emailId,
-                message_id: event.data?.message_id ?? null,
-                from_address: event.data?.from ?? 'unknown',
-                to_addresses: event.data?.to ?? [],
-                received_for: event.data?.received_for ?? [],
-                subject: event.data?.subject ?? null,
-                attachments: event.data?.attachments ?? [],
-                received_at: event.data?.created_at ?? new Date().toISOString(),
-            },
-            { onConflict: 'resend_email_id', ignoreDuplicates: true },
-        )
-        .select('id');
-    if (claimError) {
-        return jsonResponse({ error: `could not record ${emailId}: ${claimError.message}` }, 500);
-    }
-    const rowId = claimed?.[0]?.id;
-    if (!rowId) {
-        console.log(`duplicate inbound email ${emailId} ignored`);
-        return jsonResponse({ duplicate: true }, 200);
-    }
-
-    // The body lives behind a second call; the webhook carries metadata only.
-    let email: FetchedEmail = {};
-    let bodyError: string | null = null;
+const fetchBody = async (
+    emailId: string,
+): Promise<{ ok: true; text?: string | null; html?: string | null } | { ok: false; detail: string }> => {
     try {
-        const res = await fetch(`${RESEND_API}/emails/receiving/${emailId}`, {
-            headers: { Authorization: `Bearer ${apiKey}` },
-        });
-        if (res.ok) {
-            email = (await res.json()) as FetchedEmail;
-        } else {
-            // Recorded, not just logged: an unfetchable body is why a forward
-            // fails with "Missing `html` or `text` field", and the reason should
-            // be on the row rather than only in a log nobody is tailing.
-            bodyError = `fetch ${res.status}`;
-            console.error(`fetching inbound email ${emailId} returned ${res.status}`);
-        }
-    } catch (err) {
-        bodyError = String(err).slice(0, 200);
-        console.error(`fetching inbound email ${emailId} failed: ${String(err)}`);
-    }
-
-    const text = truncate(email.text);
-    const html = truncate(email.html);
-    if (text || html) {
-        await admin.from('support_messages').update({ text_body: text, html_body: html }).eq('id', rowId);
-    }
-
-    if (!text && !html) {
-        const detail = `no body to forward${bodyError ? ` (${bodyError})` : ''}`;
-        await admin.from('support_messages').update({ forward_error: detail }).eq('id', rowId);
-        console.error(`${emailId}: ${detail}`);
-        return jsonResponse({ stored: rowId, forwarded: false, reason: 'no_body' }, 200);
-    }
-
-    const to = forwardTo();
-    if (!to) {
-        // Store-only is a deliberate mode, not a failure: the row is the record.
-        return jsonResponse({ stored: rowId, forwarded: false }, 200);
-    }
-
-    const from = event.data?.from ?? 'unknown sender';
-    const subject = event.data?.subject ?? '(no subject)';
-
-    if (isOwnForward(from, forwardFrom())) {
-        // Stored, so the loop is still visible in the table, but not re-sent.
-        await admin
-            .from('support_messages')
-            .update({ forward_error: 'not forwarded: message is from our own forwarding address (loop guard)' })
-            .eq('id', rowId);
-        console.log(`loop guard: not forwarding ${emailId}, from is our own forward address`);
-        return jsonResponse({ stored: rowId, forwarded: false, reason: 'loop_guard' }, 200);
-    }
-
-    try {
-        const res = await fetch(`${RESEND_API}/emails`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                from: forwardFrom(),
-                to: [to],
-                // Replying goes to the person who wrote in, not to our own relay.
-                reply_to: from,
-                subject: `[cleffy support] ${subject}`,
-                text: text ?? undefined,
-                html: html ?? undefined,
-                headers: { 'X-Cleffy-Inbound-Id': emailId },
-            }),
+        const res = await fetch(`${RESEND_API}/emails/receiving/${encodeURIComponent(emailId)}`, {
+            headers: { Authorization: `Bearer ${env('RESEND_API_KEY') ?? ''}` },
+            signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
         });
         if (!res.ok) {
-            const detail = `${res.status} ${await res.text()}`.slice(0, 500);
-            await admin.from('support_messages').update({ forward_error: detail }).eq('id', rowId);
-            console.error(`forwarding ${emailId} failed: ${detail}`);
-            // 200 on purpose: the message IS stored, so a Svix retry would only
-            // hit the duplicate path and never retry the forward. The null
-            // forwarded_at is the durable signal instead.
-            return jsonResponse({ stored: rowId, forwarded: false }, 200);
+            await res.body?.cancel().catch(() => undefined);
+            return { ok: false, detail: `fetch ${res.status}` };
         }
-        await admin
-            .from('support_messages')
-            .update({ forwarded_at: new Date().toISOString(), forward_error: null })
-            .eq('id', rowId);
-        return jsonResponse({ stored: rowId, forwarded: true }, 200);
+        const email = (await res.json()) as { text?: unknown; html?: unknown };
+        return {
+            ok: true,
+            text: typeof email.text === 'string' ? email.text : null,
+            html: typeof email.html === 'string' ? email.html : null,
+        };
     } catch (err) {
-        const detail = String(err).slice(0, 500);
-        await admin.from('support_messages').update({ forward_error: detail }).eq('id', rowId);
-        return jsonResponse({ stored: rowId, forwarded: false }, 200);
+        return { ok: false, detail: String(err).slice(0, 200) };
     }
-});
+};
+
+Deno.serve((req) =>
+    handleResendInbound(req, {
+        json: jsonResponse,
+        options: optionsResponse,
+        readText: readCappedText,
+        verifySignature: async (rawBody, request) => {
+            const check = await verifySvixSignature(
+                rawBody,
+                {
+                    id: request.headers.get('svix-id'),
+                    timestamp: request.headers.get('svix-timestamp'),
+                    signature: request.headers.get('svix-signature'),
+                },
+                env('RESEND_WEBHOOK_SECRET') ?? '',
+                Math.floor(Date.now() / 1000),
+            );
+            return check.ok ? { ok: true } : { ok: false, reason: check.reason };
+        },
+        // Present only on the retry tick's POST (support_inbound_retry_tick):
+        // compared in constant time with SUPPORT_RETRY_SECRET. Absent, this is a
+        // webhook delivery and the Svix signature decides.
+        retryAuthorized: async (request) => {
+            const given = request.headers.get('x-support-retry-secret');
+            if (given === null) {
+                return null;
+            }
+            return secretsEqual(given, env('SUPPORT_RETRY_SECRET'));
+        },
+        config: {
+            signingSecret: env('RESEND_WEBHOOK_SECRET') ?? null,
+            apiKey: env('RESEND_API_KEY') ?? null,
+            forwardTo: env('SUPPORT_FORWARD_TO') ?? null,
+            forwardFrom: forwardFrom(),
+        },
+        store: store(),
+        fetchBody,
+        reserveBudget,
+        send: (email, idempotencyKey) => sendViaResend({ apiKey: env('RESEND_API_KEY'), idempotencyKey, email }),
+        idempotencyKey: resendIdempotencyKey,
+        mail: { isOwnForward, inboxTagFor, forwardedSubject },
+        logError: (code, message) => logError('resend-inbound', new Error(message), { code }),
+    }),
+);

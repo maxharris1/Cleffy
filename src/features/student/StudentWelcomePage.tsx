@@ -8,8 +8,6 @@ import { getSupabase } from '@/lib/supabase';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
-import { STUDENT_PASSWORD_MIN } from '../../../supabase/functions/_shared/studentCodes';
-
 /** Whether the account we are signed in as still has a password to choose. */
 type InviteState = 'checking' | 'unclaimed' | 'spent';
 
@@ -152,7 +150,6 @@ const ChoosePassword = ({ name }: { name: string | null }) => {
                 confirm
                 passwordId="welcome-password"
                 confirmId="welcome-confirm"
-                minPasswordLength={STUDENT_PASSWORD_MIN}
                 submitLabel="Save password"
                 busyLabel="Saving…"
                 fallbackError="Could not save your password."

@@ -1,0 +1,1493 @@
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
+import { AnnotationStore } from '@/sync/annotationStore';
+import { ScribblerDb } from '@/sync/db';
+import { holdOps, resetInkRecoveryForTests } from '@/sync/inkRecovery';
+import type { DocumentRow } from '@/types/database';
+
+const fetchDocument = vi.fn();
+const fetchMyRole = vi.fn();
+const fetchSeatReadOnly = vi.fn();
+const loadDocumentBytes = vi.fn();
+const loadDocumentSource = vi.fn();
+const loadDocumentOffline = vi.fn();
+const ensureDocumentPageCount = vi.fn();
+const prefetchScoreUrl = vi.fn();
+const cacheDocumentBytes = vi.fn();
+const cacheStreamedDocument = vi.fn();
+const purgeLocalDocument = vi.fn();
+const removeCachedLibraryDocument = vi.fn();
+
+vi.mock('@/features/library/libraryBootstrap', () => ({
+    removeCachedLibraryDocument: (...args: unknown[]) => removeCachedLibraryDocument(...args),
+}));
+
+vi.mock('@/features/library/documentsService', () => ({
+    purgeLocalDocument: (...args: unknown[]) => purgeLocalDocument(...args),
+    isCloudDocId: (id: string) => /^[0-9a-f-]{36}$/i.test(id),
+    fetchDocument: (...args: unknown[]) => fetchDocument(...args),
+    fetchMyRole: (...args: unknown[]) => fetchMyRole(...args),
+    fetchSeatReadOnly: (...args: unknown[]) => fetchSeatReadOnly(...args),
+    loadDocumentBytes: (...args: unknown[]) => loadDocumentBytes(...args),
+    loadDocumentSource: (...args: unknown[]) => loadDocumentSource(...args),
+    loadDocumentOffline: (...args: unknown[]) => loadDocumentOffline(...args),
+    ensureDocumentPageCount: (...args: unknown[]) => ensureDocumentPageCount(...args),
+    prefetchScoreUrl: (...args: unknown[]) => prefetchScoreUrl(...args),
+    cacheDocumentBytes: (...args: unknown[]) => cacheDocumentBytes(...args),
+    cacheStreamedDocument: (...args: unknown[]) => cacheStreamedDocument(...args),
+}));
+
+const SESSION = {
+    user: { id: 'teacher-1', email: 'teacher@example.com', is_anonymous: false, user_metadata: {} },
+};
+
+const sessionKind: { userType: 'student' | null } = { userType: null };
+
+const signOutKeepingChanges = vi.fn();
+const signOutDeletedAccount = vi.fn();
+const fetchSignInStillValid = vi.fn();
+const fetchAccountDeleted = vi.fn();
+
+vi.mock('@/features/auth/session', () => ({
+    useSession: () => ({ session: SESSION, loading: false, lastEvent: null }),
+    isRegisteredSession: () => true,
+    presenceNameOf: () => 'Teacher',
+    userTypeOf: () => sessionKind.userType,
+    signOutKeepingChanges: (...args: unknown[]) => signOutKeepingChanges(...args),
+    signOutDeletedAccount: (...args: unknown[]) => signOutDeletedAccount(...args),
+}));
+
+vi.mock('@/features/student/studentApi', () => ({
+    fetchSignInStillValid: (...args: unknown[]) => fetchSignInStillValid(...args),
+    fetchAccountDeleted: (...args: unknown[]) => fetchAccountDeleted(...args),
+}));
+
+/** The sync wiring the viewer last handed the viewport, for driving realtime callbacks. */
+const viewportSync: { current: { onMembershipChanged?: () => void } | undefined } = { current: undefined };
+
+/** What the viewer last handed the PDF provider: the source, and the stream callbacks. */
+const pdfProps = vi.hoisted(() => ({
+    current: null as null | {
+        data: ArrayBuffer | { url: string };
+        onStreamComplete?: (source: { url: string }, bytes: ArrayBuffer) => void;
+        onStreamError?: (source: { url: string }, err: unknown) => void;
+        onStreamAbandoned?: (source: { url: string }, download: unknown) => void;
+    },
+}));
+
+vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
+    PdfProvider: (props: NonNullable<typeof pdfProps.current> & { children: ReactNode }) => {
+        pdfProps.current = props;
+        return <div data-testid="pdf-provider">{props.children}</div>;
+    },
+}));
+const warmPdfWorker = vi.hoisted(() => vi.fn());
+vi.mock('@/features/viewer/pdf/pdfWorker', () => ({ warmPdfWorker }));
+
+/** The sync props the viewer last handed the viewport (to drive its callbacks). */
+const lastSync = vi.hoisted(() => ({
+    current: null as null | { onRejected?: (r: unknown) => void; onHeld?: (h: unknown) => void },
+}));
+
+/** What the viewport mock reports as its store: a stub, or a real AnnotationStore. */
+const storeReady = vi.hoisted(() => {
+    const stub = { subscribeMeta: () => () => undefined, persistFailureCount: 0, refusedEditCount: 0 };
+    return { enabled: false, stub, store: stub as unknown };
+});
+
+vi.mock('@/features/viewer/PdfViewport', () => ({
+    PdfViewport: ({
+        readOnly,
+        authorId,
+        sync,
+        playback,
+        onStoreReady,
+    }: {
+        readOnly?: boolean;
+        authorId?: string | null;
+        sync?: { onMembershipChanged?: () => void; onScoreAnalysis?: unknown } & NonNullable<typeof lastSync.current>;
+        playback?: unknown;
+        onStoreReady?: (store: unknown) => void;
+    }) => {
+        // The smart-import test needs a store to exist; nothing else reads it.
+        if (storeReady.enabled) {
+            queueMicrotask(() => onStoreReady?.(storeReady.store));
+        }
+        viewportSync.current = sync;
+        lastSync.current = sync ?? null;
+        return (
+            <div
+                data-testid="pdf-viewport"
+                data-readonly={String(Boolean(readOnly))}
+                data-author={authorId ?? ''}
+                data-sync={sync ? 'on' : 'off'}
+                data-playback={playback ? 'on' : 'off'}
+                data-analysis-broadcasts={sync?.onScoreAnalysis ? 'on' : 'off'}
+            />
+        );
+    },
+}));
+
+vi.mock('@/features/viewer/ViewerHeader', () => ({
+    ViewerHeader: ({ title, children }: { title: string; children: ReactNode }) => (
+        <header>
+            <h1>{title}</h1>
+            {children}
+        </header>
+    ),
+}));
+
+vi.mock('@/features/viewer/presence/PresenceBar', () => ({ PresenceBar: () => null }));
+vi.mock('@/features/viewer/history/LessonHistoryButton', () => ({ LessonHistoryButton: () => null }));
+vi.mock('@/features/export/ShareExportMenu', () => ({
+    ShareExportMenu: ({
+        openSignal = 0,
+        docId,
+        title,
+        userId,
+    }: {
+        openSignal?: number;
+        docId: string;
+        title: string;
+        userId?: string | null;
+    }) => (
+        <div
+            data-testid="share-export-menu"
+            data-open-signal={openSignal}
+            data-doc={docId}
+            data-title={title}
+            data-user={userId ?? ''}
+        />
+    ),
+}));
+vi.mock('@/features/import/ImportScanButton', () => ({
+    ImportScanButton: () => <div data-testid="import-scan-button" />,
+}));
+vi.mock('@/features/import/analyzeApi', () => ({ makeCloudClassifyFn: () => null }));
+vi.mock('@/features/import/cleanReplace', () => ({ buildCleanFn: () => null }));
+vi.mock('@/features/import/prepareUpload', () => ({ UPLOAD_ACCEPT: '', prepareUploadFile: vi.fn() }));
+vi.mock('@/features/notes/NotesPanel', () => ({ NotesPanel: () => null }));
+vi.mock('@/features/share/ShareDialog', () => ({
+    ShareDialog: ({ role, onLeft }: { role: string; onLeft?: () => void }) => (
+        <div data-testid="share-dialog" data-role={role}>
+            <button type="button" onClick={() => onLeft?.()}>
+                mock leave
+            </button>
+        </div>
+    ),
+}));
+vi.mock('@/features/auth/UpgradeBanner', () => ({ UpgradeBanner: () => null }));
+vi.mock('@/features/playback/TransportBar', () => ({
+    TransportBar: () => <div data-testid="transport-bar" />,
+}));
+const engine = { pause: vi.fn() };
+vi.mock('@/features/playback/usePlayback', () => ({
+    usePlayback: () => ({
+        playbackFeature: { score: {}, getEngine: () => engine },
+        getEngine: () => engine,
+        warning: null,
+        dismissWarning: vi.fn(),
+    }),
+}));
+const analysis: { state: { kind: string } } = { state: { kind: 'none' } };
+const useScoreAnalysis = vi.fn((_docId: string, _enabled: boolean) => ({
+    state: analysis.state,
+    generate: vi.fn(),
+    applyBroadcast: vi.fn(),
+}));
+vi.mock('@/features/playback/useScoreAnalysis', () => ({
+    useScoreAnalysis: (docId: string, enabled: boolean) => useScoreAnalysis(docId, enabled),
+}));
+/** Release flags (src/lib/features.ts), flipped per test; read at render. */
+const flags = vi.hoisted(() => ({ playalong: false, fingering: false, printHandwriting: false, smartImport: false }));
+vi.mock('@/lib/features', () => ({ features: flags }));
+
+const DOC_ID = '11111111-2222-4333-8444-555555555555';
+
+const serverDoc = (overrides: Partial<DocumentRow> = {}): DocumentRow => ({
+    id: DOC_ID,
+    owner_id: 'teacher-1',
+    title: 'Nocturne (Chopin)',
+    storage_path: `${DOC_ID}/original.pdf`,
+    page_count: 2,
+    content_rev: 0,
+    thumb_rev: null,
+    created_at: '2026-08-01T00:00:00Z',
+    updated_at: '2026-08-01T00:00:00Z',
+    archived_at: null,
+    ...overrides,
+});
+
+const cachedOpen = (role: 'owner' | 'editor' | 'viewer' = 'owner') => ({
+    doc: serverDoc({ owner_id: '', page_count: null, title: 'Nocturne (cached)' }),
+    role,
+    cachedRole: role,
+    bytes: new ArrayBuffer(8),
+});
+
+/** A cache row written before the role was stored with it (see loadDocumentBytes). */
+const cachedWithoutRole = () => ({ ...cachedOpen('viewer'), cachedRole: null });
+
+const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve, reject };
+};
+
+const renderViewer = (entry = `/doc/${DOC_ID}`) =>
+    render(
+        <MemoryRouter initialEntries={[entry]}>
+            <Routes>
+                <Route path="/doc/:documentId" element={<ViewerPage />} />
+                <Route path="/" element={<div>home</div>} />
+                <Route path="/library" element={<div>library</div>} />
+                <Route path="/student" element={<StudentLoginStub />} />
+            </Routes>
+        </MemoryRouter>,
+    );
+
+/** Stands in for the student sign-in page, showing what it was told. */
+const StudentLoginStub = () => {
+    const state = useLocation().state as {
+        signedOutByTeacher?: boolean;
+        keptChanges?: number;
+        accountDeleted?: boolean;
+        discardedChanges?: number;
+    } | null;
+    return (
+        <div>
+            {`student login: teacher ${String(state?.signedOutByTeacher)}, kept ${String(state?.keptChanges)}`}
+            {state?.accountDeleted ? `, deleted, discarded ${String(state.discardedChanges)}` : null}
+        </div>
+    );
+};
+
+const viewport = () => screen.getByTestId('pdf-viewport');
+
+beforeEach(() => {
+    vi.clearAllMocks();
+    analysis.state = { kind: 'none' };
+    sessionKind.userType = null;
+    viewportSync.current = undefined;
+    purgeLocalDocument.mockResolvedValue(undefined);
+    fetchSeatReadOnly.mockResolvedValue(false);
+    removeCachedLibraryDocument.mockResolvedValue(undefined);
+    signOutKeepingChanges.mockResolvedValue(2);
+    signOutDeletedAccount.mockResolvedValue(2);
+    fetchSignInStillValid.mockResolvedValue(true);
+    fetchAccountDeleted.mockResolvedValue(false);
+    flags.playalong = false;
+    flags.smartImport = false;
+    storeReady.enabled = false;
+    storeReady.store = storeReady.stub;
+    pdfProps.current = null;
+    loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
+    loadDocumentSource.mockResolvedValue({ bytes: new ArrayBuffer(16) });
+    cacheDocumentBytes.mockResolvedValue(undefined);
+    ensureDocumentPageCount.mockImplementation(async (doc: DocumentRow) => doc);
+    fetchMyRole.mockResolvedValue('owner');
+    prefetchScoreUrl.mockImplementation((docId: string) => ({
+        path: `${docId}/original.pdf`,
+        url: Promise.resolve(null),
+    }));
+});
+
+afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    resetInkRecoveryForTests();
+});
+
+describe('CloudViewer warm open', () => {
+    it('drops the cached paint when the server answers that the score is not visible', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen());
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+
+        renderViewer();
+
+        expect(await screen.findByText(/access was revoked/)).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+        expect(screen.queryByText('Nocturne (cached)')).not.toBeInTheDocument();
+        // This account's cached copy goes with it.
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
+        expect(removeCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', DOC_ID);
+    });
+
+    it('keeps the cached score, no longer provisional, when the server cannot be reached', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen());
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        expect(screen.getByText('Nocturne (cached)')).toBeInTheDocument();
+        expect(screen.queryByText(/access was revoked/)).not.toBeInTheDocument();
+    });
+
+    it('stays read-only while confirm hangs when the cache stored no role', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
+        fetchDocument.mockReturnValue(new Promise(() => undefined));
+        fetchMyRole.mockReturnValue(new Promise(() => undefined));
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+        // Not syncing, but whose queued marks to draw is known all the same.
+        expect(viewport()).toHaveAttribute('data-author', 'teacher-1');
+        expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();
+
+        vi.useFakeTimers();
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(4000);
+        });
+        expect(viewport()).toHaveAttribute('data-readonly', 'true');
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+    });
+
+    it('paints read-only without sync until a role is confirmed when none was stored', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
+        const docRequest = deferred<DocumentRow | null>();
+        const roleRequest = deferred<'owner'>();
+        fetchDocument.mockReturnValue(docRequest.promise);
+        fetchMyRole.mockReturnValue(roleRequest.promise);
+
+        renderViewer();
+
+        await waitFor(() => expect(screen.getByTestId('pdf-viewport')).toBeInTheDocument());
+        expect(viewport()).toHaveAttribute('data-readonly', 'true');
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+        expect(screen.getByText('view only')).toBeInTheDocument();
+
+        docRequest.resolve(serverDoc());
+        roleRequest.resolve('owner');
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        await waitFor(() => expect(screen.getByText('Nocturne (Chopin)')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
+        expect(screen.getByTestId('share-export-menu')).toBeInTheDocument();
+    });
+
+    it('confirms the warm paint against the fresh archive flag, not the cached one', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen());
+        fetchDocument.mockResolvedValue(serverDoc({ archived_at: '2026-08-30T00:00:00Z' }));
+        fetchMyRole.mockResolvedValue('owner');
+
+        renderViewer();
+
+        await waitFor(() => expect(screen.getByText('Archived')).toBeInTheDocument());
+        expect(viewport()).toHaveAttribute('data-readonly', 'true');
+    });
+
+    it('shows the IMSLP source to a view-only member, carried onto a warm paint even if the bytes reload fails', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('viewer'));
+        fetchMyRole.mockResolvedValue('viewer');
+        fetchDocument.mockResolvedValue(
+            serverDoc({
+                source_url: 'https://imslp.org/wiki/Nocturnes%2C_Op.9_(Chopin%2C_Fr%C3%A9d%C3%A9ric)',
+                source_filename: 'nocturnes.pdf',
+                source_license: 'Creative Commons Attribution 4.0',
+                source_attribution: {
+                    source: 'imslp',
+                    work: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+                    composer: 'Chopin, Frédéric',
+                    editor: 'A. Engraver',
+                    arranger: null,
+                    publisher: null,
+                    year: null,
+                },
+            }),
+        );
+        loadDocumentSource.mockRejectedValue(new Error('offline'));
+
+        renderViewer();
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Source' }));
+        expect(await screen.findByRole('dialog', { name: 'About this score' })).toHaveTextContent('A. Engraver');
+    });
+
+    it('offers no Source control for an uploaded score', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Source' })).not.toBeInTheDocument();
+    });
+
+    it('hands the warm paint’s buffer to the bytes load and never prefetches over it', async () => {
+        const cached = cachedOpen();
+        loadDocumentOffline.mockResolvedValue(cached);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(loadDocumentSource).toHaveBeenCalled());
+        expect(prefetchScoreUrl).toHaveBeenCalledWith(DOC_ID);
+        const [, options] = loadDocumentSource.mock.calls[0] as [
+            DocumentRow,
+            { preloaded?: { bytes: ArrayBuffer }; prefetch?: unknown },
+        ];
+        expect(options.preloaded?.bytes).toBe(cached.bytes);
+        expect(options.prefetch).toBeUndefined();
+    });
+
+    it('mints the score URL alongside the row on a cold open', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(loadDocumentSource).toHaveBeenCalled());
+        expect(prefetchScoreUrl).toHaveBeenCalledWith(DOC_ID);
+        const [, options] = loadDocumentSource.mock.calls[0] as [DocumentRow, { prefetch?: { path: string } }];
+        expect(options.prefetch?.path).toBe(`${DOC_ID}/original.pdf`);
+    });
+
+    it('starts the pdf.js worker while the score is still being looked up', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockReturnValue(new Promise(() => undefined));
+
+        renderViewer();
+
+        await waitFor(() => expect(warmPdfWorker).toHaveBeenCalledTimes(1));
+        expect(loadDocumentSource).not.toHaveBeenCalled();
+    });
+
+    it('streams a first open, then caches the whole file under the confirmed role when it lands', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        loadDocumentSource.mockResolvedValue({ url: 'https://storage.example/signed/original.pdf' });
+
+        renderViewer();
+
+        // Page 1 renders from the URL; nothing waits for the download.
+        await waitFor(() => expect(pdfProps.current?.data).toMatchObject({ url: expect.stringContaining('signed') }));
+        const stream = pdfProps.current!.data as { url: string };
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+        expect(cacheDocumentBytes).not.toHaveBeenCalled();
+
+        const bytes = new ArrayBuffer(32);
+        act(() => pdfProps.current!.onStreamComplete!(stream, bytes));
+
+        expect(cacheDocumentBytes).toHaveBeenCalledWith(
+            expect.objectContaining({ id: DOC_ID }),
+            bytes,
+            expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
+        );
+        // Same source: the finished download does not reload the document.
+        expect(pdfProps.current!.data).toBe(stream);
+    });
+
+    it('still caches a first open left before its download ended', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        loadDocumentSource.mockResolvedValue({ url: 'https://storage.example/signed/original.pdf' });
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        const stream = pdfProps.current!.data as { url: string };
+        const download = { complete: new Promise<ArrayBuffer>(() => undefined), abort: vi.fn() };
+        // PdfProvider closing mid-download hands it over rather than aborting it.
+        pdfProps.current!.onStreamAbandoned!(stream, download);
+
+        expect(cacheStreamedDocument).toHaveBeenCalledWith(
+            expect.objectContaining({ id: DOC_ID }),
+            download,
+            expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
+        );
+        expect(download.abort).not.toHaveBeenCalled();
+    });
+
+    it('downloads the file whole when the stream fails', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        loadDocumentSource.mockResolvedValue({ url: 'https://storage.example/signed/original.pdf' });
+        const whole = new ArrayBuffer(24);
+        loadDocumentBytes.mockResolvedValue(whole);
+
+        renderViewer();
+
+        await waitFor(() => expect(pdfProps.current?.data).toMatchObject({ url: expect.any(String) }));
+        const stream = pdfProps.current!.data as { url: string };
+        act(() => pdfProps.current!.onStreamError!(stream, new TypeError('network error')));
+
+        await waitFor(() => expect(pdfProps.current?.data).toBe(whole));
+        expect(loadDocumentBytes).toHaveBeenCalledWith(
+            expect.objectContaining({ id: DOC_ID }),
+            expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
+        );
+    });
+
+    it('says the score could not be reached when the stream and the whole download both fail', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        loadDocumentSource.mockResolvedValue({ url: 'https://storage.example/signed/original.pdf' });
+        loadDocumentBytes.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        await waitFor(() => expect(pdfProps.current?.data).toMatchObject({ url: expect.any(String) }));
+        act(() => pdfProps.current!.onStreamError!(pdfProps.current!.data as { url: string }, new TypeError('x')));
+
+        expect(await screen.findByText(/Couldn’t reach Cleffy to open this score/)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    });
+
+    it('reports a cold open that finds nothing on the server without a fallback', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+
+        renderViewer();
+
+        expect(await screen.findByText(/access was revoked/)).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+    });
+
+    it('drops the cached paint when the document is gone even if the role request rejects', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen());
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
+
+        renderViewer();
+
+        expect(await screen.findByText(/access was revoked/)).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+        expect(screen.queryByText('Nocturne (cached)')).not.toBeInTheDocument();
+    });
+
+    it('ships no play-along with the feature switched off: no control, no analysis, no broadcasts', async () => {
+        // A ready analysis on the server must not surface either — the flag, not
+        // the analysis state, decides whether the feature exists in this build.
+        analysis.state = { kind: 'ready' };
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByRole('button', { name: 'Play-along' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
+        expect(viewport()).toHaveAttribute('data-playback', 'off');
+        expect(viewport()).toHaveAttribute('data-analysis-broadcasts', 'off');
+        // Disabled analysis is what keeps status reads, polling and OMR runs off.
+        expect(useScoreAnalysis).toHaveBeenCalled();
+        expect(useScoreAnalysis.mock.calls.every(([, enabled]) => enabled === false)).toBe(true);
+    });
+
+    it('keeps the play-along panel and playhead hidden until asked for, and pauses on close', async () => {
+        flags.playalong = true;
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
+        expect(viewport()).toHaveAttribute('data-playback', 'off');
+
+        const toggle = screen.getByRole('button', { name: 'Play-along' });
+        expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        expect(viewport()).toHaveAttribute('data-analysis-broadcasts', 'on');
+        expect(useScoreAnalysis).toHaveBeenLastCalledWith(DOC_ID, true);
+        await user.click(toggle);
+        // The transport is a lazy chunk, fetched on first open.
+        expect(await screen.findByTestId('transport-bar')).toBeInTheDocument();
+        expect(toggle).toHaveAttribute('aria-expanded', 'true');
+        expect(viewport()).toHaveAttribute('data-playback', 'on');
+        expect(engine.pause).not.toHaveBeenCalled();
+
+        await user.click(toggle);
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
+        expect(viewport()).toHaveAttribute('data-playback', 'off');
+        expect(engine.pause).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers no play-along control when analysis is unavailable', async () => {
+        flags.playalong = true;
+        analysis.state = { kind: 'unavailable' };
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByRole('button', { name: 'Play-along' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
+    });
+
+    it('stays read-only when confirm fails with a PostgREST error and no role was stored', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
+        fetchDocument.mockRejectedValue(new Error('Could not load document: JWT expired'));
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+        expect(screen.getByText('Nocturne (cached)')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+    });
+});
+
+describe('CloudViewer stored role and reconnects', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('edits and syncs at once under the stored role while the server is still being asked', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('owner'));
+        fetchDocument.mockReturnValue(new Promise(() => undefined));
+        fetchMyRole.mockReturnValue(new Promise(() => undefined));
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        expect(screen.queryByText('view only')).not.toBeInTheDocument();
+        // Owner chrome still waits for the server's answer.
+        expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();
+    });
+
+    it('keeps the stored role in use when the confirm fails with a PostgREST error', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('editor'));
+        fetchDocument.mockRejectedValue(new Error('Could not load document: JWT expired'));
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
+
+        renderViewer();
+
+        await waitFor(() => expect(fetchMyRole).toHaveBeenCalled());
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+    });
+
+    it('downgrades, and says so, when the server lowered the stored role', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('editor'));
+        const roleRequest = deferred<'viewer'>();
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockReturnValue(roleRequest.promise);
+
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+
+        roleRequest.resolve('viewer');
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByText('Your access changed: you can now only view this score.')).toBeInTheDocument();
+    });
+
+    it('stores the confirmed role with the bytes of a first open', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(loadDocumentSource).toHaveBeenCalledWith(
+            expect.objectContaining({ id: DOC_ID }),
+            expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
+        );
+    });
+
+    it('asks the server again on reconnect, then edits and syncs what was queued offline', async () => {
+        // A device whose cache never stored a role, opened offline.
+        const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        await waitFor(() => expect(fetchMyRole).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+        // Not a "Syncing…" that never ends: there is no network to sync over.
+        expect(screen.getByTitle('Offline — changes saved on this device')).toBeInTheDocument();
+
+        onLine.mockReturnValue(true);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        await act(async () => {
+            window.dispatchEvent(new Event('online'));
+        });
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        // Same bytes on screen: the re-check does not reload the PDF from the cache.
+        expect(loadDocumentOffline).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-verifies a stored role used offline once back online, and downgrades if it changed', async () => {
+        const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        loadDocumentOffline.mockResolvedValue(cachedOpen('editor'));
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+        await waitFor(() => expect(fetchMyRole).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+
+        onLine.mockReturnValue(true);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('viewer');
+        await act(async () => {
+            window.dispatchEvent(new Event('online'));
+        });
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByText('Your access changed: you can now only view this score.')).toBeInTheDocument();
+    });
+
+    it('does not ask again on reconnect once the server has confirmed', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('owner'));
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+
+        renderViewer();
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument());
+
+        await act(async () => {
+            window.dispatchEvent(new Event('online'));
+        });
+        expect(fetchMyRole).toHaveBeenCalledTimes(1);
+    });
+
+    it('explains a first open with no network, and opens on reconnect', async () => {
+        const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        expect(
+            await screen.findByText(/You’re offline, and this score isn’t saved on this device yet/),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/TypeError|Failed to fetch/)).not.toBeInTheDocument();
+
+        onLine.mockReturnValue(true);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        await act(async () => {
+            window.dispatchEvent(new Event('online'));
+        });
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+    });
+});
+
+describe('CloudViewer when the server cannot be reached while online', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('does not claim a first open is offline when the browser is online, and offers to try again', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        // DNS, an ad-blocker, an outage without CORS headers: no 'online' event will come.
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        expect(await screen.findByText(/Couldn’t reach Cleffy to open this score/)).toBeInTheDocument();
+        expect(screen.queryByText(/You’re offline/)).not.toBeInTheDocument();
+
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        await user.click(screen.getByRole('button', { name: 'Try again' }));
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+    });
+
+    it('shows a server failure on a first open without its raw text, with Try again', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockRejectedValue(new Error('Could not load document: 500 upstream'));
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: 500 upstream'));
+
+        renderViewer();
+
+        expect(await screen.findByText('Couldn’t open this score. Try again in a moment.')).toBeInTheDocument();
+        expect(screen.queryByText(/500 upstream/)).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    });
+
+    it('says it is waiting for the server, not syncing, and asks again by itself', async () => {
+        const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
+        fetchDocument.mockRejectedValue(new Error('Could not load document: JWT expired'));
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
+
+        renderViewer();
+
+        await waitFor(() =>
+            expect(
+                screen.getByTitle('Waiting for the server to confirm this score — asking again shortly.'),
+            ).toBeInTheDocument(),
+        );
+        expect(screen.queryByText('Syncing…', { selector: '[data-swap-active]' })).not.toBeInTheDocument();
+
+        // The retry is armed by a passive effect, which React may flush in a
+        // later task than the commit that showed the title.
+        let retry: (typeof setTimeoutSpy.mock.calls)[number] | undefined;
+        await waitFor(() => {
+            retry = setTimeoutSpy.mock.calls.find(([, ms]) => ms === 5000);
+            expect(retry).toBeDefined();
+        });
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        await act(async () => {
+            (retry![0] as () => void)();
+        });
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+    });
+});
+
+describe('SyncDot', () => {
+    const activeDot = () => document.querySelector('[data-sync-dot][data-active]');
+    const activeLabel = () => document.querySelector('[data-swap-active]')?.textContent;
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('shows a retryable failure calmly and keeps red for errors', () => {
+        const { rerender } = render(<SyncDot status="retrying" />);
+        expect(activeLabel()).toBe('Retrying…');
+        expect(activeDot()).not.toHaveClass('bg-red-500');
+
+        rerender(<SyncDot status="error" />);
+        expect(activeDot()).toHaveClass('bg-red-500');
+    });
+
+    it('words a delay without claiming the server was unreachable, or that it will recover by itself', () => {
+        const { rerender } = render(<SyncDot status="retrying" />);
+        expect(screen.getByTitle('Sync delayed — retrying. Changes are saved on this device.')).toBeInTheDocument();
+
+        rerender(<SyncDot status="error" />);
+        expect(
+            screen.getByTitle('Changes aren’t reaching the server yet. They’re saved on this device.'),
+        ).toBeInTheDocument();
+    });
+
+    it('never leaves Synced for a round trip quicker than 600ms', () => {
+        vi.useFakeTimers();
+        const { rerender } = render(<SyncDot status="synced" />);
+        rerender(<SyncDot status="syncing" />);
+        act(() => vi.advanceTimersByTime(599));
+        expect(activeLabel()).toBe('Synced');
+        expect(activeDot()).toHaveAttribute('data-sync-dot', 'synced');
+        rerender(<SyncDot status="synced" />);
+        act(() => vi.advanceTimersByTime(1000));
+        expect(activeLabel()).toBe('Synced');
+    });
+
+    it('says Syncing once a sync has lasted 600ms, with a static dot', () => {
+        vi.useFakeTimers();
+        const { rerender } = render(<SyncDot status="synced" />);
+        rerender(<SyncDot status="syncing" />);
+        act(() => vi.advanceTimersByTime(600));
+        expect(activeLabel()).toBe('Syncing…');
+        expect(activeDot()).toHaveAttribute('data-sync-dot', 'syncing');
+        expect(document.querySelector('.animate-pulse')).toBeNull();
+    });
+
+    it('shows offline, retrying and errors at once', () => {
+        vi.useFakeTimers();
+        const { rerender } = render(<SyncDot status="synced" />);
+        rerender(<SyncDot status="offline" />);
+        expect(activeLabel()).toBe('Offline');
+        rerender(<SyncDot status="error" />);
+        expect(activeLabel()).toBe('Not syncing');
+    });
+
+    it('shows a first sync as itself', () => {
+        render(<SyncDot status="syncing" />);
+        expect(activeLabel()).toBe('Syncing…');
+    });
+
+    it('crossfades stacked dots on opacity, instantly under reduced motion', () => {
+        const { rerender } = render(<SyncDot status="synced" />);
+        const synced = document.querySelector('[data-sync-dot="synced"]');
+        const offline = document.querySelector('[data-sync-dot="offline"]');
+        expect(synced).toHaveClass(
+            'opacity-100',
+            'transition-opacity',
+            'duration-200',
+            'motion-reduce:transition-none',
+        );
+        expect(offline).toHaveClass('opacity-0');
+        rerender(<SyncDot status="offline" />);
+        // The same nodes, so a quick flip back retargets mid-fade.
+        expect(document.querySelector('[data-sync-dot="synced"]')).toBe(synced);
+        expect(synced).toHaveClass('opacity-0');
+        expect(offline).toHaveClass('opacity-100');
+    });
+
+    it('keeps the label at the widest wording, without announcing every change', () => {
+        render(<SyncDot status="synced" />);
+        const label = document.querySelector('.swap-label');
+        expect(label).not.toBeNull();
+        expect(label).not.toHaveAttribute('aria-live');
+        expect(screen.getByText('Waiting for server')).toHaveAttribute('aria-hidden', 'true');
+    });
+});
+
+describe('CloudViewer membership changes', () => {
+    /** A cold open that settles as `role` on a score someone else owns. */
+    const openAs = async (role: 'editor' | 'viewer') => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue(role);
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+    };
+
+    const membershipChanged = async () => {
+        await act(async () => {
+            viewportSync.current?.onMembershipChanged?.();
+            await Promise.resolve();
+        });
+    };
+
+    it('turns read-only and says why when the owner lowers the role', async () => {
+        await openAs('editor');
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+
+        fetchMyRole.mockResolvedValue('viewer');
+        await membershipChanged();
+
+        // Two mocked reads and a commit: generous room on a loaded CI runner.
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'), { timeout: 5000 });
+        expect(screen.getByRole('status')).toHaveTextContent('you can now only view this score');
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
+    it('opens for writing when the owner raises the role', async () => {
+        await openAs('viewer');
+        expect(viewport()).toHaveAttribute('data-readonly', 'true');
+
+        fetchMyRole.mockResolvedValue('editor');
+        await membershipChanged();
+
+        // Two mocked reads and a commit: generous room on a loaded CI runner.
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'), { timeout: 5000 });
+        expect(screen.getByRole('status')).toHaveTextContent('you can now edit this score');
+    });
+
+    it('leaves the score with a clear message, and purges it, once access is gone', async () => {
+        await openAs('editor');
+
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+
+        expect(
+            await screen.findByText(/no longer available to you — it was deleted, or your access was removed/),
+        ).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
+        expect(removeCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', DOC_ID);
+    });
+
+    it('does not drop a change that arrives while a re-check is still running', async () => {
+        await openAs('editor');
+
+        // The first check reads the role before the owner's second change
+        // commits (editor, then viewer, in quick succession).
+        let answerFirst: (role: string) => void = () => undefined;
+        fetchMyRole.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    answerFirst = resolve;
+                }),
+        );
+        await membershipChanged();
+        fetchMyRole.mockResolvedValue('viewer');
+        await membershipChanged();
+        expect(fetchMyRole).toHaveBeenCalledTimes(2); // load + the first check only
+
+        await act(async () => {
+            answerFirst('editor');
+            await Promise.resolve();
+        });
+
+        // The second event was queued, not ignored: one more read, and the
+        // viewer lands on the latest role.
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(fetchMyRole).toHaveBeenCalledTimes(3);
+        expect(screen.getByRole('status')).toHaveTextContent('you can now only view this score');
+    });
+
+    it('follows a role change and then a removal in quick succession to the end', async () => {
+        await openAs('editor');
+
+        let answerFirst: (role: string) => void = () => undefined;
+        fetchMyRole.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    answerFirst = resolve;
+                }),
+        );
+        await membershipChanged();
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+        await membershipChanged();
+
+        await act(async () => {
+            answerFirst('viewer');
+            await Promise.resolve();
+        });
+
+        expect(await screen.findByText(/no longer available to you/)).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+        // Two events mid-check still mean one follow-up, not two.
+        expect(fetchMyRole).toHaveBeenCalledTimes(3);
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
+    });
+
+    it('changes nothing when the re-check cannot reach the server', async () => {
+        await openAs('editor');
+
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+        await membershipChanged();
+
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
+    it('follows the score being archived and then restored while the role stays the same', async () => {
+        // The realtime channel asks for a re-check on both (20261022120200).
+        await openAs('editor');
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+        expect(screen.queryByText('Archived')).not.toBeInTheDocument();
+
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else', archived_at: '2026-10-22T08:00:00Z' }));
+        await membershipChanged();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'), { timeout: 5000 });
+        expect(screen.getByText('Archived')).toBeInTheDocument();
+        // Still syncing (the channel keeps waiting for the restore), and no
+        // "your access changed": the role did not change.
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else', archived_at: null }));
+        await membershipChanged();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'), { timeout: 5000 });
+        expect(screen.queryByText('Archived')).not.toBeInTheDocument();
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
+    it('offers members the sharing dialog, and leaving purges then returns to the library', async () => {
+        const user = userEvent.setup();
+        await openAs('viewer');
+
+        expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Sharing' }));
+        expect(screen.getByTestId('share-dialog')).toHaveAttribute('data-role', 'viewer');
+
+        await user.click(screen.getByRole('button', { name: 'mock leave' }));
+
+        expect(await screen.findByText('library')).toBeInTheDocument();
+        expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID);
+        expect(removeCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', DOC_ID);
+    });
+
+    it('opens sharing for the owner from the button labelled Share', async () => {
+        // "Share" is people and links; the export menu beside it is "Export".
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Share' }));
+        expect(screen.getByTestId('share-dialog')).toHaveAttribute('data-role', 'owner');
+    });
+
+    it('offers the owner no smart import while the feature is off, even on the post-upload ?import=1', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        storeReady.enabled = true;
+        renderViewer(`/doc/${DOC_ID}?import=1`);
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
+        expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();
+    });
+
+    it('offers the owner smart import once the feature is on', async () => {
+        flags.smartImport = true;
+        storeReady.enabled = true;
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        expect(await screen.findByTestId('import-scan-button')).toBeInTheDocument();
+    });
+
+    it('gives a roster student no way to leave an assigned score', async () => {
+        sessionKind.userType = 'student';
+        await openAs('editor');
+
+        expect(screen.queryByRole('button', { name: 'Sharing' })).not.toBeInTheDocument();
+    });
+
+    it('keeps a student’s queued changes when the teacher ended the sign-in, not the assignment', async () => {
+        // A reset or an archive: the score vanishes exactly as on an unassign,
+        // but the server says the sign-in itself is what ended.
+        sessionKind.userType = 'student';
+        await openAs('editor');
+        fetchSignInStillValid.mockResolvedValue(false);
+
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+
+        expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
+        expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+        expect(removeCachedLibraryDocument).not.toHaveBeenCalled();
+    });
+
+    it('still purges a score unassigned from a student whose sign-in stands', async () => {
+        sessionKind.userType = 'student';
+        await openAs('editor');
+
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+
+        expect(await screen.findByText(/no longer available to you/)).toBeInTheDocument();
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
+        expect(fetchSignInStillValid).toHaveBeenCalled();
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
+    });
+
+    it('keeps everything when it cannot ask whether a student’s sign-in stands', async () => {
+        sessionKind.userType = 'student';
+        await openAs('editor');
+        fetchSignInStillValid.mockResolvedValue(null);
+
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+
+        expect(await screen.findByText(/no longer available to you/)).toBeInTheDocument();
+        await waitFor(() => expect(fetchSignInStillValid).toHaveBeenCalled());
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
+    });
+});
+
+describe('CloudViewer sign-in ended under the sync engine', () => {
+    it('signs out keeping the outbox when the engine holds it for an ended sign-in', async () => {
+        sessionKind.userType = 'student';
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('editor');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        act(() => {
+            lastSync.current?.onHeld?.({ reason: 'signed-out', pendingMarks: 2 });
+        });
+
+        expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
+        expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
+    it('offers Export of ink this device could not store before signing out, and signs out when asked (new finding 1)', async () => {
+        const user = userEvent.setup();
+        sessionKind.userType = 'student';
+        holdOps(new ScribblerDb(`viewer-held-${crypto.randomUUID()}`), DOC_ID, [
+            {
+                op: {
+                    type: 'create',
+                    annotation: {
+                        id: 'unsaved-1',
+                        docId: DOC_ID,
+                        page: 0,
+                        kind: 'stroke',
+                        color: '#111111',
+                        payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+                        createdBy: null,
+                        createdAt: '2026-10-22T00:00:00.000Z',
+                        updatedAt: '2026-10-22T00:00:00.000Z',
+                        deletedAt: null,
+                        seq: 0,
+                    },
+                },
+                author: SESSION.user.id,
+            },
+        ]);
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('editor');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        act(() => {
+            lastSync.current?.onHeld?.({ reason: 'signed-out', pendingMarks: 2 });
+        });
+
+        expect(await screen.findByText(/Some marks you made couldn’t be saved on this device/)).toBeInTheDocument();
+        const menu = screen.getByTestId('share-export-menu');
+        expect(menu).toHaveAttribute('data-doc', DOC_ID);
+        expect(menu).toHaveAttribute('data-user', SESSION.user.id);
+        expect(menu.getAttribute('data-title')).toBe(serverDoc().title);
+        // Nothing is signed out (or cleared) while the student can still export.
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
+
+        await user.click(screen.getByRole('button', { name: 'Sign out now' }));
+
+        expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
+        expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('discards, and says so, the outbox of a student whose account was deleted with their teacher', async () => {
+        // No next sign-in can upload them: the account is gone, not archived.
+        sessionKind.userType = 'student';
+        fetchAccountDeleted.mockResolvedValue(true);
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('editor');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        act(() => {
+            lastSync.current?.onHeld?.({ reason: 'signed-out', pendingMarks: 2 });
+        });
+
+        expect(
+            await screen.findByText('student login: teacher true, kept 0, deleted, discarded 2'),
+        ).toBeInTheDocument();
+        expect(signOutDeletedAccount).toHaveBeenCalledTimes(1);
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
+    });
+});
+
+describe('CloudViewer refused changes', () => {
+    it('tells the user once per refused mark and can be dismissed', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+
+        act(() => {
+            lastSync.current?.onRejected?.({ annotationId: 'a1', opType: 'update', reason: 'rls' });
+            lastSync.current?.onRejected?.({ annotationId: 'a1', opType: 'delete', reason: 'rls' });
+            lastSync.current?.onRejected?.({ annotationId: 'a2', opType: 'create', reason: 'rls' });
+        });
+
+        expect(screen.getByText(/2 of your changes could not be saved/)).toBeInTheDocument();
+        // Non-blocking: the score is still there and still editable.
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+
+        await user.click(screen.getByRole('button', { name: 'Dismiss' }));
+        expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+    });
+});
+
+describe('CloudViewer refused changes across scores', () => {
+    const OTHER_DOC_ID = '66666666-7777-4888-8999-aaaaaaaaaaaa';
+    const GoToOther = () => {
+        const navigate = useNavigate();
+        return (
+            <button type="button" onClick={() => navigate(`/doc/${OTHER_DOC_ID}`)}>
+                open other score
+            </button>
+        );
+    };
+
+    it('does not carry one score’s notices over to the next score opened in place', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        render(
+            <MemoryRouter initialEntries={[`/doc/${DOC_ID}`]}>
+                <GoToOther />
+                <Routes>
+                    <Route path="/doc/:documentId" element={<ViewerPage />} />
+                </Routes>
+            </MemoryRouter>,
+        );
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        act(() => {
+            lastSync.current?.onRejected?.({ annotationId: 'a1', opType: 'update', reason: 'rls' });
+            lastSync.current?.onHeld?.({ reason: 'archived', pendingMarks: 2 });
+        });
+        expect(screen.getByText(/One of your changes could not be saved/)).toBeInTheDocument();
+        expect(screen.getByText(/2 changes you made to it are saved only on this device/)).toBeInTheDocument();
+
+        fetchDocument.mockResolvedValue(serverDoc({ id: OTHER_DOC_ID }));
+        await user.click(screen.getByRole('button', { name: 'open other score' }));
+
+        expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/saved only on this device/)).not.toBeInTheDocument();
+    });
+});
+
+describe('CloudViewer on a read-only Academy seat', () => {
+    // Codex round-3 review of #61: the server refuses a read-only seat's every
+    // write and its live ink, but a channel opened while the seat was active
+    // keeps Realtime's permission until it rejoins. The viewer drops to view
+    // only, which restarts sync without the live-ink publisher and rejoins.
+    const openAsOwner = () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+    };
+
+    it('opens view only when the seat is already read-only', async () => {
+        fetchSeatReadOnly.mockResolvedValue(true);
+        openAsOwner();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByTitle('View only — your Academy seat is read-only')).toHaveTextContent('view only');
+        // Still syncing: it receives everyone else's marks, and keeps its own outbox.
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+    });
+
+    it('drops to view only on the server’s hint when the seat turns read-only, and back when it is active', async () => {
+        openAsOwner();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+
+        fetchSeatReadOnly.mockResolvedValue(true);
+        act(() => viewportSync.current?.onMembershipChanged?.());
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByTitle('View only — your Academy seat is read-only')).toBeInTheDocument();
+
+        fetchSeatReadOnly.mockResolvedValue(false);
+        act(() => viewportSync.current?.onMembershipChanged?.());
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(screen.queryByText('view only')).not.toBeInTheDocument();
+    });
+
+    it('drops to view only as soon as sync holds a change the seat was refused', async () => {
+        openAsOwner();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+
+        act(() => lastSync.current?.onHeld?.({ reason: 'seat-read-only', pendingMarks: 1 }));
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByTitle('View only — your Academy seat is read-only')).toBeInTheDocument();
+    });
+
+    it('keeps the last answer when the seat cannot be asked', async () => {
+        fetchSeatReadOnly.mockRejectedValue(new Error('Could not load seat: JWT expired'));
+        openAsOwner();
+
+        await waitFor(() => expect(fetchSeatReadOnly).toHaveBeenCalled());
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+    });
+});
+
+describe('CloudViewer: marks this device could not store (SF-1)', () => {
+    const fullDiskStore = async () => {
+        const db = new ScribblerDb(`viewer-${crypto.randomUUID()}`);
+        const store = new AnnotationStore(db, DOC_ID);
+        await store.load();
+        const full = vi
+            .spyOn(db.ops, 'bulkAdd')
+            .mockRejectedValue(new DOMException('The quota has been exceeded.', 'QuotaExceededError'));
+        await store
+            .create({
+                id: 'unsaved-1',
+                docId: DOC_ID,
+                page: 0,
+                kind: 'stroke',
+                color: '#111111',
+                payload: { pts: [0.1, 0.1, 0.5, 0.2, 0.2, 0.5], w: 0.005 },
+                createdBy: null,
+                createdAt: '2026-10-22T00:00:00.000Z',
+                updatedAt: '2026-10-22T00:00:00.000Z',
+                deletedAt: null,
+                seq: 0,
+            })
+            .catch(() => undefined);
+        return { store, full };
+    };
+
+    const openWith = async (store: AnnotationStore) => {
+        storeReady.enabled = true;
+        storeReady.store = store;
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+    };
+
+    it('shows one persistent banner with Retry and Export, and clears it once a retry saves them', async () => {
+        const { store, full } = await fullDiskStore();
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        await openWith(store);
+
+        const banner = await screen.findByText('Some marks couldn’t be saved on this device.');
+        expect(screen.getAllByText(/couldn’t be saved on this device/)).toHaveLength(1);
+        expect(banner.closest('[role="status"]')).not.toBeNull();
+        expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
+
+        // Export opens the viewer's existing Export menu.
+        expect(screen.getByTestId('share-export-menu')).toHaveAttribute('data-open-signal', '0');
+        await userEvent.click(screen.getByRole('button', { name: 'Export' }));
+        expect(screen.getByTestId('share-export-menu')).toHaveAttribute('data-open-signal', '1');
+
+        // Still full: the banner stays and says what to do instead.
+        await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+        expect(await screen.findByText(/Retrying didn’t work/)).toBeInTheDocument();
+        expect(store.hasPersistFailure('unsaved-1')).toBe(true);
+
+        full.mockRestore();
+        await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+        await waitFor(() => expect(screen.queryByText(/couldn’t be saved on this device/)).not.toBeInTheDocument());
+        expect(store.hasPersistFailure('unsaved-1')).toBe(false);
+    });
+
+    it('shows nothing while every mark is saved', async () => {
+        const db = new ScribblerDb(`viewer-${crypto.randomUUID()}`);
+        const store = new AnnotationStore(db, DOC_ID);
+        await store.load();
+        await openWith(store);
+        expect(screen.queryByText(/couldn’t be saved/)).not.toBeInTheDocument();
+    });
+});

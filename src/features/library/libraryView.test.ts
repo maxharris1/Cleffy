@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    appendPage,
+    applyLibraryFilters,
     composerOf,
     displayTitleOf,
     filterByTag,
     groupByComposer,
     groupByTag,
+    isFiltering,
     sortDocuments,
 } from '@/features/library/libraryView';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
@@ -17,6 +20,7 @@ const doc = (id: string, title: string, updated_at: string): DocumentRow => ({
     storage_path: `${id}/original.pdf`,
     page_count: null,
     content_rev: 0,
+    thumb_rev: null,
     created_at: updated_at,
     updated_at,
     archived_at: null,
@@ -99,5 +103,52 @@ describe('libraryView', () => {
         expect(groups[0]?.documents.map((d) => d.id)).toEqual(['1', '3']);
         expect(groups[1]?.documents.map((d) => d.id)).toEqual(['3']);
         expect(groups[2]?.documents.map((d) => d.id)).toEqual(['2']);
+    });
+});
+
+describe('applyLibraryFilters', () => {
+    const docs = [
+        doc('a', 'Prelude in C', '2026-08-02T00:00:00Z'),
+        doc('b', 'Gymnopédie', '2026-08-01T00:00:00Z'),
+        doc('c', 'Prelude in D', '2026-08-03T00:00:00Z'),
+    ];
+    const none = {
+        query: '',
+        favoritesOnly: false,
+        favorites: new Set<string>(),
+        tagId: null,
+        assignments: new Map<string, string[]>(),
+    };
+
+    it('narrows by title, favorites and tag together', () => {
+        const filtered = applyLibraryFilters(docs, {
+            ...none,
+            query: 'prelude',
+            favoritesOnly: true,
+            favorites: new Set(['a', 'c']),
+            tagId: 't1',
+            assignments: new Map([['c', ['t1']]]),
+        });
+        expect(filtered.map((d) => d.id)).toEqual(['c']);
+    });
+
+    it('keeps the given order (server results are already ordered)', () => {
+        expect(applyLibraryFilters(docs, none).map((d) => d.id)).toEqual(['a', 'b', 'c']);
+    });
+
+    it('treats only real filters as filtering', () => {
+        expect(isFiltering(none)).toBe(false);
+        expect(isFiltering({ ...none, query: 'x' })).toBe(true);
+        expect(isFiltering({ ...none, tagId: 't' })).toBe(true);
+        expect(isFiltering({ ...none, favoritesOnly: true })).toBe(true);
+    });
+});
+
+describe('appendPage', () => {
+    it('appends in order and skips ids already held', () => {
+        const a = doc('a', 'A', '2026-08-03T00:00:00Z');
+        const b = doc('b', 'B', '2026-08-02T00:00:00Z');
+        const c = doc('c', 'C', '2026-08-01T00:00:00Z');
+        expect(appendPage([a, b], [b, c]).map((d) => d.id)).toEqual(['a', 'b', 'c']);
     });
 });

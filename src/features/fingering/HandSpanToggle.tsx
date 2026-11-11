@@ -15,10 +15,8 @@ export const HandSpanToggle = ({ value, onChange }: HandSpanToggleProps) => (
                 type="button"
                 aria-pressed={value === size}
                 onClick={() => onChange(size)}
-                className={`rounded-md border px-1.5 py-0.5 capitalize transition ${
-                    value === size
-                        ? 'border-accent bg-accent-soft text-accent'
-                        : 'border-stone-200 hover:bg-stone-50'
+                className={`rounded-md border px-1.5 py-0.5 capitalize transition-colors ${
+                    value === size ? 'border-accent bg-accent-soft text-accent' : 'border-stone-200 hover:bg-stone-50'
                 }`}
             >
                 {size}

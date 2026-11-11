@@ -26,6 +26,8 @@ import {
     Volume2Icon,
     VolumeXIcon,
 } from '@/ui/icons';
+import { fieldClassName } from '@/ui/classNames';
+import { CloseButton } from '@/ui/CloseButton';
 
 export interface TransportBarProps {
     state: ScoreAnalysisState;
@@ -47,6 +49,7 @@ const ERROR_COPY: Record<string, string> = {
     queue_full: 'The analysis service is busy — try again in a few minutes.',
     backlog_full: 'You already have several scores analyzing — try Generate again shortly.',
     service_unreachable: 'The analysis service is not reachable right now.',
+    deletion_check_unavailable: 'We could not check your account just now — try Generate again in a minute.',
     download_failed: 'The PDF could not be fetched for analysis.',
     worker_lost: 'The analysis was interrupted and will retry automatically.',
     stale: 'The analysis was interrupted.',
@@ -125,13 +128,12 @@ const StaleAnalysisNotice = (props: { engineVersion: string | null; canManage: b
         return null;
     }
     return (
-        <div className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900" role="status">
+        <div
+            className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900"
+            role="status"
+        >
             This play-along was made by an older version of the analysis.{' '}
-            <button
-                type="button"
-                onClick={props.onGenerate}
-                className="font-medium underline underline-offset-2"
-            >
+            <button type="button" onClick={props.onGenerate} className="font-medium underline underline-offset-2">
                 Regenerate it
             </button>{' '}
             to pick up the improvements.
@@ -155,7 +157,9 @@ const ScoreWarnings = (props: { warnings: readonly string[] }) => {
                 className="flex w-full items-center gap-1.5 text-left text-xs font-medium text-amber-900"
             >
                 {open ? <ChevronDownIcon size={13} /> : <ChevronUpIcon size={13} />}
-                {present.length === 1 ? '1 thing to know about this play-along' : `${present.length} things to know about this play-along`}
+                {present.length === 1
+                    ? '1 thing to know about this play-along'
+                    : `${present.length} things to know about this play-along`}
             </button>
             {open ? (
                 <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-xs text-amber-900">
@@ -347,11 +351,17 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
     return (
         <div className="flex flex-col gap-1">
             {warning ? (
-                <div className="flex items-center justify-center gap-2 text-xs text-amber-700" role="status">
+                <div
+                    className="flex items-center justify-center gap-2 text-xs text-amber-700 pointer-coarse:min-h-11"
+                    role="status"
+                >
                     <span>{WARNING_COPY[warning] ?? warning}</span>
-                    <button type="button" aria-label="Dismiss warning" onClick={onDismissWarning}>
-                        <CloseIcon size={12} />
-                    </button>
+                    <CloseButton
+                        label="Dismiss warning"
+                        iconSize={12}
+                        onClick={onDismissWarning}
+                        className="size-6 rounded text-amber-700 hover:bg-amber-100"
+                    />
                 </div>
             ) : null}
 
@@ -363,7 +373,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
             <ScoreWarnings warnings={score.warnings} />
 
             {loopRange ? (
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-accent/30 bg-accent-soft/50 px-2 py-1">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-accent/30 bg-accent-soft/50 px-2 py-1 pointer-coarse:gap-y-3">
                     <span className="flex items-center gap-1 text-xs font-medium text-accent">
                         <RepeatIcon size={13} />
                         Looping bars
@@ -384,7 +394,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     <button
                         type="button"
                         onClick={() => moveLoopEdge('a', currentMeasureIndex ?? 0)}
-                        className="rounded-full px-2 py-0.5 text-xs text-stone-600 underline-offset-2 hover:bg-ink/5 hover:underline"
+                        className="rounded-full px-2 py-0.5 text-xs text-stone-600 underline-offset-2 hover:bg-ink/5 hover:underline pointer-coarse:hit-44-y"
                     >
                         Start here
                     </button>
@@ -392,7 +402,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                         type="button"
                         aria-label="Turn off the loop"
                         onClick={() => setLoopRange(null)}
-                        className="ml-auto flex items-center gap-1 rounded-full px-2 py-0.5 text-xs text-stone-600 hover:bg-ink/5"
+                        className="ml-auto flex items-center gap-1 rounded-full px-2 py-0.5 text-xs text-stone-600 hover:bg-ink/5 pointer-coarse:hit-44-y"
                     >
                         <CloseIcon size={12} />
                         Turn off
@@ -400,7 +410,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                 </div>
             ) : null}
 
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pointer-coarse:gap-y-3">
                 {/* Core transport — explicit rewind / play / pause, always visible */}
                 <div className="flex items-center gap-1">
                     <button
@@ -477,8 +487,15 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                 </button>
 
                 {/* Practice controls — collapsible on phones */}
-                <div className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 sm:flex`}>
-                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} inferred={tempoIsInferred(score)} />
+                <div
+                    className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 pointer-coarse:gap-y-3 sm:flex`}
+                >
+                    <TempoControl
+                        bpm={bpm}
+                        onBpm={setBpm}
+                        compound={isCompoundMeter(score)}
+                        inferred={tempoIsInferred(score)}
+                    />
 
                     <div className="mx-0.5 hidden h-6 w-px bg-stone-200 sm:block" />
 
@@ -620,7 +637,7 @@ const TempoControl = ({
 
     return (
         <div
-            className="flex items-center gap-0.5"
+            className="flex items-center gap-0.5 pointer-coarse:gap-1.5"
             title={
                 inferred
                     ? 'Tempo (quarter note BPM) — estimated from the tempo marking, which prints no number'
@@ -653,20 +670,14 @@ const TempoControl = ({
                         onBpm(bpm - 1);
                     }
                 }}
-                className="w-11 rounded-md border border-stone-200 bg-white py-0.5 text-center text-sm tabular-nums text-stone-700 focus:border-accent focus:outline-none"
+                className={fieldClassName('inline', 'w-11')}
             />
             <button type="button" aria-label="Faster" onClick={() => onBpm(bpm + 1)} className={squareButton(false)}>
                 +
             </button>
             {compound ? <span className="ml-0.5 text-xs text-stone-400">(♩· = {Math.round(bpm / 1.5)})</span> : null}
-            {inferred ? (
-                <span
-                    className="ml-0.5 text-xs text-stone-400"
-                    title="Estimated from the printed tempo marking, which gives no number"
-                >
-                    est.
-                </span>
-            ) : null}
+            {/* Said inline, not in a tooltip, so touch sees why the number is a guess. */}
+            {inferred ? <span className="ml-0.5 text-xs text-stone-500">est. from marking</span> : null}
         </div>
     );
 };
@@ -722,7 +733,7 @@ const isCompoundMeter = (score: ScoreData): boolean => {
 
 const pillButton = (active: boolean, attention = false): string =>
     [
-        'flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition',
+        'flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] pointer-coarse:hit-44',
         active
             ? 'border-accent bg-accent-soft text-accent'
             : attention
@@ -732,7 +743,7 @@ const pillButton = (active: boolean, attention = false): string =>
 
 const squareButton = (active: boolean): string =>
     [
-        'flex h-8 w-8 items-center justify-center rounded-lg text-stone-600 transition',
+        'flex h-8 w-8 items-center justify-center rounded-lg text-stone-600 transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] pointer-coarse:hit-44',
         active ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5',
     ].join(' ');
 
@@ -743,10 +754,12 @@ const squareButton = (active: boolean): string =>
  */
 const roundButton = (primary: boolean): string =>
     [
-        'flex h-10 w-10 items-center justify-center rounded-full transition disabled:animate-pulse',
+        'flex h-10 w-10 items-center justify-center rounded-full transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] disabled:animate-pulse disabled:active:scale-100 pointer-coarse:hit-44',
         primary
             ? 'bg-accent text-white shadow-sm hover:opacity-90'
             : 'border border-stone-200 text-stone-600 hover:bg-ink/5',
     ].join(' ');
 
-const stepperButton = 'flex h-6 w-6 items-center justify-center rounded-md text-stone-600 transition hover:bg-ink/10';
+/** Loop-edge nudges: 24px on a mouse; 32px plus a 44px hit area on touch. */
+const stepperButton =
+    'flex h-6 w-6 items-center justify-center rounded-md text-stone-600 transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] hover:bg-ink/10 pointer-coarse:size-8 pointer-coarse:hit-44';

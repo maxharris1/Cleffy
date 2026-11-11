@@ -1,7 +1,7 @@
 import { RenderingCancelledException, type PDFDocumentProxy, type RenderTask } from 'pdfjs-dist';
 import { memo, useEffect, useRef, useState } from 'react';
 
-import { bitmapDims, type PageLayout } from '@/features/viewer/geometry';
+import { bitmapDims, INK_MAX_DPR, type PageLayout } from '@/features/viewer/geometry';
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 
 export interface PageViewProps {
@@ -9,6 +9,12 @@ export interface PageViewProps {
     pageIndex: number;
     layout: PageLayout;
     scale: number;
+    /**
+     * Backing pixels per CSS pixel for the PDF raster — the device ratio,
+     * already reduced by the viewport's bitmap budget. Ink canvases use at
+     * most INK_MAX_DPR of it.
+     */
+    pixelRatio: number;
     registry: CanvasRegistry;
 }
 
@@ -19,7 +25,7 @@ export interface PageViewProps {
  * 3. live canvas: the in-flight stroke (local or remote), cleared per frame.
  * Positioned absolutely by the parent in scaled CSS px.
  */
-export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageViewProps) => {
+export const PageView = memo(({ doc, pageIndex, layout, scale, pixelRatio, registry }: PageViewProps) => {
     const pdfCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const committedCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -41,8 +47,7 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageV
                 if (cancelled) {
                     return;
                 }
-                const dpr = Math.min(window.devicePixelRatio || 1, 3);
-                const dims = bitmapDims(layout, scale, dpr);
+                const dims = bitmapDims(layout, scale, pixelRatio);
                 const viewport = page.getViewport({ scale: dims.pxPerBase });
                 canvas.width = Math.floor(viewport.width);
                 canvas.height = Math.floor(viewport.height);
@@ -70,18 +75,18 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageV
             canvas.width = 0;
             canvas.height = 0;
         };
-    }, [doc, pageIndex, layout, scale]);
+    }, [doc, pageIndex, layout, scale, pixelRatio]);
 
-    // Annotation canvases: size to the same bitmap dims, then register — the
-    // ink controller listens on the registry and paints committed strokes.
+    // Annotation canvases: sized like the raster but at ink resolution, then
+    // registered — the ink controller listens on the registry and paints
+    // committed strokes scaled to whatever size the canvas has.
     useEffect(() => {
         const committed = committedCanvasRef.current;
         const live = liveCanvasRef.current;
         if (!committed || !live) {
             return;
         }
-        const dpr = Math.min(window.devicePixelRatio || 1, 3);
-        const dims = bitmapDims(layout, scale, dpr);
+        const dims = bitmapDims(layout, scale, Math.min(pixelRatio, INK_MAX_DPR));
         committed.width = dims.width;
         committed.height = dims.height;
         live.width = dims.width;
@@ -95,7 +100,7 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageV
             live.width = 0;
             live.height = 0;
         };
-    }, [registry, pageIndex, layout, scale]);
+    }, [registry, pageIndex, layout, scale, pixelRatio]);
 
     return (
         <div

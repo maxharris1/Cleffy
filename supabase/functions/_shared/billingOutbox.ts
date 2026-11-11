@@ -1,0 +1,374 @@
+import type * as BillingTerms from './billingTerms.ts';
+import type { LEGAL_VERSIONS } from './legalVersions.ts';
+import type { MailWindow } from './mailBudget.ts';
+import type { CancellationNotice, PurchaseNotice } from './stripeEvents.ts';
+import type { StripeMode } from './stripeMode.ts';
+
+/**
+ * Delivering billing mail from the durable outbox (`billing_mail_outbox`,
+ * migration 20261020160200) -- the half of Codex findings 3 and 4 on #62 that
+ * runs after nobody is waiting on an answer.
+ *
+ * The webhook and /cancel only WRITE mail down; this sends it. Each row is
+ * claimed under an expiring lease, delivered, and settled as one of:
+ *
+ *  * `sent`  -- it went out;
+ *  * `done`  -- handled, nothing to send (a cancel link for an address with no
+ *               subscription, an account deleted since the purchase);
+ *  * `expired` -- a cancel link whose hour ran out before it could go: never
+ *               sent, settled for good (migration 20261020160300);
+ *  * `retry` -- not yet (Resend refused it or is unconfigured, Resend may or
+ *               may not have taken it, the mail budget is spent, a read
+ *               failed), due again after a backoff. Every attempt at a row
+ *               carries the same Resend Idempotency-Key, so a retry of a
+ *               mail Resend did take is not a second email.
+ *
+ * Nothing is dropped quietly. A confirmation is retried until it goes out, and
+ * every retry past ALERT_AFTER_ATTEMPTS logs an ALERT line, which is what the
+ * error log watches for; the only confirmation settled unsent is one whose
+ * account no longer exists, and that is an ALERT too.
+ *
+ * NO runtime imports, for the reason checkoutFlow.ts gives: everything doing I/O
+ * arrives in `deps`, and billingMailWorker.ts is the Deno wiring.
+ */
+
+export type OutboxKind = 'purchase_confirmation' | 'cancellation_confirmation' | 'cancel_link';
+
+export interface OutboxRow {
+    id: string;
+    kind: OutboxKind;
+    mode: StripeMode;
+    payload: Record<string, unknown>;
+    /** Including the claim that handed this row over. */
+    attempts: number;
+    claimToken: string;
+    createdAt: string;
+    /** A cancel link's expiry, fixed when it was asked for (migration 20261020160300); null for the rest. */
+    linkExpiresAt: string | null;
+}
+
+export type Delivery =
+    | { outcome: 'sent' }
+    | { outcome: 'done'; reason: string }
+    /** A cancel link past its expiry: nothing sent, never retried. */
+    | { outcome: 'expired'; reason: string }
+    | {
+          outcome: 'retry';
+          reason: string;
+          afterMs?: number;
+          /** Resend may have sent it (resendDelivery.ts `unknown`); its share of the budget was kept. */
+          uncertain?: true;
+      };
+
+/**
+ * One send's result, as resendDelivery.ts sendViaResend places it: `sent`,
+ * `rejected` (certainly not sent) or `unknown` (may have been). Declared here
+ * rather than imported, for the reason below.
+ */
+export interface SendResult {
+    outcome: 'sent' | 'rejected' | 'unknown';
+    reason: string;
+    /** On a 429: how long Resend asked us to wait. */
+    retryAfterMs?: number;
+}
+
+/**
+ * The outbox name in this outbox's Resend idempotency keys:
+ * `billing-outbox-<row id>`, the same on every retry of a row.
+ */
+export const BILLING_OUTBOX_KEY = 'billing-outbox';
+
+/** How long a worker may hold a row before another may take it (claim_billing_mail). */
+export const OUTBOX_LEASE = '2 minutes';
+/** Rows per claim, and claims per drain: a drain is bounded however much is queued. */
+export const OUTBOX_BATCH = 10;
+export const OUTBOX_MAX_ROUNDS = 5;
+/** Past this many attempts, every further retry of a row is an ALERT. */
+export const ALERT_AFTER_ATTEMPTS = 5;
+
+/** One minute, doubling per attempt, at most six hours: Resend down for a day still gets there. */
+export const retryDelayMs = (attempts: number): number =>
+    Math.min(60_000 * 2 ** Math.max(0, attempts - 1), 6 * 60 * 60_000);
+
+export interface OutboxDeps {
+    claim: (limit: number) => Promise<OutboxRow[]>;
+    /** False when the lease was taken over meanwhile; the row is then the new holder's. */
+    settle: (row: OutboxRow, delivery: Delivery, retryAfterMs: number) => Promise<boolean>;
+    deliver: (row: OutboxRow) => Promise<Delivery>;
+    log: (message: string) => void;
+    logError: (code: string, err: unknown) => void;
+}
+
+export interface DrainSummary {
+    claimed: number;
+    sent: number;
+    done: number;
+    retried: number;
+}
+
+/** Sends what is due. Never throws: a row it could not settle is retaken when its lease runs out. */
+export const drainBillingMail = async (deps: OutboxDeps): Promise<DrainSummary> => {
+    const summary: DrainSummary = { claimed: 0, sent: 0, done: 0, retried: 0 };
+    for (let round = 0; round < OUTBOX_MAX_ROUNDS; round += 1) {
+        let rows: OutboxRow[];
+        try {
+            rows = await deps.claim(OUTBOX_BATCH);
+        } catch (err) {
+            deps.logError('billing_outbox_claim_failed', err);
+            return summary;
+        }
+        summary.claimed += rows.length;
+        for (const row of rows) {
+            let delivery: Delivery;
+            try {
+                delivery = await deps.deliver(row);
+            } catch (err) {
+                delivery = { outcome: 'retry', reason: err instanceof Error ? err.message : String(err) };
+            }
+            const retryAfterMs = delivery.outcome === 'retry' ? (delivery.afterMs ?? retryDelayMs(row.attempts)) : 0;
+            if (delivery.outcome === 'retry') {
+                summary.retried += 1;
+                const line = `billing mail ${row.kind} ${row.id}: attempt ${row.attempts} ${delivery.uncertain ? 'outcome unknown' : 'not sent'} (${delivery.reason})`;
+                // A cancel link waiting for the budget is the system working;
+                // a confirmation that keeps failing is a human's problem.
+                deps.log(row.kind !== 'cancel_link' && row.attempts >= ALERT_AFTER_ATTEMPTS ? `ALERT ${line}` : line);
+            } else if (delivery.outcome === 'sent') {
+                summary.sent += 1;
+            } else if (delivery.outcome === 'expired') {
+                summary.done += 1;
+                deps.log(`billing mail ${row.kind} ${row.id}: attempt ${row.attempts} not sent (${delivery.reason})`);
+            } else {
+                summary.done += 1;
+            }
+            try {
+                if (!(await deps.settle(row, delivery, retryAfterMs))) {
+                    deps.log(`billing mail ${row.kind} ${row.id}: lease taken over before it was settled`);
+                }
+            } catch (err) {
+                deps.logError('billing_outbox_settle_failed', err);
+            }
+        }
+        if (rows.length < OUTBOX_BATCH) {
+            break;
+        }
+    }
+    return summary;
+};
+
+/** What the webhook writes down for a purchase: the notice and the versions the buyer consented under. */
+export interface PurchaseMail extends PurchaseNotice {
+    /** From the consent record; null falls back to the versions this deployment publishes. */
+    termsVersion: string | null;
+    refundsVersion: string | null;
+    /** The consent's amount_minor: the regular price each renewal charges. */
+    recurringAmountMinor: number | null;
+}
+
+export type CancellationMail = CancellationNotice;
+
+/** What sending inside a share of the mail budget needs (sendWithinBudget). */
+export interface BudgetedSendDeps {
+    checkRateLimit: (
+        key: string,
+        limit: number,
+        windowMs: number,
+    ) => Promise<{ ok: true } | { ok: false; retryAfterSec: number }>;
+    refundRateLimit: (key: string) => Promise<void>;
+    /** mailLimit('billingConfirmation', …) from mailBudget.ts. */
+    mailBudget: { hour: MailWindow; day: MailWindow };
+    /** billingMail.ts sendBillingEmail: Resend, with the Idempotency-Key it is given. */
+    sendEmail: (to: string, message: BillingTerms.BillingEmail, options: BillingSendOptions) => Promise<SendResult>;
+    /** resendDelivery.ts resendIdempotencyKey, handed in so this module has no runtime imports. */
+    idempotencyKey: (outbox: string, rowId: string) => string;
+}
+
+export interface BillingSendOptions {
+    replyTo?: string;
+    tag: string;
+    /** The same on every attempt at this one mail, so Resend sends it at most once. */
+    idempotencyKey: string;
+}
+
+export interface ConfirmationDeps extends BudgetedSendDeps {
+    emailOfUser: (userId: string) => Promise<string | null>;
+    slotForPrice: (priceId: string) => BillingTerms.PlanSlot | null;
+    storefrontOrigin: (mode: StripeMode) => string;
+    terms: Pick<
+        typeof BillingTerms,
+        | 'purchaseConfirmationEmail'
+        | 'cancellationConfirmationEmail'
+        | 'PLAN_NAMES'
+        | 'PLAN_INTERVALS'
+        | 'CURRENCIES'
+        | 'PLAN_PRICES'
+    >;
+    /** _shared/legalVersions.ts: what an email names when no consent recorded the versions. */
+    legalVersions: Pick<typeof LEGAL_VERSIONS, 'terms' | 'refunds'>;
+    log: (message: string) => void;
+}
+
+/** The limiter keys the confirmations' share of the mail budget is counted under. */
+export const CONFIRMATION_BUDGET_KEYS = {
+    hour: 'billing-confirmation:global',
+    day: 'billing-confirmation:global-day',
+} as const;
+
+/**
+ * Sends billing mail inside the confirmations' share of the mail budget
+ * (`billingConfirmation` in mailBudget.ts), so no billing mail goes out past
+ * the project's 60/hour and 300/day (Codex round 2, cross-PR finding 1): the
+ * purchase and cancellation confirmations here, and billing-cancel's refund
+ * request to support. A spent window sends nothing and answers `retry` with
+ * when it reopens -- an outbox row waits for it rather than being dropped.
+ *
+ * What was counted is handed back ONLY when Resend certainly sent nothing
+ * (`rejected`). When it may have (`unknown`: the connection dropped after
+ * Resend had the request, a timeout, a 5xx), the reservation is kept and the
+ * row retried with the same Idempotency-Key, which Resend answers without
+ * sending again (Codex round 3, new major on #62): refunding it let an
+ * accepted email go uncounted and its retry mail the customer twice.
+ *
+ * Every attempt reserves its own place, a retry after an `unknown` included.
+ * That can count one email twice, but never counts a real send zero times: a
+ * retry whose first attempt never reached Resend sends now, in this window,
+ * and only a reservation made now keeps this window under its ceiling.
+ */
+export const sendWithinBudget = async (
+    deps: BudgetedSendDeps,
+    to: string,
+    message: BillingTerms.BillingEmail,
+    options: BillingSendOptions,
+): Promise<Delivery> => {
+    const counted: string[] = [];
+    const handBack = async () => {
+        await Promise.all(counted.map((key) => deps.refundRateLimit(key).catch(() => undefined)));
+    };
+    for (const window of ['hour', 'day'] as const) {
+        const key = CONFIRMATION_BUDGET_KEYS[window];
+        const gate = await deps.checkRateLimit(key, deps.mailBudget[window].limit, deps.mailBudget[window].windowMs);
+        if (!gate.ok) {
+            await handBack();
+            return {
+                outcome: 'retry',
+                reason: 'mail budget spent',
+                afterMs: Math.max(60, gate.retryAfterSec) * 1000,
+            };
+        }
+        counted.push(key);
+    }
+    const sent = await deps.sendEmail(to, message, options);
+    if (sent.outcome === 'sent') {
+        return { outcome: 'sent' };
+    }
+    if (sent.outcome === 'rejected') {
+        await handBack();
+        return {
+            outcome: 'retry',
+            reason: `resend rejected: ${sent.reason}`,
+            ...(sent.retryAfterMs !== undefined ? { afterMs: Math.max(60_000, sent.retryAfterMs) } : {}),
+        };
+    }
+    // `unknown`, or anything else: it may be out. Keep what was counted.
+    return { outcome: 'retry', reason: `resend unknown: ${sent.reason}`, uncertain: true };
+};
+
+/**
+ * sendWithinBudget for mail sent from a request rather than the outbox
+ * (billing-cancel's refund request to support), answered as a SendResult: a
+ * spent budget is `rejected` (nothing went), a send Resend may have taken is
+ * `unknown` and keeps its reservation.
+ */
+export const sendRequestMailWithinBudget = async (
+    deps: BudgetedSendDeps,
+    to: string,
+    message: BillingTerms.BillingEmail,
+    options: BillingSendOptions,
+): Promise<SendResult> => {
+    const delivery = await sendWithinBudget(deps, to, message, options);
+    if (delivery.outcome === 'sent') {
+        return { outcome: 'sent', reason: 'sent' };
+    }
+    const reason = delivery.reason;
+    return { outcome: delivery.outcome === 'retry' && delivery.uncertain ? 'unknown' : 'rejected', reason };
+};
+
+/**
+ * The address, or the answer for a confirmation that has nobody to go to. Read
+ * at send time so a changed address gets the mail; a read that FAILS throws,
+ * which the drain turns into a retry.
+ */
+const recipient = async (deps: ConfirmationDeps, row: OutboxRow, userId: string): Promise<string | Delivery> => {
+    const email = await deps.emailOfUser(userId);
+    if (email) {
+        return email;
+    }
+    deps.log(`ALERT billing mail ${row.kind} ${row.id}: account ${userId} has no address; not sent`);
+    return { outcome: 'done', reason: 'no_address' };
+};
+
+export const deliverPurchaseConfirmation = async (deps: ConfirmationDeps, row: OutboxRow): Promise<Delivery> => {
+    const mail = row.payload as unknown as PurchaseMail;
+    const to = await recipient(deps, row, mail.userId);
+    if (typeof to !== 'string') {
+        return to;
+    }
+    const slot = mail.priceId ? deps.slotForPrice(mail.priceId) : null;
+    const currency = (deps.terms.CURRENCIES as readonly string[]).includes(mail.currency ?? '')
+        ? (mail.currency as BillingTerms.Currency)
+        : null;
+    if (!slot || !currency || mail.amountTotalMinor === null) {
+        // A price or currency this deployment does not know is configuration a
+        // human can fix, so the mail waits for it rather than going unsent.
+        return {
+            outcome: 'retry',
+            reason: `lacks ${[!slot && 'a known price', !currency && 'a known currency', mail.amountTotalMinor === null && 'an amount'].filter(Boolean).join(', ')}`,
+        };
+    }
+    const message = deps.terms.purchaseConfirmationEmail({
+        planName: deps.terms.PLAN_NAMES[slot],
+        interval: deps.terms.PLAN_INTERVALS[slot],
+        currency,
+        amountTotalMinor: mail.amountTotalMinor,
+        amountTaxMinor: mail.amountTaxMinor,
+        // What the buyer consented to renew at, else this deployment's price
+        // for the plan; distinct from today's charge, which a promotion code
+        // may have discounted.
+        recurringAmountMinor: mail.recurringAmountMinor ?? deps.terms.PLAN_PRICES[slot][currency],
+        amountDiscountMinor: mail.amountDiscountMinor ?? null,
+        renewsAtMs: mail.renewsAt ? Date.parse(mail.renewsAt) : null,
+        purchasedAtMs: Date.parse(mail.purchasedAt),
+        origin: deps.storefrontOrigin(row.mode),
+        // What the buyer agreed to, not what this deployment publishes now
+        // (Codex minor 2 on #62): a policy updated between Checkout and
+        // completion must not rewrite the version their email names.
+        termsVersion: mail.termsVersion ?? deps.legalVersions.terms,
+        refundsVersion: mail.refundsVersion ?? deps.legalVersions.refunds,
+    });
+    return sendWithinBudget(deps, to, message, {
+        tag: 'purchase_confirmation',
+        idempotencyKey: deps.idempotencyKey(BILLING_OUTBOX_KEY, row.id),
+    });
+};
+
+export const deliverCancellationConfirmation = async (deps: ConfirmationDeps, row: OutboxRow): Promise<Delivery> => {
+    const mail = row.payload as unknown as CancellationMail;
+    const to = await recipient(deps, row, mail.userId);
+    if (typeof to !== 'string') {
+        return to;
+    }
+    const slot = mail.priceId ? deps.slotForPrice(mail.priceId) : null;
+    const message = deps.terms.cancellationConfirmationEmail({
+        planName: slot ? deps.terms.PLAN_NAMES[slot] : null,
+        cancelledAtMs: Date.parse(mail.cancelledAt),
+        endsAtMs: mail.endsAt ? Date.parse(mail.endsAt) : null,
+        origin: deps.storefrontOrigin(row.mode),
+    });
+    return sendWithinBudget(deps, to, message, {
+        tag: 'cancellation_confirmation',
+        idempotencyKey: deps.idempotencyKey(BILLING_OUTBOX_KEY, row.id),
+    });
+};
+
+/** The outbox key for a cancellation: one confirmation per subscription per end date. */
+export const cancellationMailKey = (notice: CancellationNotice): string =>
+    `${notice.subscriptionId}:${notice.endsAt ?? 'open'}`;

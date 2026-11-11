@@ -305,7 +305,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                         </div>
                                                     </>
                                                 ) : (
-                                                    <p className="whitespace-pre-wrap text-sm leading-relaxed text-stone-800">
+                                                    <p className="whitespace-pre-wrap text-sm leading-relaxed text-stone-800 [overflow-wrap:anywhere]">
                                                         {note.body}
                                                     </p>
                                                 )}
@@ -313,7 +313,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                     <div className="mt-1.5 flex items-center gap-1.5">
                                                         <Badge tone="accent">Shared</Badge>
                                                         {recipientLabel(note.student_user_id) ? (
-                                                            <span className="text-xs text-stone-500">
+                                                            <span className="min-w-0 text-xs text-stone-500 [overflow-wrap:anywhere]">
                                                                 {recipientLabel(note.student_user_id)}
                                                             </span>
                                                         ) : null}
@@ -328,7 +328,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                     onClick={() =>
                                                         setMenuFor((current) => (current === note.id ? null : note.id))
                                                     }
-                                                    className="rounded-lg p-1.5 text-stone-500 transition hover:bg-ink/5"
+                                                    className="rounded-lg p-1.5 text-stone-500 transition-colors hover:bg-ink/5 pointer-coarse:-m-2 pointer-coarse:p-3.5"
                                                 >
                                                     <MoreVerticalIcon size={16} />
                                                 </button>

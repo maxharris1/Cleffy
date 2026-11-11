@@ -29,7 +29,7 @@
 set -euo pipefail
 
 OWNER="${OWNER:-maxharris1}"
-REPO="${REPO:-sheet_music_scribbler}"
+REPO="${REPO:-Cleffy}"
 BRANCH="${BRANCH:-main}"
 RULESET_NAME="protect-${BRANCH}"
 

@@ -1,5 +1,5 @@
 import { getDb } from '@/sync/db';
-import { cachedPdfSize } from '@/sync/pdfCache';
+import { cancelBackgroundPdfCache, readCachedPdfMeta } from '@/sync/pdfCache';
 
 export interface OfflineStorageUsage {
     /** Scores whose PDF bytes are held on this device. */
@@ -11,23 +11,22 @@ export interface OfflineStorageUsage {
 /**
  * How much of this device the offline cache is using.
  *
- * Read with Dexie's cursor walk rather than `toArray()`: a teacher with fifty
- * cached scores would otherwise hold every PDF in memory at once just to add up
- * their sizes. `each` hands back one row at a time and lets the previous one go,
- * so peak memory is one score rather than the whole library.
+ * Sizes come from each copy's metadata (pdfMeta): the keys are listed without
+ * reading a single file, where walking pdfCache read every cached PDF in full
+ * just to add up their lengths. A copy cached before pdfMeta existed is read
+ * once, here, and its metadata kept.
  */
 export const readOfflineStorage = async (): Promise<OfflineStorageUsage> => {
     const db = getDb();
-    let scoreCount = 0;
+    const docIds = await db.pdfCache.toCollection().primaryKeys();
     let bytes = 0;
-    await db.pdfCache.each((row) => {
-        scoreCount += 1;
-        bytes += cachedPdfSize(row.bytes);
-    });
+    for (const docId of docIds) {
+        bytes += (await readCachedPdfMeta(db, docId))?.size ?? 0;
+    }
     await db.thumbnails.each((row) => {
         bytes += row.blob?.size ?? 0;
     });
-    return { scoreCount, bytes };
+    return { scoreCount: docIds.length, bytes };
 };
 
 /**
@@ -40,8 +39,11 @@ export const readOfflineStorage = async (): Promise<OfflineStorageUsage> => {
  * download and nothing more.
  */
 export const clearOfflineStorage = async (): Promise<void> => {
+    // Nor may a download still finishing in the background put one back.
+    cancelBackgroundPdfCache();
     const db = getDb();
     await db.pdfCache.clear();
+    await db.pdfMeta.clear();
     await db.thumbnails.clear();
 };
 

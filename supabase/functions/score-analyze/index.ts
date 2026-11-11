@@ -1,8 +1,15 @@
-import { createClient } from 'npm:@supabase/supabase-js@2';
+import { isSharedImslpPath } from '../_shared/imslpPdfCache.ts';
+import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import {
+    ACCOUNT_DELETION_PENDING,
+    accountDeletionPending,
+    DELETION_CHECK_UNAVAILABLE,
+} from '../_shared/deletionPending.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
 import { enforce, refund } from '../_shared/quota.ts';
+import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
 
 /**
  * Kick off play-along analysis.
@@ -37,12 +44,16 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    let body: { documentId?: string };
-    try {
-        body = await req.json();
-    } catch {
+    const read = await readCappedJson(req, CONTROL_BODY_MAX_BYTES);
+    if (!read.ok) {
+        return read.status === 413
+            ? jsonResponse(PAYLOAD_TOO_LARGE, 413)
+            : jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+    if (!isJsonObject(read.value)) {
         return jsonResponse({ error: 'Invalid JSON body' }, 400);
     }
+    const body = read.value as { documentId?: string };
     const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
     if (!documentId || !uuidRe.test(documentId)) {
         return jsonResponse({ error: 'documentId must be a UUID' }, 400);
@@ -85,7 +96,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Document not found or not accessible' }, 403);
     }
 
-    if (doc.storage_path !== `${documentId}/original.pdf`) {
+    if (doc.storage_path !== `${documentId}/original.pdf` && !isSharedImslpPath(doc.storage_path)) {
         return jsonResponse({ error: 'Document storage path is invalid' }, 400);
     }
 
@@ -97,6 +108,18 @@ Deno.serve(async (req) => {
     const admin = serviceClient();
     if (!admin) {
         return jsonResponse({ ok: false, code: 'service_unreachable' }, 502);
+    }
+
+    // The job is the owner's (it is metered and stored against them), so no
+    // run starts for a score whose owner's account is being deleted
+    // (../_shared/deletionPending.ts).
+    const pending = await accountDeletionPending(admin, doc.owner_id as string);
+    if (!pending.ok) {
+        console.error(`could not check whether ${doc.owner_id} is being deleted: ${pending.message}`);
+        return jsonResponse({ ok: false, ...DELETION_CHECK_UNAVAILABLE }, 503);
+    }
+    if (pending.pending) {
+        return jsonResponse({ ok: false, ...ACCOUNT_DELETION_PENDING }, 409);
     }
 
     // Gate BEFORE dispatch, against the OWNER. A refused run costs nothing and
@@ -128,7 +151,9 @@ Deno.serve(async (req) => {
     return response;
 });
 
-type UserClient = ReturnType<typeof createClient>;
+// SupabaseClient, not ReturnType<typeof createClient>: under deno check the
+// latter's schema generics resolve to `never`, and every query on it fails to type.
+type UserClient = SupabaseClient;
 
 const rejectBadPageCount = async (
     userClient: UserClient,

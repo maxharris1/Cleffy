@@ -154,6 +154,109 @@ describe('ImportReviewPanel', () => {
         expect(store.isHistoryMode).toBe(false);
     });
 
+    it('offers recognition again when the AI was only unavailable', async () => {
+        vi.mocked(scanDocument).mockResolvedValue({ ...proposalOf([makeItem('c1', 'ink mark')]), aiDegraded: true });
+        renderPanel();
+        await screen.findByText(/Text recognition is unavailable right now/);
+        expect(screen.getByRole('button', { name: 'Try recognition again' })).toBeInTheDocument();
+    });
+
+    it('says the AI page reads are spent instead of inviting a retry that would be refused', async () => {
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        vi.mocked(scanDocument).mockResolvedValue({
+            ...proposalOf([makeItem('c1', 'ink mark')]),
+            aiDegraded: true,
+            aiLimit: new LimitReachedError({ code: 'limit_reached', metric: 'vision_reads', limit: 5, tier: 'free' }),
+        });
+        renderPanel();
+
+        expect(await screen.findByText('You have used your 5 free AI page reads this month')).toBeInTheDocument();
+        expect(screen.getByText(/import as ink you can erase/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Try recognition again' })).not.toBeInTheDocument();
+        expect(screen.queryByText(/unavailable right now/)).not.toBeInTheDocument();
+        // The marks can still be imported, as ink.
+        expect(screen.getByRole('button', { name: /Import 1 mark/ })).toBeInTheDocument();
+    });
+
+    describe('running Import marks again', () => {
+        /** As buildProposals makes them: a fresh id every scan, flagged src, placed by where the ink is. */
+        const importedItem = (id: string, x: number): ProposedItem => {
+            const item = makeItem(id, `“${x}”`);
+            return {
+                ...item,
+                annotations: item.annotations.map((a) => ({
+                    ...a,
+                    id: `${id}-${crypto.randomUUID()}`,
+                    payload: { x, y: 0.2, text: '3', size: 0.018, src: 1 },
+                })),
+            };
+        };
+
+        const importOnce = async (items: ProposedItem[]) => {
+            vi.mocked(scanDocument).mockResolvedValue(proposalOf(items));
+            renderPanel();
+            await userEvent.click(await screen.findByRole('button', { name: `Import ${items.length} marks` }));
+            await screen.findByText(new RegExp(`Imported ${items.length} marks`));
+            cleanup();
+        };
+
+        it('does not import the same marks twice', async () => {
+            await importOnce([importedItem('first-a', 0.1), importedItem('first-b', 0.4)]);
+            expect(store.liveAnnotations()).toHaveLength(2);
+
+            // Same ink, scanned again: new proposal ids, same places.
+            vi.mocked(scanDocument).mockResolvedValue(
+                proposalOf([importedItem('second-a', 0.1), importedItem('second-b', 0.4)]),
+            );
+            renderPanel();
+
+            expect(await screen.findByText(/All 2 marks found on this score were imported before/)).toBeInTheDocument();
+            expect(screen.queryByRole('button', { name: /Import \d+ marks/ })).not.toBeInTheDocument();
+            expect(store.liveAnnotations()).toHaveLength(2);
+            // Nothing to review, so nothing holds the score read-only.
+            expect(store.isHistoryMode).toBe(false);
+        });
+
+        it('offers only the new marks, and says how many were left out', async () => {
+            await importOnce([importedItem('first-a', 0.1)]);
+
+            vi.mocked(scanDocument).mockResolvedValue(
+                proposalOf([importedItem('second-a', 0.1), importedItem('second-new', 0.7)]),
+            );
+            renderPanel();
+
+            expect(await screen.findByText(/1 mark was imported before and is left out/)).toBeInTheDocument();
+            await userEvent.click(screen.getByRole('button', { name: 'Import 1 marks' }));
+            await screen.findByText(/Imported 1 marks/);
+            expect(store.liveAnnotations()).toHaveLength(2);
+        });
+
+        it('can still lift the ink under marks imported without lifting it', async () => {
+            await importOnce([importedItem('first-a', 0.1)]);
+
+            const rescan = proposalOf([importedItem('second-a', 0.1)]);
+            vi.mocked(scanDocument).mockResolvedValue(rescan);
+            const clean = vi.fn(async () => undefined);
+            render(
+                <ImportReviewPanel
+                    store={store}
+                    docId={DOC}
+                    bytes={new ArrayBuffer(8)}
+                    classify={null}
+                    includeBornDigital={false}
+                    clean={clean}
+                    onClose={() => undefined}
+                />,
+            );
+
+            await userEvent.click(await screen.findByRole('button', { name: 'Lift the original ink' }));
+            await screen.findByText(/The original ink was lifted off the page/);
+            // The whole scan (its masks) and the skipped item, so its ink is lifted.
+            expect(clean).toHaveBeenCalledWith(rescan, rescan.pages[0]?.items, expect.any(Function));
+            expect(store.liveAnnotations()).toHaveLength(1);
+        });
+    });
+
     it('surfaces scan failures with a retry', async () => {
         vi.mocked(scanDocument).mockRejectedValue(new Error('render exploded'));
         renderPanel();

@@ -68,8 +68,9 @@ describe('makeCloudClassifyFn', () => {
 
         const result = await makeCloudClassifyFn(DOC)(seg, raster);
         expect(result).not.toBeNull();
-        expect(result?.clusters).toHaveLength(3);
-        expect(result?.clusters[0]?.kind).toBe('digit');
+        const labels = result && 'clusters' in result ? result : null;
+        expect(labels?.clusters).toHaveLength(3);
+        expect(labels?.clusters[0]?.kind).toBe('digit');
 
         const [url, init] = fetchMock.mock.calls[0] ?? [];
         expect(String(url)).toContain('/functions/v1/analyze-annotations');
@@ -91,6 +92,22 @@ describe('makeCloudClassifyFn', () => {
             new Response(JSON.stringify({ error: 'down', code: 'ai_unavailable' }), { status: 502 }),
         );
         expect(await makeCloudClassifyFn(DOC)(seg, raster)).toBeNull();
+    });
+
+    it('says when the plan’s AI page reads are spent, instead of degrading as if the AI were down', async () => {
+        // A 402 is a refusal a retry gets again; the review must not offer one.
+        const { seg, raster } = makeSeg();
+        fetchMock.mockResolvedValue(
+            new Response(JSON.stringify({ code: 'limit_reached', metric: 'vision_reads', limit: 5, tier: 'free' }), {
+                status: 402,
+            }),
+        );
+        const result = await makeCloudClassifyFn(DOC)(seg, raster);
+        expect(result && 'refused' in result ? result.refused : null).toMatchObject({
+            metric: 'vision_reads',
+            limit: 5,
+            tier: 'free',
+        });
     });
 
     it('degrades to null on malformed response bodies', async () => {

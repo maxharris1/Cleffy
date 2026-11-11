@@ -1,18 +1,35 @@
+import { takeRetryAfterHint } from '@/lib/retryAfter';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import type { AnnotationStore } from '@/sync/annotationStore';
-import type { PendingOp, ScribblerDb } from '@/sync/db';
+import type { PendingOp, PendingOpType, ScribblerDb } from '@/sync/db';
+import { opOwnerFor, type LegacyOwnerCache, type OpOwner } from '@/sync/opOwnership';
 import type { AnnotationInsert, AnnotationRow, AnnotationUpdate } from '@/types/database';
 import type { Annotation } from '@/types/models';
 
-export type SyncStatus = 'synced' | 'syncing' | 'offline' | 'error';
+/**
+ * - retrying: a transient failure (throttling, a server fault, a dropped
+ *   request); the outbox is kept and retried with backoff. Nothing is wrong
+ *   that waiting will not fix, so the viewer shows it calmly.
+ * - error: the server refused for good (a pull it will never answer, an
+ *   archived score holding the outbox), or retries have been failing for
+ *   PERSISTENT_FAILURE_MS — long enough that the user should know.
+ */
+export type SyncStatus = 'synced' | 'syncing' | 'offline' | 'retrying' | 'error';
 
 /** Pull overlap window: covers the commit-visibility race where seq N commits
  * after N+1 was pulled while broadcast was down (plan §sync). */
 const PULL_OVERLAP = 50;
 const PULL_PAGE_SIZE = 500;
+const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
 /** Outbox ops drained per round-trip (creates / patches). */
 const FLUSH_BATCH_SIZE = 40;
+/** Marks checked against the server per reconcile round-trip (see reconcile). */
+const RECONCILE_BATCH_SIZE = 100;
+/** Retryable failures this long in a row stop being "retrying" and become an error. */
+export const PERSISTENT_FAILURE_MS = 3 * 60_000;
+
+export type AnnotationPatchRow = { id: string; document_id: string } & AnnotationUpdate;
 
 /**
  * The slice of the Supabase client the engine needs — injected so tests can
@@ -22,24 +39,137 @@ export interface AnnotationsApi {
     insertIgnoreDuplicates(row: AnnotationInsert): Promise<{ error: ApiError | null }>;
     /** Multi-row create; same semantics as insertIgnoreDuplicates per row. */
     insertMany(rows: AnnotationInsert[]): Promise<{ error: ApiError | null }>;
-    update(id: string, docId: string, patch: AnnotationUpdate): Promise<{ error: ApiError | null }>;
+    update(id: string, docId: string, patch: AnnotationUpdate): Promise<PatchResult>;
     /** Multi-row patch; each entry is { id, document_id, ...AnnotationUpdate }. */
-    updateMany(
-        patches: Array<{ id: string; document_id: string } & AnnotationUpdate>,
-    ): Promise<{ error: ApiError | null }>;
+    updateMany(patches: AnnotationPatchRow[]): Promise<PatchResult>;
     fetchOne(id: string): Promise<{ data: AnnotationRow | null; error: ApiError | null }>;
+    /** Current server rows for these ids in one document (missing = not visible / gone). */
+    fetchMany(docId: string, ids: string[]): Promise<{ data: AnnotationRow[] | null; error: ApiError | null }>;
+    /**
+     * Whether the document is archived (read-only past the plan's score cap).
+     * False when it is not, or when this account can no longer see it at all.
+     */
+    fetchDocumentArchived(docId: string): Promise<{ archived: boolean; error: ApiError | null }>;
+    /**
+     * Whether the server has ended this sign-in under a token that is still
+     * valid: a roster student whose teacher archived them or reset their
+     * access (student_access_revoked). Every request is then refused, which
+     * says nothing about the changes themselves. Absent, or false, for anyone
+     * whose sign-in cannot be ended that way.
+     */
+    fetchSignInEnded?(): Promise<{ ended: boolean; error: ApiError | null }>;
+    /**
+     * Whether this account is on a read-only Academy seat right now (a seat
+     * past its academy's limit: caller_seat_read_only). RLS then refuses its
+     * every write, on any score, until the seat is active again. Absent, or
+     * false, for anyone who is not.
+     */
+    fetchSeatReadOnly?(): Promise<{ readOnly: boolean; error: ApiError | null }>;
     fetchSince(
         docId: string,
         afterSeq: number,
         limit: number,
     ): Promise<{ data: AnnotationRow[] | null; error: ApiError | null }>;
+    /**
+     * The highest seq tombstone compaction has removed on this score
+     * (annotation_resync_floor, 20261021120600): 0 when nothing there was
+     * compacted, null when the score cannot be read. A watermark below it may
+     * have missed a deletion whose tombstone is gone, so the device resyncs in
+     * full (see pullOnce). Absent in fakes that never compact.
+     */
+    fetchResyncFloor?(docId: string): Promise<{ floor: number | null; error: ApiError | null }>;
+    /**
+     * Get a fresh access token after a 401. True when one is now in place.
+     * A tab that slept past its JWT's expiry wakes before the auth client's
+     * refresh timer does, and its first flush would otherwise be refused.
+     */
+    refreshAuth?(): Promise<boolean>;
 }
+
+export interface PatchResult {
+    error: ApiError | null;
+    /**
+     * Ids of the rows the server actually updated. A patch RLS filtered out
+     * (or whose row does not exist) succeeds with zero rows and no error, so
+     * an id missing here is a refusal, not a success. Null/undefined means the
+     * server could not say (the pre-20261007120200 void RPC) — treated as
+     * applied, the old behaviour.
+     */
+    updatedIds?: string[] | null;
+}
+
+/**
+ * - retry: connectivity, timeouts, throttling, server faults — keep the op and back off.
+ * - auth: the access token was refused (401) — refresh it, then retry; never drop.
+ * - reject: the server refused this op for good (RLS 403, check/invalid-input 400,
+ *   conflict 409) — drop it, adopt server truth, tell the user.
+ */
+export type ApiErrorKind = 'retry' | 'auth' | 'reject';
 
 export interface ApiError {
     message: string;
-    /** True for connectivity failures (retry); false for rejections (drop+repair). */
-    transient: boolean;
+    kind: ApiErrorKind;
+    /** Server-requested wait before retrying (Retry-After), when it sent one. */
+    retryAfterMs?: number;
 }
+
+/** A local change the server permanently refused; local state has been repaired. */
+export interface SyncRejection {
+    annotationId: string;
+    opType: PendingOpType;
+    reason: string;
+}
+
+/**
+ * The outbox is refused, and is being kept rather than dropped:
+ * - 'archived': the score is archived (a lapsed plan). An archive is undone by
+ *   resubscribing, and the marks then upload as if nothing happened.
+ * - 'signed-out': the server ended this sign-in (a roster student's teacher
+ *   archived them or reset their access) while the device still holds its
+ *   token. The changes are this account's (stamped with it) and upload when
+ *   it signs in again; no other account sends or draws them meanwhile.
+ * - 'seat-read-only': this account's Academy seat is read-only (its academy
+ *   is over its seat limit), so no score takes its changes. Nothing is lost:
+ *   they upload once the owner makes the seat active again or the academy
+ *   pays.
+ */
+export interface SyncHold {
+    reason: 'archived' | 'signed-out' | 'seat-read-only';
+    /** Distinct marks with changes waiting on this document. */
+    pendingMarks: number;
+}
+
+/** A refused op left in the outbox (see the engine's onRefusalHeld). */
+export interface HeldRefusal {
+    opId: number;
+    annotationId: string;
+    reason: string;
+}
+
+/**
+ * Classify a failed PostgREST/RPC response by HTTP status.
+ *
+ * Only statuses that cannot change on retry may lose a user's edit, so the
+ * default for anything ambiguous is to keep the op. 404 is retried too: from
+ * PostgREST it means a missing table or function — a deploy in progress, not
+ * a verdict on this row.
+ */
+export const classifyFailure = (message: string, status?: number): ApiError => {
+    if (status === undefined || status === 0) {
+        return { message, kind: 'retry' };
+    }
+    if (status === 401) {
+        return { message, kind: 'auth' };
+    }
+    if (status === 429 || status === 503) {
+        const retryAfterMs = takeRetryAfterHint();
+        return retryAfterMs === undefined ? { message, kind: 'retry' } : { message, kind: 'retry', retryAfterMs };
+    }
+    if (status === 404 || status === 408 || status === 425 || status >= 500) {
+        return { message, kind: 'retry' };
+    }
+    return { message, kind: 'reject' };
+};
 
 export const fromServerRow = (row: AnnotationRow): Annotation => ({
     id: row.id,
@@ -55,21 +185,419 @@ export const fromServerRow = (row: AnnotationRow): Annotation => ({
     seq: row.seq,
 });
 
+interface PushResult {
+    error: ApiError | null;
+    /** Set when the server reported which rows a patch batch touched. */
+    updatedIds: ReadonlySet<string> | null;
+}
+
+/** Engines currently running, by document — sign-out drains through these. */
+const activeEngines = new Map<string, SyncEngine>();
+
+export const activeEngineFor = (docId: string): SyncEngine | undefined => activeEngines.get(docId);
+
+type RejectionObserver = (rejection: SyncRejection & { docId: string }) => void;
+const rejectionObservers = new Set<RejectionObserver>();
+
+/**
+ * Hear about every refusal from every engine (the open viewer's and headless
+ * ones alike) until the returned function is called. Sign-out uses this so a
+ * change refused while it drains is reported, not just logged.
+ */
+export const observeRejections = (observer: RejectionObserver): (() => void) => {
+    rejectionObservers.add(observer);
+    return () => {
+        rejectionObservers.delete(observer);
+    };
+};
+
+/**
+ * What one engine tells the others on its document, in this tab and (over a
+ * BroadcastChannel) in the browser's other tabs. Every engine renders through
+ * its own AnnotationStore over the one Dexie mirror, so without these an open
+ * viewer keeps drawing the copy it loaded and calls it synced:
+ *
+ * - repair: rows rewritten in the mirror from server truth — reconcile
+ *   adopted the server's row, or a refusal rolled a change back — in another
+ *   tab, or in this one when the background drain reached the score first.
+ * - written: local edits, already in the mirror and queued. Another tab of the
+ *   same account on the score would otherwise not see them until they
+ *   uploaded, and often not even then: its pulls and broadcasts skip a row
+ *   while it has ops queued, and the outbox is shared.
+ * - settled: queued changes were accepted by the server, so the rows the other
+ *   engines held back meanwhile can be applied (see SyncEngine.deferred).
+ *
+ * A message without `kind` is a repair: that is what builds before it sent.
+ * Those builds read written and settled as repairs, which re-read rows that
+ * have nothing queued — harmless.
+ */
+interface SyncMessage {
+    kind?: 'repair' | 'written' | 'settled';
+    /** The Dexie database the rows live in; another one is not this device's mirror. */
+    db: string;
+    docId: string;
+    annotationIds: string[];
+    /** Set when the repair rolled back a refused change, so the viewer can say so. */
+    rejection?: SyncRejection;
+    /** The engine that sent it, which has already applied it. */
+    origin: string;
+}
+
+const SYNC_CHANNEL_NAME = 'cleffy-sync';
+const repairListeners = new Set<(message: SyncMessage) => void>();
+let syncChannel: BroadcastChannel | null | undefined;
+
+const deliverRepair = (message: SyncMessage): void => {
+    for (const listener of [...repairListeners]) {
+        listener(message);
+    }
+};
+
+/** This tab's end of the cross-tab channel, opened on first use (null where unsupported). */
+const getSyncChannel = (): BroadcastChannel | null => {
+    if (syncChannel !== undefined) {
+        return syncChannel;
+    }
+    syncChannel = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+        try {
+            const channel = new BroadcastChannel(SYNC_CHANNEL_NAME);
+            channel.onmessage = (event: MessageEvent<SyncMessage>) => deliverRepair(event.data);
+            // Node (tests) would otherwise keep the process alive for it.
+            (channel as { unref?: () => void }).unref?.();
+            syncChannel = channel;
+        } catch {
+            // No cross-tab delivery; this tab's engines still hear each other.
+        }
+    }
+    return syncChannel;
+};
+
+/** Tell every other engine on the document — this tab's and other tabs'. */
+const announceRepair = (message: SyncMessage): void => {
+    deliverRepair(message);
+    try {
+        getSyncChannel()?.postMessage(message);
+    } catch {
+        // Best effort: the next pull covers another tab that missed it.
+    }
+};
+
+const VIEWER_LOCK_PREFIX = 'cleffy-viewer:';
+
+/**
+ * Scores open in a viewer in any tab of this browser. Each started engine
+ * holds a shared Web Lock for its document while it runs, so the background
+ * drain can leave those to their viewers. Empty where Web Locks are missing.
+ */
+export const docsOpenInViewers = async (): Promise<Set<string>> => {
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    if (!locks || typeof locks.query !== 'function') {
+        return new Set();
+    }
+    try {
+        const { held = [] } = await locks.query();
+        return new Set(
+            held
+                .map((lock) => lock.name ?? '')
+                .filter((name) => name.startsWith(VIEWER_LOCK_PREFIX))
+                .map((name) => name.slice(VIEWER_LOCK_PREFIX.length)),
+        );
+    } catch {
+        return new Set();
+    }
+};
+
+/** In-tab fallback for withOutboxLock where the Web Locks API is missing. */
+const outboxLockTails = new Map<string, Promise<unknown>>();
+
+/**
+ * Run `fn` while holding the document's outbox. One document's outbox can be
+ * drained by more than one engine — the open viewer's, the background drain's,
+ * sign-out's, another tab's — and reconcile rewrites queued ops, which is only
+ * safe while nothing else is pushing them. Web Locks serialize across tabs;
+ * without them (older browsers, tests) a promise chain serializes this tab.
+ * The lock is held for one drain pass only, never across a backoff wait.
+ */
+const withOutboxLock = async <T>(docId: string, fn: () => Promise<T>): Promise<T> => {
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    if (locks && typeof locks.request === 'function') {
+        return locks.request(`cleffy-outbox:${docId}`, fn) as Promise<T>;
+    }
+    const prev = outboxLockTails.get(docId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    outboxLockTails.set(docId, tail);
+    try {
+        return await run;
+    } finally {
+        if (outboxLockTails.get(docId) === tail) {
+            outboxLockTails.delete(docId);
+        }
+    }
+};
+
+const sameInstant = (a: string | null | undefined, b: string | null | undefined): boolean =>
+    !!a && !!b && Date.parse(a) === Date.parse(b);
+
+/** JSON with object keys in one order: jsonb does not keep the order a payload was sent in. */
+const canonicalJson = (value: unknown): string =>
+    JSON.stringify(value, (_key, v: unknown) =>
+        v && typeof v === 'object' && !Array.isArray(v)
+            ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+            : v,
+    );
+
+/**
+ * Whether a server row carries what `op` wrote, so shows the mark as that
+ * push left it: its echo, or a read made after it landed. A delete is told by
+ * its own instant, the other ops by the content they wrote. (An update sends
+ * no deleted_at, so its echo may be a tombstone — which is then the truth.)
+ */
+export const isEchoOf = (row: AnnotationRow, op: PendingOp): boolean => {
+    const a = op.annotation;
+    const content = row.color === a.color && canonicalJson(row.payload) === canonicalJson(a.payload);
+    switch (op.type) {
+        case 'delete':
+            return sameInstant(row.deleted_at, a.deletedAt);
+        case 'restore':
+            return row.deleted_at === null && content;
+        case 'update':
+            return content;
+        case 'create':
+            return content && (row.deleted_at === null) === !a.deletedAt;
+        default: {
+            const _exhaustive: never = op.type;
+            return _exhaustive;
+        }
+    }
+};
+
+/** One mark's queued ops, oldest first. */
+interface OpGroup {
+    annotationId: string;
+    ops: PendingOp[];
+}
+
+/**
+ * Marks whose queued ops must be checked against the server row before any is
+ * sent (at most `limit`):
+ *  - two or more ops: they collapse to their net effect, so an undo/redo pair
+ *    made offline sends nothing instead of replaying both halves;
+ *  - any restore: a restore must not resurrect a mark someone erased again
+ *    after the tombstone it undoes.
+ * Groups headed by a create are left alone — the row is not on the server yet
+ * (or a lost response hides that it is, and an insert of a folded snapshot
+ * would be ignored as a duplicate), so they replay op by op as before. So is a
+ * group with a create further in (a delete + re-create under the same id),
+ * whose page or kind may differ and cannot be patched.
+ */
+export const groupsToReconcile = (ops: PendingOp[], verified: ReadonlySet<number>, limit: number): OpGroup[] => {
+    const groups = new Map<string, PendingOp[]>();
+    for (const op of ops) {
+        const group = groups.get(op.annotationId);
+        if (group) {
+            group.push(op);
+        } else {
+            groups.set(op.annotationId, [op]);
+        }
+    }
+    const out: OpGroup[] = [];
+    for (const [annotationId, group] of groups) {
+        if (out.length >= limit) {
+            break;
+        }
+        if (group.some((op) => op.type === 'create')) {
+            continue;
+        }
+        if (group.length < 2 && !group.some((op) => op.type === 'restore')) {
+            continue;
+        }
+        if (group.every((op) => verified.has(op.opId as number))) {
+            continue;
+        }
+        out.push({ annotationId, ops: group });
+    }
+    return out;
+};
+
+/** What to do with a mark's queued ops once its server row is known. */
+export type Reconciled =
+    /** Replace them with these (one, or a revive and the edit behind it — see below). */
+    | { kind: 'send'; ops: PendingOp[] }
+    /** Send nothing: the server already holds the outcome, or a newer change there wins. Adopt its row. */
+    | { kind: 'adopt' };
+
+/**
+ * Collapse one mark's queued ops (no create among them) to the net change that
+ * takes the server row as it is NOW to the state the user left the mark in —
+ * or to nothing at all. Judged against the server rather than against what
+ * the device last saw because either may have moved: a collaborator's edit,
+ * or one of these very ops that landed although its response was lost.
+ *
+ * Tombstones are told apart by deleted_at, which the client sends and the
+ * server keeps verbatim: a server row deleted at an instant one of these ops
+ * (or the tombstone a restore undoes) carries is this device's own delete; any
+ * other instant is a collaborator's, made after the tombstone the restore
+ * undoes, and wins over the restore — undo/redo replays the user's history, it
+ * does not get to erase someone else's.
+ *
+ * It does not win over an edit made after the restore, though: the user
+ * brought the mark back and went on working on it, and device clocks cannot
+ * say whether that came before or after the other delete. Their version
+ * stands, rather than the edit being dropped without a word — and it must
+ * stand however the requests interleave, so this read does not decide it. The
+ * row can change between the read and the write (the collaborator's delete
+ * still on its way when the user reconnects), and a plain update, sent
+ * because the row looked live, would land on that tombstone and leave the
+ * edit erased. Such a mark is sent as a restore that carries the edit, so one
+ * row update revives it with the user's content whatever reached the row
+ * first, followed by the edit itself. The restore names no tombstone
+ * (baseDeletedAt), and the edit stays queued behind it, so if the send fails
+ * the next reconcile reaches the same verdict instead of mistaking the pair
+ * for an undo the server already holds.
+ */
+export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Reconciled => {
+    const first = ops[0];
+    const last = ops[ops.length - 1];
+    if (!first || !last) {
+        return { kind: 'adopt' };
+    }
+    const finalLive = !last.annotation.deletedAt;
+    const serverLive = server.deleted_at === null;
+    const netOp = (from: PendingOp, type: PendingOpType, extra: Partial<PendingOp> = {}): PendingOp => ({
+        opId: from.opId,
+        docId: first.docId,
+        annotationId: first.annotationId,
+        queuedAt: from.queuedAt,
+        type,
+        annotation: last.annotation,
+        ...(last.userId !== undefined ? { userId: last.userId } : {}),
+        ...extra,
+    });
+    const net = (type: PendingOpType, extra: Partial<PendingOp> = {}): Reconciled => ({
+        kind: 'send',
+        ops: [netOp(first, type, extra)],
+    });
+    if (!finalLive) {
+        if (!serverLive) {
+            // Already erased on the server (by anyone): nothing left to say.
+            return { kind: 'adopt' };
+        }
+        // An edit made before the erase goes out ahead of it, rather than
+        // folding into the delete: an Undo of the erase queued before that
+        // delete is sent would otherwise meet a delete + restore pair over
+        // the unedited row, send nothing, and drop the edit.
+        const edits = ops.filter((op) => op.type === 'update');
+        const lastEdit = edits[edits.length - 1];
+        return lastEdit ? { kind: 'send', ops: [lastEdit, netOp(last, 'delete')] } : net('delete');
+    }
+    const restoredAt = ops.findIndex((op) => op.type === 'restore');
+    if (restoredAt >= 0 && ops.slice(restoredAt + 1).some((op) => op.type === 'update')) {
+        return { kind: 'send', ops: [netOp(first, 'restore'), netOp(last, 'update')] };
+    }
+    if (serverLive) {
+        // Only edits change what a live mark looks like; a delete + restore
+        // pair, or a restore someone else already made, leaves nothing to send.
+        return ops.some((op) => op.type === 'update') ? net('update') : { kind: 'adopt' };
+    }
+    const ours =
+        ops.some((op) => op.type === 'delete' && sameInstant(op.annotation.deletedAt, server.deleted_at)) ||
+        (first.type === 'restore' &&
+            // Queued by a build that did not record the tombstone: restore, as it always did.
+            (first.baseDeletedAt === undefined || sameInstant(first.baseDeletedAt, server.deleted_at)));
+    return ours ? net('restore', { baseDeletedAt: server.deleted_at }) : { kind: 'adopt' };
+};
+
 /**
  * Drains the Dexie outbox to Supabase and pulls remote changes by watermark.
  * One instance per open cloud document. Local-first: the UI never waits on
  * this — it reacts to AnnotationStore, which this engine feeds via
  * applyRemoteBatch (plan §sync).
+ *
+ * An op leaves the outbox only when the server accepted it, or refused it for
+ * good AND the row's server state has been fetched to repair local state
+ * from. Everything else — offline, timeouts, throttling, an expired token,
+ * a server fault — keeps the op and retries with backoff.
  */
 export class SyncEngine {
     private flushing = false;
-    private pulling = false;
+    /** The pull in flight, which callers that arrive meanwhile share. */
+    private pulling: Promise<void> | null = null;
+    /** A pull was asked for while one was in flight; run another after it. */
+    private pullAgain = false;
+    /**
+     * Live rows may not move the watermark while this is set. A pull reaches
+     * back only PULL_OVERLAP seqs, so a live row that lands after a stretch
+     * this device never heard (offline, a dropped channel, the score moving
+     * to new realtime topics) would carry the watermark past marks no later
+     * pull could reach. It starts set (the first pull has not run yet), is
+     * set again by noteGap, and is cleared only by a successful pull that
+     * began after the latest gap (see gapGeneration). Live rows are still
+     * applied meanwhile; only the watermark waits.
+     */
+    private watermarkHeld = true;
+    /** Bumped by noteGap; a pull releases the hold only if none came in during it. */
+    private gapGeneration = 0;
     private stopped = false;
-    private backoffMs = 1000;
+    private backoffMs = INITIAL_BACKOFF_MS;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
+    private retryAt = 0;
+    private lastRetryDelay: number | null = null;
     private onlineListener = () => this.onOnline();
     private offlineListener = () => this.setStatus('offline');
     private status: SyncStatus = 'syncing';
+    /** When the current run of retryable failures began; null while healthy. */
+    private failingSince: number | null = null;
+    /**
+     * How the last pull ended. A flush that empties the outbox says "synced"
+     * only after a pull that worked: with the pull failing (offline, or the
+     * server down) this device has not heard what changed elsewhere.
+     */
+    private lastPullError: ApiError | null = null;
+    /**
+     * Ops reconcile already checked against the server during this flush, so
+     * a mark it decided to send is pushed rather than checked again. Cleared
+     * per flush: a later flush re-checks, since the server may have moved.
+     */
+    private reconciled = new Set<number>();
+    /**
+     * Which queued ops are the signed-in account's (opOwnerFor), as of the
+     * current drain pass. Only those are sent, rolled back or dropped here;
+     * another account's stay queued, untouched, for that account.
+     */
+    private owns: OpOwner = () => false;
+    private readonly legacyOwners: LegacyOwnerCache;
+    /**
+     * Server rows a pull or broadcast brought while their mark had ops queued
+     * on this device, newest per mark, with when they came (on `clock`).
+     * Applying one then would overwrite intent the server has not seen yet,
+     * so it waits until the mark's queue settles — this engine's ack, or
+     * another's (a settled message) — instead of being dropped: dropped, a
+     * collaborator's change that landed while an op was in flight stayed
+     * invisible until a reload, and a second tab of the same account, whose
+     * outbox this is too, never showed what the first one drew.
+     */
+    private deferred = new Map<string, { row: AnnotationRow; at: number }>();
+    private clock = 0;
+    /** `clock` when the last push left: a row held back before it is older than what it sent. */
+    private pushedAt = 0;
+    /**
+     * The last push of each mark to land, and `clock` when it did: this
+     * engine's ack (with the op it sent), or another engine's (a settled
+     * message; op unknown). The server answers a push with no seq, so the
+     * store keeps the seq from before it, and under seq LWW any row read
+     * before the push landed outranks what it landed. A row read before
+     * `at` is therefore in doubt unless it is the push's own echo (see
+     * landedSince).
+     */
+    private landed = new Map<string, { at: number; op: PendingOp | null }>();
+    /** Marks whose queue this engine emptied during the current flush. */
+    private settled = new Set<string>();
+    /** Names this engine in the messages it sends, so it skips its own. */
+    private readonly engineId = crypto.randomUUID();
+    private releaseViewerLock: (() => void) | null = null;
+    private repairListener = (message: SyncMessage) => this.onMessage(message);
 
     constructor(
         private deps: {
@@ -79,13 +607,54 @@ export class SyncEngine {
             docId: string;
             getUserId: () => string | null;
             onStatus?: (status: SyncStatus) => void;
+            /** A local change was refused for good and rolled back to server truth. */
+            onRejected?: (rejection: SyncRejection) => void;
+            /** The outbox is refused but kept (archived score, ended sign-in) — see SyncHold. */
+            onHeld?: (hold: SyncHold) => void;
+            /**
+             * Set by a driver nobody is watching (the background drain). A
+             * refusal then changes nothing: the op and everything queued
+             * after it stay, no mark is rolled back, the pass stops, and the
+             * refused op is reported here. Rolled back where no one sees it,
+             * the marks would just vanish; left queued, they meet the refusal
+             * again in the score's viewer or at sign-out, which say so.
+             */
+            onRefusalHeld?: (refusal: HeldRefusal) => void;
+            /** Shared answers for ops queued before PendingOp.userId existed (see opOwnerFor). */
+            legacyOwners?: LegacyOwnerCache;
         },
-    ) {}
+    ) {
+        this.legacyOwners = deps.legacyOwners ?? new Map();
+    }
 
     start(): void {
-        this.deps.store.setDirtyHook(() => this.requestFlush());
+        this.deps.store.setDirtyHook((ids) => {
+            this.announce('written', ids);
+            this.requestFlush();
+        });
+        // Ink the store could not write: the status says so (see drain).
+        this.deps.store.setHeldHook(() => this.requestFlush());
+        // Its Retry asks the server whether a newer version overtook a held
+        // mark, and draws the server's version of any that one did.
+        this.deps.store.setRetryHooks({
+            serverRows: async (ids) => {
+                const { data, error } = await this.withAuth(() => this.deps.api.fetchMany(this.deps.docId, ids));
+                return error || !data ? null : data.map(fromServerRow);
+            },
+            overtaken: (ids) => {
+                if (!this.stopped) {
+                    void this.applyDeferred(ids)
+                        .then(() => (this.stopped ? undefined : this.askAgain(ids)))
+                        .catch((err: unknown) => console.warn('Could not refresh overtaken marks', err));
+                }
+            },
+        });
         window.addEventListener('online', this.onlineListener);
         window.addEventListener('offline', this.offlineListener);
+        activeEngines.set(this.deps.docId, this);
+        repairListeners.add(this.repairListener);
+        getSyncChannel();
+        this.holdViewerLock();
         if (navigator.onLine === false) {
             this.setStatus('offline');
         }
@@ -95,25 +664,289 @@ export class SyncEngine {
     stop(): void {
         this.stopped = true;
         this.deps.store.setDirtyHook(null);
+        this.deps.store.setHeldHook(null);
+        this.deps.store.setRetryHooks(null);
         window.removeEventListener('online', this.onlineListener);
         window.removeEventListener('offline', this.offlineListener);
-        if (this.retryTimer) {
-            clearTimeout(this.retryTimer);
+        if (activeEngines.get(this.deps.docId) === this) {
+            activeEngines.delete(this.deps.docId);
+        }
+        repairListeners.delete(this.repairListener);
+        this.releaseViewerLock?.();
+        this.releaseViewerLock = null;
+        this.clearRetry();
+    }
+
+    /** See docsOpenInViewers. Released by stop(). */
+    private holdViewerLock(): void {
+        const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+        if (!locks || typeof locks.request !== 'function') {
+            return;
+        }
+        void locks
+            .request(
+                `${VIEWER_LOCK_PREFIX}${this.deps.docId}`,
+                { mode: 'shared' },
+                () =>
+                    new Promise<void>((resolve) => {
+                        if (this.stopped) {
+                            resolve();
+                        } else {
+                            this.releaseViewerLock = resolve;
+                        }
+                    }),
+            )
+            .catch(() => undefined);
+    }
+
+    /**
+     * Another engine changed rows of this document (see SyncMessage): draw
+     * them as they now are, and pass a refusal on to the viewer, which is the
+     * one that can tell the user.
+     */
+    private onMessage(message: SyncMessage): void {
+        const { db, store, docId } = this.deps;
+        if (this.stopped || message.origin === this.engineId || message.docId !== docId || message.db !== db.name) {
+            return;
+        }
+        const ids = message.annotationIds;
+        let work: Promise<void>;
+        switch (message.kind) {
+            case 'written':
+                // The mirror holds the device's newest intent for these, queued or not.
+                work = store.reloadFromMirror(ids, { includeQueued: true });
+                break;
+            case 'settled':
+                work = this.settledElsewhere(ids);
+                break;
+            default:
+                work = store.reloadFromMirror(ids).then(() => {
+                    if (message.rejection && !this.stopped) {
+                        this.deps.onRejected?.(message.rejection);
+                    }
+                });
+        }
+        void work.catch((err: unknown) => console.warn('Could not reload marks changed elsewhere', err));
+    }
+
+    private announce(
+        kind: NonNullable<SyncMessage['kind']>,
+        annotationIds: readonly string[],
+        rejection?: SyncRejection,
+    ): void {
+        if (annotationIds.length === 0) {
+            return;
+        }
+        announceRepair({
+            kind,
+            db: this.deps.db.name,
+            docId: this.deps.docId,
+            annotationIds: [...annotationIds],
+            ...(rejection ? { rejection } : {}),
+            origin: this.engineId,
+        });
+    }
+
+    /**
+     * Hold back server rows the store skipped for local intent (see
+     * `deferred`). `sentAt`: when the request that read them left, for a
+     * pull — the row is as old as that, not as new as its arrival.
+     */
+    private defer(rows: readonly AnnotationRow[], sentAt?: number): void {
+        for (const row of rows) {
+            const held = this.deferred.get(row.id);
+            if (!held || row.seq > held.row.seq) {
+                this.deferred.set(row.id, { row, at: sentAt ?? ++this.clock });
+            }
         }
     }
 
-    /** Full cycle: pull remote changes, then push local ops. */
+    /**
+     * Apply the rows held back for these marks that have nothing queued any
+     * more. Server-seq LWW still decides, so a held row older than what the
+     * store already shows changes nothing. Returns the marks it applied.
+     */
+    private async applyDeferred(ids: readonly string[]): Promise<Set<string>> {
+        const applied = new Set<string>();
+        if (this.stopped || !ids.some((id) => this.deferred.has(id))) {
+            return applied;
+        }
+        const queued = await this.queuedIds();
+        if (this.stopped) {
+            return applied;
+        }
+        const rows: AnnotationRow[] = [];
+        const readAt = new Map<string, number>();
+        const inDoubt: string[] = [];
+        for (const id of ids) {
+            const held = this.deferred.get(id);
+            if (held && !queued.has(id)) {
+                this.deferred.delete(id);
+                if (this.landedSince(held.row, held.at)) {
+                    // Read before the mark's own push landed (a pull that
+                    // crossed it): applied, it would take that push back.
+                    inDoubt.push(id);
+                    continue;
+                }
+                rows.push(held.row);
+                readAt.set(id, held.at);
+                applied.add(id);
+            }
+        }
+        if (rows.length > 0) {
+            const reheld = await this.deps.store.applyRemoteBatch(rows.map(fromServerRow), queued);
+            for (const row of rows) {
+                if (reheld.has(row.id)) {
+                    // Held again, still as old as when it was first read.
+                    this.defer([row], readAt.get(row.id));
+                }
+            }
+        }
+        if (inDoubt.length > 0) {
+            await this.askAgain(inDoubt);
+        }
+        return applied;
+    }
+
+    /**
+     * Whether `row`, read at `at` (on `clock`), may predate a push of its
+     * mark that has landed since — and so, applied, would replace what that
+     * push landed. Not when it is that push's own echo: then it shows the
+     * mark as the server holds it after the push, seq included.
+     */
+    private landedSince(row: AnnotationRow, at: number): boolean {
+        const landed = this.landed.get(row.id);
+        return !!landed && landed.at > at && !(landed.op && isEchoOf(row, landed.op));
+    }
+
+    /** Read these marks from the server again and apply what it says now (see landedSince). */
+    private async askAgain(ids: readonly string[]): Promise<void> {
+        const { api, docId } = this.deps;
+        const askedAt = ++this.clock;
+        const { data, error } = await this.withAuth(() => api.fetchMany(docId, [...ids]));
+        if (error || !data || data.length === 0 || this.stopped) {
+            // The echo of the push, or the next pull, brings it instead.
+            return;
+        }
+        await this.applyPulled(data, askedAt, false);
+    }
+
+    /**
+     * Another engine's push settled these marks. A row held back for one of
+     * them here may predate that push — a collaborator's change heard while
+     * the edit sat queued — and this engine cannot tell, since it did not
+     * see the push leave (the pusher drops those itself; see ackOp). Applied
+     * as it is, it would replace the edit the server now holds. So held rows
+     * are dropped, the mirror's copy (what the pusher sent) is drawn, and the
+     * server is asked how the marks stand now, which also covers a change
+     * made after the push. If it cannot answer, the echo or the next pull
+     * brings anything newer.
+     */
+    private async settledElsewhere(ids: readonly string[]): Promise<void> {
+        const { api, store, docId } = this.deps;
+        const at = ++this.clock;
+        ids.forEach((id) => this.landed.set(id, { at, op: null }));
+        const held = ids.filter((id) => this.deferred.delete(id));
+        await store.reloadFromMirror(ids);
+        if (held.length === 0 || this.stopped) {
+            return;
+        }
+        const { data, error } = await api.fetchMany(docId, held);
+        if (error || !data || data.length === 0 || this.stopped) {
+            return;
+        }
+        const queued = await this.queuedIds();
+        if (this.stopped) {
+            return;
+        }
+        this.applyHeld(data, await store.applyRemoteBatch(data.map(fromServerRow), queued));
+    }
+
+    /** Defer the rows applyRemoteBatch held back for local intent. */
+    private applyHeld(rows: readonly AnnotationRow[], held: ReadonlySet<string>, sentAt?: number): void {
+        if (held.size > 0) {
+            this.defer(
+                rows.filter((row) => held.has(row.id)),
+                sentAt,
+            );
+        }
+    }
+
+    /** Marks this flush settled: apply what was held back for them, and tell the other engines. */
+    private async finishSettled(): Promise<void> {
+        if (this.settled.size === 0) {
+            return;
+        }
+        const ids = [...this.settled];
+        this.settled.clear();
+        this.announce('settled', ids);
+        await this.applyDeferred(ids);
+    }
+
+    private async queuedIds(): Promise<Set<string>> {
+        const { db, docId } = this.deps;
+        return new Set((await db.ops.where('docId').equals(docId).toArray()).map((op) => op.annotationId));
+    }
+
+    /** Delay of the currently scheduled retry (ms), or null when none is pending. */
+    get pendingRetryDelayMs(): number | null {
+        return this.retryTimer ? this.lastRetryDelay : null;
+    }
+
+    /**
+     * For a driver that schedules its own retries (the background drain):
+     * cancel the retry this engine scheduled and return its delay, keeping the
+     * backoff it was computed from so the next failure waits longer still.
+     */
+    takeScheduledRetry(): number | null {
+        const delay = this.pendingRetryDelayMs;
+        this.clearRetry();
+        return delay;
+    }
+
+    /** The network is back: retry at the shortest delay again. */
+    resetBackoff(): void {
+        this.backoffMs = INITIAL_BACKOFF_MS;
+        this.failingSince = null;
+    }
+
+    /**
+     * Full cycle: pull remote changes, then push local ops. Waits for the
+     * store to hydrate from Dexie first, so pulled rows merge against the
+     * mirror instead of racing the load that would otherwise replace them.
+     */
     async sync(): Promise<void> {
+        await this.deps.store.load();
         await this.pullSince();
         await this.flush();
     }
 
+    /**
+     * Committed rows may have gone unheard since the last pull: the realtime
+     * channel re-joined, its committed-row topic was out, or the score moved
+     * to new topics. Holds the watermark against live rows until a pull that
+     * starts after this completes (see watermarkHeld). The caller pulls next.
+     */
+    noteGap(): void {
+        this.gapGeneration += 1;
+        this.watermarkHeld = true;
+    }
+
+    /**
+     * Wake the flush after a local edit. While a retry is scheduled the edit
+     * just queues: the timer drains everything, and a throttled server is not
+     * hit again early because someone drew another stroke.
+     */
     requestFlush(): void {
+        if (this.retryTimer) {
+            return;
+        }
         queueMicrotask(() => void this.flush());
     }
 
     private onOnline(): void {
-        this.backoffMs = 1000;
+        this.resetBackoff();
+        this.clearRetry();
         void this.sync();
     }
 
@@ -124,15 +957,77 @@ export class SyncEngine {
         }
     }
 
-    private scheduleRetry(): void {
-        if (this.stopped || this.retryTimer) {
+    private clearRetry(): void {
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = null;
+        }
+    }
+
+    /**
+     * Exponential backoff with jitter (half fixed, half random, so devices that
+     * lost the same server together do not come back in lockstep). A server
+     * Retry-After is a floor, and it may push an already-scheduled retry later.
+     */
+    private scheduleRetry(retryAfterMs?: number): void {
+        if (this.stopped) {
             return;
         }
+        const base = this.backoffMs;
+        const delay = Math.max(Math.round(base / 2 + Math.random() * (base / 2)), retryAfterMs ?? 0);
+        const at = Date.now() + delay;
+        if (this.retryTimer) {
+            if (retryAfterMs === undefined || at <= this.retryAt) {
+                return;
+            }
+            this.clearRetry();
+        }
+        this.backoffMs = Math.min(base * 2, MAX_BACKOFF_MS);
+        this.retryAt = at;
+        this.lastRetryDelay = delay;
         this.retryTimer = setTimeout(() => {
             this.retryTimer = null;
             void this.sync();
-        }, this.backoffMs);
-        this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
+        }, delay);
+    }
+
+    /** Keep the outbox as it is and come back later. */
+    private deferRetry(error: ApiError): void {
+        this.failingSince ??= Date.now();
+        this.setStatus(this.failureStatus());
+        this.scheduleRetry(error.retryAfterMs);
+    }
+
+    /**
+     * What a retryable failure looks like to the user: offline when the
+     * browser says so, a calm "retrying" through ordinary throttling and
+     * blips, and an error only once it has gone on for PERSISTENT_FAILURE_MS.
+     */
+    private failureStatus(): SyncStatus {
+        if (navigator.onLine === false) {
+            return 'offline';
+        }
+        const since = this.failingSince ?? Date.now();
+        return Date.now() - since >= PERSISTENT_FAILURE_MS ? 'error' : 'retrying';
+    }
+
+    /**
+     * Run a request; on a 401, refresh the session once and run it again. A
+     * 401 that survives the refresh (or a refresh that failed — offline, or
+     * the refresh token itself expired) is reported as retryable: the op is
+     * kept, never treated as a refusal of its content.
+     */
+    private async withAuth<T extends { error: ApiError | null }>(call: () => Promise<T>): Promise<T> {
+        const first = await call();
+        if (first.error?.kind !== 'auth') {
+            return first;
+        }
+        const refreshed = this.deps.api.refreshAuth ? await this.deps.api.refreshAuth().catch(() => false) : false;
+        const second = refreshed ? await call() : first;
+        if (second.error?.kind === 'auth') {
+            return { ...second, error: { ...second.error, kind: 'retry' } };
+        }
+        return second;
     }
 
     async flush(): Promise<void> {
@@ -141,87 +1036,433 @@ export class SyncEngine {
         }
         this.flushing = true;
         try {
-            const { db, docId } = this.deps;
-            for (;;) {
-                const ops = await db.ops.where('docId').equals(docId).sortBy('opId');
-                if (ops.length === 0) {
-                    break;
-                }
-                this.setStatus('syncing');
-
-                const batch = takeHomogeneousBatch(ops, FLUSH_BATCH_SIZE);
-                const error = await this.pushBatch(batch);
-
-                // Non-transient batch reject: RPC is transactional (nothing applied).
-                // Peel one-by-one so an innocent head is not discarded for a sibling fault.
-                if (error && !error.transient && batch.length > 1) {
-                    for (const op of batch) {
-                        const single = await this.pushBatch([op]);
-                        if (single?.transient) {
-                            this.setStatus(navigator.onLine === false ? 'offline' : 'error');
-                            this.scheduleRetry();
-                            return;
-                        }
-                        if (single) {
-                            console.warn(`Sync op ${op.type} rejected for ${op.annotationId}: ${single.message}`);
-                            await db.ops.delete(op.opId as number);
-                            await this.repair(op.annotationId);
-                            continue;
-                        }
-                        await this.ackOp(op);
-                    }
-                    continue;
-                }
-
-                if (error?.transient) {
-                    this.setStatus(navigator.onLine === false ? 'offline' : 'error');
-                    this.scheduleRetry();
-                    return;
-                }
-                if (error) {
-                    const head = batch[0]!;
-                    console.warn(`Sync op ${head.type} rejected for ${head.annotationId}: ${error.message}`);
-                    await db.ops.delete(head.opId as number);
-                    await this.repair(head.annotationId);
-                    continue;
-                }
-
-                for (const op of batch) {
-                    await this.ackOp(op);
-                }
-            }
-            this.backoffMs = 1000;
-            this.setStatus('synced');
+            await withOutboxLock(this.deps.docId, () => this.drain());
         } finally {
             this.flushing = false;
         }
+        await this.finishSettled();
+    }
+
+    /**
+     * One pass over the outbox, under the document's outbox lock. Only the
+     * signed-in account's ops: another account's changes queued on this
+     * device (an expired session, a guest who signed in to their own account)
+     * are not sent under this account's name. They stay for their own account
+     * to upload, and sign-out says so before it clears them.
+     */
+    private async drain(): Promise<void> {
+        const { db, docId, getUserId, store } = this.deps;
+        this.reconciled = new Set();
+        let heldForRetry: boolean;
+        for (;;) {
+            if (this.stopped) {
+                return;
+            }
+            const queued = await db.ops.where('docId').equals(docId).sortBy('opId');
+            this.owns = await opOwnerFor(db, docId, getUserId(), queued, this.legacyOwners);
+            const owned = queued.filter(this.owns);
+            // A mark whose newest edit could not be written to this device
+            // (AnnotationStore.hasPersistFailure) waits, queued ops and all:
+            // what is queued is not all the user did to it, so neither a
+            // push nor a reconcile verdict may be based on it. Its retry
+            // queues the rest and wakes this engine. A held new mark has
+            // nothing queued at all, so the store's count says it too.
+            const ops = owned.filter((op) => !store.hasPersistFailure(op.annotationId));
+            heldForRetry = ops.length < owned.length || store.persistFailureCount > 0;
+            if (ops.length === 0) {
+                break;
+            }
+            this.setStatus('syncing');
+
+            const groups = groupsToReconcile(ops, this.reconciled, RECONCILE_BATCH_SIZE);
+            if (groups.length > 0) {
+                if (!(await this.reconcile(groups))) {
+                    return;
+                }
+                continue;
+            }
+
+            const batch = takeHomogeneousBatch(ops, FLUSH_BATCH_SIZE);
+            const result = await this.push(batch);
+
+            if (result.error?.kind === 'reject' && batch.length > 1) {
+                // Non-transient batch reject: RPC is transactional (nothing applied).
+                // Peel one-by-one so an innocent head is not discarded for a sibling fault.
+                for (const op of batch) {
+                    if (this.stopped || !(await this.settle(op, await this.push([op])))) {
+                        return;
+                    }
+                }
+                continue;
+            }
+
+            if (result.error) {
+                // An error covers the whole batch; settling the head is enough
+                // to either stop (retry later) or reject the single op it was.
+                const head = batch[0];
+                if (head && !(await this.settle(head, result))) {
+                    return;
+                }
+                continue;
+            }
+
+            // The server applied the batch. Ack everything it reports as
+            // updated BEFORE repairing the ids it missed: a repair whose
+            // fetch fails stops the drain, and an applied op left queued
+            // behind it would be pushed again on retry — re-sending an
+            // update over a collaborator's newer edit, or a restore over
+            // their delete.
+            const missed: PendingOp[] = [];
+            for (const op of batch) {
+                if (result.updatedIds && !result.updatedIds.has(op.annotationId)) {
+                    missed.push(op);
+                } else {
+                    await this.ackOp(op);
+                }
+            }
+            for (const op of missed) {
+                if (!(await this.reject(op, 'the change matched no row this account may edit'))) {
+                    return;
+                }
+            }
+        }
+        // The outbox is empty. Healthy only if the pull that came with it
+        // worked too: a failed pull means changes made elsewhere have not
+        // arrived, which is not "synced", and the retry it scheduled keeps
+        // its backoff rather than starting over at the shortest delay.
+        // Nor while marks wait on a write to this device (the viewer's
+        // "couldn't be saved" banner says which).
+        if (heldForRetry) {
+            this.setStatus('error');
+            return;
+        }
+        if (navigator.onLine === false) {
+            this.setStatus('offline');
+            return;
+        }
+        if (this.lastPullError) {
+            this.setStatus(this.lastPullError.kind === 'reject' ? 'error' : this.failureStatus());
+            return;
+        }
+        this.backoffMs = INITIAL_BACKOFF_MS;
+        this.failingSince = null;
+        this.setStatus('synced');
+    }
+
+    /**
+     * Check marks with several queued ops, or a restore, against their server
+     * rows and rewrite their ops to the net change (see reconcileWithServer).
+     * False when the rows could not be read: the ops stay exactly as queued
+     * and the whole pass is retried, so nothing is sent on a guess.
+     */
+    private async reconcile(groups: OpGroup[]): Promise<boolean> {
+        const { api, docId } = this.deps;
+        const { data, error } = await this.withAuth(() =>
+            api.fetchMany(
+                docId,
+                groups.map((g) => g.annotationId),
+            ),
+        );
+        if (error) {
+            // A refused read says nothing about the ops; keep them and retry.
+            this.deferRetry(error.kind === 'reject' ? { ...error, kind: 'retry' } : error);
+            return false;
+        }
+        if (this.stopped) {
+            return false;
+        }
+        const rows = new Map((data ?? []).map((row) => [row.id, row]));
+        for (const group of groups) {
+            if (!(await this.reconcileGroup(group, rows.get(group.annotationId)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * reconcile for one mark; false once the engine has been stopped.
+     *
+     * The verdict is reached inside the transaction that rewrites the queue,
+     * over the mark's ops as they stand then — not over `group`, the ops
+     * queued when the read left. The user goes on working while it is out,
+     * and it can be out for several seconds: postgrest-js retries a GET
+     * that could not reach the server inside the one call, after 1 s, 2 s
+     * and 4 s, so a read begun offline answers up to ~7 s later. An edit
+     * queued meanwhile behind an Undo of an erase turns the verdict into a
+     * restore that carries it; judged without it, the Undo was dropped as
+     * yielding to a collaborator's delete, and the edit went out as a plain
+     * update onto their tombstone (QA C1).
+     *
+     * For the same reason the verdict waits for an edit of the mark that is
+     * made but not yet queued (see AnnotationStore.hasUnsavedEdit), and a
+     * verdict to send nothing adopts the server's row in that same
+     * transaction, memory first: an edit begun after it finds the mark as
+     * the server has it, instead of being queued on top of ops already
+     * dropped. The other engines on the score are told at once, not after
+     * the rest of the batch: until they hear, another tab still draws the
+     * mark, and an edit of it there would go out as a plain update onto the
+     * tombstone.
+     */
+    private async reconcileGroup(group: OpGroup, row: AnnotationRow | undefined): Promise<boolean> {
+        const { db, store, docId } = this.deps;
+        const { annotationId } = group;
+        if (!row) {
+            // Not visible (or gone): send the ops as queued, and the
+            // refusal path repairs from what the server says about each.
+            group.ops.forEach((op) => this.reconciled.add(op.opId as number));
+            return true;
+        }
+        // Adopting below changes memory inside a transaction the store
+        // could not hydrate in.
+        await store.load();
+        for (;;) {
+            if (this.stopped) {
+                return false;
+            }
+            const decided = await db.transaction('rw', db.ops, db.annotations, async () => {
+                const queued = await db.ops
+                    .where('docId')
+                    .equals(docId)
+                    .filter((op) => op.annotationId === annotationId)
+                    .sortBy('opId');
+                const ops = queued.filter(this.owns);
+                if (this.stopped || ops.length === 0 || ops.some((op) => op.type === 'create')) {
+                    // Stopped (nothing may be written back), drained by
+                    // another engine, or re-created under the same id:
+                    // nothing for reconcile here, and the pass looks again.
+                    return null;
+                }
+                if (store.hasPersistFailure(annotationId)) {
+                    // An edit of it never reached the outbox: no verdict
+                    // without it (see drain).
+                    return 'failed' as const;
+                }
+                if (store.hasUnsavedEdit(annotationId)) {
+                    return 'unsaved' as const;
+                }
+                const outcome = reconcileWithServer(ops, row);
+                const kept = new Set(outcome.kind === 'send' ? outcome.ops.map((op) => op.opId as number) : []);
+                // Nothing to send, and nothing left queued for the mark by
+                // anyone: the server's row is how it stands. Pulls skipped
+                // it while ops were queued, so adopt it here — before
+                // anything below yields to an edit that would build on the
+                // ops being dropped.
+                const adoption =
+                    outcome.kind === 'adopt' && queued.length === ops.length
+                        ? store.adoptServerRowWithin(fromServerRow(row))
+                        : null;
+                await db.ops.bulkDelete(ops.map((op) => op.opId as number).filter((id) => !kept.has(id)));
+                if (outcome.kind === 'send') {
+                    await db.ops.bulkPut(outcome.ops);
+                }
+                await adoption?.saved;
+                return { kept, repaint: adoption?.repaint ?? null };
+            });
+            if (decided === 'failed') {
+                // Left as queued; the next pass holds the mark back.
+                return true;
+            }
+            const repaint = decided !== null && decided !== 'unsaved' ? decided.repaint : null;
+            if (repaint) {
+                // Adopted and committed: draw it, and tell the other engines,
+                // even if this one has just been stopped.
+                repaint();
+                this.announce('repair', [annotationId]);
+            }
+            if (this.stopped) {
+                return false;
+            }
+            if (decided === 'unsaved') {
+                // Decide with that edit in the queue, against the same read.
+                if (!(await store.whenSaved(annotationId))) {
+                    // Its write failed: left as queued, held back next pass.
+                    return true;
+                }
+                continue;
+            }
+            decided?.kept.forEach((id) => this.reconciled.add(id));
+            if (repaint) {
+                // …and anything newer that arrived during the read.
+                const applied = await this.applyDeferred([annotationId]);
+                this.announce('repair', [...applied]);
+            }
+            return true;
+        }
+    }
+
+    /**
+     * Resolve one op against the response that covered it: ack, reject +
+     * repair, or (false) stop draining and retry later.
+     */
+    private async settle(op: PendingOp, result: PushResult): Promise<boolean> {
+        if (result.error) {
+            if (result.error.kind !== 'reject') {
+                this.deferRetry(result.error);
+                return false;
+            }
+            return this.reject(op, result.error.message);
+        }
+        if (result.updatedIds && !result.updatedIds.has(op.annotationId)) {
+            return this.reject(op, 'the change matched no row this account may edit');
+        }
+        await this.ackOp(op);
+        return true;
     }
 
     private async ackOp(op: PendingOp): Promise<void> {
-        const { db, docId } = this.deps;
-        await db.ops.delete(op.opId as number);
-        const remaining = await db.ops
-            .where('docId')
-            .equals(docId)
-            .filter((o) => o.annotationId === op.annotationId)
-            .count();
-        if (remaining === 0) {
-            const mirror = await db.annotations.get(op.annotationId);
-            if (mirror) {
-                await db.annotations.put({ ...mirror, pending: 0 });
+        this.landed.set(op.annotationId, { at: ++this.clock, op });
+        await this.deps.db.ops.delete(op.opId as number);
+        if ((await this.queuedFor(op.annotationId)) === 0) {
+            const createdBy = op.type === 'create' ? this.deps.getUserId() : null;
+            await this.deps.store.markSynced(op.annotationId, createdBy);
+            // A row held back since before this push predates the change it
+            // just landed; one that came after may be its echo, or newer —
+            // or a read that crossed it, which applyDeferred asks about
+            // again (landedSince).
+            const held = this.deferred.get(op.annotationId);
+            if (held && held.at < this.pushedAt) {
+                this.deferred.delete(op.annotationId);
             }
+            this.settled.add(op.annotationId);
         }
     }
 
-    private async pushBatch(ops: PendingOp[]): Promise<ApiError | null> {
+    private queuedFor(annotationId: string): Promise<number> {
+        const { db, docId } = this.deps;
+        return db.ops
+            .where('docId')
+            .equals(docId)
+            .filter((o) => o.annotationId === annotationId)
+            .count();
+    }
+
+    /**
+     * The server refused `op` for good. Fetch the row's server state FIRST —
+     * if that fails the op stays queued (false) and the whole thing is retried,
+     * so a refusal never costs the local copy without a server copy to adopt.
+     * Then drop the op, repair local state, and tell the user.
+     *
+     * Except on an archived score. RLS refuses every write there, but the
+     * archive is a billing state the owner undoes by resubscribing — and marks
+     * drawn offline before the archive landed would otherwise be discarded
+     * for good, a whole lesson's work lost to a failed card. Those ops are kept
+     * and the drain stops (false) until the score is writable again.
+     *
+     * Likewise on a read-only Academy seat (fetchSeatReadOnly): the refusal
+     * is of the seat, on every score, and lifts when the seat does.
+     *
+     * Likewise when the server has ended this sign-in (fetchSignInEnded): a
+     * student whose teacher reset their access is still a member, and the
+     * refusal is of the token, not of the change. The ops are kept for the
+     * same account's next sign-in.
+     *
+     * And except in a headless engine that holds refusals (onRefusalHeld):
+     * the op is kept for an engine whose refusal someone will see.
+     */
+    private async reject(op: PendingOp, reason: string): Promise<boolean> {
+        const { api, db, store, docId } = this.deps;
+        const [archive, signIn, seat] = await Promise.all([
+            this.withAuth(() => api.fetchDocumentArchived(docId)),
+            api.fetchSignInEnded
+                ? this.withAuth(() => api.fetchSignInEnded!())
+                : Promise.resolve({ ended: false, error: null }),
+            api.fetchSeatReadOnly
+                ? this.withAuth(() => api.fetchSeatReadOnly!())
+                : Promise.resolve({ readOnly: false, error: null }),
+        ]);
+        const unknown = archive.error ?? signIn.error ?? seat.error;
+        if (unknown) {
+            // Either question unanswered: keep the op and ask again later.
+            this.deferRetry(unknown.kind === 'reject' ? { ...unknown, kind: 'retry' } : unknown);
+            return false;
+        }
+        if (signIn.ended) {
+            await this.hold('signed-out');
+            return false;
+        }
+        if (archive.archived) {
+            await this.hold('archived');
+            return false;
+        }
+        if (seat.readOnly) {
+            await this.hold('seat-read-only');
+            return false;
+        }
+        if (this.deps.onRefusalHeld) {
+            if (!this.stopped) {
+                console.warn(`Sync op ${op.type} refused for ${op.annotationId}, kept for the viewer: ${reason}`);
+                this.deps.onRefusalHeld({ opId: op.opId as number, annotationId: op.annotationId, reason });
+            }
+            return false;
+        }
+        const { data, error } = await this.withAuth(() => api.fetchOne(op.annotationId));
+        if (error) {
+            this.deferRetry(error.kind === 'reject' ? { ...error, kind: 'retry' } : error);
+            return false;
+        }
+        if (this.stopped) {
+            return false;
+        }
+        console.warn(`Sync op ${op.type} rejected for ${op.annotationId}: ${reason}`);
+        if (data) {
+            await db.ops.delete(op.opId as number);
+            // Later ops for the row are still queued: they are the user's newer
+            // intent and get their own verdict. Only adopt the server row when
+            // nothing local is left to apply on top of it.
+            if ((await this.queuedFor(op.annotationId)) === 0) {
+                await store.adoptServerRow(fromServerRow(data));
+                await this.applyDeferred([op.annotationId]);
+            }
+        } else {
+            // No row this account can see: nothing it queued for it can
+            // apply. Another account's changes are that account's to settle.
+            await db.ops
+                .where('docId')
+                .equals(docId)
+                .filter((o) => o.annotationId === op.annotationId && this.owns(o))
+                .delete();
+            this.deferred.delete(op.annotationId);
+            if ((await this.queuedFor(op.annotationId)) === 0) {
+                await store.discardLocal(op.annotationId);
+            }
+        }
+        const rejection: SyncRejection = { annotationId: op.annotationId, opType: op.type, reason };
+        this.announce('repair', [op.annotationId], rejection);
+        this.deps.onRejected?.(rejection);
+        for (const observer of rejectionObservers) {
+            observer({ ...rejection, docId });
+        }
+        return true;
+    }
+
+    /**
+     * Keep the outbox and say why (see SyncHold). Retried at the slowest
+     * backoff: nothing changes until the plan does (or the account signs in
+     * again), but when the plan does (a resubscribe in another tab) the marks
+     * should upload without a reload.
+     */
+    private async hold(reason: SyncHold['reason']): Promise<void> {
+        if (this.stopped) {
+            return;
+        }
+        const { db, docId } = this.deps;
+        const queued = (await db.ops.where('docId').equals(docId).toArray()).filter(this.owns);
+        this.setStatus('error');
+        this.deps.onHeld?.({ reason, pendingMarks: new Set(queued.map((o) => o.annotationId)).size });
+        this.scheduleRetry(MAX_BACKOFF_MS);
+    }
+
+    private async push(ops: PendingOp[]): Promise<PushResult> {
         const head = ops[0];
         if (!head) {
-            return null;
+            return { error: null, updatedIds: null };
         }
+        this.pushedAt = ++this.clock;
         if (head.type === 'create') {
             const userId = this.deps.getUserId();
             if (!userId) {
-                return { message: 'not signed in', transient: true };
+                return { error: { message: 'not signed in', kind: 'retry' }, updatedIds: null };
             }
             const rows: AnnotationInsert[] = ops.map((op) => {
                 const a = op.annotation;
@@ -237,19 +1478,22 @@ export class SyncEngine {
                     deleted_at: a.deletedAt,
                 };
             });
-            return (await this.deps.api.insertMany(rows)).error;
+            const { error } = await this.withAuth(() => this.deps.api.insertMany(rows));
+            return { error, updatedIds: null };
         }
 
-        const patches = ops.map((op) => {
+        const patches = ops.map((op): AnnotationPatchRow => {
             const a = op.annotation;
             switch (op.type) {
                 case 'update':
+                    // No deleted_at: an edit is not a statement about whether the
+                    // mark exists. Sending the snapshot's `null` would undelete a
+                    // mark a collaborator erased while this edit sat in the outbox.
                     return {
                         id: a.id,
                         document_id: op.docId,
                         color: a.color,
                         payload: a.payload,
-                        deleted_at: a.deletedAt,
                     };
                 case 'delete':
                     return {
@@ -273,94 +1517,236 @@ export class SyncEngine {
                 }
             }
         });
-        return (await this.deps.api.updateMany(patches)).error;
+        const { error, updatedIds } = await this.withAuth(() => this.deps.api.updateMany(patches));
+        return { error, updatedIds: updatedIds ? new Set(updatedIds) : null };
     }
 
-    /** After a rejected op: adopt server truth for the annotation (or discard it). */
-    private async repair(annotationId: string): Promise<void> {
-        const { api, store } = this.deps;
-        const { data, error } = await api.fetchOne(annotationId);
-        if (error) {
-            return; // transient — next sync cycle repairs
+    /**
+     * Merge pulled or broadcast rows into the store, holding back (deferring)
+     * those it skipped for local intent. The mark's queue may have settled
+     * while that was being decided — its ack would then have found nothing
+     * held — so the held rows are looked at once more straight away.
+     */
+    private async applyRemote(
+        rows: readonly AnnotationRow[],
+        pendingIds: ReadonlySet<string>,
+        sentAt?: number,
+    ): Promise<void> {
+        const held = await this.deps.store.applyRemoteBatch(rows.map(fromServerRow), pendingIds);
+        if (held.size === 0 || this.stopped) {
+            return;
         }
-        if (data) {
-            await store.applyRemoteBatch([fromServerRow(data)], new Set());
-        } else {
-            await store.discardLocal(annotationId);
+        this.applyHeld(rows, held, sentAt);
+        await this.applyDeferred([...held]);
+    }
+
+    /**
+     * Apply rows a request that left at `sentAt` read (a pull, or askAgain).
+     * A row that may predate a push of its mark which landed after the
+     * request left (see landedSince) is not applied: under seq LWW it would
+     * replace what the push landed in this tab, until the next pull or the
+     * push's echo — an erase undone, a mark brought back — and an edit made
+     * meanwhile would go onto a row that is not what the tab shows. The
+     * server is asked again instead (`retry`); a row still in doubt after
+     * that waits for the echo or the next pull.
+     */
+    private async applyPulled(rows: readonly AnnotationRow[], sentAt: number, retry = true): Promise<void> {
+        // Queue first: an ack records the landing before it unqueues the op,
+        // so each row is either held for its queued op (dated by `sentAt`,
+        // and checked again when it is applied) or seen here as in doubt.
+        const pendingIds = await this.queuedIds();
+        if (this.stopped) {
+            return;
+        }
+        const inDoubt = rows.filter((row) => this.landedSince(row, sentAt));
+        const fresh = inDoubt.length === 0 ? rows : rows.filter((row) => !inDoubt.includes(row));
+        if (fresh.length > 0) {
+            await this.applyRemote(fresh, pendingIds, sentAt);
+        }
+        if (inDoubt.length > 0 && retry && !this.stopped) {
+            await this.askAgain(inDoubt.map((row) => row.id));
         }
     }
 
     /** Apply one row fanned out via broadcast-from-database (M4). */
     async applyServerRow(row: AnnotationRow): Promise<void> {
-        const { db, store, docId } = this.deps;
+        const { db, docId } = this.deps;
         if (row.document_id !== docId || this.stopped) {
             return;
         }
-        const pendingIds = new Set((await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId));
-        await store.applyRemoteBatch([fromServerRow(row)], pendingIds);
+        const pendingIds = await this.queuedIds();
+        // Re-checked after every await: stop() may have come in meanwhile
+        // because this account lost the score, and the caller is purging its
+        // local copy — nothing may be written back over that.
+        if (this.stopped) {
+            return;
+        }
+        await this.applyRemote([row], pendingIds);
         const state = await db.syncState.get(docId);
-        if (!state || row.seq > state.watermarkSeq) {
-            await db.syncState.put({ docId, watermarkSeq: row.seq });
+        if (this.stopped) {
+            return;
+        }
+        // Held: the row is applied, but the pull that closes the gap moves the watermark.
+        // The cursor is also gated until a pull has run the compaction check once
+        // (it is what writes checkedSeq). Until then — a device that has never
+        // pulled this score, or one whose state was cached before checkedSeq
+        // existed — the watermark is the only record of where the last full
+        // check stood, and advancing it here would let pullOnce take the
+        // broadcast's seq as the checked position and skip a compacted
+        // deletion for good. The row is applied either way; the pull fetches
+        // it again, harmlessly.
+        if (!this.watermarkHeld && state?.checkedSeq !== undefined && row.seq > state.watermarkSeq) {
+            // checkedSeq stays: a live row says nothing about deletions this
+            // device missed while it was away (see pullOnce).
+            await db.syncState.put({ ...state, docId, watermarkSeq: row.seq });
         }
     }
 
-    async pullSince(): Promise<void> {
-        if (this.pulling || this.stopped) {
+    /**
+     * Pull every row past the watermark. A request that arrives while a pull
+     * is in flight is not dropped: that pull's query may already have been
+     * read before the rows the caller is asking about (a doc-db rejoin's gap
+     * fill, say), and once live rows push the watermark past them no later
+     * pull would reach back. So the caller waits for the in-flight pull plus
+     * one more that starts after it.
+     */
+    pullSince(): Promise<void> {
+        if (this.stopped) {
+            return Promise.resolve();
+        }
+        if (this.pulling) {
+            this.pullAgain = true;
+            return this.pulling;
+        }
+        const run = async (): Promise<void> => {
+            try {
+                do {
+                    this.pullAgain = false;
+                    await this.pullOnce();
+                    // A failed pass has scheduled its own retry; going
+                    // again now would hit a throttled server early.
+                } while (this.pullAgain && !this.stopped && this.lastPullError === null);
+            } finally {
+                this.pullAgain = false;
+                this.pulling = null;
+            }
+        };
+        this.pulling = run();
+        return this.pulling;
+    }
+
+    /**
+     * Compares `checkedSeq` with the score's compaction floor: `floor` is set
+     * when it is below it (resync), and `checked` says whether the server
+     * answered. A device that has never synced the score pulls everything
+     * anyway, and one that cannot ask (an older server, a failed request)
+     * pulls as before without moving checkedSeq, so it asks again next time:
+     * the check never holds sync up, and never lets a stale device off.
+     */
+    private async compactionFloor(checkedSeq: number): Promise<{ floor: number | null; checked: boolean }> {
+        const { api, docId } = this.deps;
+        if (checkedSeq === 0 || !api.fetchResyncFloor) {
+            return { floor: null, checked: true };
+        }
+        const fetchFloor = api.fetchResyncFloor.bind(api);
+        const { floor, error } = await this.withAuth(() => fetchFloor(docId));
+        if (error) {
+            return { floor: null, checked: false };
+        }
+        return { floor: floor !== null && checkedSeq < floor ? floor : null, checked: true };
+    }
+
+    private async pullOnce(): Promise<void> {
+        const { db, api, docId } = this.deps;
+        // Read before the first request: a gap noted after this pull began
+        // is not covered by it.
+        const gap = this.gapGeneration;
+        const state = await db.syncState.get(docId);
+        let watermark = state?.watermarkSeq ?? 0;
+        const checkedSeq = state?.checkedSeq ?? watermark;
+        // Away longer than the tombstones lasted: deletions this device never
+        // saw are gone from the server, so watermark pulls cannot bring them.
+        // Pull the score's whole current set instead, and afterwards drop every
+        // synced mark it did not contain.
+        const { floor, checked } = await this.compactionFloor(checkedSeq);
+        if (this.stopped) {
             return;
         }
-        this.pulling = true;
-        try {
-            const { db, api, store, docId } = this.deps;
-            const state = await db.syncState.get(docId);
-            let watermark = state?.watermarkSeq ?? 0;
-            let after = Math.max(0, watermark - PULL_OVERLAP);
+        const seen = floor === null ? null : new Set<string>();
+        if (floor !== null) {
+            watermark = 0;
+        }
+        let after = Math.max(0, watermark - PULL_OVERLAP);
 
-            for (;;) {
-                const { data, error } = await api.fetchSince(docId, after, PULL_PAGE_SIZE);
-                if (error) {
-                    this.setStatus(error.transient && navigator.onLine === false ? 'offline' : 'error');
-                    if (error.transient) {
-                        this.scheduleRetry();
-                    }
-                    return;
-                }
-                const rows = data ?? [];
-                if (rows.length === 0) {
-                    break;
-                }
-                const pendingIds = new Set(
-                    (await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId),
-                );
-                await store.applyRemoteBatch(rows.map(fromServerRow), pendingIds);
-                const last = rows[rows.length - 1];
-                if (last) {
-                    watermark = Math.max(watermark, last.seq);
-                    after = last.seq;
-                }
-                if (rows.length < PULL_PAGE_SIZE) {
-                    break;
-                }
+        for (;;) {
+            const sentAt = ++this.clock;
+            const { data, error } = await this.withAuth(() => api.fetchSince(docId, after, PULL_PAGE_SIZE));
+            // stop() can land during any await below (the account lost
+            // the score and its local copy is being purged): a pull that
+            // was already in flight must not write rows or a watermark
+            // back afterwards.
+            if (this.stopped) {
+                return;
             }
-            await db.syncState.put({ docId, watermarkSeq: watermark });
-        } finally {
-            this.pulling = false;
+            if (error) {
+                this.lastPullError = error;
+                if (error.kind === 'reject') {
+                    this.setStatus('error');
+                } else {
+                    this.deferRetry(error);
+                }
+                return;
+            }
+            const rows = data ?? [];
+            if (rows.length === 0) {
+                break;
+            }
+            await this.applyPulled(rows, sentAt);
+            if (this.stopped) {
+                return;
+            }
+            rows.forEach((row) => seen?.add(row.id));
+            const last = rows[rows.length - 1];
+            if (last) {
+                watermark = Math.max(watermark, last.seq);
+                after = last.seq;
+            }
+            if (rows.length < PULL_PAGE_SIZE) {
+                break;
+            }
+        }
+        if (this.stopped) {
+            return;
+        }
+        if (seen && floor !== null) {
+            // Everything up to the floor (and up to what was pulled) is now
+            // accounted for: a synced mark at or below it that the server did
+            // not return is gone there. Above it, a mark not returned may simply
+            // have arrived since the pull read past it, and is kept.
+            watermark = Math.max(watermark, floor);
+            await this.deps.store.dropAbsent(seen, watermark, await this.queuedIds());
+            if (this.stopped) {
+                return;
+            }
+        }
+        await db.syncState.put({ docId, watermarkSeq: watermark, checkedSeq: checked ? watermark : checkedSeq });
+        this.lastPullError = null;
+        if (gap === this.gapGeneration) {
+            this.watermarkHeld = false;
         }
     }
 }
 
 /** Production AnnotationsApi backed by the shared Supabase client. */
 export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): AnnotationsApi => {
-    const classify = (message: string, status?: number): ApiError => ({
-        message,
-        // PostgREST/HTTP failures with no status (network) are transient.
-        transient: status === undefined || status === 0 || status >= 500,
-    });
+    const fail = (error: { message: string } | null, status: number): ApiError | null =>
+        error ? classifyFailure(error.message, status) : null;
     return {
         async insertIgnoreDuplicates(row) {
             const { error, status } = await supabase
                 .from('annotations')
                 .upsert(row, { onConflict: 'id', ignoreDuplicates: true });
-            return { error: error ? classify(error.message, status) : null };
+            return { error: fail(error, status) };
         },
         async insertMany(rows) {
             if (rows.length === 0) {
@@ -370,34 +1756,73 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
                 return this.insertIgnoreDuplicates(rows[0]!);
             }
             const { error, status } = await supabase.rpc('insert_annotations_batch', { p_rows: rows });
-            return { error: error ? classify(error.message, status) : null };
+            return { error: fail(error, status) };
         },
         async update(id, docId, patch) {
-            const { error, status } = await supabase
+            // .select('id') makes PostgREST return the rows it updated, so a
+            // patch RLS filtered out shows up as an empty list, not a success.
+            const { data, error, status } = await supabase
                 .from('annotations')
                 .update(patch)
                 .eq('id', id)
-                .eq('document_id', docId);
-            return { error: error ? classify(error.message, status) : null };
+                .eq('document_id', docId)
+                .select('id');
+            return { error: fail(error, status), updatedIds: error ? null : (data ?? []).map((row) => row.id) };
         },
         async updateMany(patches) {
             if (patches.length === 0) {
-                return { error: null };
+                return { error: null, updatedIds: [] };
             }
             if (patches.length === 1) {
-                const p = patches[0]!;
-                return this.update(p.id, p.document_id, {
-                    color: p.color,
-                    payload: p.payload,
-                    deleted_at: p.deleted_at,
-                });
+                const { id, document_id, ...patch } = patches[0]!;
+                return this.update(id, document_id, patch);
             }
-            const { error, status } = await supabase.rpc('patch_annotations_batch', { p_patches: patches });
-            return { error: error ? classify(error.message, status) : null };
+            const { data, error, status } = await supabase.rpc('patch_annotations_batch', { p_patches: patches });
+            return { error: fail(error, status), updatedIds: error ? null : (data ?? null) };
         },
         async fetchOne(id) {
             const { data, error, status } = await supabase.from('annotations').select('*').eq('id', id).maybeSingle();
-            return { data, error: error ? classify(error.message, status) : null };
+            return { data, error: fail(error, status) };
+        },
+        async fetchMany(docId, ids) {
+            if (ids.length === 0) {
+                return { data: [], error: null };
+            }
+            const { data, error, status } = await supabase
+                .from('annotations')
+                .select('*')
+                .eq('document_id', docId)
+                .in('id', ids);
+            return { data, error: fail(error, status) };
+        },
+        async fetchDocumentArchived(docId) {
+            const { data, error, status } = await supabase
+                .from('documents')
+                .select('archived_at')
+                .eq('id', docId)
+                .maybeSingle();
+            return { archived: !error && data !== null && data.archived_at !== null, error: fail(error, status) };
+        },
+        async fetchSignInEnded() {
+            // Only a roster student's sign-in is ended under a live token (by
+            // their teacher). For anyone else a refusal is about the change,
+            // and asking would cost every refusal a round trip for nothing.
+            // app_metadata is admin-set, so the routing answer is trustworthy
+            // here; the server's answer is what decides.
+            const { data } = await supabase.auth.getSession();
+            if (data.session?.user.app_metadata?.['user_type'] !== 'student') {
+                return { ended: false, error: null };
+            }
+            const { data: revoked, error, status } = await supabase.rpc('student_access_revoked');
+            return { ended: !error && revoked === true, error: fail(error, status) };
+        },
+        async fetchResyncFloor(docId) {
+            const { data, error, status } = await supabase.rpc('annotation_resync_floor', { p_document: docId });
+            return { floor: error || typeof data !== 'number' ? null : data, error: fail(error, status) };
+        },
+        async fetchSeatReadOnly() {
+            const { data, error, status } = await supabase.rpc('caller_seat_read_only');
+            return { readOnly: !error && data === true, error: fail(error, status) };
         },
         async fetchSince(docId, afterSeq, limit) {
             const { data, error, status } = await supabase
@@ -407,7 +1832,13 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
                 .gt('seq', afterSeq)
                 .order('seq', { ascending: true })
                 .limit(limit);
-            return { data, error: error ? classify(error.message, status) : null };
+            return { data, error: fail(error, status) };
+        },
+        async refreshAuth() {
+            // The auth client serializes refreshes behind its own lock, so a
+            // refresh already in flight from its timer is shared, not doubled.
+            const { data, error } = await supabase.auth.refreshSession();
+            return !error && data.session !== null;
         },
     };
 };

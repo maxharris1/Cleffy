@@ -61,6 +61,21 @@ describe('entitlement resolution', () => {
         expect(resolve('teacher', [founding]).limits).toEqual(TIER_LIMITS.teacher);
     });
 
+    it('says when the entitling subscription ends instead of renewing', () => {
+        // resolve_entitlements() in 20261009120101: the Account page prints
+        // "Ends <date>" rather than "Renews <date>" from this flag.
+        expect(resolve('teacher', [sub({ user_id: 'teacher', cancel_at_period_end: true })]).cancel_at_period_end).toBe(
+            true,
+        );
+        expect(resolve('teacher', [sub({ user_id: 'teacher' })]).cancel_at_period_end).toBe(false);
+        // A seat ends when the owner's Academy does.
+        expect(
+            resolve('member', [sub({ user_id: 'owner', tier: 'academy', cancel_at_period_end: true })], ['owner'])
+                .cancel_at_period_end,
+        ).toBe(true);
+        expect(resolve('teacher', []).cancel_at_period_end).toBe(false);
+    });
+
     it('grants academy to a member through the owner’s subscription', () => {
         const result = resolve('member', [sub({ user_id: 'owner', tier: 'academy' })], ['owner']);
         expect(result.tier).toBe('academy');
@@ -175,6 +190,7 @@ describe('provisioned students', () => {
             status: null,
             source: 'managed',
             current_period_end: null,
+            cancel_at_period_end: false,
             limits: STUDENT_LIMITS,
         });
     });

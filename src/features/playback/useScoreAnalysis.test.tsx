@@ -1,9 +1,10 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { getDb } from '@/sync/db';
+import type { ScoreAnalysisBroadcast } from '@/sync/wire';
 
 interface FakeState {
     row: Record<string, unknown> | null;
@@ -12,24 +13,32 @@ interface FakeState {
 }
 
 const fake: FakeState = { row: null, fail: false, invoke: { data: { ok: true }, error: null } };
+/** Every request the hook makes, so a disabled hook can be proven silent. */
+const calls = { from: 0, invoke: 0 };
 
 vi.mock('@/lib/supabase', () => ({
     isSupabaseConfigured: () => true,
     getSupabase: () => ({
-        from: () => ({
-            select: () => ({
-                eq: () => ({
-                    maybeSingle: async () => {
-                        if (fake.fail) {
-                            return { data: null, error: { message: 'offline' } };
-                        }
-                        return { data: fake.row, error: null };
-                    },
+        from: () => {
+            calls.from++;
+            return {
+                select: () => ({
+                    eq: () => ({
+                        maybeSingle: async () => {
+                            if (fake.fail) {
+                                return { data: null, error: { message: 'offline' } };
+                            }
+                            return { data: fake.row, error: null };
+                        },
+                    }),
                 }),
-            }),
-        }),
+            };
+        },
         functions: {
-            invoke: async () => fake.invoke,
+            invoke: async () => {
+                calls.invoke++;
+                return fake.invoke;
+            },
         },
     }),
 }));
@@ -41,6 +50,8 @@ beforeEach(async () => {
     fake.row = null;
     fake.fail = false;
     fake.invoke = { data: { ok: true }, error: null };
+    calls.from = 0;
+    calls.invoke = 0;
     await getDb().scoreCache.clear();
 });
 
@@ -48,6 +59,24 @@ describe('useScoreAnalysis', () => {
     it('is unavailable when disabled (local docs)', () => {
         const { result } = renderHook(() => useScoreAnalysis(DOC, false));
         expect(result.current.state).toEqual({ kind: 'unavailable' });
+    });
+
+    it('stays silent when disabled: no status read, no OMR request, broadcasts ignored', async () => {
+        // The play-along release flag passes enabled=false for cloud scores too,
+        // so this is what keeps a switched-off feature from costing a request.
+        const { result } = renderHook(() => useScoreAnalysis(DOC, false));
+        await act(async () => {
+            await result.current.generate();
+            result.current.applyBroadcast({ document_id: DOC, status: 'ready' } as ScoreAnalysisBroadcast);
+            result.current.applyBroadcast({
+                document_id: DOC,
+                status: 'processing',
+                progress: 0.5,
+            } as ScoreAnalysisBroadcast);
+            result.current.refresh();
+        });
+        expect(result.current.state).toEqual({ kind: 'unavailable' });
+        expect(calls).toEqual({ from: 0, invoke: 0 });
     });
 
     it('reports none when no analysis row exists', async () => {

@@ -1,7 +1,11 @@
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
 
-import { getSupabase } from '@/lib/supabase';
+import type { AgeGate } from '@/features/auth/ageCheck';
+import { perfMark } from '@/lib/perf';
+import { safePresenceName } from '@/lib/presenceName';
+import { getSupabase, type TypedSupabaseClient } from '@/lib/supabase';
+import { noteAccountSignedIn } from '@/sync/inkRecoverySignal';
 
 export interface SessionState {
     session: Session | null;
@@ -13,15 +17,63 @@ export interface SessionState {
 
 const authCallbackUrl = (): string => `${window.location.origin}/auth/callback`;
 
+/**
+ * A Turnstile token for GoTrue, or nothing at all.
+ *
+ * Every auth call below takes one, because GoTrue's captcha is a PROJECT-WIDE
+ * setting: the moment `[auth.captcha]` is enabled, /signup, /token (the
+ * password grant), /recover, /resend AND /signup?anonymous all demand a token,
+ * not just the endpoint somebody had in mind when they switched it on. A form
+ * that did not send one would simply stop working, and the failure would read
+ * as a server error rather than a missing check.
+ *
+ * `options` is omitted entirely when there is no token, so a build without
+ * `VITE_TURNSTILE_SITE_KEY` sends byte-for-byte the request it sent before —
+ * no `captchaToken: undefined` on the wire, and nothing for a project with
+ * captcha disabled to object to. That is the whole inertness story on this
+ * side; the widget's half is in `turnstile.ts`.
+ *
+ * The token is NOT verified here and cannot be: that is Cloudflare's judgement,
+ * reached by GoTrue with the secret key, server-side. All the browser does is
+ * carry it.
+ */
+const captchaOptions = (captchaToken?: string | null): { captchaToken: string } | Record<string, never> =>
+    captchaToken ? { captchaToken } : {};
+
+/**
+ * Last session observed in this tab. `undefined` means nothing has resolved yet
+ * (cold start); `null` means we know the user is signed out. Remounts of
+ * useSession / auth gates read this synchronously so SPA navigations do not
+ * flash BrandLoading while getSession() round-trips again.
+ */
+let knownSession: Session | null | undefined = undefined;
+
+const rememberSession = (session: Session | null): void => {
+    knownSession = session;
+    if (session) {
+        // A signed-out account's ink still held in this tab is its again,
+        // or goes once another account signs in here (inkRecovery).
+        noteAccountSignedIn(session.user.id);
+    }
+};
+
 /** Reactive Supabase session. */
 export const useSession = (): SessionState => {
-    const [state, setState] = useState<SessionState>({ session: null, loading: true, lastEvent: null });
+    const [state, setState] = useState<SessionState>(() =>
+        knownSession !== undefined
+            ? { session: knownSession, loading: false, lastEvent: null }
+            : { session: null, loading: true, lastEvent: null },
+    );
 
     useEffect(() => {
         const supabase = getSupabase();
         let mounted = true;
 
         void supabase.auth.getSession().then(({ data }) => {
+            if (knownSession === undefined) {
+                perfMark('session-known');
+            }
+            rememberSession(data.session);
             if (mounted) {
                 setState((prev) => ({ ...prev, session: data.session, loading: false }));
             }
@@ -29,6 +81,7 @@ export const useSession = (): SessionState => {
         const {
             data: { subscription },
         } = supabase.auth.onAuthStateChange((event, session) => {
+            rememberSession(session);
             if (mounted) {
                 setState({ session, loading: false, lastEvent: event });
             }
@@ -60,15 +113,29 @@ export const userTypeOf = (session: Session | null): 'student' | null => {
     return meta?.['user_type'] === 'student' ? 'student' : null;
 };
 
-/** Email/password registration. */
+/**
+ * Email/password registration.
+ *
+ * `captchaToken` is how sign-up gets a server-side-verified captcha without
+ * being rebuilt behind an Edge Function: GoTrue checks the token against
+ * Cloudflare with the secret key before it creates anything, so the
+ * verification is no more skippable than it would be in a function of our own —
+ * and GoTrue keeps ownership of the confirmation email, which is the thing a
+ * hand-rolled sign-up would have had to replace.
+ */
 export const signUpWithPassword = async (
     email: string,
     password: string,
+    captchaToken: string | null | undefined,
+    ageGate: AgeGate,
 ): Promise<{ needsEmailConfirmation: boolean }> => {
     const { data, error } = await getSupabase().auth.signUp({
         email,
         password,
-        options: { emailRedirectTo: authCallbackUrl() },
+        // age_gate is what the before_user_created hook checks
+        // (20261021120000_consent_age.sql): country and the age it requires,
+        // never the birthday the age screen compared it with.
+        options: { emailRedirectTo: authCallbackUrl(), data: { age_gate: ageGate }, ...captchaOptions(captchaToken) },
     });
     if (error) {
         throw error;
@@ -77,18 +144,54 @@ export const signUpWithPassword = async (
     return { needsEmailConfirmation: !data.session };
 };
 
+/**
+ * Send the sign-up confirmation email again, to an address that has just been
+ * signed up from this page.
+ *
+ * It exists because the link is short-lived — production's `mailer_otp_exp` is
+ * one hour — and without a resend the only route back from an expired link was
+ * signing up again, which answers `user_already_exists`, which sends the user
+ * to sign in, which fails with "email not confirmed": a loop with no exit.
+ *
+ * Says nothing about the address either way. GoTrue's /resend answers an
+ * address with no pending confirmation differently from one that has one, so
+ * the caller must report the same thing whatever comes back, exactly as the
+ * forgot-password form does — see `confirmationResendProblem` in authErrors.ts,
+ * which draws the line between the failures that are safe to name and the ones
+ * that would turn this button into a way to test which addresses have accounts.
+ */
+export const resendSignUpConfirmation = async (email: string, captchaToken?: string | null): Promise<void> => {
+    const { error } = await getSupabase().auth.resend({
+        type: 'signup',
+        email,
+        options: { emailRedirectTo: authCallbackUrl(), ...captchaOptions(captchaToken) },
+    });
+    if (error) {
+        throw error;
+    }
+};
+
 /** Email/password sign-in. */
-export const signInWithPassword = async (email: string, password: string): Promise<void> => {
-    const { error } = await getSupabase().auth.signInWithPassword({ email, password });
+export const signInWithPassword = async (
+    email: string,
+    password: string,
+    captchaToken?: string | null,
+): Promise<void> => {
+    const { error } = await getSupabase().auth.signInWithPassword({
+        email,
+        password,
+        ...(captchaToken ? { options: captchaOptions(captchaToken) } : {}),
+    });
     if (error) {
         throw error;
     }
 };
 
 /** Send password-reset email (link lands on /update-password with recovery session). */
-export const requestPasswordReset = async (email: string): Promise<void> => {
+export const requestPasswordReset = async (email: string, captchaToken?: string | null): Promise<void> => {
     const { error } = await getSupabase().auth.resetPasswordForEmail(email, {
         redirectTo: `${window.location.origin}/update-password`,
+        ...captchaOptions(captchaToken),
     });
     if (error) {
         throw error;
@@ -103,25 +206,426 @@ export const updatePassword = async (password: string): Promise<void> => {
     }
 };
 
-/** Student join flow: anonymous session carrying a display name for presence. */
-export const signInAnonymouslyWithName = async (displayName: string): Promise<void> => {
+/**
+ * Student join flow: anonymous session carrying a display name for presence.
+ *
+ * Takes a token like the rest: an anonymous sign-in is a POST to the same
+ * captcha-protected signup endpoint, so enabling GoTrue's captcha makes the
+ * share-link join page need one too — the one flow where an unsolved challenge
+ * would stop a child getting into the score their teacher just shared.
+ */
+export const signInAnonymouslyWithName = async (
+    displayName: string,
+    captchaToken: string | null | undefined,
+    ageGate: AgeGate,
+): Promise<void> => {
     const supabase = getSupabase();
-    const { error } = await supabase.auth.signInAnonymously({ options: { data: { display_name: displayName } } });
+    // A guest is a new auth user like any other, so the hook checks its
+    // age_gate too.
+    const { error } = await supabase.auth.signInAnonymously({
+        options: { data: { display_name: displayName, age_gate: ageGate }, ...captchaOptions(captchaToken) },
+    });
     if (error) {
         throw error;
     }
 };
 
-export const signOut = async (): Promise<void> => {
-    await getSupabase().auth.signOut();
-    // Drop cached ScoreData so a later account on this browser can't replay it.
-    const { getDb } = await import('@/sync/db');
-    await getDb()
-        .scoreCache.clear()
-        .catch(() => undefined);
+/** How long sign-out waits for the outbox to upload before asking. */
+const SIGN_OUT_SYNC_TIMEOUT_MS = 8000;
+
+/** How long sign-out waits for pending lesson-history snapshots. */
+const SIGN_OUT_SNAPSHOT_TIMEOUT_MS = 3000;
+
+/**
+ * How long an ended sign-in's sign-out (signOutKeepingChanges,
+ * signOutDeletedAccount) waits on this device's storage in all — writing
+ * ink it could not store before, then every later step — before it signs
+ * out regardless: one deadline for the lot, not one per step. A stalled
+ * IndexedDB never answers, and the ended session must not stay installed
+ * waiting on it.
+ */
+export const SIGN_OUT_STORAGE_TIMEOUT_MS = 5000;
+
+/** Waits bounded together by one deadline: each gets what is left of it. */
+type Bounded = <T>(work: Promise<T>, fallback: T) => Promise<T>;
+
+const deadlineOf = (ms: number): Bounded => {
+    const end = Date.now() + ms;
+    return (work, fallback) => within(work, Math.max(0, end - Date.now()), fallback);
 };
 
-/** Display name for presence/attribution: metadata name, else email, else Guest. */
+/** `work`, or `fallback` once `ms` have passed without it settling (or when it fails). */
+const within = async <T>(work: Promise<T>, ms: number, fallback: T): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            work.catch(() => fallback),
+            new Promise<T>((resolve) => {
+                timer = setTimeout(() => resolve(fallback), ms);
+            }),
+        ]);
+    } finally {
+        clearTimeout(timer);
+    }
+};
+
+/**
+ * The account signed in in this tab, for clearing what is its own at
+ * sign-out: the stored session's, else the last one this tab saw (an
+ * expired session whose refresh failed reads as none). Undefined when
+ * neither says.
+ */
+export const signedInUserId = async (): Promise<string | undefined> => {
+    try {
+        const { data } = await getSupabase().auth.getSession();
+        if (data.session) {
+            return data.session.user.id;
+        }
+    } catch {
+        // Fall back on what this tab last saw.
+    }
+    return knownSession?.user.id;
+};
+
+export interface SignOutSyncResult {
+    /**
+     * Annotation changes still not on the server; signing out deletes them.
+     * Includes marks a viewer could not even write to this device
+     * (inkRecovery), which exist only in this tab's memory.
+     */
+    pending: number;
+    /** Marks whose change the server refused for good while uploading. */
+    refused: number;
+    /**
+     * How many of `pending` another account queued on this device (a session
+     * that ended without signing out): never uploaded under this account,
+     * deleted all the same by sign-out.
+     */
+    foreign?: number;
+}
+
+/**
+ * Upload what this device still owes the server, then report how many
+ * annotation changes are STILL unsynced, and how many the server refused
+ * outright on the way. Sign-out clears the unsynced ones from the device, so
+ * either count being non-zero must be put to the user before signOut().
+ * Never throws. Reports nothing pending only when the outbox cannot be read
+ * at all — and then sign-out cannot clear it either.
+ */
+export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): Promise<SignOutSyncResult> => {
+    const { unsavedMarkCount } = await import('@/sync/inkRecovery');
+    // Read after the upload: an edit whose write failed is not in the outbox,
+    // so the drain's "nothing pending" does not cover it.
+    const outbox = await syncOutboxBeforeSignOut(timeoutMs);
+    const unsaved = unsavedMarkCount();
+    return unsaved > 0 ? { ...outbox, pending: outbox.pending + unsaved } : outbox;
+};
+
+const syncOutboxBeforeSignOut = async (timeoutMs: number): Promise<SignOutSyncResult> => {
+    const [
+        { getDb },
+        { drainCloudOutboxes, foreignCloudOpCount, pendingCloudOpCount },
+        { createSupabaseAnnotationsApi },
+        snapshots,
+    ] = await Promise.all([
+        import('@/sync/db'),
+        import('@/sync/signOutSync'),
+        import('@/sync/syncEngine'),
+        import('@/features/viewer/history/snapshotService'),
+    ]);
+    const db = getDb();
+    let pending: number;
+    let refused = 0;
+    let foreign = 0;
+    let userId: string | null = null;
+    try {
+        pending = await pendingCloudOpCount(db);
+    } catch {
+        return { pending: 0, refused: 0 };
+    }
+    try {
+        const supabase = getSupabase();
+        const { data } = await supabase.auth.getSession();
+        userId = data.session?.user.id ?? null;
+        if (!userId) {
+            return { pending, refused };
+        }
+        if (pending > 0) {
+            ({ pending, refused, foreign } = await drainCloudOutboxes({
+                db,
+                api: createSupabaseAnnotationsApi(supabase),
+                getUserId: () => userId,
+                timeoutMs,
+            }));
+        }
+        // Day snapshots are history, not marks — best effort, never a reason to
+        // ask, and not worth a wait at all when none are waiting.
+        if ((await snapshots.countPendingSnapshots(db)) > 0) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            await Promise.race([
+                snapshots.retryPendingSnapshots(db).catch(() => undefined),
+                new Promise((resolve) => {
+                    timer = setTimeout(resolve, Math.min(timeoutMs, SIGN_OUT_SNAPSHOT_TIMEOUT_MS));
+                }),
+            ]);
+            clearTimeout(timer);
+        }
+    } catch (err) {
+        console.warn('Could not sync before sign-out', err);
+        pending = await pendingCloudOpCount(db).catch(() => pending);
+        // The drain never got to say which of them are another account's.
+        const known = userId;
+        if (known && pending > 0) {
+            foreign = await foreignCloudOpCount(db, known).catch(() => foreign);
+        }
+    }
+    return { pending, refused, foreign: Math.min(foreign, pending) };
+};
+
+/**
+ * End the session on THIS device whatever the server says.
+ *
+ * `auth.signOut({ scope: 'local' })` POSTs /logout first, and when that cannot
+ * finish it may answer `{ error }` with the session still stored: offline with
+ * an expired access token, the refresh it attempts on the way fails and it
+ * returns before removing anything. It can also throw (the auth lock, a
+ * rejected initialisation). Ignoring either left the next page load signed in
+ * as the account the user had just signed out of — on a shared studio iPad,
+ * the next pupil. So on any failure the stored copies go regardless (each
+ * `*-auth-token` key and the iOS restore cookie, forgetStoredSessions), and a
+ * second local sign-out follows: with nothing stored it makes no request, but
+ * it does clear what the client holds in memory and emits SIGNED_OUT, so
+ * useSession, realtime's token and getSession() all read signed-out in this
+ * tab without a reload. The server-side refresh token is left to expire, as it
+ * would after an ended sign-in. Never throws.
+ */
+const signOutThisDevice = async (supabase: TypedSupabaseClient): Promise<void> => {
+    let failure: unknown;
+    try {
+        const { error } = await supabase.auth.signOut({ scope: 'local' });
+        failure = error;
+    } catch (err) {
+        failure = err ?? new Error('Sign-out threw');
+    }
+    if (!failure) {
+        return;
+    }
+    console.warn('Sign-out could not reach the server; forgetting this device’s session', failure);
+    const { forgetStoredSessions } = await import('@/features/auth/authStorage');
+    forgetStoredSessions();
+    try {
+        await supabase.auth.signOut({ scope: 'local' });
+    } catch {
+        // Storage is already empty, so the next load starts signed out.
+    }
+};
+
+export const signOut = async (): Promise<void> => {
+    // Bump the library mutation epoch on BOTH sides of the auth round-trip.
+    // The first bump outranks any response already in flight (including the
+    // window after callers delete the entitlements row, just ahead of us).
+    // The second outranks a request DISPATCHED during the round-trip — e.g.
+    // LibraryPage refetching the response the first bump outranked — which
+    // still left with a live JWT and would otherwise re-persist this
+    // account's rows after the clears below swept them.
+    const [{ noteLibraryMutation }, { stopSnapshotWrites }, { stopAllBackgroundDrains }] = await Promise.all([
+        import('@/features/library/libraryCache'),
+        import('@/features/viewer/history/snapshotService'),
+        import('@/sync/backgroundDrain'),
+    ]);
+    noteLibraryMutation();
+    // Whose held ink to clear (clearAccountCachesFromDevice), asked while the
+    // session is still here.
+    const userId = await signedInUserId();
+    // A snapshot upload still in flight from syncBeforeSignOut (it is raced
+    // against a timer, not awaited) must not write this account's day
+    // snapshot back into Dexie after the clear below.
+    stopSnapshotWrites();
+    // Nor may a background outbox drain write a synced row back after it.
+    stopAllBackgroundDrains();
+    // Local scope: THIS device signs out, and the account's sessions elsewhere
+    // are left alone.
+    //
+    // supabase-js defaults to `global`, which revokes every refresh token the
+    // user has — so a teacher signing out of the studio iPad at the end of a
+    // lesson was also signing out their laptop and their phone, with nothing
+    // in the UI that asked for that or said it had happened. There is no "sign
+    // out everywhere" affordance anywhere in the app, so the global behaviour
+    // was reachable only by accident, and the only thing it protected against
+    // (a session you no longer trust on a device you no longer have) is better
+    // served by an explicit control than by every ordinary sign-out.
+    //
+    // This also makes the two sign-out paths agree: signOutEndedSignIn() has
+    // always passed `{ scope: 'local' }`, and what the privacy policy says
+    // happens on sign-out ("removes from that device…", legalContent.ts
+    // §device-storage) is now what the code does.
+    await signOutThisDevice(getSupabase());
+    noteLibraryMutation();
+    rememberSession(null);
+    await clearAccountCachesFromDevice({ userId });
+};
+
+/**
+ * Sign out after the server ended this sign-in under the device: a roster
+ * student whose teacher archived them or reset their access. Their token
+ * still parses but reaches nothing, and every refresh is refused.
+ *
+ * Unlike signOut(), the account's queued changes and annotation mirror stay:
+ * there is nothing to upload them with now (syncBeforeSignOut would only meet
+ * the same refusal), and nothing about the teacher's action makes them wrong.
+ * A reset student is still a member under the same account, and a restored
+ * one too, so they upload when that account signs in here again. Every op is
+ * stamped with the account first (stampOwnCloudOps), so no other account on
+ * the device sends or draws them meanwhile (opOwnerFor), and its own sign-out
+ * warns before it clears them. The cached scores, lists and PDFs go, as on
+ * any sign-out.
+ *
+ * Local scope: the server has already ended the sessions, and a global
+ * sign-out would only say so again. Resolves to how many queued changes were
+ * kept (0 when the outbox cannot be read).
+ *
+ * Ink this device could not store yet gets one more try first: written, it
+ * is kept with the rest. Every storage wait shares one deadline,
+ * SIGN_OUT_STORAGE_TIMEOUT_MS. Whatever is still unwritten then is not lost:
+ * the sign-out cuts off every write of it still on its way
+ * (inkRecovery.retireAccountInk, so none lands after), and keeps it in this
+ * tab, for Export or Discard (SignedOutInkNotice). The caller offers Export
+ * of it before this too (EndedSignInInkPrompt).
+ */
+export const signOutKeepingChanges = async (): Promise<number> => {
+    const [{ getDb }, { stampOwnCloudOps }, { retryAccountInk }] = await Promise.all([
+        import('@/sync/db'),
+        import('@/sync/signOutSync'),
+        import('@/sync/inkRecovery'),
+    ]);
+    // Before the PDFs (and with them the legacy ownership test) are cleared.
+    return signOutEndedSignIn(async (userId, bounded) => {
+        if (userId) {
+            await bounded(retryAccountInk(userId), undefined);
+        }
+        return {
+            count: userId ? await bounded(stampOwnCloudOps(getDb(), userId), 0) : 0,
+            keepCloudAnnotations: true,
+        };
+    });
+};
+
+/**
+ * Sign out a roster student whose account no longer exists: it was deleted
+ * with their teacher's (student-provision has no per-student delete). Like
+ * signOutKeepingChanges, the server has already ended the sign-in, so this is
+ * local only; unlike it, nothing this account queued can ever upload (no
+ * sign-in will reach it again), so its changes are discarded rather than
+ * promised. Another account's kept changes on the device stay for that
+ * account's next sign-in. Resolves to how many queued changes were discarded.
+ */
+export const signOutDeletedAccount = async (): Promise<number> => {
+    const [{ getDb }, { dropOwnCloudOps, pendingCloudOpCount }] = await Promise.all([
+        import('@/sync/db'),
+        import('@/sync/signOutSync'),
+    ]);
+    return signOutEndedSignIn(async (userId, bounded) => {
+        const db = getDb();
+        const discarded = userId ? await bounded(dropOwnCloudOps(db, userId), 0) : 0;
+        // Unreadable reads as "something is waiting": keeping marks nobody
+        // will draw costs a little storage, clearing them could lose them.
+        const othersWaiting = await bounded(pendingCloudOpCount(db), 1);
+        return { count: discarded, keepCloudAnnotations: othersWaiting > 0 };
+    });
+};
+
+/**
+ * What signOutKeepingChanges and signOutDeletedAccount share: stop every
+ * writer, settle the outbox (`settle`, before the PDFs and with them the
+ * legacy ownership test are cleared), sign out locally, and clear the
+ * account's caches. Resolves to `settle`'s count. No storage step can hold
+ * it: `settle`'s waits and the cache clear share one deadline,
+ * SIGN_OUT_STORAGE_TIMEOUT_MS from the start (the account's writes are cut
+ * off at once, before any wait, and its held ink kept in this tab).
+ */
+const signOutEndedSignIn = async (
+    settle: (userId: string | null, bounded: Bounded) => Promise<{ count: number; keepCloudAnnotations: boolean }>,
+): Promise<number> => {
+    const [{ noteLibraryMutation }, { stopSnapshotWrites }, { stopAllBackgroundDrains }] = await Promise.all([
+        import('@/features/library/libraryCache'),
+        import('@/features/viewer/history/snapshotService'),
+        import('@/sync/backgroundDrain'),
+    ]);
+    // As signOut(): nothing may write this account's rows back after the clear.
+    noteLibraryMutation();
+    stopSnapshotWrites();
+    stopAllBackgroundDrains();
+    const supabase = getSupabase();
+    const bounded = deadlineOf(SIGN_OUT_STORAGE_TIMEOUT_MS);
+    const userId = (await signedInUserId()) ?? null;
+    const { count, keepCloudAnnotations } = await settle(userId, bounded);
+    await signOutThisDevice(supabase);
+    noteLibraryMutation();
+    rememberSession(null);
+    await bounded(clearAccountCachesFromDevice({ keepCloudAnnotations, userId: userId ?? undefined }), undefined);
+    return count;
+};
+
+/**
+ * What sign-out removes from this browser: the signed-out account's cached
+ * scores, lists and cloud-score marks. Device-only (`local-…`) scores and the
+ * app's preferences are not the account's and stay. Also the tail of deleting
+ * a guest profile (accountDeletion.ts), which ends the same way.
+ * `keepCloudAnnotations` keeps the marks, their outbox, watermarks and day
+ * snapshots (signOutKeepingChanges). `userId`: the account signing out
+ * (undefined when that could not be told; see retireAccountInk).
+ */
+export const clearAccountCachesFromDevice = async ({
+    keepCloudAnnotations = false,
+    userId,
+}: { keepCloudAnnotations?: boolean; userId?: string } = {}): Promise<void> => {
+    // Marks a viewer could not store, held in this tab's memory: the
+    // account's writes are cut off at once (none lands after), and its held
+    // ink leaves every viewer and Retry — but is not dropped, being its only
+    // copy: it stays in this tab for Export or an explicit Discard
+    // (SignedOutInkNotice), until the tab closes or another account signs in
+    // here. Only this account's. The other tabs hear too, and do the same.
+    const { retireAccountInk } = await import('@/sync/inkRecovery');
+    retireAccountInk(userId, 'here');
+    // Drop cached ScoreData so a later account on this browser can't replay it.
+    const { getDb } = await import('@/sync/db');
+    const { clearCloudAnnotationData } = await import('@/sync/signOutSync');
+    const { cancelBackgroundPdfCache } = await import('@/sync/pdfCache');
+    // A score download that outlived its viewer must not cache the PDF after the clear.
+    cancelBackgroundPdfCache();
+    const db = getDb();
+    await Promise.all([
+        db.scoreCache.clear().catch(() => undefined),
+        db.libraryList.clear().catch(() => undefined),
+        db.rosterCache.clear().catch(() => undefined),
+        db.assignmentsCache.clear().catch(() => undefined),
+        db.pdfCache.clear().catch(() => undefined),
+        db.pdfMeta.clear().catch(() => undefined),
+        db.thumbnails.clear().catch(() => undefined),
+        db.entitlements.clear().catch(() => undefined),
+        // Cloud-score marks, their outbox, watermarks and day snapshots: the
+        // next account on this browser must neither see nor push them.
+        // Callers ask first (syncBeforeSignOut) when any are unsynced.
+        keepCloudAnnotations
+            ? Promise.resolve()
+            : clearCloudAnnotationData(db).catch((err: unknown) =>
+                  console.warn('Could not clear annotation data', err),
+              ),
+    ]);
+};
+
+/**
+ * The name this account announces in a score's presence bar: its display name,
+ * else "Guest" / "Collaborator" — never its email (src/lib/presenceName.ts).
+ */
+export const presenceNameOf = (session: Session | null): string =>
+    safePresenceName(storedDisplayNameOf(session), Boolean(session?.user.is_anonymous));
+
+/**
+ * This account's own label (top bar, account page): metadata name, else email,
+ * else Guest. Only ever shown to the account itself — presence uses
+ * presenceNameOf instead.
+ */
 export const displayNameOf = (session: Session | null): string => {
     const meta = session?.user.user_metadata as Record<string, unknown> | undefined;
     const name = typeof meta?.['display_name'] === 'string' ? (meta['display_name'] as string) : null;
@@ -131,8 +635,8 @@ export const displayNameOf = (session: Session | null): string => {
 /**
  * The stored display name with no fallback — '' when the account never set one.
  *
- * displayNameOf() substitutes the email, which is right for presence and wrong
- * for a form field: seeding the input with an address the user never typed
+ * displayNameOf() substitutes the email, which is right for the account's own
+ * label and wrong for a form field: seeding the input with an address the user never typed
  * would turn "leave it blank" into "save my email as my name".
  */
 export const storedDisplayNameOf = (session: Session | null): string => {

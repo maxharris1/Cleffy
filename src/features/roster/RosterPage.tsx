@@ -3,11 +3,17 @@ import { Link, useOutletContext } from 'react-router';
 
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { LimitReachedError, isLimitReachedError } from '@/features/billing/limitErrors';
+import { countryName } from '@/features/legal/countries';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { useEntranceDelay } from '@/features/library/scoreRow';
+import { AgeAttestationFields } from '@/features/roster/AgeAttestationFields';
 import { StudentCodeCard } from '@/features/roster/StudentCodeCard';
 import {
     archiveStudent,
     assignScore,
+    attestationFor,
+    attestationProblem,
+    deleteStudent,
     fetchStudentTimeline,
     listAssignmentsForStudents,
     listRoster,
@@ -17,8 +23,10 @@ import {
     unassignScore,
     type ProvisionOptions,
     type RosterAssignment,
+    type TeacherAttestation,
     type TimelineEntry,
 } from '@/features/roster/rosterService';
+import { getDb } from '@/sync/db';
 import type { AssignmentAccess, AssignmentRow, EffectiveTier, ManagedStudentRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -27,6 +35,8 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { Menu, MenuItem } from '@/ui/Menu';
+import { RosterSkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
 import { MoreVerticalIcon } from '@/ui/icons';
@@ -69,7 +79,7 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
     if (student.auth_method === 'email') {
         return {
             title: 'Email a new sign-in link?',
-            body: `${student.display_name}’s current password stops working straight away, and the link lets them choose a new one. Their scores, annotations and notes are untouched.`,
+            body: `${student.display_name}’s current password stops working straight away and any device they are signed in on is signed out. The link lets them choose a new one. Their scores, annotations and notes are untouched.`,
             confirmLabel: 'Send link',
         };
     }
@@ -82,7 +92,7 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
     }
     return {
         title: 'Reset this student’s access?',
-        body: `${student.display_name}’s password stops working straight away, and the new setup code is how they choose another one. They keep their username, and their scores, annotations and notes are untouched.`,
+        body: `${student.display_name}’s password stops working straight away and any device they are signed in on is signed out. The new setup code is how they choose another one. Their scores, annotations and notes are untouched.`,
         confirmLabel: 'Reset access',
     };
 };
@@ -129,11 +139,33 @@ const noRosterOnThisPlan = (tier: EffectiveTier): LimitReachedError =>
  * seat back rather than claims one. Hiding those rows would leave live student
  * sign-ins with no control left anywhere that could turn them off.
  */
+const countsOf = (grouped: Map<string, RosterAssignment[]>): Array<[string, number]> =>
+    [...grouped.entries()].map(([id, rows]) => [id, rows.length]);
+
+/** Best-effort snapshot for the next mount's instant paint; a refused write costs nothing. */
+const persistRoster = (userId: string, students: ManagedStudentRow[], assignmentCounts: Array<[string, number]>) => {
+    void getDb()
+        .rosterCache.put({ userId, students, assignmentCounts, cachedAt: new Date().toISOString() })
+        .catch(() => undefined);
+};
+
 export const RosterPage = () => {
-    const { canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
+    const { userId, canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
+    /**
+     * Counts from the Dexie snapshot, shown until the network's assignments
+     * arrive (then null). Without them every cached row would read "No scores"
+     * — an affirmative claim the cache can't back.
+     */
+    const [cachedCounts, setCachedCounts] = useState<Map<string, number> | null>(null);
+    /**
+     * Whether `assignments` reflects the server. While 'loading' a row with a
+     * snapshot count shows a spinner in its panel; after 'failed' it must show
+     * a terminal notice instead — nothing on this mount will fill the panel.
+     */
+    const [assignmentsStatus, setAssignmentsStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
     const [loadError, setLoadError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
@@ -141,49 +173,91 @@ export const RosterPage = () => {
     const [invitedEmail, setInvitedEmail] = useState<string | null>(null);
     const [resetTarget, setResetTarget] = useState<ManagedStudentRow | null>(null);
     const [archiveTarget, setArchiveTarget] = useState<ManagedStudentRow | null>(null);
+    const [restoreTarget, setRestoreTarget] = useState<ManagedStudentRow | null>(null);
+    const [deleteTarget, setDeleteTarget] = useState<ManagedStudentRow | null>(null);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const rosterGen = useRef(0);
 
     useEffect(() => {
         let mounted = true;
+        const gen = rosterGen.current;
+        let firstResolved = false;
+        const first = Promise.all([listRoster(), listAssignmentsForStudents().catch(() => null)]);
+        first.then(
+            () => {
+                firstResolved = true;
+            },
+            () => undefined,
+        );
         void (async () => {
+            const cached = await getDb()
+                .rosterCache.get(userId)
+                .catch(() => undefined);
+            await Promise.resolve();
+            if (mounted && !firstResolved && gen === rosterGen.current && cached && cached.students.length > 0) {
+                setStudents(cached.students);
+                setCachedCounts(new Map(cached.assignmentCounts));
+            }
+
             try {
-                const roster = await listRoster();
-                if (!mounted) {
+                const [roster, grouped] = await first;
+                if (!mounted || gen !== rosterGen.current) {
                     return;
                 }
                 setStudents(roster);
+                setAssignments(grouped ?? new Map());
+                setAssignmentsStatus(grouped ? 'ready' : 'failed');
+                if (grouped) {
+                    setCachedCounts(null);
+                }
+                setLoadError(null);
+                persistRoster(userId, roster, grouped ? countsOf(grouped) : (cached?.assignmentCounts ?? []));
             } catch (err) {
-                if (mounted) {
-                    setStudents([]);
-                    setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
+                if (!mounted || gen !== rosterGen.current) {
+                    return;
                 }
-                return;
-            }
-            // Best-effort, like the library's favourites and tags: a roster with
-            // no counts beside it is still a usable roster.
-            try {
-                const grouped = await listAssignmentsForStudents();
-                if (mounted) {
-                    setAssignments(grouped);
-                }
-            } catch {
-                // Counts stay at zero; the per-student panel says so too.
+                setStudents((prev) => prev ?? []);
+                setAssignmentsStatus('failed');
+                setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
             }
         })();
         return () => {
             mounted = false;
         };
-    }, []);
+    }, [userId]);
 
-    const reloadRoster = async () => setStudents(await listRoster());
-    const reloadAssignments = async () => setAssignments(await listAssignmentsForStudents());
+    /**
+     * Every roster mutation re-reads the server and rewrites the snapshot the
+     * mount effect paints from. Without the rewrite a remount would show the
+     * pre-action roster — an archived student active, a removed one back —
+     * until the network corrected it.
+     */
+    const currentCounts = (): Array<[string, number]> =>
+        assignmentsStatus === 'ready' ? countsOf(assignments) : [...(cachedCounts ?? new Map()).entries()];
+    const reloadRoster = async () => {
+        const gen = ++rosterGen.current;
+        const roster = await listRoster();
+        if (gen !== rosterGen.current) {
+            return;
+        }
+        setStudents(roster);
+        persistRoster(userId, roster, currentCounts());
+    };
+    const reloadAssignments = async () => {
+        const grouped = await listAssignmentsForStudents();
+        setAssignments(grouped);
+        setAssignmentsStatus('ready');
+        setCachedCounts(null);
+        persistRoster(userId, students ?? [], countsOf(grouped));
+    };
 
     /**
      * The three ways a roster action ends: it worked, the plan refused it, or it
      * broke. Only the middle one gets an upgrade prompt instead of red text.
      */
     const run = async (action: () => Promise<void>): Promise<void> => {
+        rosterGen.current += 1;
         setActionError(null);
         setLimit(null);
         setBusy(true);
@@ -279,11 +353,30 @@ export const RosterPage = () => {
         setArchiveTarget(null);
     };
 
-    const restore = (student: ManagedStudentRow) =>
-        run(async () => {
-            await restoreStudent(student.id);
+    const confirmRestore = async (attestation: TeacherAttestation) => {
+        const target = restoreTarget;
+        if (!target) {
+            return;
+        }
+        await run(async () => {
+            await restoreStudent(target.id, attestation);
             await reloadRoster();
         });
+        setRestoreTarget(null);
+    };
+
+    const confirmDelete = async () => {
+        const target = deleteTarget;
+        if (!target) {
+            return;
+        }
+        await run(async () => {
+            await deleteStudent(target.id);
+            setExpandedId((id) => (id === target.id ? null : id));
+            await reloadRoster();
+        });
+        setDeleteTarget(null);
+    };
 
     /**
      * Flipping access re-runs the assignment, which overwrites everything it is
@@ -318,7 +411,8 @@ export const RosterPage = () => {
             {canManageStudents ? (
                 <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-stone-600">
                     Each student gets their own sign-in: a printed setup code they turn into a username, or an email
-                    invite if they have an address. Assign scores from your library and their markings stay theirs.
+                    invite if they have an address. Assign scores from your library: with Edit access a student marks up
+                    the same score you do.
                 </p>
             ) : null}
 
@@ -335,8 +429,8 @@ export const RosterPage = () => {
             {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
 
             {students === null ? (
-                <LoadingText className="mt-10">Loading your roster…</LoadingText>
-            ) : loadError ? (
+                <RosterSkeleton label="Loading your roster…" />
+            ) : loadError && students.length === 0 ? (
                 <ErrorText className="mt-8">{loadError}</ErrorText>
             ) : students.length === 0 ? (
                 canManageStudents ? (
@@ -354,6 +448,10 @@ export const RosterPage = () => {
                 )
             ) : (
                 <section className="mt-8">
+                    {/* Above the list, not instead of it: the cached roster the
+                        effect just painted is exactly what a teacher on a bad
+                        connection came for. */}
+                    {loadError ? <ErrorText className="mb-4">{loadError}</ErrorText> : null}
                     {/* Nothing in the list is taken away with the form: archive and
                         reset ask student-provision for no seat, and restore — which
                         does — comes back 402 into the notice above.
@@ -379,12 +477,15 @@ export const RosterPage = () => {
                                 student={student}
                                 index={index}
                                 assignments={assignments.get(student.student_user_id) ?? []}
+                                cachedCount={cachedCounts?.get(student.student_user_id)}
+                                assignmentsStatus={assignmentsStatus}
                                 expanded={expandedId === student.id}
                                 busy={busy}
                                 onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
                                 onReset={() => setResetTarget(student)}
                                 onArchive={() => setArchiveTarget(student)}
-                                onRestore={() => void restore(student)}
+                                onRestore={() => setRestoreTarget(student)}
+                                onDelete={() => setDeleteTarget(student)}
                                 onSetAccess={setAccess}
                                 onUnassign={unassign}
                             />
@@ -436,24 +537,60 @@ export const RosterPage = () => {
                 </Dialog>
             ) : null}
 
+            {/* Both prompts carry the student's name in the title and body. The
+                wrapper adds no box (`contents`); it only hands the inherited
+                overflow-wrap down, so a name with no spaces wraps inside the
+                dialog instead of running past it. */}
             {resetTarget ? (
-                <ConfirmDialog
-                    {...resetPromptFor(resetTarget)}
-                    busy={busy}
-                    onConfirm={() => void confirmReset()}
-                    onCancel={() => setResetTarget(null)}
-                />
+                <div className="contents [overflow-wrap:anywhere]">
+                    <ConfirmDialog
+                        {...resetPromptFor(resetTarget)}
+                        busy={busy}
+                        onConfirm={() => void confirmReset()}
+                        onCancel={() => setResetTarget(null)}
+                    />
+                </div>
             ) : null}
 
             {archiveTarget ? (
-                <ConfirmDialog
-                    title={`Archive ${archiveTarget.display_name}?`}
-                    body="Their seat frees up for another student and their sign-in stops working. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was."
-                    confirmLabel="Archive"
-                    busy={busy}
-                    onConfirm={() => void confirmArchive()}
-                    onCancel={() => setArchiveTarget(null)}
-                />
+                <div className="contents [overflow-wrap:anywhere]">
+                    <ConfirmDialog
+                        // The name goes in the body, as in the reset prompts: the title sits in a
+                        // sticky header, and a long name wrapping there would leave the body and
+                        // actions a sliver of scroll room on a short screen.
+                        title="Archive this student?"
+                        body={`${archiveTarget.display_name}’s seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted yet — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was. An archived student is deleted for good after 12 months.`}
+                        confirmLabel="Archive"
+                        busy={busy}
+                        onConfirm={() => void confirmArchive()}
+                        onCancel={() => setArchiveTarget(null)}
+                    />
+                </div>
+            ) : null}
+
+            {restoreTarget ? (
+                <div className="contents [overflow-wrap:anywhere]">
+                    <RestoreDialog
+                        student={restoreTarget}
+                        busy={busy}
+                        onConfirm={(attestation) => void confirmRestore(attestation)}
+                        onCancel={() => setRestoreTarget(null)}
+                    />
+                </div>
+            ) : null}
+
+            {deleteTarget ? (
+                <div className="contents [overflow-wrap:anywhere]">
+                    <ConfirmDialog
+                        title="Delete this student?"
+                        body={`${deleteTarget.display_name}’s account is deleted for good, along with every mark they made on your scores (lesson history included), their assignments and your practice notes about them. This can’t be undone — to keep their work, archive them instead.`}
+                        confirmLabel="Delete student"
+                        danger
+                        busy={busy}
+                        onConfirm={() => void confirmDelete()}
+                        onCancel={() => setDeleteTarget(null)}
+                    />
+                </div>
             ) : null}
         </div>
     );
@@ -468,7 +605,7 @@ export const RosterPage = () => {
  * something went wrong that belongs under these fields rather than above them.
  */
 const SIGN_IN_METHODS: ReadonlyArray<{ value: 'code' | 'email'; label: string; hint: string }> = [
-    { value: 'code', label: 'Setup code', hint: 'No email needed — best for younger students' },
+    { value: 'code', label: 'Setup code', hint: 'No email needed — a printed card they set up once' },
     { value: 'email', label: 'Email invite', hint: 'They’ll get a link to set their password' },
 ];
 
@@ -483,6 +620,8 @@ const AddStudentForm = ({
     const [email, setEmail] = useState('');
     const [method, setMethod] = useState<'code' | 'email'>('code');
     const [studentEmail, setStudentEmail] = useState('');
+    const [country, setCountry] = useState('');
+    const [ageConfirmed, setAgeConfirmed] = useState(false);
     const [error, setError] = useState<string | null>(null);
     // Separate from `busy`, which is every roster action at once. Disabling this
     // form while an archive runs is right — two mutations should not overlap —
@@ -501,18 +640,27 @@ const AddStudentForm = ({
             setError('Enter the student’s email address.');
             return;
         }
+        const ageProblem = attestationProblem(country, ageConfirmed);
+        if (ageProblem) {
+            setError(ageProblem);
+            return;
+        }
         setError(null);
         const parentEmail = email.trim() || undefined;
+        const attestation = attestationFor(country, countryName(country));
         setSubmitting(true);
         try {
             const opts: ProvisionOptions =
                 method === 'email'
-                    ? { parentEmail, method: 'email', studentEmail: trimmedStudentEmail }
-                    : { parentEmail, method: 'code' };
+                    ? { parentEmail, method: 'email', studentEmail: trimmedStudentEmail, attestation }
+                    : { parentEmail, method: 'code', attestation };
             if (await onAdd(displayName, opts)) {
                 setName('');
                 setEmail('');
                 setStudentEmail('');
+                // The country is likely the next student's too; the tick is
+                // about this student, so it is asked again.
+                setAgeConfirmed(false);
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not add that student.');
@@ -564,7 +712,7 @@ const AddStudentForm = ({
                     {SIGN_IN_METHODS.map((option) => (
                         <label
                             key={option.value}
-                            className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition ${
+                            className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition-colors ${
                                 method === option.value
                                     ? 'border-accent/60 bg-accent-soft/50'
                                     : 'border-stone-300/90 bg-white/70 hover:border-stone-400/90'
@@ -603,6 +751,17 @@ const AddStudentForm = ({
                 </div>
             ) : null}
 
+            <div className="mt-4">
+                <AgeAttestationFields
+                    idPrefix="roster"
+                    country={country}
+                    onCountryChange={setCountry}
+                    confirmed={ageConfirmed}
+                    onConfirmedChange={setAgeConfirmed}
+                    disabled={busy}
+                />
+            </div>
+
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs text-stone-500">
                     Parent email is for your records and for sending the card home — it is never a sign-in.
@@ -620,62 +779,81 @@ const StudentRow = ({
     student,
     index,
     assignments,
+    cachedCount,
+    assignmentsStatus,
     expanded,
     busy,
     onToggle,
     onReset,
     onArchive,
     onRestore,
+    onDelete,
     onSetAccess,
     onUnassign,
 }: {
     student: ManagedStudentRow;
     index: number;
     assignments: RosterAssignment[];
+    /** Snapshot count while the network's assignments are still out (else undefined). */
+    cachedCount?: number;
+    assignmentsStatus: 'loading' | 'ready' | 'failed';
     expanded: boolean;
     busy: boolean;
     onToggle: () => void;
     onReset: () => void;
     onArchive: () => void;
     onRestore: () => void;
+    onDelete: () => void;
     onSetAccess: (assignment: AssignmentRow, access: AssignmentAccess) => void;
     onUnassign: (assignment: AssignmentRow) => void;
 }) => {
     const archived = student.archived_at !== null;
     const detailId = `student-detail-${student.id}`;
     const identifier = identifierOf(student);
+    const count = assignments.length > 0 ? assignments.length : (cachedCount ?? 0);
+    /** The badge shows a snapshot count whose rows haven't arrived (yet, or at all). */
+    const detailsMissing = assignments.length === 0 && (cachedCount ?? 0) > 0;
+    const entranceDelay = useEntranceDelay(index);
 
     return (
-        <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
-            <div
-                className={`group border-b border-stone-300/50 transition hover:border-accent/40 ${
-                    archived ? 'opacity-60' : ''
-                }`}
-            >
+        <li
+            className={`library-list-item${entranceDelay === null ? ' library-card-settled' : ''}`}
+            style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
+        >
+            {/* Archived rows dim their content, not the wrapper: opacity on the
+                wrapper would also wash out the ⋮ menu popover inside it. */}
+            <div className="group border-b border-stone-300/50 transition-colors hover:border-accent/40">
                 <div className="flex items-center gap-0.5">
                     <button
                         type="button"
                         aria-expanded={expanded}
                         aria-controls={detailId}
                         onClick={onToggle}
-                        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-3.5 text-left"
+                        className={`flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-3.5 text-left ${
+                            archived ? 'opacity-60' : ''
+                        }`}
                     >
                         <span aria-hidden="true" className="w-3 shrink-0 text-xs text-stone-400">
                             {expanded ? '▾' : '▸'}
                         </span>
-                        <span className="truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
-                            {student.display_name}
+                        {/* Name first: on a phone the identifier drops to its own
+                            line instead of splitting one line with the name, which
+                            left an emoji name as "🎹🎻 …" beside a full email. */}
+                        <span className="flex min-w-0 flex-col sm:flex-row sm:items-center sm:gap-2">
+                            <span className="truncate font-medium text-stone-800 transition-colors group-hover:text-accent-hover">
+                                {student.display_name}
+                            </span>
+                            {/* What they type to get in, beside the name the teacher
+                                typed — the two are different strings on both paths. */}
+                            {identifier ? <span className="truncate text-xs text-stone-500">{identifier}</span> : null}
                         </span>
-                        {/* What they type to get in, beside the name the teacher
-                            typed — the two are different strings on both paths. */}
-                        {identifier ? <span className="truncate text-xs text-stone-500">{identifier}</span> : null}
                         {student.claimed_at === null && !archived ? <Badge tone="warn">Invited</Badge> : null}
                         {archived ? <Badge>Archived</Badge> : null}
                     </button>
-                    <span className="shrink-0 px-2 text-xs text-stone-500">
-                        {assignments.length === 0
-                            ? 'No scores'
-                            : `${assignments.length} ${assignments.length === 1 ? 'score' : 'scores'}`}
+                    <span
+                        className={`shrink-0 px-2 text-xs tabular-nums text-stone-500 ${archived ? 'opacity-60' : ''}`}
+                    >
+                        {count === 0 ? 'No scores' : `${count} ${count === 1 ? 'score' : 'scores'}`}
                     </span>
                     <RosterRowMenu
                         archived={archived}
@@ -684,15 +862,24 @@ const StudentRow = ({
                         onReset={onReset}
                         onArchive={onArchive}
                         onRestore={onRestore}
+                        onDelete={onDelete}
                     />
                 </div>
 
                 {expanded ? (
-                    <div id={detailId} className="pb-5 pl-5">
+                    <div id={detailId} className={`pb-5 pl-5 ${archived ? 'opacity-60' : ''}`}>
                         <h3 className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
                             Assigned scores
                         </h3>
-                        {assignments.length === 0 ? (
+                        {detailsMissing && assignmentsStatus === 'loading' ? (
+                            <LoadingText className="mt-2">Loading assignments…</LoadingText>
+                        ) : detailsMissing ? (
+                            // Terminal, not a spinner: nothing on this mount will
+                            // fill the panel once the load has failed.
+                            <p className="mt-2 text-sm text-stone-500">
+                                The assignment list couldn’t be loaded — the count is from the last sync.
+                            </p>
+                        ) : assignments.length === 0 ? (
                             <p className="mt-2 text-sm text-stone-500">
                                 Nothing assigned yet — open a score’s menu in your library and pick “Assign to
                                 student…”.
@@ -704,9 +891,13 @@ const StudentRow = ({
                                         key={assignment.id}
                                         className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-stone-200 bg-white/70 px-3 py-2"
                                     >
+                                        {/* Its own line on a phone: sharing one with the
+                                            due date and both controls left a real title
+                                            as "Sona…". */}
                                         <Link
                                             to={`/doc/${assignment.document_id}`}
-                                            className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 transition hover:text-accent-hover"
+                                            title={documentTitle}
+                                            className="min-w-0 basis-full truncate text-sm font-medium text-stone-800 transition-colors hover:text-accent-hover sm:basis-0 sm:flex-1"
                                         >
                                             {documentTitle}
                                         </Link>
@@ -729,7 +920,7 @@ const StudentRow = ({
                                             Unassign
                                         </Button>
                                         {assignment.note ? (
-                                            <p className="w-full text-xs leading-relaxed text-stone-600">
+                                            <p className="w-full text-xs leading-relaxed text-stone-600 [overflow-wrap:anywhere]">
                                                 {assignment.note}
                                             </p>
                                         ) : null}
@@ -764,7 +955,7 @@ const AccessToggle = ({
                 aria-pressed={value === option}
                 disabled={disabled}
                 onClick={() => onChange(option)}
-                className={`rounded-md px-2 py-1 text-xs transition disabled:cursor-default disabled:opacity-50 ${
+                className={`rounded-md px-2 py-1 text-xs transition-colors disabled:cursor-default disabled:opacity-50 ${
                     value === option ? 'bg-accent text-white' : 'text-stone-600 hover:bg-ink/5'
                 }`}
             >
@@ -822,11 +1013,11 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
                             <p className="text-xs font-medium text-stone-500">{formatDay(day.day)}</p>
                             <ul className="mt-1.5 flex flex-col gap-1.5 border-l border-stone-300/70 pl-3">
                                 {day.entries.map(({ note, documentTitle }) => (
-                                    <li key={note.id}>
+                                    <li key={note.id} className="min-w-0">
                                         <div className="flex flex-wrap items-center gap-2">
                                             <Link
                                                 to={`/doc/${note.document_id}`}
-                                                className="text-xs text-stone-500 transition hover:text-stone-700 hover:underline"
+                                                className="min-w-0 text-xs text-stone-500 transition-colors [overflow-wrap:anywhere] hover:text-stone-700 hover:underline"
                                             >
                                                 {documentTitle}
                                             </Link>
@@ -834,7 +1025,7 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
                                                 {note.shared ? 'Shared' : 'Private'}
                                             </Badge>
                                         </div>
-                                        <p className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-stone-700">
+                                        <p className="mt-0.5 whitespace-pre-wrap text-sm leading-relaxed text-stone-700 [overflow-wrap:anywhere]">
                                             {note.body}
                                         </p>
                                     </li>
@@ -856,6 +1047,7 @@ const RosterRowMenu = ({
     onReset,
     onArchive,
     onRestore,
+    onDelete,
 }: {
     archived: boolean;
     busy: boolean;
@@ -863,79 +1055,88 @@ const RosterRowMenu = ({
     onReset: () => void;
     onArchive: () => void;
     onRestore: () => void;
-}) => {
-    const [open, setOpen] = useState(false);
-    const rootRef = useRef<HTMLDivElement | null>(null);
+    onDelete: () => void;
+}) => (
+    <Menu
+        label="Student actions"
+        disabled={busy}
+        popupClassName="w-56"
+        triggerContent={<MoreVerticalIcon size={16} />}
+        triggerClassName={`grid place-items-center rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11 ${
+            archived ? 'opacity-60' : ''
+        }`}
+    >
+        {archived ? (
+            <MenuItem onClick={onRestore}>Restore…</MenuItem>
+        ) : (
+            <>
+                <MenuItem onClick={onReset}>{resetLabel}</MenuItem>
+                <MenuItem onClick={onArchive}>Archive…</MenuItem>
+            </>
+        )}
+        <MenuItem danger onClick={onDelete}>
+            Delete student…
+        </MenuItem>
+    </Menu>
+);
 
-    useEffect(() => {
-        if (!open) {
+/**
+ * Restoring re-admits a student, so the teacher vouches for their age again —
+ * with the country the row last had, where it has one (rows archived before
+ * attestations existed have none).
+ */
+const RestoreDialog = ({
+    student,
+    busy,
+    onConfirm,
+    onCancel,
+}: {
+    student: ManagedStudentRow;
+    busy: boolean;
+    onConfirm: (attestation: TeacherAttestation) => void;
+    onCancel: () => void;
+}) => {
+    const [country, setCountry] = useState(student.country ?? '');
+    const [confirmed, setConfirmed] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const confirm = () => {
+        const problem = attestationProblem(country, confirmed);
+        if (problem) {
+            setError(problem);
             return;
         }
-        const onPointerDown = (e: PointerEvent) => {
-            if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-                setOpen(false);
-            }
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                setOpen(false);
-            }
-        };
-        window.addEventListener('pointerdown', onPointerDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-            window.removeEventListener('pointerdown', onPointerDown);
-            window.removeEventListener('keydown', onKey);
-        };
-    }, [open]);
-
-    const pick = (action: () => void) => {
-        setOpen(false);
-        action();
+        onConfirm(attestationFor(country, countryName(country)));
     };
 
     return (
-        <div ref={rootRef} className="relative">
-            <button
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={open}
-                aria-label="Student actions"
-                disabled={busy}
-                onClick={() => setOpen((v) => !v)}
-                className="rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600 disabled:opacity-50"
-            >
-                <MoreVerticalIcon size={16} />
-            </button>
-            {open ? (
-                <div
-                    role="menu"
-                    className="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
-                >
-                    {archived ? (
-                        <MenuItem label="Restore" onClick={() => pick(onRestore)} />
-                    ) : (
-                        <>
-                            <MenuItem label={resetLabel} onClick={() => pick(onReset)} />
-                            <MenuItem label="Archive…" onClick={() => pick(onArchive)} />
-                        </>
-                    )}
-                </div>
-            ) : null}
-        </div>
+        <Dialog label="Restore this student?" onClose={onCancel}>
+            <p className="text-sm leading-relaxed text-stone-600">
+                {student.display_name} takes a seat again and can sign in as before, with their assignments, marks and
+                notes as they were.
+            </p>
+            <div className="mt-4">
+                <AgeAttestationFields
+                    idPrefix="restore"
+                    country={country}
+                    onCountryChange={setCountry}
+                    confirmed={confirmed}
+                    onConfirmedChange={setConfirmed}
+                    disabled={busy}
+                />
+            </div>
+            {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
+            <div className="mt-5 flex justify-end gap-2">
+                <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+                    Cancel
+                </Button>
+                <Button size="sm" onClick={confirm} disabled={busy}>
+                    Restore
+                </Button>
+            </div>
+        </Dialog>
     );
 };
-
-const MenuItem = ({ label, onClick }: { label: string; onClick: () => void }) => (
-    <button
-        type="button"
-        role="menuitem"
-        onClick={onClick}
-        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5"
-    >
-        {label}
-    </button>
-);
 
 /** Run-length grouping: the query already ordered by day, so runs are the groups. */
 const groupByDay = (entries: TimelineEntry[]): Array<{ day: string; entries: TimelineEntry[] }> => {

@@ -23,3 +23,31 @@ export const bareAddress = (value: string): string => {
  */
 export const isOwnForward = (from: string, forwardFromValue: string): boolean =>
     bareAddress(from) === bareAddress(forwardFromValue);
+
+/** The three inboxes, most sensitive first: that is also the order a tag is picked in. */
+export type InboxTag = 'privacy' | 'legal' | 'support';
+
+const INBOX_ORDER: readonly InboxTag[] = ['privacy', 'legal', 'support'];
+
+/**
+ * Which of our addresses a message was for, as a tag for the forwarded
+ * subject: `[privacy]`, `[legal]` or `[support]`.
+ *
+ * One mailbox receives all three (a catch-all on the domain), so the tag is how
+ * a privacy request — a deletion or access request with a statutory clock on
+ * it — stands out from routine support at a glance. `received_for` is the
+ * address that actually accepted the message and is read first; `to` is the
+ * fallback when Resend omits it. A message to more than one inbox takes the
+ * most sensitive, and anything else (billing@, a typo the catch-all caught) is
+ * support.
+ */
+export const inboxTagFor = (receivedFor: readonly string[] = [], to: readonly string[] = []): InboxTag => {
+    const localParts = new Set(
+        [...receivedFor, ...to].map((address) => bareAddress(address).split('@')[0] ?? '').filter(Boolean),
+    );
+    return INBOX_ORDER.find((tag) => localParts.has(tag)) ?? 'support';
+};
+
+/** The forwarded subject: the tag, then the sender's subject. */
+export const forwardedSubject = (tag: InboxTag, subject: string | null | undefined): string =>
+    `[${tag}] ${subject?.trim() || '(no subject)'}`;

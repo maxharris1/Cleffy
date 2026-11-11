@@ -1,11 +1,18 @@
 import type { ReactNode } from 'react';
 
+import { features } from '@/lib/features';
+
 /**
  * The landing showcase: two static vignettes of what practice looks like in
  * Cleffy — a playhead over a score with transport controls, and a fingering
  * keyboard. Nothing here imports the real playback, fingering or billing code;
  * the glyphs are hand-drawn inline SVG, the same way HeroDemo fakes the viewer
  * toolbar. Purely decorative — none of it is interactive.
+ *
+ * Each vignette sells a feature behind a release flag (src/lib/features.ts),
+ * so each shows only in a build that ships it: the landing page must not
+ * advertise what a paying customer then cannot find. With both off the whole
+ * section goes.
  */
 
 const STAFF_TOP = 18;
@@ -219,34 +226,43 @@ const VignetteCard = ({
     </div>
 );
 
-export const ProductShowcase = () => (
-    <section aria-labelledby="showcase-title" className="border-t border-line py-14 lg:py-16">
-        <p className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">Practice tools</p>
-        <h2 id="showcase-title" className="mt-2 font-display text-2xl font-semibold tracking-tight text-ink">
-            More than markings
-        </h2>
+export const ProductShowcase = () => {
+    if (!features.playalong && !features.fingering) {
+        return null;
+    }
+    return (
+        <section aria-labelledby="showcase-title" className="border-t border-line py-14 lg:py-16">
+            <p className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">Practice tools</p>
+            <h2 id="showcase-title" className="mt-2 font-display text-2xl font-semibold tracking-tight text-ink">
+                More than markings
+            </h2>
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-2">
-            <VignetteCard
-                title="Practice one hand at a time"
-                body="Mute a hand and play it yourself while Cleffy plays the other — with a live playhead on the score, tempo control, and a loop for the hard bars."
-                visualLabel="A score excerpt with a playhead, above playback controls: play, measure stepper, tempo, left hand muted, loop on bars 5 to 8"
-            >
-                <ScoreExcerpt />
-                <TransportHint />
-            </VignetteCard>
+            <div className={`mt-8 grid gap-6 ${features.playalong && features.fingering ? 'lg:grid-cols-2' : ''}`}>
+                {features.playalong ? (
+                    <VignetteCard
+                        title="Practice one hand at a time"
+                        body="Mute a hand and play it yourself while Cleffy plays the other — with a live playhead on the score, tempo control, and a loop for the hard bars."
+                        visualLabel="A score excerpt with a playhead, above playback controls: play, measure stepper, tempo, left hand muted, loop on bars 5 to 8"
+                    >
+                        <ScoreExcerpt />
+                        <TransportHint />
+                    </VignetteCard>
+                ) : null}
 
-            <VignetteCard
-                title="Fingering, read from the score"
-                body="Cleffy reads the fingering numbers printed on the page and shows them on a keyboard, colored by hand."
-                visualLabel="A piano keyboard diagram with numbered finger badges: left hand in green, right hand in indigo"
-            >
-                <KeyboardDiagram />
-            </VignetteCard>
-        </div>
+                {features.fingering ? (
+                    <VignetteCard
+                        title="Fingering, read from the score"
+                        body="Cleffy reads the fingering numbers printed on the page and shows them on a keyboard, colored by hand."
+                        visualLabel="A piano keyboard diagram with numbered finger badges: left hand in green, right hand in indigo"
+                    >
+                        <KeyboardDiagram />
+                    </VignetteCard>
+                ) : null}
+            </div>
 
-        <p className="mt-6 text-center text-sm text-stone-500">
-            Made for iPad and Apple Pencil — annotate with the Pencil, practice at the piano.
-        </p>
-    </section>
-);
+            <p className="mt-6 text-center text-sm text-stone-500">
+                Made for iPad and Apple Pencil — annotate with the Pencil, practice at the piano.
+            </p>
+        </section>
+    );
+};

@@ -1,9 +1,13 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
+import type { AgeGate } from '@/features/auth/ageCheck';
+import { AgeScreen } from '@/features/auth/AgeScreen';
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { RequireGuest } from '@/features/auth/AuthGates';
+import { ResendConfirmation } from '@/features/auth/ResendConfirmation';
 import { signUpWithPassword } from '@/features/auth/session';
+import { AgreementNote } from '@/features/legal/AgreementNote';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
@@ -17,6 +21,8 @@ const RegisterForm = () => {
     const navigate = useNavigate();
     const [needsConfirm, setNeedsConfirm] = useState(false);
     const [email, setEmail] = useState('');
+    /** The age screen's outcome; the form is not shown until there is one. */
+    const [ageGate, setAgeGate] = useState<AgeGate | null>(null);
 
     if (needsConfirm) {
         return (
@@ -26,10 +32,19 @@ const RegisterForm = () => {
                     <Link to="/login" className={linkClassName}>
                         log in
                     </Link>
-                    .
+                    . The link works once and expires after an hour.
                 </p>
+                {/* The way back from an expired link. Without it, the only
+                    route was signing up again — which answers "that email
+                    already exists, try signing in" — and then signing in,
+                    which answers "email not confirmed". */}
+                <ResendConfirmation email={email} className="mt-5" />
             </BrandShell>
         );
+    }
+
+    if (!ageGate) {
+        return <AgeScreen purpose="register" onPass={setAgeGate} footer={<SignInInstead />} />;
     }
 
     return (
@@ -44,16 +59,15 @@ const RegisterForm = () => {
                 submitLabel="Create account"
                 busyLabel="Creating…"
                 fallbackError="Could not create account."
+                captchaAction="signup"
                 footer={
-                    <p className="mt-6 text-center text-sm text-stone-600">
-                        Already have an account?{' '}
-                        <Link to="/login" className={linkClassName}>
-                            Log in
-                        </Link>
-                    </p>
+                    <>
+                        <AgreementNote action="creating an account" className="mt-4 text-center" />
+                        <SignInInstead />
+                    </>
                 }
-                onSubmit={async ({ email: nextEmail, password }) => {
-                    const result = await signUpWithPassword(nextEmail, password);
+                onSubmit={async ({ email: nextEmail, password, captchaToken }) => {
+                    const result = await signUpWithPassword(nextEmail, password, captchaToken, ageGate);
                     if (result.needsEmailConfirmation) {
                         setEmail(nextEmail);
                         setNeedsConfirm(true);
@@ -65,3 +79,12 @@ const RegisterForm = () => {
         </BrandShell>
     );
 };
+
+const SignInInstead = () => (
+    <p className="mt-6 text-center text-sm text-stone-600">
+        Already have an account?{' '}
+        <Link to="/login" className={linkClassName}>
+            Log in
+        </Link>
+    </p>
+);

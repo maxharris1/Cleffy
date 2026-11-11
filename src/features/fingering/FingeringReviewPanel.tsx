@@ -75,10 +75,7 @@ export const FingeringReviewPanel = ({
     );
     const selectedNote = region.notes.find((n) => n.id === selectedNoteId) ?? null;
 
-    const suggestion = useMemo(
-        () => suggestForRegionDetailed(region, true, handSpan),
-        [region, handSpan],
-    );
+    const suggestion = useMemo(() => suggestForRegionDetailed(region, true, handSpan), [region, handSpan]);
 
     const selectStep = (index: number) => {
         setSelectedEvent(index);
@@ -212,9 +209,7 @@ export const FingeringReviewPanel = ({
                                     backgroundColor:
                                         n.confidence === 'low'
                                             ? '#d97706'
-                                            : HAND_COLORS[
-                                                  suggestion.fingeringHand.get(n.id) ?? region.handOf[n.staff]
-                                              ],
+                                            : HAND_COLORS[suggestion.fingeringHand.get(n.id) ?? region.handOf[n.staff]],
                                 }}
                             />
                         );
@@ -232,7 +227,7 @@ export const FingeringReviewPanel = ({
                             aria-pressed={selectedEvent === index}
                             aria-label={`Step ${position + 1}`}
                             onClick={() => selectStep(index)}
-                            className={`rounded-lg border px-2 py-1 text-xs transition ${
+                            className={`rounded-lg border px-2 py-1 text-xs transition-colors ${
                                 selectedEvent === index
                                     ? 'border-accent bg-accent-soft text-accent'
                                     : 'border-stone-200 text-stone-600 hover:bg-stone-50'
@@ -252,11 +247,7 @@ export const FingeringReviewPanel = ({
             </div>
 
             <div className="mb-3 flex flex-wrap items-center gap-2">
-                <StepHearBar
-                    hearing={hearing}
-                    hearDisabled={selectedStepNotes.length === 0}
-                    onHear={hearStep}
-                />
+                <StepHearBar hearing={hearing} hearDisabled={selectedStepNotes.length === 0} onHear={hearStep} />
             </div>
 
             <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-600">
@@ -268,23 +259,20 @@ export const FingeringReviewPanel = ({
                             type="button"
                             aria-pressed={entryHand === hand}
                             onClick={() => setEntryHand(hand)}
-                            className={`flex items-center gap-1 rounded-md border px-1.5 py-0.5 transition ${
+                            className={`flex items-center gap-1 rounded-md border px-1.5 py-0.5 transition-colors ${
                                 entryHand === hand
                                     ? 'border-accent bg-accent-soft text-accent'
                                     : 'border-stone-200 hover:bg-stone-50'
                             }`}
                         >
-                            <span
-                                className="h-2 w-2 rounded-full"
-                                style={{ backgroundColor: HAND_COLORS[hand] }}
-                            />
+                            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: HAND_COLORS[hand] }} />
                             {hand === 'R' ? 'Right hand' : 'Left hand'}
                         </button>
                     ))}
                 </div>
                 <HandSpanToggle value={handSpan} onChange={onHandSpanChange} />
             </div>
-            <div className="mb-3 overflow-x-auto rounded-lg border border-stone-200 bg-stone-50 p-1.5">
+            <div className="mb-3 overflow-x-auto overscroll-x-contain rounded-lg border border-stone-200 bg-stone-50 p-1.5">
                 <KeyboardDiagram
                     pressed={stripPressed}
                     range={ENTRY_RANGE}
@@ -303,26 +291,26 @@ export const FingeringReviewPanel = ({
                             const finger = displayFinger(n);
                             const hand = suggestion.fingeringHand.get(n.id) ?? region.handOf[n.staff];
                             return (
-                            <button
-                                key={n.id}
-                                type="button"
-                                aria-pressed={selectedNoteId === n.id}
-                                onClick={() => setSelectedNoteId(selectedNoteId === n.id ? null : n.id)}
-                                className={`rounded-lg border px-2 py-1 text-xs transition ${
-                                    selectedNoteId === n.id
-                                        ? 'border-accent bg-accent-soft text-accent'
-                                        : n.confidence === 'low'
-                                          ? 'border-amber-300 bg-amber-50 text-amber-900'
-                                          : 'border-stone-200 text-stone-700 hover:bg-stone-50'
-                                }`}
-                            >
-                                <span
-                                    className="mr-1 inline-block h-2 w-2 rounded-full"
-                                    style={{ backgroundColor: HAND_COLORS[hand] }}
-                                />
-                                {n.name}
-                                {finger !== null ? ` · ${finger}` : showMissingFinger ? ' · ?' : ''}
-                            </button>
+                                <button
+                                    key={n.id}
+                                    type="button"
+                                    aria-pressed={selectedNoteId === n.id}
+                                    onClick={() => setSelectedNoteId(selectedNoteId === n.id ? null : n.id)}
+                                    className={`rounded-lg border px-2 py-1 text-xs transition-colors ${
+                                        selectedNoteId === n.id
+                                            ? 'border-accent bg-accent-soft text-accent'
+                                            : n.confidence === 'low'
+                                              ? 'border-amber-300 bg-amber-50 text-amber-900'
+                                              : 'border-stone-200 text-stone-700 hover:bg-stone-50'
+                                    }`}
+                                >
+                                    <span
+                                        className="mr-1 inline-block h-2 w-2 rounded-full"
+                                        style={{ backgroundColor: HAND_COLORS[hand] }}
+                                    />
+                                    {n.name}
+                                    {finger !== null ? ` · ${finger}` : showMissingFinger ? ' · ?' : ''}
+                                </button>
                             );
                         })}
                 </div>
@@ -355,7 +343,7 @@ export const FingeringReviewPanel = ({
                                             fingerSource: finger === null ? null : 'manual',
                                         })
                                     }
-                                    className={`h-8 w-8 rounded-lg border text-sm transition ${
+                                    className={`h-8 w-8 rounded-lg border text-sm transition-colors ${
                                         selectedNote.annotatedFinger === finger
                                             ? 'border-accent bg-accent text-white'
                                             : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-100'

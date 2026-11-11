@@ -4,3 +4,12 @@ coverage
 node_modules
 package-lock.json
 supabase/.temp
+# pstack, vendored by scripts/vendor-pstack.sh: never reformat (rerun the script to update)
+.agents
+.claude/skills/*
+!.claude/skills/ui-check
+!.claude/skills/supabase-ops
+.claude/agents/comment-sicko.md
+.claude/docs/harness
+.claude/vendor/pstack
+scripts/codex-adapter.md

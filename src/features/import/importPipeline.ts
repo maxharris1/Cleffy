@@ -1,3 +1,4 @@
+import type { LimitReachedError } from '@/features/billing/limitErrors';
 import { extractBornDigital } from '@/features/import/bornDigital';
 import { openDetectionDoc, whiteFraction } from '@/features/import/pageRaster';
 import { buildProposals } from '@/features/import/proposals';
@@ -7,6 +8,7 @@ import { sampleBackgroundColor } from '@/features/import/whiteout';
 import type { DetectRequest, DetectResponse } from '@/features/import/detectWorker';
 import type {
     ClassifyFn,
+    ClassifyRefused,
     ClassifyResult,
     DetectionRaster,
     ImportProposal,
@@ -142,7 +144,7 @@ const semaphore = (limit: number) => {
     };
 };
 
-type SettledLabels = { ok: ClassifyResult | null } | { err: unknown };
+type SettledLabels = { ok: ClassifyResult | ClassifyRefused | null } | { err: unknown };
 
 export const scanDocument = async (opts: {
     docId: string;
@@ -215,6 +217,7 @@ export const scanDocument = async (opts: {
         const unreadablePages: number[] = [];
         const tooColorfulPages: number[] = [];
         let aiDegraded = false;
+        let aiLimit: LimitReachedError | null = null;
         for (const entry of entries) {
             aborted();
             const seg = entry.det.segmentation;
@@ -227,7 +230,11 @@ export const scanDocument = async (opts: {
                 if ('err' in settled) {
                     throw settled.err; // AbortError — classify returns null on ordinary failures
                 }
-                labels = settled.ok;
+                if (settled.ok && 'refused' in settled.ok) {
+                    aiLimit ??= settled.ok.refused;
+                } else {
+                    labels = settled.ok;
+                }
             }
             if (seg.clusters.length > 0 && !labels) {
                 aiDegraded = true;
@@ -248,7 +255,15 @@ export const scanDocument = async (opts: {
             }
         }
 
-        return { docId, pages, aiDegraded: pages.length > 0 && aiDegraded, unreadablePages, tooColorfulPages };
+        const degraded = pages.length > 0 && aiDegraded;
+        return {
+            docId,
+            pages,
+            aiDegraded: degraded,
+            aiLimit: degraded ? aiLimit : null,
+            unreadablePages,
+            tooColorfulPages,
+        };
     } finally {
         detector.destroy();
         await doc.destroy();

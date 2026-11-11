@@ -79,6 +79,15 @@ npx supabase db push
 - File size limit: 50 MB (raise the project-wide limit under Settings → Storage if you
   need bigger scans)
 
+And a second bucket for the library covers (`20260902130000_thumbnails.sql`
+attempts to create it, but hosted projects can refuse `storage.buckets` writes
+from a migration — check it exists after the migration runs):
+
+- Name: `thumbnails`
+- Public: **OFF** (private)
+- Allowed MIME types: `image/jpeg`
+- File size limit: 2 MB
+
 (The object-level access policies were already created by the migrations.)
 
 ## 3. Auth settings
@@ -178,6 +187,8 @@ turns it into editable Cleffy annotations. Its parts:
     npx supabase secrets set ANALYZE_NOTES_MODEL=claude-sonnet-5 --project-ref jibgwgosihadbjgxdsfe
     ```
 
+Print mode converts digits and symbols on the device. Letters and teaching text stay ink. There is no handwriting-to-text function to deploy.
+
 ## 5. Play-along analysis (OMR service + Edge Function)
 
 The play-along feature converts uploaded PDFs to notes + measure positions via
@@ -209,6 +220,119 @@ If `pg_cron` / `pg_net` are unavailable, schedule Cloud Scheduler to
 `POST /poke` every minute instead; the worker calls `omr_reap_expired_leases`
 at the top of each poke.
 
+IMSLP chip browse uses the same vault + cron pattern. After deploying
+`imslp-sync` (`--no-verify-jwt`) and setting `IMSLP_SYNC_SECRET` as an Edge
+secret, store the function URL and the same secret in Vault so
+`imslp_sync_tick` can POST every two minutes:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp-sync', 'imslp_sync_url');
+select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
+```
+
+The billing mail outbox (`billing_mail_outbox`, migration 20261020160200)
+uses the same pattern for its retry path. Deploy `billing-mail-outbox`
+(`--no-verify-jwt`), set `BILLING_OUTBOX_SECRET` as an Edge secret, and store
+the function URL and that same secret in Vault. `billing_mail_outbox_tick` then
+POSTs every minute while mail is due. Until both are set, purchase and
+cancellation confirmations and cancel links still go out right after they are
+queued, but a failed send is not retried:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/billing-mail-outbox', 'billing_outbox_url');
+select vault.create_secret('<same value as BILLING_OUTBOX_SECRET>', 'billing_outbox_secret');
+```
+
+**Billing mail rollout.** Apply the migrations first, then deploy
+`stripe-webhook`, `billing-mail-outbox`, `billing-cancel` and `stripe-checkout`
+together. Until the new `stripe-webhook` is live, the previous one keeps
+claiming confirmations in `billing_notices` and sending them inline, which is
+why migration 20261020160200 keeps that table rather than dropping it. Drop
+it in a separate, later migration
+(`drop table if exists public.billing_notices;`), only after the new webhook
+has been live for longer than Stripe's three-day retry window. Nothing in the
+new functions reads or writes it.
+
+Content notices (report acknowledgments, statements of reasons, reporter
+outcomes) wait in `content_notice_outbox` until they are sent, and
+`content_notice_retry_tick` retries them every five minutes the same way.
+Deploy `content-notices` (`--no-verify-jwt`), set `CONTENT_NOTICE_SECRET` as an
+Edge secret, then:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/content-notices', 'content_notice_url');
+select vault.create_secret('<same value as CONTENT_NOTICE_SECRET>', 'content_notice_secret');
+```
+
+Without them, queued notices still go out, but only with the next report or
+moderator action. The moderation page counts what is still owed.
+
+Chip browse reads the live `public.imslp_works` snapshot: one row per IMSLP
+work with the array of taxonomy categories it belongs to. Refresh ticks write
+`imslp_works_building` and only promote after a category walk completes, so a
+mid-rebuild failure leaves the previous snapshot serving. Typed search stays on
+live MediaWiki search; key chips there still match the title. Chip browse keys
+are IMSLP key categories on the mirror.
+
+The chip index is a **committed catalog** in the repo
+(`scripts/data/imslp-works-catalog.jsonl.gz` + `imslp-works-sync.json`).
+`db push` loads it (the `*_imslp_works_catalog.sql` migration(s); split if
+a single file would exceed ~40MB). Those files are **not** in
+`scripts/apply-migrations.sql` — a SQL-editor paste cannot carry ~48MB of
+inserts. Locally, `npm run imslp:seed` upserts the same files and does **not**
+call IMSLP.
+
+To rebuild the catalog after a taxonomy change (talks to IMSLP, ~3,500
+requests, ~1 h at `--delay 1000`; do not go below 1000):
+
+```bash
+npm run imslp:export-catalog
+```
+
+That overwrites the gzip jsonl/sync files and regenerates the catalog
+migration(s).
+Interrupt and rerun: a checkpoint at `scripts/data/.imslp-export-progress.json`
+resumes (gitignored). Then commit the new files.
+
+```bash
+# load the committed catalog into the local stack (no IMSLP)
+npm run imslp:seed
+# or a hosted project:
+SUPABASE_URL=https://<project-ref>.supabase.co \
+SUPABASE_SERVICE_ROLE_KEY=<service role key> \
+npm run imslp:seed
+```
+
+`--dry-run` prints counts without writing. The cron tick is only a refresh
+after the catalog is loaded; without the two vault secrets it is a silent
+no-op. Rollout for a fresh project:
+
+1. `npx supabase db push` — schema plus the catalog insert. Do not paste
+   `scripts/apply-migrations.sql` expecting the catalog: that mirror is
+   schema-only. Use `db push` or `psql -f` for `*_imslp_works_catalog.sql`.
+2. (Optional) `npm run imslp:seed` if you need to reload the catalog without
+   re-running migrations.
+3. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
+   `npx supabase functions deploy imslp-search`.
+4. `npx supabase secrets set IMSLP_SYNC_SECRET=<random>`.
+5. The two `vault.create_secret` statements above.
+6. Verify the refresh is ticking:
+
+    ```sql
+    select category, state, pages_done, completed_at
+    from public.imslp_category_sync
+    order by updated_at desc;
+    ```
+
+    Each tick spends up to 60 MediaWiki requests on one category (batches of
+    500 pages, usually 4 requests each) and resumes where it left off. The
+    committed catalog already answers every chip; cron keeps membership from
+    going stale.
+
+Locally the cron does not fire (no vault secrets); with the stack up, run
+`npm run imslp:seed` (no env needed — it targets the local API port from
+`supabase/config.toml` with the public demo service key).
+
 The OMR service also needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
 `SELF_URL` (its public base URL for drain-chain self-pokes). Without any of
 this configured the app still works — the transport bar just reports analysis
@@ -216,7 +340,6 @@ as unavailable and offers a retry once the service exists.
 
 **Cutover:** deploy worker dual-mode → sweeper live → `OMR_QUEUE_MODE=pull` →
 confirm drain → remove push path later. Rollback = `OMR_QUEUE_MODE=push`.
-
 
 ## 6. Stripe billing
 
@@ -243,8 +366,8 @@ Unlimited is unlimited except for AI fingering reads, which carry a silent
 
 Annotation, the on-device fingering optimizer and manual fingering are unlimited
 on every plan, including Free. PDF export is the one on-device feature that is
-metered — 1/mo on Free, unlimited everywhere else, and never counted for guests
-or students (§6e).
+metered — 1/mo on Free, unlimited everywhere else, never counted for students,
+and a share-link guest's export is drawn from the score owner's allowance (§6e).
 
 ### 6a. Create the products and prices
 
@@ -306,17 +429,24 @@ supabase secrets set \
 ```
 
 Those seven `STRIPE_PRICE_*` names are exactly the seven `priceCatalog()` reads
-in `supabase/functions/_shared/stripeMode.ts`. A name that is unset is simply a price
-that does not exist: it maps to no tier, and checkout refuses it.
+in `supabase/functions/_shared/stripeMode.ts` for test mode; live reads
+`STRIPE_PRICE_LIVE_*`. Today both catalogues are committed (`PUBLISHED_PRICES`)
+and these secrets stay **unset**. An override is all-or-nothing per mode: one
+name set replaces that mode's whole catalogue, and every name left unset is then
+a price that does not exist, which maps to no tier and checkout refuses. DEPLOY.md
+_Go-live 2026-10_ (steps 4 and 9) audits production for leftovers.
 
-| Secret                       | Purpose                                                                     |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `STRIPE_SECRET_KEY`          | Sandbox: creating Checkout/Portal sessions and reading subscriptions        |
-| `STRIPE_WEBHOOK_SECRET`      | Sandbox: verifying the webhook signature — its own value, not the API key   |
-| `STRIPE_SECRET_KEY_LIVE`     | The same, for the live account. Setting it is what puts cleffy.io on live   |
-| `STRIPE_WEBHOOK_SECRET_LIVE` | The live endpoint's signing secret                                          |
-| `STRIPE_PRICE_*`             | The price→tier map. A price id absent from these is refused at checkout     |
-| `APP_URL`                    | Return URL when a caller sent no Origin (a known Origin wins over it)       |
+| Secret                       | Purpose                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| `STRIPE_SECRET_KEY_TEST`     | Sandbox: creating Checkout/Portal sessions and reading subscriptions       |
+| `STRIPE_WEBHOOK_SECRET_TEST` | Sandbox: verifying the webhook signature — its own value, not the API key  |
+| `STRIPE_SECRET_KEY`          | Legacy alias of `STRIPE_SECRET_KEY_TEST`, read only when that is unset     |
+| `STRIPE_WEBHOOK_SECRET`      | Legacy alias of `STRIPE_WEBHOOK_SECRET_TEST`, read only when that is unset |
+| `STRIPE_SECRET_KEY_LIVE`     | The same, for the live account. Setting it is what puts cleffy.io on live  |
+| `STRIPE_WEBHOOK_SECRET_LIVE` | The live endpoint's signing secret                                         |
+| `STRIPE_PRICE_*`             | Optional test-mode override; normally unset (committed catalogue)          |
+| `STRIPE_PRICE_LIVE_*`        | Optional live-mode override; normally unset (committed catalogue)          |
+| `APP_URL`                    | Return URL when a caller sent no Origin (a known Origin wins over it)      |
 
 cleffy.io and dev.cleffy.io share this one project, so the Edge Functions pick
 the account per request from the `Origin` header — live for cleffy.io, sandbox
@@ -327,15 +457,18 @@ keep their pre-split meaning as the **sandbox** pair. See
 `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` are provided
 by the platform — you do not set those.
 
-The client-visible values go in `.env` (see `.env.example`):
-`VITE_STRIPE_PUBLISHABLE_KEY`, the seven `VITE_STRIPE_PRICE_*` ids mirroring the
-secrets above, and `VITE_STRIPE_FOUNDING_OFFER`. Leave them blank to run without
+The client-visible values go in `.env` (see `.env.example`): the seven
+`VITE_STRIPE_PRICE_*` ids mirroring the secrets above, and
+`VITE_STRIPE_FOUNDING_OFFER`. Leave the price ids blank to run without
 billing — the pricing dialog then says so rather than offering buttons that
 cannot work. The dialog considers billing configured once both Personal and both
 Teacher ids are present; the two Academy ids are optional, and an Academy card
 with no id keeps its description but offers no button. Founding is optional
 twice over — it needs its id **and** `VITE_STRIPE_FOUNDING_OFFER=true`, or the
 card is not rendered at all.
+
+`VITE_STRIPE_PUBLISHABLE_KEY`, still in `.env.example`, is unused: no code
+reads it, because checkout redirects to the URL `stripe-checkout` returns.
 
 ### 6c. Deploy the functions
 
@@ -350,12 +483,52 @@ explicitly when deploying by hand:
 supabase functions deploy stripe-webhook --no-verify-jwt
 supabase functions deploy student-claim  --no-verify-jwt
 supabase functions deploy student-login  --no-verify-jwt
+supabase functions deploy imslp-sync     --no-verify-jwt
 supabase functions deploy stripe-checkout
 supabase functions deploy stripe-portal
 supabase functions deploy student-provision   # roster create/reset/archive/restore
 supabase functions deploy score-analyze analyze-annotations analyze-notes
 supabase functions deploy imslp-download   # now meters smart imports
 ```
+
+**Deploy `imslp-download` and `imslp-work` after applying
+`20261007120700_document_provenance.sql`.** The download now writes the score's
+provenance (`documents.source_url`, `source_filename`, `source_license`,
+`source_attribution`) and calls `edge_rate_block`; against a database without
+them every import fails at the provenance write (and is refunded). `imslp-work`
+now reports an edition as not downloadable when IMSLP's license lookup was
+unavailable (`licenseCheck: 'unavailable'`), matching what `imslp-download`
+already refused.
+
+`imslp-download` also paces live IMSLP fetches for the whole deployment on one
+`edge_rate_buckets` key (`imslp:download:global`): at most
+`IMSLP_DOWNLOAD_GLOBAL_MAX` fetches per `IMSLP_DOWNLOAD_GLOBAL_SPACING_MS`
+(defaults `2` and `1000` — two a second). A caller that finds the window full
+gets `429 { code: 'download_queued', retryAfterSec }` at once and the client
+waits and retries (up to 90 s), showing "Queued for IMSLP…". When IMSLP itself
+answers 429 — on the file servers or on the API (license parse, imageinfo) —
+the function closes the same key for IMSLP's `Retry-After` (60 s when absent,
+900 s at most), so every import backs off together. The slot is taken before
+the invocation's first live IMSLP request, the license parse included, so
+nothing reaches IMSLP while the key is closed; a cached license refusal spends
+no slot. Tune with
+`npx supabase secrets set IMSLP_DOWNLOAD_GLOBAL_MAX=1 IMSLP_DOWNLOAD_GLOBAL_SPACING_MS=2000`.
+
+Per-caller limits: 60 requests a minute per client address (a school's NAT
+shares one), then 10 a minute per signed-in user, answered as
+`429 { code: 'caller_rate_limited', retryAfterSec }`, which current clients wait
+out like the queue.
+
+**`imslp-download` now creates the score itself.** Current clients send
+`create: true` and a `title` with a fresh `documentId`; the function inserts the
+`documents` row (as the caller, so RLS and the score-cap trigger apply) only once
+the PDF is fetched, so a queued or abandoned import never leaves an empty score
+behind. **Deploy the function before the web app**: a new client talking to the
+old function is refused (403, "Only the document owner…") because the row it
+names does not exist yet. Clients from before this change still create the row
+first and are served as before (owner-checked), but they do not understand
+`download_queued`/`caller_rate_limited`: while the queue is busy they show the
+message as an error and roll their row back, until the PWA updates.
 
 **Deploy the three student functions together**, after applying
 `20260827150000_student_credentials.sql`. They are one change: `student-claim` is
@@ -384,13 +557,23 @@ to that header and only its last entry is one a caller cannot choose.
 
 Register the endpoint in Stripe
 ([Developers → Webhooks](https://dashboard.stripe.com/test/webhooks)) pointing at
-`https://<project-ref>.supabase.co/functions/v1/stripe-webhook`, subscribed to:
+`https://<project-ref>.supabase.co/functions/v1/stripe-webhook`, subscribed to
+all nine events it handles (`dispatchStripeEvent` in
+`supabase/functions/_shared/stripeEvents.ts`; DEPLOY.md → _Go-live 2026-10_,
+_Stripe webhook events_):
 
 - `checkout.session.completed`
 - `customer.subscription.created`
 - `customer.subscription.updated`
 - `customer.subscription.deleted`
+- `customer.subscription.paused`
+- `customer.subscription.resumed`
+- `invoice.paid`
+- `invoice.payment_succeeded`
 - `invoice.payment_failed`
+
+There is no `charge.refunded` handler: a refund changes nothing in the app, so a
+refunded subscription must also be cancelled in Stripe (DEPLOY.md → _Refunds_).
 
 ### 6d. Local webhook testing
 
@@ -416,15 +599,15 @@ the Stripe dashboard is a no-op (the handler reports `duplicate: true`).
 
 Client-side checks are UX only. Every limit is enforced server-side:
 
-| Limit                                   | Enforced by                                                                                                                                                                    |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 4th active cloud score                  | `documents_enforce_score_cap` trigger — uploads are a direct browser insert, so the cap lives in the database                                                                  |
-| Play-along, vision reads, smart imports | `consume_quota()` called from the Edge Function _before_ any work                                                                                                              |
-| PDF export                              | `consume_pdf_export()` — the export runs on-device, so this is an honest-UI counter, not a hard gate. It exempts anonymous share-link guests and provisioned students outright |
-| Student seats                           | Stock check in `student-provision`, on both `create` and `restore` — a seat is claimed where the row is written, so archive+restore cannot launder the cap                     |
-| Writes to an archived score             | `annotations_insert` / `annotations_update` RLS, so it holds for share-link students too                                                                                       |
-| Practice-note visibility                | `practice_notes_select` RLS — a note is private to its author until `shared` is set, and then only to the student it is about                                                  |
-| Academy seat count                      | `studio_members_seat_limit` trigger (the v1 `studios` / `studio_members` table names are kept; only the tier they entitle was renamed)                                         |
+| Limit                                   | Enforced by                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4th active cloud score                  | `documents_enforce_score_cap` trigger — uploads are a direct browser insert, so the cap lives in the database                                                                                                                                                                                                                                                       |
+| Play-along, vision reads, smart imports | `consume_quota()` called from the Edge Function _before_ any work                                                                                                                                                                                                                                                                                                   |
+| PDF export                              | `claim_pdf_export()` — check and increment in one statement, called before the on-device export is built; the client builds nothing without `ok: true` and fails closed on any error (offline is allowed only on an unlimited plan). A share-link guest names the score and is billed to its owner; students are exempt. `consume_pdf_export()` is the legacy alias |
+| Student seats                           | Stock check in `student-provision`, on both `create` and `restore` — a seat is claimed where the row is written, so archive+restore cannot launder the cap                                                                                                                                                                                                          |
+| Writes to an archived score             | `annotations_insert` / `annotations_update` RLS, so it holds for share-link students too                                                                                                                                                                                                                                                                            |
+| Practice-note visibility                | `practice_notes_select` RLS — a note is private to its author until `shared` is set, and then only to the student it is about                                                                                                                                                                                                                                       |
+| Academy seat count                      | `studio_members_seat_limit` trigger (the v1 `studios` / `studio_members` table names are kept; only the tier they entitle was renamed)                                                                                                                                                                                                                              |
 
 `students` and `cloud_scores` are **stocks** — a live count of rows, checked
 where the row is written — so neither ever reaches `usage_counters`. Everything
@@ -464,10 +647,10 @@ whichever credential state the method implies.
 **The teacher picks a method per student, at creation, and it is fixed for the
 life of the row** (`auth_method`, `check (auth_method in ('code','email'))`):
 
-| Method    | Choose it for                                  | What the student gets                                                        |
-| --------- | ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| `'code'`  | A young child, or anyone with no email of their own | A printed card. No address is collected, anywhere                        |
-| `'email'` | An older student with their own address, or one whose parent will manage it | An emailed invitation, then an ordinary sign-in |
+| Method    | Choose it for                                                               | What the student gets                             |
+| --------- | --------------------------------------------------------------------------- | ------------------------------------------------- |
+| `'code'`  | A young child, or anyone with no email of their own                         | A printed card. No address is collected, anywhere |
+| `'email'` | An older student with their own address, or one whose parent will manage it | An emailed invitation, then an ordinary sign-in   |
 
 On the **code** path the account is keyed on a synthetic address
 `st-<roster-id>@students.cleffy.app` with **no inbox behind it** — the roster id
@@ -492,12 +675,12 @@ replaced by `action: 'reset'`, never recovered.
 **Four states, and the database admits no others** (the
 `managed_students_claim_state` CHECK in `20260827150000_student_credentials.sql`):
 
-| State            | Row                                                        | Where the student goes  |
-| ---------------- | ---------------------------------------------------------- | ----------------------- |
-| code + Invited   | `login_code_hash` set, `claimed_at` null                    | `student-claim`         |
-| code + Active    | `username` set, `login_code_hash` **null**                  | `student-login`         |
-| email + Invited  | `student_email` set, `claimed_at` null                      | the emailed link        |
-| email + Active   | `student_email` set, `claimed_at` stamped                   | ordinary sign-in        |
+| State           | Row                                        | Where the student goes |
+| --------------- | ------------------------------------------ | ---------------------- |
+| code + Invited  | `login_code_hash` set, `claimed_at` null   | `student-claim`        |
+| code + Active   | `username` set, `login_code_hash` **null** | `student-login`        |
+| email + Invited | `student_email` set, `claimed_at` null     | the emailed link       |
+| email + Active  | `student_email` set, `claimed_at` stamped  | ordinary sign-in       |
 
 "Invited" means the same thing on both paths: the password is a scramble nobody
 has ever seen. Usernames are stored canonical-lowercase, so the plain unique index

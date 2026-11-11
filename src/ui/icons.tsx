@@ -1,26 +1,32 @@
 import {
     ArrowLeft,
+    Check,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
     ChevronUp,
+    Columns2,
     EllipsisVertical,
     Hourglass,
     LayoutGrid,
     List,
     LocateFixed,
+    Maximize,
     Minus,
     Music,
     Pause,
     Play,
     Plus,
     Pointer,
+    RectangleVertical,
     Redo2,
     RefreshCw,
     Repeat,
     Settings2,
+    Share,
     SkipBack,
     Square,
+    SquareCheck,
     Star,
     Tags,
     Timer,
@@ -28,6 +34,7 @@ import {
     Upload,
     Volume2,
     VolumeX,
+    WandSparkles,
     X,
 } from 'lucide-react';
 import type { LucideIcon, LucideProps } from 'lucide-react';
@@ -44,16 +51,23 @@ const withBrandStroke = (Icon: LucideIcon) => {
 
 export const ArrowLeftIcon = withBrandStroke(ArrowLeft);
 export const CloseIcon = withBrandStroke(X);
+export const CheckIcon = withBrandStroke(Check);
 export const UndoIcon = withBrandStroke(Undo2);
 export const RedoIcon = withBrandStroke(Redo2);
 export const ZoomInIcon = withBrandStroke(Plus);
 export const ZoomOutIcon = withBrandStroke(Minus);
+export const SinglePageIcon = withBrandStroke(RectangleVertical);
+export const TwoPagesIcon = withBrandStroke(Columns2);
+export const CheckboxIcon = withBrandStroke(Square);
+export const CheckboxCheckedIcon = withBrandStroke(SquareCheck);
 export const PointerIcon = withBrandStroke(Pointer);
+export const PrintHandwritingIcon = withBrandStroke(WandSparkles);
 export const StarIcon = withBrandStroke(Star);
 export const TagIcon = withBrandStroke(Tags);
 export const MoreVerticalIcon = withBrandStroke(EllipsisVertical);
 export const SettingsIcon = withBrandStroke(Settings2);
 export const UploadIcon = withBrandStroke(Upload);
+export const ShareIcon = withBrandStroke(Share);
 export const LayoutGridIcon = withBrandStroke(LayoutGrid);
 export const ListIcon = withBrandStroke(List);
 
@@ -73,4 +87,5 @@ export const RepeatIcon = withBrandStroke(Repeat);
 export const MetronomeIcon = withBrandStroke(Timer);
 export const FollowIcon = withBrandStroke(LocateFixed);
 export const MusicIcon = withBrandStroke(Music);
+export const FullScreenIcon = withBrandStroke(Maximize);
 export const RetryIcon = withBrandStroke(RefreshCw);

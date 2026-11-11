@@ -1,4 +1,16 @@
+import { PAID_VISION_READS } from '@/features/billing/paidAllowances';
+import { features } from '@/lib/features';
 import type { BillingTier } from '@/types/database';
+
+import {
+    formatMoney,
+    PLAN_PRICES,
+    TAX_INCLUSIVE,
+    type Currency,
+    type PlanSlot,
+} from '../../../supabase/functions/_shared/billingTerms';
+
+export type { Currency, PlanSlot };
 
 /**
  * Pricing catalogue. Every price id comes from env — nothing is hardcoded, so
@@ -24,10 +36,69 @@ export type BillingInterval = 'monthly' | 'annual';
 
 export type StripeMode = 'live' | 'test';
 
-const env = (key: string): string | null => {
-    const value = import.meta.env[key] as string | undefined;
-    return value && value.length > 0 ? value : null;
-};
+type PriceSuffix =
+    | 'PERSONAL_MONTHLY'
+    | 'PERSONAL_ANNUAL'
+    | 'TEACHER_MONTHLY'
+    | 'TEACHER_ANNUAL'
+    | 'ACADEMY_MONTHLY'
+    | 'ACADEMY_ANNUAL'
+    | 'FOUNDING_ANNUAL';
+
+interface PriceVars {
+    /** `VITE_STRIPE_PRICE_*`: an explicit price for this build. */
+    explicit: string | undefined;
+    /** `VITE_STRIPE_LIVE_PRICE_*`, for the production storefront. */
+    live: string | undefined;
+    /** `VITE_STRIPE_TEST_PRICE_*`, for previews and localhost. */
+    test: string | undefined;
+}
+
+/**
+ * Every price variable, each named outright. Vite inlines an
+ * `import.meta.env.VITE_X` read as that one value; a read by computed key made
+ * it inline the whole env object — every VITE_ variable the build had —
+ * instead. Built per call so tests can `vi.stubEnv`.
+ */
+const priceVars = (): Record<PriceSuffix, PriceVars> => ({
+    PERSONAL_MONTHLY: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_PERSONAL_MONTHLY,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_PERSONAL_MONTHLY,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_PERSONAL_MONTHLY,
+    },
+    PERSONAL_ANNUAL: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_PERSONAL_ANNUAL,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_PERSONAL_ANNUAL,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_PERSONAL_ANNUAL,
+    },
+    TEACHER_MONTHLY: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_TEACHER_MONTHLY,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_TEACHER_MONTHLY,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_TEACHER_MONTHLY,
+    },
+    TEACHER_ANNUAL: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_TEACHER_ANNUAL,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_TEACHER_ANNUAL,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_TEACHER_ANNUAL,
+    },
+    ACADEMY_MONTHLY: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_ACADEMY_MONTHLY,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_ACADEMY_MONTHLY,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_ACADEMY_MONTHLY,
+    },
+    ACADEMY_ANNUAL: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_ACADEMY_ANNUAL,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_ACADEMY_ANNUAL,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_ACADEMY_ANNUAL,
+    },
+    FOUNDING_ANNUAL: {
+        explicit: import.meta.env.VITE_STRIPE_PRICE_FOUNDING_ANNUAL,
+        live: import.meta.env.VITE_STRIPE_LIVE_PRICE_FOUNDING_ANNUAL,
+        test: import.meta.env.VITE_STRIPE_TEST_PRICE_FOUNDING_ANNUAL,
+    },
+});
+
+const nonEmpty = (value: string | undefined): string | null => (value && value.length > 0 ? value : null);
 
 /** Only the production storefront is live; previews and localhost are sandbox. */
 const LIVE_HOSTS = ['cleffy.io', 'www.cleffy.io'];
@@ -43,9 +114,10 @@ export const stripeMode = (): StripeMode => {
  * An explicit `VITE_STRIPE_PRICE_*` wins — that is what a local `.env` sets, and
  * what the tests stub. Otherwise the per-mode catalogue decides.
  */
-const priceEnv = (suffix: string): string | null =>
-    env(`VITE_STRIPE_PRICE_${suffix}`) ??
-    env(stripeMode() === 'live' ? `VITE_STRIPE_LIVE_PRICE_${suffix}` : `VITE_STRIPE_TEST_PRICE_${suffix}`);
+const priceEnv = (suffix: PriceSuffix): string | null => {
+    const vars = priceVars()[suffix];
+    return nonEmpty(vars.explicit) ?? nonEmpty(stripeMode() === 'live' ? vars.live : vars.test);
+};
 
 export const stripePrices = () => ({
     personalMonthly: priceEnv('PERSONAL_MONTHLY'),
@@ -80,102 +152,153 @@ export interface TierCard {
     features: string[];
 }
 
-export const TIER_CARDS: TierCard[] = [
-    {
-        tier: 'free',
-        name: 'Free',
-        tagline: 'A taste of Personal — the whole practice tool for one player, in small amounts.',
-        features: [
-            '3 active cloud scores',
-            '3 play-along analyses a month',
-            '2 smart imports a month',
-            '5 AI fingering reads a month',
-            '1 PDF export a month',
-            'Unlimited annotation and fingering tools',
-        ],
-    },
-    {
-        tier: 'personal',
-        name: 'Personal',
-        tagline: 'Your personal practice tool — the whole app for one player, with no student features.',
-        features: [
-            'Unlimited cloud scores',
-            'Unlimited play-along analysis',
-            'Unlimited smart imports',
-            'Unlimited AI fingering reads',
-            'Unlimited PDF export',
-            'No roster — this plan is just for you',
-        ],
-    },
-    {
-        tier: 'teacher',
-        name: 'Teacher',
-        tagline: 'For a teaching studio: a class of twenty works out at under $1 per student.',
-        features: [
-            'Unlimited students',
-            'Everything unlimited, as in Personal',
-            'One roster for everyone you teach',
-            'Practice notes on every lesson',
-        ],
-    },
-    {
-        tier: 'academy',
-        name: 'Academy',
-        tagline: 'Teacher for every instructor on your team, up to five seats.',
-        features: [
-            'Everything in Teacher, for up to 5 teachers',
-            'One invoice for the whole academy',
-            'Add and remove teacher seats by email',
-            'Students always join free',
-        ],
-    },
-];
+/** The release flags the cards depend on (src/lib/features.ts). */
+export type TierCardFlags = Pick<typeof features, 'playalong' | 'fingering'>;
+
+/**
+ * The tier cards for a build. Play-along analyses (omr_runs) and fingering are
+ * still metered server-side, but a release that switches them off must not
+ * sell them: a line on a card is a promise to a paying customer. The two
+ * meters every build uses are named for what actually draws on them —
+ * `smart_imports` is spent by an IMSLP import, `vision_reads` by the AI pass of
+ * Import marks (and by fingering note reads where that ships).
+ */
+export const tierCards = (flags: TierCardFlags): TierCard[] => {
+    const playalong = flags.playalong;
+    const fingering = flags.fingering;
+    const aiReads = fingering ? 'AI page reads (Import marks and fingering)' : 'AI page reads for Import marks';
+    return [
+        {
+            tier: 'free',
+            name: 'Free',
+            tagline: 'A taste of Personal — the whole practice tool for one player, in small amounts.',
+            features: [
+                '3 active cloud scores',
+                ...(playalong ? ['3 play-along analyses a month'] : []),
+                '2 imports a month from Find a score',
+                `5 ${aiReads} a month`,
+                '1 PDF export a month',
+                fingering ? 'Unlimited annotation and fingering tools' : 'Unlimited annotation',
+            ],
+        },
+        {
+            tier: 'personal',
+            name: 'Personal',
+            tagline: 'Your personal practice tool — the whole app for one player, with no student features.',
+            features: [
+                'Unlimited cloud scores',
+                ...(playalong ? ['Unlimited play-along analysis'] : []),
+                'Unlimited imports from Find a score',
+                // Paid AI reads carry a fair-use ceiling (tier_limits() in SQL),
+                // so the card states it rather than promising "unlimited".
+                `${PAID_VISION_READS} ${aiReads} a month (fair use)`,
+                'Unlimited PDF export',
+                'No roster — this plan is just for you',
+            ],
+        },
+        {
+            tier: 'teacher',
+            name: 'Teacher',
+            tagline: 'For a teaching studio: one price, however many students you teach.',
+            features: [
+                'Unlimited students',
+                'Everything in Personal',
+                'One roster for everyone you teach',
+                'Practice notes on every lesson',
+            ],
+        },
+        {
+            tier: 'academy',
+            name: 'Academy',
+            tagline: 'Teacher for every instructor on your team, up to five seats.',
+            features: [
+                'Everything in Teacher, for up to 5 teachers',
+                'One invoice for the whole academy',
+                'Add and remove teacher seats by email',
+                'Students always join free',
+            ],
+        },
+    ];
+};
+
+/** The cards this build sells. */
+export const TIER_CARDS: TierCard[] = tierCards(features);
 
 export interface PriceDisplay {
     priceId: string | null;
+    /** Which catalogue slot this is, for the consent wording; null on Free. */
+    slot: PlanSlot | null;
     amount: string;
     caption: string;
     note?: string;
 }
 
-export const priceFor = (tier: BillingTier, interval: BillingInterval): PriceDisplay | null => {
+/** "per month, VAT incl." / "per year + tax" -- every paid price says how tax applies to it. */
+const withTax = (caption: string, currency: Currency): string =>
+    `${caption}${TAX_INCLUSIVE[currency] ? ', VAT incl.' : ' + tax'}`;
+
+const paid = (
+    slot: PlanSlot,
+    priceId: string | null,
+    currency: Currency,
+    caption: string,
+    note?: string,
+): PriceDisplay => ({
+    priceId,
+    slot,
+    amount: formatMoney(PLAN_PRICES[slot][currency], currency),
+    caption: withTax(caption, currency),
+    ...(note ? { note } : {}),
+});
+
+/**
+ * A tier's price in the buyer's currency. The amounts live in billingTerms.ts,
+ * which the checkout function also reads, so the card, the consent wording and
+ * the charge cannot name three different numbers.
+ */
+export const priceFor = (
+    tier: BillingTier,
+    interval: BillingInterval,
+    currency: Currency = 'usd',
+): PriceDisplay | null => {
     const prices = stripePrices();
     const monthly = interval === 'monthly';
     if (tier === 'free') {
-        return { priceId: null, amount: 'Free', caption: 'no card required' };
+        return { priceId: null, slot: null, amount: 'Free', caption: 'no card required' };
     }
     if (tier === 'personal') {
         return monthly
-            ? { priceId: prices.personalMonthly, amount: '$7', caption: 'per month' }
-            : { priceId: prices.personalAnnual, amount: '$70', caption: 'per year', note: 'Two months free' };
+            ? paid('personalMonthly', prices.personalMonthly, currency, 'per month')
+            : paid('personalAnnual', prices.personalAnnual, currency, 'per year', 'Two months free');
     }
     if (tier === 'academy') {
         return monthly
-            ? { priceId: prices.academyMonthly, amount: '$49', caption: 'per month, up to 5 teachers' }
-            : {
-                  priceId: prices.academyAnnual,
-                  amount: '$490',
-                  caption: 'per year, up to 5 teachers',
-                  note: 'Two months free',
-              };
+            ? paid('academyMonthly', prices.academyMonthly, currency, 'per month, up to 5 teachers')
+            : paid('academyAnnual', prices.academyAnnual, currency, 'per year, up to 5 teachers', 'Two months free');
     }
     return monthly
-        ? { priceId: prices.teacherMonthly, amount: '$19', caption: 'per month' }
-        : { priceId: prices.teacherAnnual, amount: '$190', caption: 'per year', note: 'Two months free' };
+        ? paid('teacherMonthly', prices.teacherMonthly, currency, 'per month')
+        : paid('teacherAnnual', prices.teacherAnnual, currency, 'per year', 'Two months free');
 };
 
-/** The Founding Teacher price — a second annual price on the Teacher product. */
-export const foundingPrice = (): PriceDisplay | null => {
+/** The Founding Teacher price -- a second annual price on the Teacher product. */
+export const foundingPrice = (currency: Currency = 'usd'): PriceDisplay | null => {
     if (!isFoundingOfferEnabled()) {
         return null;
     }
-    return {
-        priceId: stripePrices().foundingAnnual,
-        amount: '$99',
-        caption: 'per year, forever',
-        note: 'Founding Teacher — $99/yr on Teacher, and it keeps this price for as long as you stay subscribed',
-    };
+    const amount = formatMoney(PLAN_PRICES.foundingAnnual[currency], currency);
+    return paid(
+        'foundingAnnual',
+        stripePrices().foundingAnnual,
+        currency,
+        'per year, forever',
+        `Founding Teacher — ${amount}/yr on Teacher, and it keeps this price for as long as you stay subscribed`,
+    );
 };
+
+/** "plans from $7/month" -- the cheapest monthly plan, for the landing page. */
+export const lowestMonthlyPrice = (currency: Currency = 'usd'): string =>
+    formatMoney(PLAN_PRICES.personalMonthly[currency], currency);
 
 export const TIER_LABELS: Record<BillingTier, string> = {
     free: 'Free',

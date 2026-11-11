@@ -1,4 +1,5 @@
 import { callEdgeFunction, limitErrorFrom } from '@/features/billing/billingApi';
+import { TEACHER_ATTESTATION_VERSION, consentAgeFor, teacherAttestationText } from '@/features/legal/consentAge';
 import { getSupabase } from '@/lib/supabase';
 import type { AssignmentAccess, AssignmentRow, ManagedStudentRow, PracticeNoteRow } from '@/types/database';
 
@@ -31,7 +32,40 @@ import type { AssignmentAccess, AssignmentRow, ManagedStudentRow, PracticeNoteRo
  * from each other, when a column is added.
  */
 export const MANAGED_STUDENT_COLUMNS =
-    'id, teacher_id, student_user_id, display_name, parent_email, auth_method, username, student_email, claimed_at, archived_at, created_at, updated_at';
+    'id, teacher_id, student_user_id, display_name, parent_email, auth_method, username, student_email, claimed_at, archived_at, created_at, updated_at, country, age_attested_at, age_attested_min_age';
+
+/**
+ * The teacher vouching for a student's age, as student-provision reads it
+ * (readTeacherAttestation in supabase/functions/_shared/consentAge.ts): the
+ * country, and the exact sentence the teacher ticked. The server recomputes
+ * the age from the country and refuses wording that does not match it.
+ */
+export interface TeacherAttestation {
+    country: string;
+    countryName: string;
+    confirmed: true;
+    wording: string;
+    version: string;
+}
+
+export const attestationFor = (country: string, countryName: string): TeacherAttestation => ({
+    country,
+    countryName,
+    confirmed: true,
+    wording: teacherAttestationText(consentAgeFor(country), countryName),
+    version: TEACHER_ATTESTATION_VERSION,
+});
+
+/** What a form shows when the two fields are not both answered, or null when they are. */
+export const attestationProblem = (country: string, confirmed: boolean): string | null => {
+    if (!country) {
+        return 'Choose the country the student lives in.';
+    }
+    if (!confirmed) {
+        return 'Confirm the student meets the minimum age for their country.';
+    }
+    return null;
+};
 
 export interface ProvisionedStudent {
     id: string;
@@ -47,8 +81,9 @@ export interface ProvisionedStudent {
  * the student's own and exists only on the invite path. Conflating them would
  * mean a parent's address could be turned into a child's sign-in.
  */
-export type ProvisionOptions =
-    { parentEmail?: string; method: 'code' } | { parentEmail?: string; method: 'email'; studentEmail: string };
+export type ProvisionOptions = { attestation: TeacherAttestation } & (
+    { parentEmail?: string; method: 'code' } | { parentEmail?: string; method: 'email'; studentEmail: string }
+);
 
 /** A printed card, or an invite already in flight — never both. */
 export type ProvisionResult =
@@ -136,6 +171,7 @@ export const provisionStudent = async (displayName: string, opts: ProvisionOptio
         action: 'create',
         displayName: displayName.trim(),
         method: opts.method,
+        attestation: opts.attestation,
         ...(trimmedEmail ? { parentEmail: trimmedEmail } : {}),
         ...(opts.method === 'email' ? { studentEmail: opts.studentEmail.trim(), redirectTo: welcomeRedirect() } : {}),
     });
@@ -162,6 +198,38 @@ export const provisionStudent = async (displayName: string, opts: ProvisionOptio
 };
 
 /**
+ * What the teacher reads when a reset fails part-way (decision 49 item 5): the
+ * server holds the student's current card for up to 10 minutes, so that card
+ * cannot be used to set up an account until the reset is retried or the hold
+ * runs out.
+ */
+export const RESET_INCOMPLETE_MESSAGE =
+    'The reset did not finish. The student’s current card is held for up to 10 minutes, so it cannot be used meanwhile. Try the reset again.';
+
+/**
+ * The same when the server could not tell whether the student's password was
+ * changed (20261022110800_student_code_reset_quarantine.sql): the retry is held
+ * off until that is settled, so it says to try again in a few minutes
+ * (decision 60(a)).
+ */
+export const RESET_UNCONFIRMED_MESSAGE =
+    'The reset did not finish, and we could not confirm whether the student’s password was changed. Their current card is held for up to 10 minutes. Try the reset again in a few minutes.';
+
+/** The same two for an email-method student, who has no card (the answer says `method: 'email'`). */
+export const EMAIL_RESET_INCOMPLETE_MESSAGE =
+    'The reset did not finish and no new link was sent. The student’s account is held for up to 10 minutes, so another reset cannot start meanwhile. Try the reset again.';
+
+export const EMAIL_RESET_UNCONFIRMED_MESSAGE =
+    'The reset did not finish, and we could not confirm whether the student’s password was changed. No new link was sent. Try the reset again in a few minutes.';
+
+/**
+ * The hold a failed reset left, by student: sent with the next reset of that
+ * student so it resumes its own hold (20261022110500_student_code_reset_holder.sql).
+ * In memory only: after a reload the hold simply runs out.
+ */
+const pendingResetTokens = new Map<string, string>();
+
+/**
  * Cuts off however the student gets in today and issues the replacement.
  *
  * One action for both paths because it is one intent — "they cannot get in, fix
@@ -172,10 +240,37 @@ export const provisionStudent = async (displayName: string, opts: ProvisionOptio
  * to a password someone else now knows.
  */
 export const resetStudentAccess = async (studentId: string): Promise<ResetResult> => {
-    const response = await provision({ action: 'reset', studentId, redirectTo: welcomeRedirect() });
+    const resetToken = pendingResetTokens.get(studentId);
+    const response = await provision({
+        action: 'reset',
+        studentId,
+        redirectTo: welcomeRedirect(),
+        ...(resetToken ? { resetToken } : {}),
+    });
     if (!response.ok) {
+        const failure = (await response
+            .clone()
+            .json()
+            .catch(() => ({}))) as { code?: string; resetToken?: unknown; method?: unknown };
+        const email = failure.method === 'email';
+        // The server kept the reset's hold on the student's current card; the
+        // token lets the teacher's next try resume it instead of waiting. Any
+        // failure that hands one back is kept, not just reset_incomplete.
+        if (typeof failure.resetToken === 'string') {
+            pendingResetTokens.set(studentId, failure.resetToken);
+        }
+        if (failure.code === 'reset_incomplete') {
+            throw new Error(email ? EMAIL_RESET_INCOMPLETE_MESSAGE : RESET_INCOMPLETE_MESSAGE);
+        }
+        if (failure.code === 'reset_unconfirmed') {
+            throw new Error(email ? EMAIL_RESET_UNCONFIRMED_MESSAGE : RESET_UNCONFIRMED_MESSAGE);
+        }
+        if (failure.code === 'reset_lost') {
+            pendingResetTokens.delete(studentId);
+        }
         return failFrom(response, 'Could not reset that student’s access.');
     }
+    pendingResetTokens.delete(studentId);
     const body = (await response.json()) as ProvisionBody;
     if (body.invited) {
         if (!body.studentEmail) {
@@ -197,11 +292,26 @@ export const archiveStudent = async (studentId: string): Promise<void> => {
     }
 };
 
-/** Re-occupies a seat, so this can be refused with LimitReachedError exactly as create is. */
-export const restoreStudent = async (studentId: string): Promise<void> => {
-    const response = await provision({ action: 'restore', studentId });
+/**
+ * Re-occupies a seat, so this can be refused with LimitReachedError exactly as
+ * create is. Needs the teacher's attestation again, as create does.
+ */
+export const restoreStudent = async (studentId: string, attestation: TeacherAttestation): Promise<void> => {
+    const response = await provision({ action: 'restore', studentId, attestation });
     if (!response.ok) {
         await failFrom(response, 'Could not restore that student.');
+    }
+};
+
+/**
+ * Deletes the student for good: their markings are scrubbed from every score
+ * and lesson-history snapshot, then their account goes, and with it the
+ * roster row, assignments and practice notes. Nothing brings it back.
+ */
+export const deleteStudent = async (studentId: string): Promise<void> => {
+    const response = await provision({ action: 'delete', studentId });
+    if (!response.ok) {
+        await failFrom(response, 'Could not delete that student.');
     }
 };
 

@@ -16,6 +16,7 @@ import { pagePointToViewport, type PageLayout } from '@/features/viewer/geometry
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
+import { readCachedPdfMeta } from '@/sync/pdfCache';
 import { useViewerStore } from '@/state/store';
 import type { Annotation } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
@@ -86,7 +87,7 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, score
             const aspect = layout.width / layout.height;
             const db = getDb();
 
-            const contentRev = (await db.pdfCache.get(docId))?.contentRev ?? 0;
+            const contentRev = (await readCachedPdfMeta(db, docId).catch(() => null))?.contentRev ?? 0;
             // Epoch from the same ScoreData instance used for mapping — no Dexie dig.
             const scoreEpoch = scoreCacheEpoch(score);
             const key = await regionCacheKey({
@@ -170,11 +171,11 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, score
         // Clear the overlay FIRST — createMany is a no-op while it is shown.
         store.setHistoryOverlay(null);
         if (commit && pendingProposals.length > 0) {
-            store.beginBatch();
+            const batch = store.beginBatch();
             try {
                 await store.createMany(pendingProposals);
             } finally {
-                store.endBatch();
+                store.endBatch(batch);
             }
         }
         setPendingProposals([]);

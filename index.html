@@ -2,17 +2,18 @@
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
-        <meta
-            name="viewport"
-            content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
-        />
-        <!-- Keep in sync with --color-accent in src/index.css @theme and the PWA manifest in vite.config.ts -->
-        <meta name="theme-color" content="#4338ca" />
+        <!-- Zoomable everywhere (WCAG 1.4.4). The score keeps pinch for itself with
+             touch-action, not the viewport: src/lib/viewportZoom.ts. -->
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+        <!-- The browser chrome matches the app's header: paper, --color-paper in src/index.css
+             @theme. Keep in sync with theme_color in the PWA manifest (vite.config.ts). -->
+        <meta name="theme-color" content="#f7f5ef" />
         <meta
             name="description"
             content="Annotate sheet music together in real time. Upload scores, share a link, and mark up with your ensemble."
         />
         <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-title" content="Cleffy" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <!-- Social cards need absolute URLs; swap the dev-tunnel origin for the production domain at deploy. -->
@@ -23,8 +24,8 @@
             property="og:description"
             content="Upload a score, share one link, and mark it up live with your students or ensemble. No accounts needed to join."
         />
-        <meta property="og:url" content="https://cleffy.ngrok.app/" />
-        <meta property="og:image" content="https://cleffy.ngrok.app/marketing/og.jpg" />
+        <meta property="og:url" content="https://cleffy.io/" />
+        <meta property="og:image" content="https://cleffy.io/marketing/og.jpg" />
         <meta property="og:image:width" content="1200" />
         <meta property="og:image:height" content="630" />
         <meta name="twitter:card" content="summary_large_image" />
@@ -33,7 +34,7 @@
             name="twitter:description"
             content="Upload a score, share one link, and mark it up live with your students or ensemble. No accounts needed to join."
         />
-        <meta name="twitter:image" content="https://cleffy.ngrok.app/marketing/og.jpg" />
+        <meta name="twitter:image" content="https://cleffy.io/marketing/og.jpg" />
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
         <link rel="icon" href="/icons/icon-192.png" />
         <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
