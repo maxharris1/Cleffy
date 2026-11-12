@@ -9,6 +9,7 @@ import {
     type AgeGate,
 } from '@/features/auth/ageCheck';
 import { countryOptions } from '@/features/legal/countries';
+import { features } from '@/lib/features';
 import { BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
@@ -65,9 +66,14 @@ export const AgeScreen = ({ purpose, onPass, footer }: AgeScreenProps) => {
 
     if (blocked) {
         return (
-            <BrandShell title="Sorry" subtitle="You can’t create a Cleffy account at this time.">
+            <BrandShell
+                title="Sorry"
+                subtitle="Cleffy accounts are for people who meet the minimum age where they live."
+            >
+                {/* No age, number or year here, whichever purpose: the refusal must not hint at what would pass. */}
                 <p className="text-center text-sm leading-relaxed text-stone-600">
-                    Cleffy is for people who meet the minimum age where they live.
+                    If your teacher uses Cleffy, ask them to show your score on their screen
+                    {features.viewLinks ? ' or send you a view link' : ''}.
                 </p>
                 <p className="mt-6 text-center">
                     <Link to="/" className={linkClassName}>

@@ -14,7 +14,8 @@ describe('LEGAL_VERSIONS', () => {
         for (const id of LEGAL_DOCUMENT_IDS) {
             expect(LEGAL_VERSIONS[id], id).toMatch(/^\d{4}-\d{2}-\d{2}(-draft)?$/);
             expect(LEGAL_LAST_UPDATED[id], id).toMatch(/^\d{1,2} [A-Z][a-z]+ \d{4}$/);
-            expect(LEGAL_PATHS[id], id).toBe(`/${id}`);
+            // Every page is /<id>, except the children's notice, which lives at a readable /children-privacy.
+            expect(LEGAL_PATHS[id], id).toBe(id === 'children' ? '/children-privacy' : `/${id}`);
         }
     });
 
@@ -22,6 +23,7 @@ describe('LEGAL_VERSIONS', () => {
         // Consent records and purchase emails are written server-side: a
         // version bumped on one side only would store the wrong one.
         expect(SERVER_LEGAL_VERSIONS).toEqual(LEGAL_VERSIONS);
+        expect(SERVER_LEGAL_VERSIONS.children).toBe('2026-11-12-draft');
         expect(LEGAL_OPERATOR).toEqual({
             name: LEGAL_ENTITY.name,
             postalAddress: LEGAL_ENTITY.postalAddress,

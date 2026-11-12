@@ -19,4 +19,6 @@ export const features = {
      * (analyze-annotations → Anthropic). Off at launch.
      */
     smartImport: flag(import.meta.env.VITE_FEATURE_SMART_IMPORT),
+    /** Under-13 view links: read-only score link, no account. Off until counsel signs off. */
+    viewLinks: flag(import.meta.env.VITE_FEATURE_VIEW_LINKS),
 } as const;

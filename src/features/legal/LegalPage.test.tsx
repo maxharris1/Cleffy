@@ -4,10 +4,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { sendsToAnthropic } from '@/features/legal/aiFeatures';
 import {
+    CHILDREN_NOTICE,
     COPYRIGHT_POLICY,
     LEGAL_DOCUMENTS,
     LEGAL_DOCUMENTS_ARE_DRAFTS,
     LEGAL_ENTITY,
+    LEGAL_PATHS,
     LEGAL_VERSIONS,
     PRIVACY_POLICY,
     REFUND_POLICY,
@@ -15,7 +17,14 @@ import {
     legalText,
     type LegalDocument,
 } from '@/features/legal/legalContent';
-import { CopyrightPolicyPage, PrivacyPage, RefundPolicyPage, TermsPage } from '@/features/legal/LegalPage';
+import { LegalLinks } from '@/features/legal/LegalLinks';
+import {
+    ChildrenPrivacyPage,
+    CopyrightPolicyPage,
+    PrivacyPage,
+    RefundPolicyPage,
+    TermsPage,
+} from '@/features/legal/LegalPage';
 import { LEGAL_DOCUMENT_IDS } from '@/features/legal/legalVersions';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
@@ -79,7 +88,7 @@ describe('legal content', () => {
         for (const id of LEGAL_DOCUMENT_IDS) {
             expect(LEGAL_VERSIONS[id], id).toMatch(/^\d{4}-\d{2}-\d{2}-draft$/);
         }
-        for (const doc of [PRIVACY_POLICY, TERMS_OF_SERVICE, REFUND_POLICY, COPYRIGHT_POLICY]) {
+        for (const doc of [PRIVACY_POLICY, CHILDREN_NOTICE, TERMS_OF_SERVICE, REFUND_POLICY, COPYRIGHT_POLICY]) {
             const placeholders = doc.sections.flatMap((section) =>
                 section.blocks.filter((block) => block.kind === 'placeholder'),
             );
@@ -146,6 +155,34 @@ describe('legal content', () => {
         for (const text of [sectionText(PRIVACY_POLICY, 'children'), sectionText(TERMS_OF_SERVICE, 'accounts')]) {
             expect(text).toMatch(/at least 13/);
             expect(text).toMatch(/up to 16/);
+        }
+    });
+
+    it('says under-13s cannot have accounts and points to the children’s notice, as drafts', () => {
+        const privacy = PRIVACY_POLICY.sections.find((section) => section.id === 'children');
+        const privacyText = sectionText(PRIVACY_POLICY, 'children');
+        expect(privacyText).toMatch(/^Cleffy accounts are not available to children under 13\./m);
+        expect(privacyText).not.toMatch(/not directed at children/);
+        expect(privacyText).toMatch(/See our Children’s Privacy Notice/);
+        expect(privacy?.blocks).toContainEqual({
+            kind: 'placeholder',
+            text: 'DRAFT — under-13 wording awaiting legal review.',
+        });
+
+        const teachers = TERMS_OF_SERVICE.sections.find((section) => section.id === 'teachers');
+        expect(sectionText(TERMS_OF_SERVICE, 'teachers')).toMatch(
+            /Students under the minimum age may not have accounts or join as guests\. You may show them scores on your own screen\. Don’t use Cleffy to collect information from them\./,
+        );
+        expect(teachers?.blocks).toContainEqual({
+            kind: 'placeholder',
+            text: 'DRAFT — teacher clause awaiting legal review.',
+        });
+    });
+
+    it('mentions no view link on any public page while view links are off', () => {
+        for (const id of LEGAL_DOCUMENT_IDS) {
+            const doc = LEGAL_DOCUMENTS[id];
+            expect(`${doc.summary}\n${legalText(doc)}`, id).not.toMatch(/view link/i);
         }
     });
 
@@ -278,10 +315,11 @@ describe('LegalPage', () => {
     });
 
     it.each([
-        [TermsPage, 'Terms of Service', 'Terms'],
-        [RefundPolicyPage, 'Refund Policy', 'Refunds'],
-        [CopyrightPolicyPage, 'Copyright and Content Policy', 'Copyright'],
-    ])('renders %#: %s, linking to the other three policies', (Page, title, current) => {
+        [TermsPage, 'Terms of Service', 'terms'],
+        [RefundPolicyPage, 'Refund Policy', 'refunds'],
+        [CopyrightPolicyPage, 'Copyright and Content Policy', 'copyright'],
+        [ChildrenPrivacyPage, 'Children’s Privacy Notice', 'children'],
+    ] as const)('renders %#: %s, linking to the other policies', (Page, title, current) => {
         render(
             <MemoryRouter>
                 <Page />
@@ -289,14 +327,38 @@ describe('LegalPage', () => {
         );
         expect(screen.getByRole('heading', { level: 1, name: title })).toBeInTheDocument();
         const nav = screen.getByRole('navigation', { name: 'Policies' });
-        expect(within(nav).getByText(current)).toHaveAttribute('aria-current', 'page');
+        expect(within(nav).getByText(LEGAL_DOCUMENTS[current].shortTitle)).toHaveAttribute('aria-current', 'page');
         const hrefs = within(nav)
             .getAllByRole('link')
             .map((link) => link.getAttribute('href'));
-        expect(hrefs).toHaveLength(3);
-        expect(new Set([...hrefs, `/${current === 'Refunds' ? 'refunds' : current.toLowerCase()}`])).toEqual(
-            new Set(['/privacy', '/terms', '/refunds', '/copyright']),
+        expect(hrefs).toHaveLength(LEGAL_DOCUMENT_IDS.length - 1);
+        expect(new Set([...hrefs, LEGAL_PATHS[current]])).toEqual(
+            new Set(['/privacy', '/children-privacy', '/terms', '/refunds', '/copyright']),
         );
+    });
+
+    it('renders the children’s privacy notice as a draft that is not in effect', () => {
+        render(
+            <MemoryRouter>
+                <ChildrenPrivacyPage />
+            </MemoryRouter>,
+        );
+        expect(screen.getByRole('heading', { level: 1, name: 'Children’s Privacy Notice' })).toBeInTheDocument();
+        expect(screen.getByText(/Version 2026-11-12-draft/)).toBeInTheDocument();
+        expect(screen.getByRole('note')).toHaveTextContent(/awaiting final legal review/);
+        expect(screen.getByText('DRAFT — awaiting legal review. Not in effect.')).toBeInTheDocument();
+    });
+
+    it('lists the children’s privacy notice in the footer, after Privacy', () => {
+        render(
+            <MemoryRouter>
+                <LegalLinks />
+            </MemoryRouter>,
+        );
+        const links = screen.getAllByRole('link');
+        const children = screen.getByRole('link', { name: 'Children’s privacy' });
+        expect(children).toHaveAttribute('href', '/children-privacy');
+        expect(links.indexOf(children)).toBe(links.indexOf(screen.getByRole('link', { name: 'Privacy' })) + 1);
     });
 
     it('offers the report form from the copyright policy', () => {

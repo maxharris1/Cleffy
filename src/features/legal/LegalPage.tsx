@@ -67,7 +67,7 @@ const Block = ({ block }: { block: LegalBlock }) => {
     }
 };
 
-/** The other three documents, one click away from each. */
+/** The other documents, one click away from each. */
 const DocumentNav = ({ current }: { current: LegalDocumentId }) => (
     <nav aria-label="Policies">
         <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
@@ -156,6 +156,8 @@ const LegalPage = ({ document: doc }: { document: LegalDocument }) => (
 );
 
 export const PrivacyPage = () => <LegalPage document={LEGAL_DOCUMENTS.privacy} />;
+
+export const ChildrenPrivacyPage = () => <LegalPage document={LEGAL_DOCUMENTS.children} />;
 
 export const TermsPage = () => <LegalPage document={LEGAL_DOCUMENTS.terms} />;
 

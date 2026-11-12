@@ -6,9 +6,17 @@ import { ageCheckBlocked, ageGateFor, isCertainlyAtLeast, rememberAgeCheckRefusa
 import { AgeScreen } from '@/features/auth/AgeScreen';
 import { passAgeScreen } from '@/test/ageScreen';
 
+/** Release flags (src/lib/features.ts), flipped per test; read at render. */
+const flags = vi.hoisted(() => ({ viewLinks: false }));
+vi.mock('@/lib/features', () => ({ features: flags }));
+
+const REFUSAL_SUBTITLE = 'Cleffy accounts are for people who meet the minimum age where they live.';
+const REFUSAL_BODY = /^If your teacher uses Cleffy, ask them to show your score on their screen\.$/;
+
 afterEach(() => {
     cleanup();
     window.localStorage.clear();
+    flags.viewLinks = false;
 });
 
 describe('isCertainlyAtLeast', () => {
@@ -54,11 +62,11 @@ describe('the refusal memory', () => {
 });
 
 describe('AgeScreen', () => {
-    const renderScreen = () => {
+    const renderScreen = (purpose: 'register' | 'join' = 'register') => {
         const onPass = vi.fn();
         render(
             <MemoryRouter>
-                <AgeScreen purpose="register" onPass={onPass} />
+                <AgeScreen purpose={purpose} onPass={onPass} />
             </MemoryRouter>,
         );
         return onPass;
@@ -81,7 +89,8 @@ describe('AgeScreen', () => {
         const onPass = renderScreen();
         await passAgeScreen('DE', String(new Date().getFullYear() - 14));
         expect(onPass).not.toHaveBeenCalled();
-        expect(screen.getByText('You can’t create a Cleffy account at this time.')).toBeInTheDocument();
+        expect(screen.getByText(REFUSAL_SUBTITLE)).toBeInTheDocument();
+        expect(screen.getByText(REFUSAL_BODY)).toBeInTheDocument();
         expect(document.body.textContent).not.toMatch(/\b1[3-6]\b/);
         expect(ageCheckBlocked()).toBe(true);
 
@@ -89,7 +98,31 @@ describe('AgeScreen', () => {
         cleanup();
         renderScreen();
         expect(screen.queryByLabelText('Where do you live?')).not.toBeInTheDocument();
-        expect(screen.getByText('You can’t create a Cleffy account at this time.')).toBeInTheDocument();
+        expect(screen.getByText(REFUSAL_SUBTITLE)).toBeInTheDocument();
+    });
+
+    it.each(['register', 'join'] as const)('shows the same refusal, with no digit in it, for %s', async (purpose) => {
+        renderScreen(purpose);
+        await passAgeScreen('US', String(new Date().getFullYear() - 5));
+        expect(screen.getByRole('heading', { level: 1, name: 'Sorry' })).toBeInTheDocument();
+        expect(screen.getByText(REFUSAL_SUBTITLE)).toBeInTheDocument();
+        expect(screen.getByText(REFUSAL_BODY)).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: 'Back to home' })).toHaveAttribute('href', '/');
+        // No age, number or year: nothing on the refusal hints at what would pass.
+        expect(document.body.textContent).not.toMatch(/\d/);
+        expect(document.body.textContent).not.toMatch(/view link/i);
+    });
+
+    it('offers a view link only when view links are switched on', async () => {
+        flags.viewLinks = true;
+        renderScreen();
+        await passAgeScreen('US', String(new Date().getFullYear() - 5));
+        expect(
+            screen.getByText(
+                'If your teacher uses Cleffy, ask them to show your score on their screen or send you a view link.',
+            ),
+        ).toBeInTheDocument();
+        expect(document.body.textContent).not.toMatch(/\d/);
     });
 
     it('lets a 15-year-old through where the age is 13', async () => {

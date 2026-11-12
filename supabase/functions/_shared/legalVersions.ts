@@ -11,6 +11,7 @@
 
 export const LEGAL_VERSIONS = {
     privacy: '2026-10-20-draft',
+    children: '2026-11-12-draft',
     terms: '2026-10-20-draft',
     refunds: '2026-10-20-draft',
     copyright: '2026-10-20-draft',
