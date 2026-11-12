@@ -20,6 +20,7 @@ const LINK =
 
 const FOOTER_LINKS = [
     { to: '/privacy', label: 'Privacy' },
+    { to: '/children-privacy', label: 'Children’s privacy' },
     { to: '/terms', label: 'Terms' },
     { to: '/refunds', label: 'Refunds' },
     { to: '/copyright', label: 'Copyright' },
@@ -27,7 +28,7 @@ const FOOTER_LINKS = [
     { to: '/report', label: 'Report content' },
 ] as const;
 
-/** The quiet "Privacy · Terms · Refunds · Copyright · Report content" line used in footers. */
+/** The quiet "Privacy · Children’s privacy · Terms · Refunds · Copyright · Report content" line used in footers. */
 export const LegalLinks = ({ className = '', withContact = false, newTab = false }: LegalLinksProps) => {
     const target = newTab ? { target: '_blank', rel: 'noopener noreferrer' } : {};
     return (

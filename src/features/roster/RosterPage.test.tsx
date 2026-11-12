@@ -315,6 +315,8 @@ describe('RosterPage', () => {
         await user.click(within(dialog).getByRole('button', { name: 'Delete student' }));
         await waitFor(() => expect(deleteStudent).toHaveBeenCalledWith('s1'));
         expect(await screen.findByText(/No students yet/)).toBeInTheDocument();
+        // Once under the add form's attestation, once in the empty state.
+        expect(screen.getAllByText(/You can still use Cleffy with them in lessons/)).toHaveLength(2);
     });
 
     it('will not send an invite without an address to send it to', async () => {

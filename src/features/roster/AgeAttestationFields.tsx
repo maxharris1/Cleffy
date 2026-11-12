@@ -4,6 +4,14 @@ import { consentAgeFor, teacherAttestationText } from '@/features/legal/consentA
 import { countryName, countryOptions } from '@/features/legal/countries';
 import { fieldClassName, fieldLabelClassName } from '@/ui/classNames';
 
+/**
+ * What a teacher can still do for a student too young for an account. Shown
+ * under the attestation and on the empty roster; the attestation's own wording
+ * (and its wording_version) is unchanged.
+ */
+export const UNDER_AGE_TEACHER_NOTE =
+    'Students under the minimum age can’t have a Cleffy account. You can still use Cleffy with them in lessons by showing the score on your own screen.';
+
 export interface AgeAttestationFieldsProps {
     /** Prefixes the inputs' ids, so the add form and the restore dialog can both be mounted. */
     idPrefix: string;
@@ -71,6 +79,7 @@ export const AgeAttestationFields = ({
                     </span>
                 </label>
             ) : null}
+            <p className="mt-2 text-xs leading-relaxed text-stone-500">{UNDER_AGE_TEACHER_NOTE}</p>
         </div>
     );
 };

@@ -190,7 +190,9 @@ describe('JoinPage', () => {
         renderJoin();
         // Germany's age is 16; someone born this year is nowhere near it.
         await passAgeScreen('DE', String(new Date().getFullYear()));
-        expect(await screen.findByText('You can’t create a Cleffy account at this time.')).toBeInTheDocument();
+        expect(
+            await screen.findByText('Cleffy accounts are for people who meet the minimum age where they live.'),
+        ).toBeInTheDocument();
         expect(screen.queryByLabelText('Your name')).not.toBeInTheDocument();
         expect(signInAnonymouslyWithName).not.toHaveBeenCalled();
     });

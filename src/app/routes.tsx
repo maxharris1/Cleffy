@@ -54,6 +54,9 @@ const AssignmentsPage = lazy(() =>
 
 // Lazy: the legal pages are long, rarely read, and reached from links only.
 const PrivacyPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.PrivacyPage })));
+const ChildrenPrivacyPage = lazy(() =>
+    import('@/features/legal/LegalPage').then((m) => ({ default: m.ChildrenPrivacyPage })),
+);
 const TermsPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.TermsPage })));
 const CancelPage = lazy(() => import('@/features/billing/CancelPage').then((m) => ({ default: m.CancelPage })));
 const RefundPolicyPage = lazy(() =>
@@ -255,6 +258,14 @@ export const AppRoutes = () => {
                 element={
                     <Suspense fallback={<PageFallback label="Loading…" />}>
                         <PrivacyPage />
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/children-privacy"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <ChildrenPrivacyPage />
                     </Suspense>
                 }
             />

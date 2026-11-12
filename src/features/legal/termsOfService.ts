@@ -1,6 +1,7 @@
 import { aiFeatures } from '@/features/legal/aiFeatures';
 import { list, p, placeholder, type LegalDocument, type LegalSection } from '@/features/legal/legalDocument';
 import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
+import { features } from '@/lib/features';
 
 /**
  * The Terms of Service, including the School Use Addendum, as data.
@@ -61,7 +62,9 @@ export const TERMS_OF_SERVICE: LegalDocument = {
                 list(
                     'If you create student accounts, you confirm that each student meets the minimum age for their country and that you have the authority to create the account, including any consent required from parents, guardians or a school, and you are responsible for how those accounts are used.',
                     'Student accounts belong to your roster. Archiving a student removes their access; deleting a student removes the account and their markings on your scores; deleting your own account deletes the student accounts you created and their work on your scores.',
+                    `Students under the minimum age may not have accounts or join as guests. You may show them scores on your own screen${features.viewLinks ? ' or share a view link, when available' : ''}. Don’t use Cleffy to collect information from them.`,
                 ),
+                placeholder('DRAFT — teacher clause awaiting legal review.'),
             ],
         },
         {

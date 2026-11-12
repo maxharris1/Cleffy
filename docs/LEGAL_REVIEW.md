@@ -1,7 +1,9 @@
 # Legal review before launch
 
-There are four public documents, each its own versioned module in
+There are five public documents, each its own versioned module in
 `src/features/legal/`: the Privacy Policy (`privacyPolicy.ts`, `/privacy`), the
+DRAFT Children's Privacy Notice (`childrenNotice.ts`, `/children-privacy`, see
+§23), the
 Terms of Service with the School Use Addendum (`termsOfService.ts`, `/terms`),
 the Refund Policy with the model withdrawal form (`refundPolicy.ts`,
 `/refunds`) and the Copyright and Content Policy (`copyrightPolicy.ts`,
@@ -293,3 +295,45 @@ The Terms say price "and any tax" are shown before payment. Confirm Stripe Tax
 - [ ] Name the support-mailbox provider (§4) and sign the DPAs.
 - [ ] Decide refunds/withdrawal (§6), cancellation config (§7), age gate (§9).
 - [ ] Update `LEGAL_LAST_UPDATED` to the publication date.
+
+## 23. Children under 13 (DRAFT, November 2026)
+
+Nothing here is a statement of compliance. Cleffy must not claim COPPA
+compliance or certification anywhere; `src/features/legal/childrenNotice.test.ts`
+fails if a legal document, any app source file or the two internal drafts
+below make that claim.
+
+What changed in the product copy:
+
+- The age-screen refusal (`AgeScreen.tsx`) points the person to their teacher
+  ("ask them to show your score on their screen"). It names no age, number or
+  year.
+- Teachers see, under the age attestation and on an empty roster, that a
+  student under the minimum age can't have an account but can be taught on the
+  teacher's own screen.
+- View links (a read-only score link, no account) are behind
+  `VITE_FEATURE_VIEW_LINKS`, off. While it is off no public page mentions them.
+
+New placeholders for counsel:
+
+- Children's Privacy Notice: "DRAFT — awaiting legal review. Not in effect."
+- Children's Privacy Notice: "Phone number — Max to supply".
+- Children's Privacy Notice, view-links section (only shown with the flag on):
+  "Counsel: retention wording (Vercel runtime logs 1 h; …)".
+- Children's Privacy Notice: "Counsel to confirm the internal-operations basis
+  (16 CFR 312.5(c)(7)) and the notice contents (312.4(d))."
+- Privacy Policy, "Children and student accounts": "DRAFT — under-13 wording
+  awaiting legal review."
+- Terms, "Teachers and student accounts": "DRAFT — teacher clause awaiting
+  legal review."
+
+Internal drafts for counsel (not published):
+
+- `docs/CHILDREN_DATA_RETENTION.md` — written retention policy, in the shape of
+  16 CFR 312.10.
+- `docs/INFORMATION_SECURITY_PROGRAM.md` — written security program, in the
+  shape of 16 CFR 312.8(b).
+
+Versions: the Children's Privacy Notice is `2026-11-12-draft`. The Privacy
+Policy and Terms text changed but their versions were left at
+`2026-10-20-draft` on purpose; Max decides when to bump them.

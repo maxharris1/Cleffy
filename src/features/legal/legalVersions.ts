@@ -14,12 +14,13 @@
  * while LEGAL_DOCUMENTS_ARE_DRAFTS is true.
  */
 
-export const LEGAL_DOCUMENT_IDS = ['privacy', 'terms', 'refunds', 'copyright'] as const;
+export const LEGAL_DOCUMENT_IDS = ['privacy', 'children', 'terms', 'refunds', 'copyright'] as const;
 
 export type LegalDocumentId = (typeof LEGAL_DOCUMENT_IDS)[number];
 
 export const LEGAL_VERSIONS: Readonly<Record<LegalDocumentId, string>> = {
     privacy: '2026-10-20-draft',
+    children: '2026-11-12-draft',
     terms: '2026-10-20-draft',
     refunds: '2026-10-20-draft',
     copyright: '2026-10-20-draft',
@@ -28,6 +29,7 @@ export const LEGAL_VERSIONS: Readonly<Record<LegalDocumentId, string>> = {
 /** Shown at the top of each document as "Last updated …". */
 export const LEGAL_LAST_UPDATED: Readonly<Record<LegalDocumentId, string>> = {
     privacy: '20 October 2026',
+    children: '12 November 2026',
     terms: '20 October 2026',
     refunds: '20 October 2026',
     copyright: '20 October 2026',
@@ -36,6 +38,7 @@ export const LEGAL_LAST_UPDATED: Readonly<Record<LegalDocumentId, string>> = {
 /** Where each document is published. */
 export const LEGAL_PATHS: Readonly<Record<LegalDocumentId, string>> = {
     privacy: '/privacy',
+    children: '/children-privacy',
     terms: '/terms',
     refunds: '/refunds',
     copyright: '/copyright',

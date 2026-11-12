@@ -251,7 +251,7 @@ export const PRIVACY_POLICY: LegalDocument = {
             heading: 'Children and student accounts',
             blocks: [
                 p(
-                    'Cleffy is not directed at children under 13. To create an account yourself, or to join a score as a guest, you must be at least 13, or older where your country sets a higher age for agreeing to the use of your information online (up to 16 in some European countries). We ask your country and confirm the age before an account is created.',
+                    'Cleffy accounts are not available to children under 13. To create an account yourself, or to join a score as a guest, you must be at least 13, or older where your country sets a higher age for agreeing to the use of your information online (up to 16 in some European countries). We ask your country and confirm the age before an account is created.',
                 ),
                 list(
                     'A teacher who creates a student account confirms that the student meets the minimum age for the student’s country, and is responsible for having the authority to create it — for example the consent of the student’s parent or guardian, or of the school.',
@@ -264,6 +264,8 @@ export const PRIVACY_POLICY: LegalDocument = {
                 p(
                     `If you believe a child under the minimum age has given us personal information, write to ${emails.privacy} and we will delete it.`,
                 ),
+                p('See our Children’s Privacy Notice for how teachers can use Cleffy with younger students.'),
+                placeholder('DRAFT — under-13 wording awaiting legal review.'),
             ],
         },
         {

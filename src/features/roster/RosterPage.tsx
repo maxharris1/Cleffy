@@ -6,7 +6,7 @@ import { LimitReachedError, isLimitReachedError } from '@/features/billing/limit
 import { countryName } from '@/features/legal/countries';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { useEntranceDelay } from '@/features/library/scoreRow';
-import { AgeAttestationFields } from '@/features/roster/AgeAttestationFields';
+import { AgeAttestationFields, UNDER_AGE_TEACHER_NOTE } from '@/features/roster/AgeAttestationFields';
 import { StudentCodeCard } from '@/features/roster/StudentCodeCard';
 import {
     archiveStudent,
@@ -434,9 +434,10 @@ export const RosterPage = () => {
                 <ErrorText className="mt-8">{loadError}</ErrorText>
             ) : students.length === 0 ? (
                 canManageStudents ? (
-                    <p className="mt-10 text-sm text-stone-500">
-                        No students yet — add one above to print their setup card or send their invite.
-                    </p>
+                    <div className="mt-10 text-sm text-stone-500">
+                        <p>No students yet — add one above to print their setup card or send their invite.</p>
+                        <p className="mt-2">{UNDER_AGE_TEACHER_NOTE}</p>
+                    </div>
                 ) : (
                     <EmptyState
                         className="mt-10"
