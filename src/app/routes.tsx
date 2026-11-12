@@ -233,7 +233,8 @@ export const AppRoutes = () => {
                 }
             />
             {/* Public and not behind RequireGuest: a signed-in teacher who taps
-                an ad link still gets the demo. Nothing in it touches the server. */}
+                an ad link still gets the demo. Nothing in it touches the server
+                but a first-party demo_visit count (lib/webEvents). */}
             <Route
                 path="/try"
                 element={

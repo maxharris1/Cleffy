@@ -108,7 +108,15 @@ const LiveInkIllustration = ({ animate }: { animate: boolean }) => {
  * this card. Escape, ✕ and Keep playing put it away; Start free goes where
  * the header's does.
  */
-export const DemoValueCard = ({ signUpTo, onDismiss }: { signUpTo: string; onDismiss: () => void }) => {
+export const DemoValueCard = ({
+    signUpTo,
+    onSignUp,
+    onDismiss,
+}: {
+    signUpTo: string;
+    onSignUp: () => void;
+    onDismiss: () => void;
+}) => {
     const titleId = useId();
     const cardRef = useRef<HTMLElement>(null);
     // Read once, as it appears: the stylesheet handles a later change.
@@ -166,7 +174,14 @@ export const DemoValueCard = ({ signUpTo, onDismiss }: { signUpTo: string; onDis
                     <Button variant="ghost" size="sm" className={HIT_Y} onClick={onDismiss}>
                         Keep playing
                     </Button>
-                    <Link to={signUpTo} onClick={onDismiss} className={buttonClassName('primary', 'sm', HIT_Y)}>
+                    <Link
+                        to={signUpTo}
+                        onClick={() => {
+                            onSignUp();
+                            onDismiss();
+                        }}
+                        className={buttonClassName('primary', 'sm', HIT_Y)}
+                    >
                         Start free
                     </Link>
                 </div>

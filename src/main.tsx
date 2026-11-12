@@ -5,10 +5,12 @@ import ReactDOM from 'react-dom/client';
 
 import { App } from '@/app/App';
 import { captureAuthUrlError } from '@/features/auth/authUrlError';
+import { captureAttribution } from '@/lib/attribution';
 import { monitoringEnabled, monitoringUserIdOf, setMonitoringUser, startMonitoring } from '@/lib/monitoring';
 import { registerServiceWorker } from '@/lib/serviceWorker';
 import { installStaleChunkRecovery } from '@/lib/staleChunk';
 import { getSupabase, isSupabaseConfigured } from '@/lib/supabase';
+import { installWebEvents } from '@/lib/webEvents';
 import { installPrimitivesPrefetch } from '@/ui/lazyPrimitives';
 
 import './index.css';
@@ -20,6 +22,14 @@ installStaleChunkRecovery();
 // Before the Supabase client reads the URL and before any gate can redirect
 // away from it: an expired email link's reason travels in the URL only.
 captureAuthUrlError();
+
+// The same, for the campaign tags of the link this visit arrived by: kept
+// first-touch for 30 days and sent with a sign-up (lib/attribution).
+captureAttribution();
+
+// First-party page views and funnel events, to our own database only. Never
+// for a roster student or a guest (lib/webEvents, and the server again).
+installWebEvents();
 
 // Before the first render, so a crash in it is still reported. Without a
 // VITE_SENTRY_DSN at build time this is a no-op and the SDK is not in the bundle.

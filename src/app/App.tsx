@@ -5,7 +5,14 @@ import { ErrorBoundary } from '@/app/ErrorBoundary';
 import { AppRoutes } from '@/app/routes';
 import { SignedOutInkGate } from '@/app/SignedOutInkGate';
 import { AuthLinkErrorNotice } from '@/features/auth/AuthLinkErrorNotice';
+import { useTrackPageViews } from '@/lib/webEvents';
 import { ToastHost } from '@/ui/ToastHost';
+
+/** First-party page views (lib/webEvents); inert unless main.tsx installed them. */
+const PageViews = () => {
+    useTrackPageViews();
+    return null;
+};
 
 export const App = () => {
     return (
@@ -14,6 +21,7 @@ export const App = () => {
         <ErrorBoundary>
             <BackgroundSync />
             <BrowserRouter>
+                <PageViews />
                 <AppRoutes />
                 <AuthLinkErrorNotice />
                 <SignedOutInkGate />

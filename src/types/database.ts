@@ -12,6 +12,20 @@ import type { Annotation, AnnotationKind, AnnotationPayload } from '@/types/mode
 import type { ScoreData } from '@/types/scoreData';
 
 export type MemberRole = 'owner' | 'editor' | 'viewer';
+
+/** One event as record_web_events accepts it (src/lib/webEvents.ts builds them). */
+export type WebEventInput = {
+    event: 'page_view' | 'demo_visit' | 'signup_click' | 'signup_completed';
+    path: string;
+    session_key: string;
+    device_class?: 'mobile' | 'tablet' | 'desktop';
+    referrer_host?: string;
+    utm_source?: string;
+    utm_medium?: string;
+    utm_campaign?: string;
+    utm_content?: string;
+    utm_term?: string;
+};
 export type ShareRole = 'editor' | 'viewer';
 
 export type DocumentRow = {
@@ -1076,6 +1090,15 @@ export type Database = {
             };
             set_document_page_count: {
                 Args: { doc: string; pages: number };
+                Returns: undefined;
+            };
+            // First-party web events (20261112120000_web_events.sql): up to 20
+            // per call, validated server-side; user_id is auth.uid(), never
+            // sent. Dropped for guests and roster students. web_events and
+            // signup_attribution themselves are service-role only, so they
+            // have no Tables entry here.
+            record_web_events: {
+                Args: { p_events: WebEventInput[] };
                 Returns: undefined;
             };
         };

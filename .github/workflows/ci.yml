@@ -123,6 +123,17 @@ jobs:
                   CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
                   CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
                       npx vitest run tests/auth/ageGateAdminCreateUser.test.ts
+            # The SQL proof sets JWT claims by hand; this checks GoTrue's own
+            # tokens (guest, roster student, teacher) and a real sign-up's
+            # attribution against record_web_events and its trigger.
+            - name: Web events and sign-up attribution (webEventsLocal.test.ts)
+              run: |
+                  eval "$(supabase status -o env | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY)=')"
+                  CLEFFY_REQUIRE_LOCAL_DB=1 \
+                  CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
+                  CLEFFY_LOCAL_ANON_KEY="$ANON_KEY" \
+                  CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+                      npx vitest run tests/analytics/webEventsLocal.test.ts
             # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
             # sharing proof beside the migrations. A new proof runs by being
             # added -- this file changes only to skip one, which needs a reason.

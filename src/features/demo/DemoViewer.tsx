@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useLocation } from 'react-router';
 
 import { DEMO_DOC_ID, DEMO_TITLE } from '@/features/demo/demoScore';
 import {
@@ -16,6 +16,7 @@ import { LocalViewerFrame } from '@/features/viewer/LocalViewerFrame';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { ViewerNotice } from '@/features/viewer/ViewerNotice';
 import { useToolbarPopupOpen } from '@/features/viewer/toolbar/toolbarPopup';
+import { track } from '@/lib/webEvents';
 import { useViewerStore } from '@/state/store';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
@@ -107,8 +108,13 @@ type StorageRefused = 'keep' | 'session';
 /** The header's small controls are 36px tall: an invisible ring takes them to 44px on touch. */
 const HIT_Y = 'pointer-coarse:hit-44-y';
 
-/** Where Start free goes, from the header and from the value card alike. */
-const SIGN_UP_TO = '/register';
+/**
+ * Where Start free goes, from the header and from the value card alike, with
+ * the query /try arrived with (its UTM tags) carried on to sign-up.
+ */
+const signUpTo = (search: string): string => `/register${search}`;
+
+const countSignUpClick = () => track('signup_click');
 
 const WIPE_FAILED_BODY: Record<WipeFailure, string> = {
     remains: 'Your markings are still saved in this browser. Try again to start on a blank score.',
@@ -122,14 +128,17 @@ const STORAGE_REFUSED_HELP: Record<StorageRefused, string> = {
 
 /**
  * The /try demo: the local viewer on a bundled score, a sandbox per browser
- * session (demoSession), and a way on to sign-up. Nothing here talks to the
- * server: DEMO_DOC_ID is a local id, so the viewport starts no sync.
+ * session (demoSession), and a way on to sign-up. Nothing here syncs:
+ * DEMO_DOC_ID is a local id, so the viewport starts no sync. The only thing
+ * sent is a first-party signup_click count (src/lib/webEvents.ts).
  *
  * What the local viewer has and this leaves out, on purpose: Export, lesson
  * history, smart import and re-opening a file. An ad visitor has two seconds
  * of attention, and those are all doors out of the demo.
  */
 export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
+    const { search } = useLocation();
+    const signUpPath = signUpTo(search);
     const [phase, setPhase] = useState<Phase>('preparing');
     /** The wipe of the current phase failed, with old ink still stored or unknown: Try again bumps `attempt`. */
     const [wipeFailed, setWipeFailed] = useState<WipeFailure | null>(null);
@@ -395,7 +404,11 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
                         <KeepToggle keep={keep} help={keepHelp} onToggle={toggleKeep} />
                         <DemoMenu keep={keep} help={keepHelp} onToggleKeep={toggleKeep} />
                         {/* The one primary: everything else in the demo is ghost or subtle. */}
-                        <Link to={SIGN_UP_TO} className={buttonClassName('primary', 'sm', `ml-auto lg:ml-0 ${HIT_Y}`)}>
+                        <Link
+                            to={signUpPath}
+                            onClick={countSignUpClick}
+                            className={buttonClassName('primary', 'sm', `ml-auto lg:ml-0 ${HIT_Y}`)}
+                        >
                             Start free
                         </Link>
                     </ViewerHeader>
@@ -426,7 +439,9 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
                 // up under the visitor's first stroke as the hint went.
                 overlay={showHint ? <DrawHint onDismiss={() => setHintHidden(true)} /> : null}
             />
-            {showValueCard ? <DemoValueCard signUpTo={SIGN_UP_TO} onDismiss={dismissValueCard} /> : null}
+            {showValueCard ? (
+                <DemoValueCard signUpTo={signUpPath} onSignUp={countSignUpClick} onDismiss={dismissValueCard} />
+            ) : null}
         </>
     );
 };
