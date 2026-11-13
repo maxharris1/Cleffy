@@ -123,6 +123,14 @@ select pg_temp.chk('04 the new P1 tables are the service role''s and no client''
                     and not has_table_privilege('anon', t, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')
                     and not has_table_privilege('authenticated', t, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE'))
     from unnest(array['public.deployment_config'::regclass, 'public.studio_supersede_log'::regclass]) t$q$);
+-- 20261112120000_web_events.sql: written only through record_web_events and
+-- the auth.users trigger, read only by the service role.
+select pg_temp.chk('09 web_events and signup_attribution are the service role''s and no client''s', $q$
+    select bool_and(has_table_privilege('service_role', t, 'SELECT, INSERT, UPDATE, DELETE')
+                    and not has_any_column_privilege(r, t, 'SELECT, INSERT, UPDATE, REFERENCES')
+                    and not has_table_privilege(r, t, 'DELETE, TRUNCATE, TRIGGER'))
+    from unnest(array['anon', 'authenticated', 'public']) r,
+         unnest(array['public.web_events'::regclass, 'public.signup_attribution'::regclass]) t$q$);
 
 -- ---- anon and authenticated, every public table
 select pg_temp.same('05 anon and authenticated hold exactly the pinned list', $q$select * from pg_temp.client_acl()$q$,

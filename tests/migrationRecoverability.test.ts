@@ -209,6 +209,10 @@ describe('imslp-sync — the cron job the push has to pause', () => {
             'retention-rate-limits': retention,
             'retention-stale-guests': retention,
             'retention-support-messages': retention,
+            // The same pattern again: it calls a function its own migration
+            // defines and deletes only web events older than 13 months, from a
+            // table that same migration creates -- nothing on its first night.
+            'retention-web-events': ['20261112120000_web_events.sql'],
             // Launchfix P3: safe to leave running across a push for the same
             // reason as content-notice-retry -- it calls a function its own
             // migration defines, and only pokes resend-inbound while inbound
@@ -228,8 +232,10 @@ describe('omr_jobs.id — why a naive logical restore of production fails', () =
      * recovery section's SQL should be simplified, not that something broke.
      */
     it('is still an always-generated identity column', () => {
+        // web_events (20261112120000) is the second: DEPLOY.md R3 covers both.
         expect(definedIn(/\bid\s+bigint\s+generated\s+always\s+as\s+identity\b/i)).toEqual([
             '20260806120000_omr_jobs.sql',
+            '20261112120000_web_events.sql',
         ]);
     });
 

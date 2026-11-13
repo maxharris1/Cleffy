@@ -33,7 +33,10 @@ const h = vi.hoisted(() => ({
     gate: null as Promise<void> | null,
     /** The stub viewport renders the real Toolbar on its store, as PdfViewport does. */
     withToolbar: false,
+    track: vi.fn(),
 }));
+
+vi.mock('@/lib/webEvents', () => ({ track: h.track }));
 
 vi.mock('@/sync/db', async (importOriginal) => ({
     ...(await importOriginal<typeof DbModule>()),
@@ -598,9 +601,10 @@ describe('DemoViewer, the value card', () => {
         expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBeNull();
     });
 
-    it('Start free goes where the header’s Start free goes', async () => {
+    it('Start free goes where the header’s Start free goes, query and all, and counts the click', async () => {
+        h.track.mockReset();
         render(
-            <MemoryRouter initialEntries={['/try']}>
+            <MemoryRouter initialEntries={['/try?utm_campaign=launch_v1&utm_content=hero_a']}>
                 <Routes>
                     <Route path="/try" element={<DemoViewer bytes={new ArrayBuffer(8)} />} />
                     <Route path="/register" element={<p>Sign-up page</p>} />
@@ -617,13 +621,16 @@ describe('DemoViewer, the value card', () => {
             name: 'Start free',
         });
         const cardStartFree = within(shown).getByRole('link', { name: 'Start free' });
-        expect(cardStartFree).toHaveAttribute('href', '/register');
+        expect(cardStartFree).toHaveAttribute('href', '/register?utm_campaign=launch_v1&utm_content=hero_a');
         expect(cardStartFree).toHaveAttribute('href', headerStartFree.getAttribute('href'));
+        expect(h.track).not.toHaveBeenCalled();
 
         fireEvent.click(cardStartFree);
 
         expect(await screen.findByText('Sign-up page')).toBeInTheDocument();
         expect(window.sessionStorage.getItem(DEMO_VALUE_CARD_KEY)).toBe('1');
+        expect(h.track).toHaveBeenCalledTimes(1);
+        expect(h.track).toHaveBeenCalledWith('signup_click');
     });
 
     it('comes up after the fallback time for a visitor who never draws', async () => {
@@ -859,5 +866,29 @@ describe('DemoViewer, the value card', () => {
 
         expect(await screen.findByRole('heading', { name: 'Couldn’t clear your markings' })).toBeInTheDocument();
         expect(card()).not.toBeInTheDocument();
+    });
+});
+
+describe('DemoViewer, the header’s Start free', () => {
+    it('keeps the query it arrived with and counts the click', async () => {
+        h.track.mockReset();
+        render(
+            <MemoryRouter initialEntries={['/try?utm_source=newsletter']}>
+                <Routes>
+                    <Route path="/try" element={<DemoViewer bytes={new ArrayBuffer(8)} />} />
+                    <Route path="/register" element={<p>Sign-up page</p>} />
+                </Routes>
+            </MemoryRouter>,
+        );
+        await screen.findByTestId('viewport');
+        const startFree = within(screen.getByRole('navigation', { name: 'Score' })).getByRole('link', {
+            name: 'Start free',
+        });
+        expect(startFree).toHaveAttribute('href', '/register?utm_source=newsletter');
+
+        fireEvent.click(startFree);
+
+        expect(await screen.findByText('Sign-up page')).toBeInTheDocument();
+        expect(h.track).toHaveBeenCalledWith('signup_click');
     });
 });

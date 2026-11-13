@@ -2693,9 +2693,9 @@ migrations against production. Use the commands in step 7.1, check the files
 as in step 7.3, and keep the dump until the next release is known good. The
 go-live does not restore its dump (step 7), and nothing in this file
 rehearses a restore. For a later release that might need one, rehearse it on
-a local stack first. Any restore must follow **R3**'s `omr_jobs` note: `id` is
-`generated always as identity`. A copy written as `insert … select` needs
-`overriding system value`, and then the `setval`. The CLI's `COPY` dump
+a local stack first. Any restore must follow **R3**'s `omr_jobs` note (and the
+same for `web_events`): `id` is `generated always as identity`. A copy written
+as `insert … select` needs `overriding system value`, and then the `setval`. The CLI's `COPY` dump
 carries both, but run the `setval` check after any restore anyway.
 
 ### STRIPE_MODES
@@ -4620,6 +4620,10 @@ skipped `setval` would surface as a primary-key collision on the next enqueue.
 `tests/migrationRecoverability.test.ts` pins both halves — that the column is
 defined `generated always` in exactly one migration, and that no migration
 relaxes or drops that identity afterwards.
+
+**`public.web_events.id` is the second such column** (`20261112120000_web_events.sql`,
+first-party web events). A restore of it needs the same two statements with
+`public.web_events` in place of `public.omr_jobs`; the test pins it the same way.
 
 This is the step that makes "we can restore production" false rather than slow.
 Combined with **R2** (the largest tables are not in any migration, so a rebuilt
