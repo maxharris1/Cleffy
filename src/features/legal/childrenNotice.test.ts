@@ -30,12 +30,12 @@ const appSources = (): string[] =>
         .map((file) => join(ROOT, 'src', file))
         .concat(join(ROOT, 'index.html'));
 
-/** The legal documents as a build with VITE_FEATURE_VIEW_LINKS=1 would publish them. */
+/** The legal documents as a build with VITE_FEATURE_SHARE_V2=1 would publish them. */
 const documentsWithViewLinks = async () => {
     vi.resetModules();
     vi.doMock('@/lib/features', async (importOriginal) => {
         const actual = await importOriginal<typeof FeaturesModule>();
-        return { features: { ...actual.features, viewLinks: true } };
+        return { features: { ...actual.features, shareV2: true, viewLinks: true } };
     });
     const content = await import('@/features/legal/legalContent');
     return content.LEGAL_DOCUMENTS;

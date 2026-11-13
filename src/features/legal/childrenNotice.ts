@@ -11,14 +11,14 @@ import { features } from '@/lib/features';
  * It must never claim COPPA compliance (childrenNotice.test.ts scans every
  * document for that).
  *
- * The view-links section appears only while VITE_FEATURE_VIEW_LINKS is on
+ * The view-links section appears only while VITE_FEATURE_SHARE_V2 is on
  * (src/lib/features.ts), like the AI sections of the Privacy Policy: the
  * notice covers what this build does.
  */
 
 const { brand, name, legalForm, postalAddress, emails } = LEGAL_ENTITY;
 
-const viewLinkSections: LegalSection[] = features.viewLinks
+const viewLinkSections: LegalSection[] = features.shareV2
     ? [
           {
               id: 'view-links',

@@ -190,6 +190,9 @@ describe('control bodies: every Deno entry point is capped', () => {
         ['_shared/contentReports.ts', 'deps.readJson(req, REPORT_BODY_MAX_BYTES)'],
         ['student-login/handler.ts', 'deps.readJson(req, BODY_MAX_BYTES)'],
         ['student-claim/handler.ts', 'deps.readJson(req, BODY_MAX_BYTES)'],
+        ['share-session/handler.ts', 'deps.readJson(req, BODY_MAX_BYTES)'],
+        ['share-invite/handler.ts', 'deps.readJson(req, BODY_MAX_BYTES)'],
+        ['share-invite-accept/handler.ts', 'deps.readJson(req, BODY_MAX_BYTES)'],
     ])('%s reads through the injected capped reader', (path, call) => {
         expect(source(path)).toContain(call);
     });
@@ -202,6 +205,9 @@ describe('control bodies: every Deno entry point is capped', () => {
             'stripe-checkout/index.ts',
             'student-login/index.ts',
             'student-claim/index.ts',
+            'share-session/index.ts',
+            'share-invite/index.ts',
+            'share-invite-accept/index.ts',
         ]) {
             expect(source(path), path).toContain('readJson: readCappedJson,');
         }

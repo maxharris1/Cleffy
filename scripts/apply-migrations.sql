@@ -28156,3 +28156,1923 @@ end;
 $$;
 
 select cron.schedule ('retention-web-events', '13 5 * * *', $$select public.retention_purge_web_events ()$$);
+
+-- ===== supabase/migrations/20261113120000_share_v2_links.sql =====
+-- Share v2, part 1 of 4: one "General access" link per score (#104, plan 6.1,
+-- 6.6 and D15).
+--
+-- A score gets at most one live general link, created and changed only through
+-- the owner RPCs below, so every change that ends or narrows it also rotates
+-- the score's realtime generation (20261022120000) and withdraws or demotes the
+-- members who joined through it. Links made before this (general = false) stay
+-- as they are: owners copy and revoke them, and /join keeps working (D2).
+--
+-- The rules each have one owner here, and everything else calls it:
+--   share_link_state       live | revoked | expired | unavailable | invalid
+--   share_assert_owner     who may share a score (D6)
+--   share_link_expiry      1 hour to 365 days, or never; 7 days by default (D15)
+--
+-- Inert until the Share v2 UI calls the RPCs: today's client keeps inserting
+-- legacy links directly, and the expiry choices it offers (7 d, 30 d, never)
+-- are all inside the new bounds.
+--
+-- Safe to run twice (CI re-applies every migration from 20261022100000 on).
+
+-- ---------------------------------------------------------------------------
+-- 6.6: PR #98's view links never reached dev. If a database has them, drop
+-- them; on every other database each step is a no-op.
+-- ---------------------------------------------------------------------------
+do $$
+begin
+    perform cron.unschedule (jobid) from cron.job where jobname = 'retention-view-links';
+exception
+    when undefined_table then null;
+end;
+$$;
+
+drop table if exists public.view_links cascade;
+
+do $$
+declare
+    v_fn regprocedure;
+begin
+    for v_fn in
+        select p.oid::regprocedure
+        from pg_proc p
+        where p.pronamespace = 'public'::regnamespace
+          and (
+              p.proname like 'view\_link\_%'
+              or p.proname like '%\_view\_link'
+              or p.proname in ('view_mark_for_viewer', 'view_links_retention_purge')
+          )
+    loop
+        execute format('drop function if exists %s', v_fn);
+    end loop;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- share_links: an id, the general flag, and a 7-day default
+-- ---------------------------------------------------------------------------
+alter table public.share_links add column if not exists id uuid not null default gen_random_uuid ();
+alter table public.share_links add column if not exists general boolean not null default false;
+alter table public.share_links add column if not exists updated_at timestamptz;
+alter table public.share_links alter column expires_at set default now() + interval '7 days';
+
+create unique index if not exists share_links_id_key on public.share_links (id);
+
+create unique index if not exists share_links_one_general on public.share_links (document_id)
+where
+    general
+    and revoked_at is null;
+
+-- 20261007120100's guard, plus the two new columns. A client never sets id or
+-- general, and never updates a general link: those changes go through the
+-- RPCs below, which rotate and withdraw as they must.
+create or replace function public.share_links_guard_columns () returns trigger language plpgsql
+set search_path = public as $$
+declare
+    v_col text;
+begin
+    if current_user not in ('authenticated', 'anon') then
+        if tg_op = 'UPDATE' then
+            new.updated_at := now();
+        end if;
+        return new;
+    end if;
+
+    if tg_op = 'INSERT' then
+        if new.general then
+            raise exception 'a general link is made with set_general_access' using errcode = '42501';
+        end if;
+        new.token := rtrim(
+            replace(replace(encode(extensions.gen_random_bytes(16), 'base64'), '+', '-'), '/', '_'),
+            '='
+        );
+        new.id := gen_random_uuid ();
+        new.created_at := now();
+        new.updated_at := null;
+        return new;
+    end if;
+
+    if old.general then
+        raise exception 'a general link changes only through the sharing RPCs' using errcode = '42501';
+    end if;
+
+    if new.token is distinct from old.token then
+        v_col := 'token';
+    elsif new.document_id is distinct from old.document_id then
+        v_col := 'document_id';
+    elsif new.created_by is distinct from old.created_by then
+        v_col := 'created_by';
+    elsif new.created_at is distinct from old.created_at then
+        v_col := 'created_at';
+    elsif new.id is distinct from old.id then
+        v_col := 'id';
+    elsif new.general is distinct from old.general then
+        v_col := 'general';
+    end if;
+
+    if v_col is not null then
+        raise exception 'share_links.% cannot be changed', v_col using errcode = '42501';
+    end if;
+    new.updated_at := now();
+    return new;
+end;
+$$;
+
+-- Deleting a general link would skip the same rotation and withdrawal.
+create or replace function public.share_links_guard_general_delete () returns trigger language plpgsql
+set search_path = '' as $$
+begin
+    if old.general and current_user in ('authenticated', 'anon') then
+        raise exception 'a general link changes only through the sharing RPCs' using errcode = '42501';
+    end if;
+    return old;
+end;
+$$;
+
+revoke all on function public.share_links_guard_general_delete () from public, anon, authenticated;
+
+drop trigger if exists share_links_guard_general_delete on public.share_links;
+create trigger share_links_guard_general_delete
+before delete on public.share_links
+for each row
+execute function public.share_links_guard_general_delete ();
+
+-- ---------------------------------------------------------------------------
+-- D15: link expiry bounds
+-- ---------------------------------------------------------------------------
+-- When a link that expires should expire, for an owner's choice: null (never),
+-- or 1 hour to 365 days from now. Anything else is refused with a code the UI
+-- can show. Note PostgreSQL compares a month as 30 days, so pass '365 days'
+-- for a year rather than '1 year' (which compares as 360 days).
+create or replace function public.share_link_expiry (p_expires_in interval) returns timestamptz language plpgsql stable
+set search_path = '' as $$
+begin
+    if p_expires_in is null then
+        return null;
+    end if;
+    if p_expires_in < interval '1 hour' or p_expires_in > interval '365 days' then
+        raise exception 'a link expires between 1 hour and 365 days from now, or never'
+            using errcode = '22023',
+                  detail = json_build_object('code', 'invalid_link_expiry')::text;
+    end if;
+    return now() + p_expires_in;
+end;
+$$;
+
+revoke all on function public.share_link_expiry (interval) from public, anon, authenticated;
+
+-- The same bounds on the links a client still inserts and updates directly,
+-- with five minutes of slack for the client's clock.
+create or replace function public.share_links_expiry_bounds () returns trigger language plpgsql
+set search_path = '' as $$
+begin
+    if current_user not in ('authenticated', 'anon') or new.expires_at is null then
+        return new;
+    end if;
+    if tg_op = 'UPDATE' and new.expires_at is not distinct from old.expires_at then
+        return new;
+    end if;
+    if new.expires_at < now() + interval '55 minutes'
+       or new.expires_at > now() + interval '365 days 5 minutes' then
+        raise exception 'a link expires between 1 hour and 365 days from now, or never'
+            using errcode = '22023',
+                  detail = json_build_object('code', 'invalid_link_expiry')::text;
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.share_links_expiry_bounds () from public, anon, authenticated;
+
+drop trigger if exists share_links_expiry_bounds on public.share_links;
+create trigger share_links_expiry_bounds
+before insert or update of expires_at on public.share_links
+for each row
+execute function public.share_links_expiry_bounds ();
+
+-- ---------------------------------------------------------------------------
+-- Link state
+-- ---------------------------------------------------------------------------
+-- Whether a score may be shown through a link at all: it exists, is not
+-- archived, and has no live takedown of either kind (PR #98's
+-- view_link_document_live, by maxharris1).
+create or replace function public.link_view_document_live (p_document uuid) returns boolean language sql stable security definer
+set search_path = '' as $$
+    select exists (
+        select 1
+        from public.documents d
+        where d.id = p_document
+          and d.archived_at is null
+          and not exists (
+              select 1
+              from public.content_takedowns ct
+              where ct.document_id = d.id
+                and ct.lifted_at is null
+          )
+    );
+$$;
+
+revoke all on function public.link_view_document_live (uuid) from public, anon, authenticated;
+
+-- The one answer to "is this link live, and if not, why". Order matters: a
+-- revoked link reads revoked even after it would also have expired.
+create or replace function public.share_link_state (p_link public.share_links) returns text language sql stable security definer
+set search_path = '' as $$
+    select case
+        when p_link.token is null then 'invalid'
+        when p_link.revoked_at is not null then 'revoked'
+        when p_link.expires_at is not null and p_link.expires_at <= now() then 'expired'
+        when not public.link_view_document_live (p_link.document_id) then 'unavailable'
+        else 'live'
+    end;
+$$;
+
+revoke all on function public.share_link_state (public.share_links) from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Who may share (D6)
+-- ---------------------------------------------------------------------------
+-- The score's owner, signed in, not a guest, not a roster student, not on a
+-- read-only seat, and the score live. One message for every refusal, so it
+-- does not say which test failed. Takes the user so the service-role invite
+-- RPCs can ask on a caller's behalf (PR #98's view_link_assert_owner).
+create or replace function public.share_assert_owner (p_document uuid, p_uid uuid) returns void language plpgsql stable security definer
+set search_path = '' as $$
+begin
+    if p_uid is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+    if exists (select 1 from auth.users u where u.id = p_uid and u.is_anonymous)
+       or exists (select 1 from public.managed_students ms where ms.student_user_id = p_uid)
+       or not exists (select 1 from public.documents d where d.id = p_document and d.owner_id = p_uid)
+       or public.seat_read_only (p_uid)
+       or not public.link_view_document_live (p_document) then
+        raise exception 'only the owner of a live score can share it' using errcode = '42501';
+    end if;
+end;
+$$;
+
+revoke all on function public.share_assert_owner (uuid, uuid) from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- What a link did for the people who joined through it
+-- ---------------------------------------------------------------------------
+-- 20261007120000 revoke_share_link's loop, unchanged: everyone the link let in
+-- loses the score, except a roster student, who falls back to their
+-- assignment's access. Deleting a member queues the score's rotation.
+create or replace function public.share_link_withdraw_members (p_document uuid, p_token text) returns integer language plpgsql security definer
+set search_path = public as $$
+declare
+    v_member record;
+    v_withdrawn int := 0;
+begin
+    for v_member in
+        select r.user_id, dm.role, a.access as assignment_access
+        from public.share_link_redemptions r
+        join public.document_members dm
+            on dm.document_id = r.document_id
+           and dm.user_id = r.user_id
+        left join public.assignments a
+            on a.document_id = r.document_id
+           and a.student_user_id = r.user_id
+        where r.token = p_token
+          and r.document_id = p_document
+        for update of dm
+    loop
+        if v_member.role = 'owner' then
+            continue;
+        end if;
+
+        if v_member.assignment_access is not null then
+            update public.document_members
+            set role = case when v_member.assignment_access = 'view' then 'viewer' else 'editor' end
+            where document_id = p_document and user_id = v_member.user_id;
+
+            delete from public.share_link_redemptions
+            where document_id = p_document and user_id = v_member.user_id;
+        else
+            delete from public.document_members
+            where document_id = p_document and user_id = v_member.user_id;
+
+            perform public.forget_document_for_user (p_document, v_member.user_id);
+        end if;
+
+        v_withdrawn := v_withdrawn + 1;
+    end loop;
+
+    return v_withdrawn;
+end;
+$$;
+
+revoke all on function public.share_link_withdraw_members (uuid, text) from public, anon, authenticated;
+
+-- An editor link turned viewer: the editors it made become viewers. A role the
+-- owner set by hand (a role lock) stays; a roster student falls back to their
+-- assignment's access, as in the withdraw loop. A demotion queues the rotation.
+create or replace function public.share_link_demote_members (p_document uuid, p_token text) returns integer language plpgsql security definer
+set search_path = public as $$
+declare
+    v_member record;
+    v_demoted int := 0;
+begin
+    for v_member in
+        select r.user_id, dm.role, a.access as assignment_access
+        from public.share_link_redemptions r
+        join public.document_members dm
+            on dm.document_id = r.document_id
+           and dm.user_id = r.user_id
+        left join public.assignments a
+            on a.document_id = r.document_id
+           and a.student_user_id = r.user_id
+        where r.token = p_token
+          and r.document_id = p_document
+          and dm.role = 'editor'
+          and not exists (
+              select 1 from public.document_member_role_locks l
+              where l.document_id = r.document_id and l.user_id = r.user_id
+          )
+        for update of dm
+    loop
+        if v_member.assignment_access is not null then
+            update public.document_members
+            set role = case when v_member.assignment_access = 'view' then 'viewer' else 'editor' end
+            where document_id = p_document and user_id = v_member.user_id;
+
+            delete from public.share_link_redemptions
+            where document_id = p_document and user_id = v_member.user_id;
+        else
+            update public.document_members
+            set role = 'viewer'
+            where document_id = p_document and user_id = v_member.user_id;
+        end if;
+
+        v_demoted := v_demoted + 1;
+    end loop;
+
+    return v_demoted;
+end;
+$$;
+
+revoke all on function public.share_link_demote_members (uuid, text) from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- The owner RPCs
+-- ---------------------------------------------------------------------------
+-- One general-link change per score at a time, so two at once cannot both
+-- create a link or both decide what to withdraw.
+create or replace function public.share_lock_general (p_document uuid) returns void language sql volatile
+set search_path = '' as $$
+    select pg_advisory_xact_lock (hashtextextended ('share_links_general:' || p_document::text, 0));
+$$;
+
+revoke all on function public.share_lock_general (uuid) from public, anon, authenticated;
+
+-- "General access" for a score. 'restricted' revokes the general link,
+-- withdraws everyone it let in and rotates. 'anyone' creates the link, or
+-- updates its role and expiry: editor to viewer demotes the link's editors and
+-- rotates; viewer to editor rotates too, so signed-out viewers on the link
+-- stop hearing the score at once. A changed expiry alone moves nothing.
+-- p_expires_in null means never.
+create or replace function public.set_general_access (
+    p_document uuid,
+    p_mode text,
+    p_role text default 'viewer',
+    p_expires_in interval default interval '7 days'
+) returns table (link_id uuid, token text, role text, expires_at timestamptz) language plpgsql security definer
+set search_path = public as $$
+#variable_conflict use_column
+declare
+    v_uid uuid := auth.uid();
+    v_link public.share_links;
+    v_expires timestamptz;
+begin
+    perform public.share_assert_owner (p_document, v_uid);
+    if p_mode is null or p_mode not in ('restricted', 'anyone') then
+        raise exception 'general access is restricted or anyone'
+            using errcode = '22023', detail = json_build_object('code', 'invalid_mode')::text;
+    end if;
+
+    perform public.share_lock_general (p_document);
+    select * into v_link
+    from public.share_links sl
+    where sl.document_id = p_document and sl.general and sl.revoked_at is null
+    for update;
+
+    if p_mode = 'restricted' then
+        if v_link.id is not null then
+            update public.share_links sl set revoked_at = now() where sl.id = v_link.id;
+            perform public.share_link_withdraw_members (p_document, v_link.token);
+            perform public.queue_document_realtime_rotation (p_document);
+        end if;
+        return;
+    end if;
+
+    if p_role is null or p_role not in ('viewer', 'editor') then
+        raise exception 'a link role is viewer or editor'
+            using errcode = '22023', detail = json_build_object('code', 'invalid_role')::text;
+    end if;
+    v_expires := public.share_link_expiry (p_expires_in);
+
+    if v_link.id is null then
+        insert into public.share_links as sl (document_id, role, created_by, expires_at, general)
+        values (p_document, p_role, v_uid, v_expires, true)
+        returning sl.* into v_link;
+    else
+        update public.share_links sl
+        set role = p_role, expires_at = v_expires
+        where sl.id = v_link.id;
+
+        if v_link.role = 'editor' and p_role = 'viewer' then
+            perform public.share_link_demote_members (p_document, v_link.token);
+            perform public.queue_document_realtime_rotation (p_document);
+        elsif v_link.role = 'viewer' and p_role = 'editor' then
+            perform public.queue_document_realtime_rotation (p_document);
+        end if;
+    end if;
+
+    return query select v_link.id, v_link.token, p_role, v_expires;
+end;
+$$;
+
+revoke all on function public.set_general_access (uuid, text, text, interval) from public, anon;
+grant execute on function public.set_general_access (uuid, text, text, interval) to authenticated;
+
+-- A new address for the general link: the old token stops working, the people
+-- who joined through it keep the score (now recorded against the new link),
+-- and everyone on the score's realtime moves, so a signed-out viewer holding
+-- the old link is cut off. Same role; same expiry, or 7 days if it had lapsed.
+create or replace function public.reset_general_link (p_document uuid) returns table (
+    link_id uuid,
+    token text,
+    role text,
+    expires_at timestamptz
+) language plpgsql security definer
+set search_path = public as $$
+#variable_conflict use_column
+declare
+    v_uid uuid := auth.uid();
+    v_old public.share_links;
+    v_new public.share_links;
+begin
+    perform public.share_assert_owner (p_document, v_uid);
+    perform public.share_lock_general (p_document);
+
+    select * into v_old
+    from public.share_links sl
+    where sl.document_id = p_document and sl.general and sl.revoked_at is null
+    for update;
+    if v_old.id is null then
+        raise exception 'this score has no general link to reset'
+            using errcode = 'P0002', detail = json_build_object('code', 'no_general_link')::text;
+    end if;
+
+    update public.share_links sl set revoked_at = now() where sl.id = v_old.id;
+
+    insert into public.share_links as sl (document_id, role, created_by, expires_at, general)
+    values (
+        p_document,
+        v_old.role,
+        v_uid,
+        case
+            when v_old.expires_at is null or v_old.expires_at > now() then v_old.expires_at
+            else public.share_link_expiry (interval '7 days')
+        end,
+        true
+    )
+    returning sl.* into v_new;
+
+    update public.share_link_redemptions r
+    set token = v_new.token
+    where r.document_id = p_document and r.token = v_old.token;
+
+    perform public.queue_document_realtime_rotation (p_document);
+    return query select v_new.id, v_new.token, v_new.role, v_new.expires_at;
+end;
+$$;
+
+revoke all on function public.reset_general_link (uuid) from public, anon;
+grant execute on function public.reset_general_link (uuid) to authenticated;
+
+-- A new expiry for a link, general or older: an expired link becomes live
+-- again. A revoked one stays revoked. Renewing only widens access, so nothing
+-- rotates. p_expires_in null means never.
+create or replace function public.renew_share_link (p_link uuid, p_expires_in interval default interval '7 days') returns timestamptz language plpgsql security definer
+set search_path = public as $$
+declare
+    v_uid uuid := auth.uid();
+    v_link public.share_links;
+    v_expires timestamptz;
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+    select * into v_link from public.share_links sl where sl.id = p_link;
+    if v_link.id is null then
+        raise exception 'only the owner of a live score can share it' using errcode = '42501';
+    end if;
+    perform public.share_assert_owner (v_link.document_id, v_uid);
+    perform public.share_lock_general (v_link.document_id);
+
+    select * into v_link from public.share_links sl where sl.id = p_link for update;
+    if v_link.revoked_at is not null then
+        raise exception 'a revoked link cannot be renewed'
+            using errcode = '22023', detail = json_build_object('code', 'link_revoked')::text;
+    end if;
+    v_expires := public.share_link_expiry (p_expires_in);
+
+    update public.share_links sl set expires_at = v_expires where sl.id = p_link;
+    return v_expires;
+end;
+$$;
+
+revoke all on function public.renew_share_link (uuid, interval) from public, anon;
+grant execute on function public.renew_share_link (uuid, interval) to authenticated;
+
+-- 20261007120000's revoke, same signature and the same answer for "no such
+-- link" and "not your link". An older link behaves exactly as before. A
+-- general link always takes its members with it, needs share_assert_owner,
+-- and its first revoke rotates the score (a repeat changes nothing).
+create or replace function public.revoke_share_link (p_token text, p_remove_members boolean default false) returns integer language plpgsql security definer
+set search_path = public as $$
+declare
+    v_caller uuid := auth.uid();
+    v_link public.share_links;
+begin
+    if v_caller is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    select * into v_link
+    from public.share_links sl
+    where sl.token = p_token
+    for update;
+
+    if v_link.document_id is null or public.document_role (v_link.document_id) is distinct from 'owner' then
+        raise exception 'only the score owner can revoke its links' using errcode = '42501';
+    end if;
+
+    if v_link.general then
+        perform public.share_assert_owner (v_link.document_id, v_caller);
+        if v_link.revoked_at is null then
+            update public.share_links sl set revoked_at = now() where sl.id = v_link.id;
+            perform public.queue_document_realtime_rotation (v_link.document_id);
+        end if;
+        return public.share_link_withdraw_members (v_link.document_id, p_token);
+    end if;
+
+    update public.share_links
+    set revoked_at = coalesce(revoked_at, now())
+    where token = p_token;
+
+    if not coalesce(p_remove_members, false) then
+        return 0;
+    end if;
+    return public.share_link_withdraw_members (v_link.document_id, p_token);
+end;
+$$;
+
+revoke all on function public.revoke_share_link (text, boolean) from public, anon;
+grant execute on function public.revoke_share_link (text, boolean) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- peek and redeem
+-- ---------------------------------------------------------------------------
+-- 20261009120200's peek plus a state. `valid` keeps exactly its old meaning
+-- (not revoked, not expired), so today's callers read the same answer.
+drop function if exists public.peek_share_link (text);
+
+create or replace function public.peek_share_link (p_token text) returns table (valid boolean, role text, state text) language sql stable security definer
+set search_path = public as $$
+    select
+        l.token is not null and l.revoked_at is null and (l.expires_at is null or l.expires_at > now()),
+        case when l.revoked_at is null and (l.expires_at is null or l.expires_at > now()) then l.role end,
+        public.share_link_state (l)
+    from (select 1) as one
+    left join public.share_links l
+        on length(p_token) between 1 and 64
+       and l.token = p_token;
+$$;
+
+revoke all on function public.peek_share_link (text) from public;
+grant execute on function public.peek_share_link (text) to anon;
+grant execute on function public.peek_share_link (text) to authenticated;
+
+-- 20261022120200's redeem. The refusal's detail now carries the link's state
+-- beside the code the client matches on. The live link row is held FOR SHARE
+-- until commit, after the score row (deletion's order) and before the roster
+-- and membership rows. Revoke, Restricted, reset and a role change all update
+-- that row: they wait for a join in flight and then withdraw or demote it, or
+-- the join waits for them and reads the link as they left it.
+create or replace function public.redeem_share_link (p_token text) returns table (document_id uuid, granted_role text) language plpgsql security definer
+set search_path = public as $$
+#variable_conflict use_column
+declare
+    v_uid uuid := auth.uid();
+    link record;
+    v_prev_role text;
+    v_new_role text;
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    perform 1
+    from public.documents d
+    where d.id = (select sl.document_id from public.share_links sl where sl.token = p_token)
+    for key share;
+
+    select sl.document_id, sl.role into link
+    from public.share_links sl
+    where sl.token = p_token
+      and sl.revoked_at is null
+      and (sl.expires_at is null or sl.expires_at > now())
+    for share;
+
+    if not found then
+        raise exception 'invalid or expired share link'
+            using errcode = 'PT404',
+                  detail = json_build_object(
+                      'code', 'invalid_share_link',
+                      'state', coalesce((select public.share_link_state (sl) from public.share_links sl where sl.token = p_token), 'invalid')
+                  )::text;
+    end if;
+
+    perform public.lock_student_for_grant (v_uid);
+
+    select dm.role into v_prev_role
+    from public.document_members dm
+    where dm.document_id = link.document_id and dm.user_id = v_uid
+    for update;
+
+    if v_prev_role is not null and exists (
+        select 1 from public.document_member_role_locks l
+        where l.document_id = link.document_id and l.user_id = v_uid
+    ) then
+        return query select link.document_id, v_prev_role;
+        return;
+    end if;
+
+    insert into public.document_members (document_id, user_id, role)
+    values (link.document_id, v_uid, link.role)
+    on conflict (document_id, user_id) do update
+        set role = case
+            when public.document_members.role = 'owner' then 'owner'
+            when public.document_members.role = 'editor' then 'editor'
+            else excluded.role
+        end
+    returning role into v_new_role;
+
+    if v_new_role <> 'owner' and v_prev_role is distinct from v_new_role then
+        insert into public.share_link_redemptions (document_id, user_id, token)
+        values (link.document_id, v_uid, p_token)
+        on conflict (document_id, user_id) do update
+            set token = excluded.token,
+                redeemed_at = now();
+    end if;
+
+    return query select link.document_id, v_new_role;
+end;
+$$;
+
+revoke all on function public.redeem_share_link (text) from public;
+revoke all on function public.redeem_share_link (text) from anon;
+grant execute on function public.redeem_share_link (text) to authenticated;
+
+-- ===== supabase/migrations/20261113120100_share_v2_viewer_auth.sql =====
+-- Share v2, part 2 of 4: signed-out viewers of a general viewer link (#104,
+-- plan 6.2 to 6.4).
+--
+-- A signed-out visitor opening "Anyone with the link: Viewer" never gets an
+-- account. share-session (an Edge Function, the only holder of the signing
+-- key) checks the link and mints a 10-minute token for the anon role:
+--
+--   { iss: 'cleffy-share', role: 'anon', exp, cleffy_link: { doc, link, v: 1 } }
+--
+-- with no `sub`. Everything here reads that claim and nothing else, and
+-- re-checks the link on every request and every Realtime join, so revoking,
+-- resetting, restricting or expiring the link ends the viewer's access at
+-- once (the rotation in part 1 moves Realtime) or at its next renewal.
+--
+-- What the token may do:
+--   * link_view_access / link_view_snapshot: the score's title, page count
+--     and its marks, each cut down to what the renderer draws (link_view_mark)
+--   * Realtime: read broadcast on doc:{id} (live ink) and doc-view:{id}
+--     (saved marks, below) at the score's current generation; send presence
+--     on doc:{id} only, so the owner sees an anonymous viewer. No broadcast
+--     send anywhere, nothing on doc-db:{id}, no presence read (D13).
+--   * Nothing else: anon holds no table, and every public function anon could
+--     execute is listed at the bottom.
+--
+-- Spike (b) on the local stack showed Realtime admits a presence write with no
+-- presence-read policy, so viewers track presence natively (no R5 fallback).
+--
+-- Safe to run twice.
+
+-- ---------------------------------------------------------------------------
+-- The claim
+-- ---------------------------------------------------------------------------
+-- The viewer token's score and link, or no row. Only for the anon role, with
+-- iss cleffy-share and version 1, and both ids well-formed: an authenticated
+-- token carrying a forged cleffy_link gets nothing. Never throws.
+create or replace function public.link_view_claims () returns table (doc uuid, link uuid) language plpgsql stable security definer
+set search_path = '' as $$
+declare
+    v_claims jsonb := auth.jwt ();
+    v_link jsonb := v_claims -> 'cleffy_link';
+    v_uuid constant text := '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+begin
+    if coalesce(current_setting('role', true), '') <> 'anon'
+       or coalesce(v_claims ->> 'role', '') <> 'anon'
+       or coalesce(v_claims ->> 'iss', '') <> 'cleffy-share'
+       or jsonb_typeof(v_link) is distinct from 'object'
+       or v_link -> 'v' is distinct from '1'::jsonb
+       or coalesce(v_link ->> 'doc', '') !~ v_uuid
+       or coalesce(v_link ->> 'link', '') !~ v_uuid then
+        return;
+    end if;
+    return query select (v_link ->> 'doc')::uuid, (v_link ->> 'link')::uuid;
+end;
+$$;
+
+revoke all on function public.link_view_claims () from public, anon, authenticated;
+
+-- The claim's link and its state: 'invalid' unless the claim names a general
+-- viewer link of the claimed score.
+create or replace function public.link_view_link_state () returns table (doc uuid, state text, expires_at timestamptz) language sql stable security definer
+set search_path = '' as $$
+    select c.doc,
+           coalesce(public.share_link_state (l), 'invalid'),
+           l.expires_at
+    from public.link_view_claims () c
+    left join public.share_links l
+        on l.id = c.link
+       and l.document_id = c.doc
+       and l.general
+       and l.role = 'viewer';
+$$;
+
+revoke all on function public.link_view_link_state () from public, anon, authenticated;
+
+-- The score the viewer token may see right now, or null.
+create or replace function public.link_view_document () returns uuid language sql stable security definer
+set search_path = '' as $$
+    select s.doc from public.link_view_link_state () s where s.state = 'live';
+$$;
+
+revoke all on function public.link_view_document () from public, anon, authenticated;
+
+-- What the viewer app asks before it joins: the generation to join, or why not.
+create or replace function public.link_view_access () returns jsonb language sql stable security definer
+set search_path = '' as $$
+    select case
+        when s.state is null then jsonb_build_object('status', 'invalid')
+        when s.state = 'live' then jsonb_build_object(
+            'status', 'open',
+            'epoch', public.document_realtime_epoch (s.doc),
+            'doc', s.doc,
+            'link_expires_at', s.expires_at
+        )
+        else jsonb_build_object('status', s.state)
+    end
+    from (select 1) as one
+    left join public.link_view_link_state () s on true;
+$$;
+
+revoke all on function public.link_view_access () from public, authenticated;
+grant execute on function public.link_view_access () to anon;
+
+-- ---------------------------------------------------------------------------
+-- What a viewer may see of one mark (PR #98's view_mark_for_viewer, by
+-- maxharris1, unchanged): exactly id, page, kind, color, seq, deleted=false
+-- and a payload rebuilt from the keys the renderer draws with -- pts, w, sp
+-- for ink; x, y, size, text, hw, font, bold, italic for text. An erased mark
+-- is only {id, seq, deleted:true}: none of its content reaches a viewer.
+-- ---------------------------------------------------------------------------
+create or replace function public.link_view_mark (
+    p_id uuid,
+    p_page integer,
+    p_kind text,
+    p_color text,
+    p_payload jsonb,
+    p_seq bigint,
+    p_deleted_at timestamptz
+) returns jsonb language sql immutable parallel safe
+set search_path = '' as $$
+    select case
+        when p_deleted_at is not null then
+            jsonb_build_object('id', p_id, 'seq', p_seq, 'deleted', true)
+        else
+            jsonb_build_object(
+                'id', p_id,
+                'page', p_page,
+                'kind', p_kind,
+                'color', p_color,
+                'payload', jsonb_strip_nulls(case
+                    when p_kind = 'text' then jsonb_build_object(
+                        'x', p_payload -> 'x',
+                        'y', p_payload -> 'y',
+                        'size', p_payload -> 'size',
+                        'text', p_payload -> 'text',
+                        'hw', p_payload -> 'hw',
+                        'font', p_payload -> 'font',
+                        'bold', p_payload -> 'bold',
+                        'italic', p_payload -> 'italic'
+                    )
+                    else jsonb_build_object(
+                        'pts', p_payload -> 'pts',
+                        'w', p_payload -> 'w',
+                        'sp', p_payload -> 'sp'
+                    )
+                end),
+                'seq', p_seq,
+                'deleted', false
+            )
+    end;
+$$;
+
+revoke all on function public.link_view_mark (uuid, integer, text, text, jsonb, bigint, timestamptz) from public, anon, authenticated;
+
+-- The score and its marks with seq > p_since, oldest first, at most p_limit
+-- (up to 1000), tombstones included. `more` says another page is waiting;
+-- max_seq is the watermark of what was sent (PR #98's view_link_poll). A token
+-- whose link is not live is refused with HTTP 403 and the link's state.
+create or replace function public.link_view_snapshot (p_since bigint default 0, p_limit integer default 500) returns jsonb language plpgsql stable security definer
+set search_path = '' as $$
+declare
+    v_access jsonb := public.link_view_access ();
+    v_doc uuid := public.link_view_document ();
+    v_limit integer := least(greatest(coalesce(p_limit, 500), 1), 1000);
+    v_since bigint := greatest(coalesce(p_since, 0), 0);
+    v_marks jsonb;
+    v_count integer;
+    v_max bigint;
+    v_more boolean;
+    v_meta jsonb;
+begin
+    if v_doc is null then
+        raise exception 'this link does not open the score'
+            using errcode = 'PT403',
+                  detail = json_build_object('code', coalesce(v_access ->> 'status', 'invalid'))::text;
+    end if;
+
+    select
+        coalesce(jsonb_agg(public.link_view_mark (
+            a.id, a.page, a.kind, a.color, a.payload, a.seq, a.deleted_at
+        ) order by a.seq), '[]'::jsonb),
+        count(*),
+        max(a.seq)
+    into v_marks, v_count, v_max
+    from (
+        select an.id, an.page, an.kind, an.color, an.payload, an.seq, an.deleted_at
+        from public.annotations an
+        where an.document_id = v_doc
+          and an.seq > v_since
+        order by an.seq
+        limit v_limit
+    ) a;
+
+    v_more := v_count = v_limit and exists (
+        select 1 from public.annotations an
+        where an.document_id = v_doc and an.seq > coalesce(v_max, v_since)
+    );
+
+    select jsonb_build_object('title', d.title, 'page_count', d.page_count, 'content_rev', d.content_rev)
+    into v_meta
+    from public.documents d
+    where d.id = v_doc;
+
+    return jsonb_build_object(
+        'doc', v_meta,
+        'marks', v_marks,
+        'max_seq', coalesce(v_max, v_since),
+        'more', v_more
+    );
+end;
+$$;
+
+revoke all on function public.link_view_snapshot (bigint, integer) from public, authenticated;
+grant execute on function public.link_view_snapshot (bigint, integer) to anon;
+
+-- ---------------------------------------------------------------------------
+-- Realtime (plan 6.3)
+-- ---------------------------------------------------------------------------
+-- Whether `topic` is `{prefix}:{doc}[:{generation}]` at the current
+-- generation for the score the viewer token may see. Granted to anon because
+-- the policies below run their expressions as the querying role.
+create or replace function public.link_view_topic_ok (topic text, prefix text) returns boolean language sql stable security definer
+set search_path = '' as $$
+    select public.realtime_topic_document (topic, prefix) is not null
+       and public.realtime_topic_document (topic, prefix) = public.link_view_document ();
+$$;
+
+revoke all on function public.link_view_topic_ok (text, text) from public, authenticated;
+grant execute on function public.link_view_topic_ok (text, text) to anon;
+
+drop policy if exists link_view_receive on realtime.messages;
+create policy link_view_receive on realtime.messages for select to anon using (
+    realtime.messages.extension = 'broadcast'
+    and (
+        public.link_view_topic_ok (realtime.topic (), 'doc')
+        or public.link_view_topic_ok (realtime.topic (), 'doc-view')
+    )
+);
+
+-- No anon policy on doc-db:*, and no anon broadcast insert anywhere.
+drop policy if exists link_view_presence on realtime.messages;
+create policy link_view_presence on realtime.messages for insert to anon with check (
+    realtime.messages.extension = 'presence'
+    and public.link_view_topic_ok (realtime.topic (), 'doc')
+);
+
+-- ---------------------------------------------------------------------------
+-- Fan-out to doc-view (plan 6.4)
+-- ---------------------------------------------------------------------------
+-- The viewer topic at the score's current generation, the twin of
+-- document_db_topic. Members do not join it; viewers only receive on it.
+create or replace function public.document_view_topic (doc uuid) returns text language sql stable security definer
+set search_path = public as $$
+    select public.document_topic_at ('doc-view', doc, public.document_realtime_epoch (doc));
+$$;
+
+revoke all on function public.document_view_topic (uuid) from public, anon, authenticated;
+
+-- Whether a signed-out viewer could be listening: a live general viewer link
+-- on a live score.
+create or replace function public.document_has_live_viewer_link (doc uuid) returns boolean language sql stable security definer
+set search_path = '' as $$
+    select exists (
+        select 1
+        from public.share_links l
+        where l.document_id = doc
+          and l.general
+          and l.revoked_at is null
+          and l.role = 'viewer'
+          and (l.expires_at is null or l.expires_at > now())
+    ) and public.link_view_document_live (doc);
+$$;
+
+revoke all on function public.document_has_live_viewer_link (uuid) from public, anon, authenticated;
+
+-- 20261020150100's annotation fan-out, plus the viewer's copy of the mark.
+create or replace function public.broadcast_annotation_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.content_removed (new.document_id) then
+        return null;
+    end if;
+    perform realtime.broadcast_changes(
+        public.document_db_topic (new.document_id), -- doc-db:{id}[:{generation}] (receive-only for clients)
+        tg_op,                                      -- event name ('INSERT' | 'UPDATE')
+        tg_op,                                      -- operation
+        tg_table_name,
+        tg_table_schema,
+        new,
+        old
+    );
+    if public.document_has_live_viewer_link (new.document_id) then
+        perform realtime.send(
+            public.link_view_mark (new.id, new.page, new.kind, new.color, new.payload, new.seq, new.deleted_at),
+            'mark', -- event
+            public.document_view_topic (new.document_id), -- doc-view:{id}[:{generation}] (receive-only)
+            true -- private
+        );
+    end if;
+    return null;
+end;
+$$;
+
+-- 20261020150100's score fan-out, plus a new content revision for viewers.
+create or replace function public.broadcast_document_changes () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if public.content_removed (new.id) then
+        return null;
+    end if;
+    perform realtime.broadcast_changes(
+        public.document_db_topic (new.id), -- doc-db:{id}[:{generation}] (receive-only for clients)
+        tg_op, tg_op, tg_table_name, tg_table_schema, new, old
+    );
+    if tg_op = 'UPDATE'
+       and old.content_rev is distinct from new.content_rev
+       and public.document_has_live_viewer_link (new.id) then
+        perform realtime.send(
+            jsonb_build_object('content_rev', new.content_rev),
+            'doc', -- event
+            public.document_view_topic (new.id),
+            true -- private
+        );
+    end if;
+    return null;
+end;
+$$;
+
+revoke all on function public.broadcast_annotation_changes () from public, anon, authenticated;
+revoke all on function public.broadcast_document_changes () from public, anon, authenticated;
+
+-- 20261022120100's rotation, plus the hint on the old doc-view topic for a
+-- score that has ever had a general link (a revoked one included: that is
+-- when its viewers most need the hint).
+create or replace function public.rotate_document_realtime (p_document uuid) returns integer language plpgsql security definer
+set search_path = public as $$
+declare
+    v_epoch integer;
+begin
+    insert into public.document_realtime_epochs as e (document_id, epoch)
+    values (p_document, 1)
+    on conflict (document_id) do update set epoch = e.epoch + 1, rotated_at = now()
+    returning e.epoch into v_epoch;
+
+    -- A hint, on both old topics: doc-db:{id} because no client can forge it
+    -- there, doc:{id} because a device whose doc-db channel is down is still
+    -- on it. The app never trusts the payload; it re-reads the generation.
+    perform realtime.send (
+        jsonb_build_object('document_id', p_document),
+        'topic_rotated', -- event
+        public.document_topic_at ('doc-db', p_document, v_epoch - 1), -- topic
+        true -- private
+    );
+    perform realtime.send (
+        jsonb_build_object('document_id', p_document),
+        'topic_rotated', -- event
+        public.document_topic_at ('doc', p_document, v_epoch - 1), -- topic
+        true -- private
+    );
+    if exists (select 1 from public.share_links l where l.document_id = p_document and l.general) then
+        perform realtime.send (
+            jsonb_build_object('document_id', p_document),
+            'topic_rotated', -- event
+            public.document_topic_at ('doc-view', p_document, v_epoch - 1), -- topic
+            true -- private
+        );
+    end if;
+    return v_epoch;
+end;
+$$;
+
+revoke all on function public.rotate_document_realtime (uuid) from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- share-session's one read (service role only)
+-- ---------------------------------------------------------------------------
+-- What a token names, for the Edge Function: {state:'invalid'} for anything
+-- but a general link; {state, link_id} for a general link that is not live;
+-- the score's facts and the PDF's storage path for a live one. Older links
+-- keep the /join path (D2), so they read invalid here.
+create or replace function public.share_session_resolve (p_token text) returns jsonb language plpgsql stable security definer
+set search_path = '' as $$
+declare
+    v_link public.share_links;
+    v_state text;
+begin
+    if p_token is null or p_token !~ '^[A-Za-z0-9_-]{22}$' then
+        return jsonb_build_object('state', 'invalid');
+    end if;
+    select * into v_link from public.share_links l where l.token = p_token;
+    if v_link.id is null or not v_link.general then
+        return jsonb_build_object('state', 'invalid');
+    end if;
+    v_state := public.share_link_state (v_link);
+    if v_state <> 'live' then
+        return jsonb_build_object('state', v_state, 'link_id', v_link.id);
+    end if;
+    return (
+        select jsonb_build_object(
+            'state', 'live',
+            'role', v_link.role,
+            'link_id', v_link.id,
+            'doc', jsonb_build_object(
+                'id', d.id,
+                'title', d.title,
+                'page_count', d.page_count,
+                'content_rev', d.content_rev
+            ),
+            'pdf_path', d.storage_path,
+            'link_expires_at', v_link.expires_at
+        )
+        from public.documents d
+        where d.id = v_link.document_id
+    );
+end;
+$$;
+
+revoke all on function public.share_session_resolve (text) from public, anon, authenticated;
+grant execute on function public.share_session_resolve (text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- What anon may execute
+-- ---------------------------------------------------------------------------
+-- A viewer token runs as anon, so anon executes exactly: consent_age (the age
+-- screen), peek_share_link (/join), record_web_events (signed-out page
+-- events) and the three viewer functions above. content_notice_time was the
+-- one other: an internal helper no signed-out path calls.
+revoke execute on function public.content_notice_time (timestamptz) from public, anon;
+
+-- And a function created later does not reach anon through this schema's
+-- default privileges (each migration still revokes PUBLIC itself).
+alter default privileges for role postgres in schema public revoke execute on functions from anon;
+
+-- ===== supabase/migrations/20261113120200_share_v2_invites.sql =====
+-- Share v2, part 3 of 4: "Specific people" invites, and retention for links
+-- and invites (#104, plan 6.5, D5 and D7).
+--
+-- The owner invites an email address as a viewer or an editor (share-invite):
+--   * an existing account gets the membership at once, with a role lock so a
+--     share link never changes what the owner chose;
+--   * a new address gets a pending invite for 14 days. Only the sha256 of its
+--     32-byte token is stored; the token itself is only in the email. Opening
+--     /invite#<token> shows the invite (share-invite-accept peek), and
+--     accepting it creates the account (age screen and password) and attaches
+--     the membership in one step (D5).
+-- A roster student's address is refused unless the inviter is their teacher,
+-- who should use Assign instead (D7), when the invite is sent, resent and
+-- accepted.
+--
+-- Every write goes through the service-role RPCs below, each starting with
+-- share_assert_owner for the caller; the Edge Function checks ownership under
+-- the caller's own JWT first (share_owner_ready).
+--
+-- Safe to run twice.
+
+create table if not exists public.document_invites (
+    id uuid primary key default gen_random_uuid (),
+    document_id uuid not null references public.documents (id) on delete cascade,
+    email text not null,
+    role text not null,
+    invited_by uuid not null references auth.users (id) on delete cascade,
+    token_hash bytea not null unique,
+    created_at timestamptz not null default now(),
+    expires_at timestamptz not null default now() + interval '14 days',
+    accepted_at timestamptz,
+    accepted_by uuid references auth.users (id) on delete set null,
+    revoked_at timestamptz,
+    constraint document_invites_email_shape check (email = lower(btrim(email)) and length(email) between 3 and 320),
+    constraint document_invites_role check (role in ('viewer', 'editor')),
+    constraint document_invites_token_hash_length check (length(token_hash) = 32)
+);
+
+create unique index if not exists document_invites_one_pending on public.document_invites (document_id, email)
+where
+    accepted_at is null
+    and revoked_at is null;
+
+create index if not exists document_invites_document on public.document_invites (document_id);
+
+alter table public.document_invites enable row level security;
+
+drop policy if exists document_invites_owner_select on public.document_invites;
+create policy document_invites_owner_select on public.document_invites for select to authenticated using (
+    exists (
+        select 1 from public.documents d
+        where d.id = document_invites.document_id and d.owner_id = (select auth.uid ())
+    )
+);
+
+-- The owner lists invites; nobody but the service role writes them, and the
+-- token hash is not readable from a client.
+revoke all on table public.document_invites from public, anon, authenticated;
+grant select (id, document_id, email, role, invited_by, created_at, expires_at, accepted_at, accepted_by, revoked_at)
+    on table public.document_invites to authenticated;
+grant select, insert, update, delete on table public.document_invites to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+create or replace function public.share_invite_state (p_invite public.document_invites) returns text language sql stable
+set search_path = '' as $$
+    select case
+        when p_invite.id is null then 'invalid'
+        when p_invite.accepted_at is not null then 'used'
+        when p_invite.revoked_at is not null then 'cancelled'
+        when p_invite.expires_at <= now() then 'expired'
+        else 'pending'
+    end;
+$$;
+
+revoke all on function public.share_invite_state (public.document_invites) from public, anon, authenticated;
+
+create or replace function public.share_display_name (p_user uuid) returns text language sql stable security definer
+set search_path = '' as $$
+    select nullif(btrim(coalesce(u.raw_user_meta_data ->> 'display_name', '')), '')
+    from auth.users u
+    where u.id = p_user;
+$$;
+
+revoke all on function public.share_display_name (uuid) from public, anon, authenticated;
+
+-- D7: p_email (or p_user's account) is a roster student of a teacher other
+-- than p_inviter.
+create or replace function public.share_invite_roster_refused (p_email text, p_inviter uuid, p_user uuid default null) returns boolean language sql stable security definer
+set search_path = '' as $$
+    select exists (
+        select 1
+        from public.managed_students ms
+        left join auth.users su on su.id = ms.student_user_id
+        where (lower(ms.student_email) = p_email or lower(su.email) = p_email or ms.student_user_id = p_user)
+          and ms.teacher_id <> p_inviter
+    );
+$$;
+
+revoke all on function public.share_invite_roster_refused (text, uuid, uuid) from public, anon, authenticated;
+
+-- Give p_user the score as p_role, recorded as the owner's choice (a role
+-- lock), as set_document_member_role does. An existing owner row is never
+-- changed. The person now has the score by invite, not through a link: its
+-- redemption goes, so Restricted no longer withdraws them, and a role the link
+-- gave yields to p_role; any other editor is not lowered by a viewer invite.
+-- A roster student's row is locked first, as redeem_share_link does.
+create or replace function public.share_invite_grant (p_document uuid, p_user uuid, p_role text) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_via_link boolean;
+begin
+    perform public.lock_student_for_grant (p_user);
+    delete from public.share_link_redemptions r
+    where r.document_id = p_document and r.user_id = p_user
+    returning true into v_via_link;
+    insert into public.document_members (document_id, user_id, role)
+    values (p_document, p_user, p_role)
+    on conflict (document_id, user_id) do update
+        set role = case
+            when public.document_members.role = 'owner' then 'owner'
+            when public.document_members.role = 'editor' and v_via_link is null then 'editor'
+            else excluded.role
+        end;
+    if not exists (
+        select 1 from public.document_members dm
+        where dm.document_id = p_document and dm.user_id = p_user and dm.role = 'owner'
+    ) then
+        insert into public.document_member_role_locks (document_id, user_id)
+        values (p_document, p_user)
+        on conflict do nothing;
+    end if;
+end;
+$$;
+
+revoke all on function public.share_invite_grant (uuid, uuid, text) from public, anon, authenticated;
+
+-- The owner has just chosen p_user's access to p_document (invited the
+-- account, set its role or removed it): a pending invite for the account's
+-- address would undo that choice when accepted, so it is cancelled. Called
+-- before the membership row is locked, the order share_invite_consume takes.
+create or replace function public.share_invite_retire (p_document uuid, p_user uuid) returns void language sql security definer
+set search_path = '' as $$
+    update public.document_invites i
+    set revoked_at = now()
+    where i.document_id = p_document
+      and i.accepted_at is null
+      and i.revoked_at is null
+      and i.email = (select lower(u.email) from auth.users u where u.id = p_user);
+$$;
+
+revoke all on function public.share_invite_retire (uuid, uuid) from public, anon, authenticated;
+
+-- 20261007120000's set_document_member_role and remove_document_member, each
+-- cancelling a pending invite for the member's address first.
+create or replace function public.set_document_member_role (p_document uuid, p_user uuid, p_role text) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_caller uuid := auth.uid();
+    v_current text;
+begin
+    if v_caller is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    -- document_role() reads auth.uid(), which is still the CALLER inside a
+    -- definer function (see assign_score).
+    if public.document_role (p_document) is distinct from 'owner' then
+        raise exception 'only the score owner can change roles' using errcode = '42501';
+    end if;
+
+    -- 'owner' is not on offer: there is one owner, fixed by documents.owner_id,
+    -- and handing the role out here would make a second one RLS would believe.
+    if p_role is null or p_role not in ('editor', 'viewer') then
+        raise exception 'role must be editor or viewer' using errcode = '22023';
+    end if;
+
+    perform public.share_invite_retire (p_document, p_user);
+
+    select dm.role into v_current
+    from public.document_members dm
+    where dm.document_id = p_document and dm.user_id = p_user
+    for update;
+
+    if not found then
+        raise exception 'not a member of this score' using errcode = 'P0002';
+    end if;
+
+    if v_current = 'owner' or exists (
+        select 1 from public.documents d where d.id = p_document and d.owner_id = p_user
+    ) then
+        raise exception 'the owner''s access cannot be changed' using errcode = '42501';
+    end if;
+
+    -- Recorded even when the role is unchanged: the owner looked at this
+    -- member and chose this role, and a link opened later must not change it
+    -- (see document_member_role_locks).
+    insert into public.document_member_role_locks (document_id, user_id)
+    values (p_document, p_user)
+    on conflict (document_id, user_id) do update
+        set locked_at = now();
+
+    if v_current = p_role then
+        return;
+    end if;
+
+    update public.document_members
+    set role = p_role
+    where document_id = p_document and user_id = p_user;
+
+    -- A roster student's access is the assignment's access. Keep them in step
+    -- so the next assign_score (which re-applies `access`) does not silently
+    -- undo this, and the teacher's Assign dialog shows what is true.
+    update public.assignments
+    set access = case when p_role = 'viewer' then 'view' else 'edit' end,
+        updated_at = now()
+    where document_id = p_document and student_user_id = p_user;
+end;
+$$;
+
+revoke all on function public.set_document_member_role (uuid, uuid, text) from public;
+revoke all on function public.set_document_member_role (uuid, uuid, text) from anon;
+grant execute on function public.set_document_member_role (uuid, uuid, text) to authenticated;
+
+create or replace function public.remove_document_member (p_document uuid, p_user uuid) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_caller uuid := auth.uid();
+    v_current text;
+begin
+    if v_caller is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    if public.document_role (p_document) is distinct from 'owner' then
+        raise exception 'only the score owner can remove collaborators' using errcode = '42501';
+    end if;
+
+    perform public.share_invite_retire (p_document, p_user);
+
+    select dm.role into v_current
+    from public.document_members dm
+    where dm.document_id = p_document and dm.user_id = p_user
+    for update;
+
+    if not found then
+        raise exception 'not a member of this score' using errcode = 'P0002';
+    end if;
+
+    if v_current = 'owner' or exists (
+        select 1 from public.documents d where d.id = p_document and d.owner_id = p_user
+    ) then
+        raise exception 'the owner cannot be removed from their own score' using errcode = '42501';
+    end if;
+
+    -- The assignment goes with the membership: an assignment whose score the
+    -- student can no longer open is the drift unassign_score exists to prevent.
+    delete from public.assignments
+    where document_id = p_document and student_user_id = p_user;
+
+    delete from public.document_members
+    where document_id = p_document and user_id = p_user;
+
+    perform public.forget_document_for_user (p_document, p_user);
+end;
+$$;
+
+revoke all on function public.remove_document_member (uuid, uuid) from public;
+revoke all on function public.remove_document_member (uuid, uuid) from anon;
+grant execute on function public.remove_document_member (uuid, uuid) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- The owner's check, under the caller's JWT
+-- ---------------------------------------------------------------------------
+create or replace function public.share_owner_ready (p_document uuid) returns boolean language plpgsql stable security definer
+set search_path = '' as $$
+begin
+    perform public.share_assert_owner (p_document, auth.uid ());
+    return true;
+end;
+$$;
+
+revoke all on function public.share_owner_ready (uuid) from public, anon;
+grant execute on function public.share_owner_ready (uuid) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- The service-role RPCs behind share-invite and share-invite-accept
+-- ---------------------------------------------------------------------------
+-- Invite p_email to p_document. Answers one of:
+--   {kind:'roster_refused'}                  a roster student of another teacher (D7)
+--   {kind:'member', title, inviter_name}     an existing account, now a member
+--   {kind:'invite', invite_id, title, inviter_name}   a pending invite (re-inviting
+--                                            the same address reissues its token)
+create or replace function public.share_invite_create (
+    p_caller uuid,
+    p_document uuid,
+    p_email text,
+    p_role text,
+    p_token_hash bytea
+) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_email text := lower(btrim(coalesce(p_email, '')));
+    v_user uuid;
+    v_anonymous boolean;
+    v_invite uuid;
+    v_title text;
+begin
+    perform public.share_assert_owner (p_document, p_caller);
+    if p_role is null or p_role not in ('viewer', 'editor') then
+        raise exception 'an invite role is viewer or editor'
+            using errcode = '22023', detail = json_build_object('code', 'invalid_role')::text;
+    end if;
+    if length(v_email) not between 3 and 320 or position('@' in v_email) = 0 then
+        raise exception 'not an email address'
+            using errcode = '22023', detail = json_build_object('code', 'invalid_email')::text;
+    end if;
+
+    if public.share_invite_roster_refused (v_email, p_caller) then
+        return jsonb_build_object('kind', 'roster_refused');
+    end if;
+
+    select d.title into v_title from public.documents d where d.id = p_document;
+
+    select u.id, u.is_anonymous into v_user, v_anonymous
+    from auth.users u
+    where lower(u.email) = v_email and u.deleted_at is null
+    limit 1;
+
+    if v_user is not null and not v_anonymous then
+        if v_user <> p_caller then
+            perform public.share_invite_retire (p_document, v_user);
+            perform public.share_invite_grant (p_document, v_user, p_role);
+        end if;
+        return jsonb_build_object(
+            'kind', 'member',
+            'title', v_title,
+            'inviter_name', public.share_display_name (p_caller)
+        );
+    end if;
+
+    insert into public.document_invites as i (document_id, email, role, invited_by, token_hash)
+    values (p_document, v_email, p_role, p_caller, p_token_hash)
+    on conflict (document_id, email) where accepted_at is null and revoked_at is null do update
+        set role = excluded.role,
+            invited_by = excluded.invited_by,
+            token_hash = excluded.token_hash,
+            created_at = now(),
+            expires_at = now() + interval '14 days'
+    returning i.id into v_invite;
+
+    return jsonb_build_object(
+        'kind', 'invite',
+        'invite_id', v_invite,
+        'title', v_title,
+        'inviter_name', public.share_display_name (p_caller)
+    );
+end;
+$$;
+
+revoke all on function public.share_invite_create (uuid, uuid, text, text, bytea) from public, anon, authenticated;
+grant execute on function public.share_invite_create (uuid, uuid, text, text, bytea) to service_role;
+
+-- Resend: a new token for a pending (or lapsed, never used or cancelled)
+-- invite, good for another 14 days. Null when there is nothing to resend;
+-- {kind:'roster_refused'}, the token unchanged, when the address has since
+-- become another teacher's roster student (D7).
+create or replace function public.share_invite_reissue (p_caller uuid, p_invite uuid, p_token_hash bytea) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_invite public.document_invites;
+begin
+    select * into v_invite from public.document_invites i where i.id = p_invite for update;
+    if v_invite.id is null then
+        return null;
+    end if;
+    perform public.share_assert_owner (v_invite.document_id, p_caller);
+    if v_invite.accepted_at is not null or v_invite.revoked_at is not null then
+        return null;
+    end if;
+    if public.share_invite_roster_refused (v_invite.email, p_caller) then
+        return jsonb_build_object('kind', 'roster_refused');
+    end if;
+
+    update public.document_invites i
+    set token_hash = p_token_hash, expires_at = now() + interval '14 days'
+    where i.id = p_invite;
+
+    return jsonb_build_object(
+        'kind', 'invite',
+        'invite_id', v_invite.id,
+        'email', v_invite.email,
+        'role', v_invite.role,
+        'title', (select d.title from public.documents d where d.id = v_invite.document_id),
+        'inviter_name', public.share_display_name (p_caller)
+    );
+end;
+$$;
+
+revoke all on function public.share_invite_reissue (uuid, uuid, bytea) from public, anon, authenticated;
+grant execute on function public.share_invite_reissue (uuid, uuid, bytea) to service_role;
+
+-- Cancel: the invite's token stops working. True when it was pending.
+create or replace function public.share_invite_cancel (p_caller uuid, p_invite uuid) returns boolean language plpgsql security definer
+set search_path = public as $$
+declare
+    v_invite public.document_invites;
+begin
+    select * into v_invite from public.document_invites i where i.id = p_invite for update;
+    if v_invite.id is null then
+        return false;
+    end if;
+    perform public.share_assert_owner (v_invite.document_id, p_caller);
+    if v_invite.accepted_at is not null or v_invite.revoked_at is not null then
+        return false;
+    end if;
+    update public.document_invites i set revoked_at = now() where i.id = p_invite;
+    return true;
+end;
+$$;
+
+revoke all on function public.share_invite_cancel (uuid, uuid) from public, anon, authenticated;
+grant execute on function public.share_invite_cancel (uuid, uuid) to service_role;
+
+-- What /invite shows: the invite's state, and for a pending one the score's
+-- title, who invited, the role and the address (the Edge Function masks it).
+create or replace function public.share_invite_peek (p_token_hash bytea) returns jsonb language sql stable security definer
+set search_path = '' as $$
+    select case
+        when public.share_invite_state (i) <> 'pending' then
+            jsonb_build_object('state', public.share_invite_state (i))
+        else jsonb_build_object(
+            'state', 'pending',
+            'title', (select d.title from public.documents d where d.id = i.document_id),
+            'inviter_name', public.share_display_name (i.invited_by),
+            'role', i.role,
+            'email', i.email
+        )
+    end
+    from (select 1) as one
+    left join public.document_invites i on i.token_hash = p_token_hash;
+$$;
+
+revoke all on function public.share_invite_peek (bytea) from public, anon, authenticated;
+grant execute on function public.share_invite_peek (bytea) to service_role;
+
+-- Accept: p_user, whose address must be the invite's, gets the score. Answers
+-- {ok:true, document_id} or {ok:false, state} (state 'email_mismatch' for
+-- another account, 'roster_refused' for another teacher's roster student, D7,
+-- asked with their roster row locked). A pending invite is used once.
+create or replace function public.share_invite_consume (p_token_hash bytea, p_user uuid) returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_invite public.document_invites;
+    v_state text;
+begin
+    select * into v_invite from public.document_invites i where i.token_hash = p_token_hash for update;
+    v_state := public.share_invite_state (v_invite);
+    if v_state <> 'pending' then
+        return jsonb_build_object('ok', false, 'state', v_state);
+    end if;
+    if not exists (
+        select 1 from auth.users u
+        where u.id = p_user and lower(u.email) = v_invite.email and not u.is_anonymous
+    ) then
+        return jsonb_build_object('ok', false, 'state', 'email_mismatch');
+    end if;
+    perform public.lock_student_for_grant (p_user);
+    if public.share_invite_roster_refused (v_invite.email, v_invite.invited_by, p_user) then
+        return jsonb_build_object('ok', false, 'state', 'roster_refused');
+    end if;
+
+    perform public.share_invite_grant (v_invite.document_id, p_user, v_invite.role);
+    update public.document_invites i
+    set accepted_at = now(), accepted_by = p_user
+    where i.id = v_invite.id;
+    return jsonb_build_object('ok', true, 'document_id', v_invite.document_id);
+end;
+$$;
+
+revoke all on function public.share_invite_consume (bytea, uuid) from public, anon, authenticated;
+grant execute on function public.share_invite_consume (bytea, uuid) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Retention
+-- ---------------------------------------------------------------------------
+-- Links revoked or expired more than 30 days ago (their redemptions cascade;
+-- the members they made keep the score as ordinary members).
+create or replace function public.retention_purge_share_links (p_batch integer default 5000) returns integer language plpgsql security definer
+set search_path = '' as $$
+declare
+    v_deleted integer;
+begin
+    with doomed as (
+        select l.token
+        from public.share_links l
+        where l.revoked_at < now() - interval '30 days'
+           or l.expires_at < now() - interval '30 days'
+        limit greatest(p_batch, 0)
+    )
+    delete from public.share_links l
+    using doomed
+    where l.token = doomed.token;
+    get diagnostics v_deleted = row_count;
+    return v_deleted;
+end;
+$$;
+
+revoke all on function public.retention_purge_share_links (integer) from public, anon, authenticated;
+grant execute on function public.retention_purge_share_links (integer) to service_role;
+
+-- Invites 30 days after they were accepted, cancelled or expired.
+create or replace function public.retention_purge_share_invites (p_batch integer default 5000) returns integer language plpgsql security definer
+set search_path = '' as $$
+declare
+    v_deleted integer;
+begin
+    with doomed as (
+        select i.id
+        from public.document_invites i
+        where coalesce(i.accepted_at, i.revoked_at, i.expires_at) < now() - interval '30 days'
+        limit greatest(p_batch, 0)
+    )
+    delete from public.document_invites i
+    using doomed
+    where i.id = doomed.id;
+    get diagnostics v_deleted = row_count;
+    return v_deleted;
+end;
+$$;
+
+revoke all on function public.retention_purge_share_invites (integer) from public, anon, authenticated;
+grant execute on function public.retention_purge_share_invites (integer) to service_role;
+
+do $$
+begin
+    perform cron.unschedule (jobid) from cron.job where jobname in ('retention-share-links', 'retention-share-invites');
+exception
+    when undefined_table then null;
+end;
+$$;
+
+select cron.schedule ('retention-share-links', '53 3 * * *', $$select public.retention_purge_share_links ()$$);
+select cron.schedule ('retention-share-invites', '3 4 * * *', $$select public.retention_purge_share_invites ()$$);
+
+-- ===== supabase/migrations/20261113120300_share_v2_link_guests.sql =====
+-- Share v2, part 4 of 4: editor-link guests (#104, D8, and the age gate for
+-- "Anyone with the link: Editor").
+--
+-- An editor link's visitor may type a name and goes straight to editing, with
+-- no age screen (Max, 2026-11-13). The app signs them in as an anonymous guest
+-- whose age gate is exactly {"source":"link_guest","v":2}. That gate is
+-- accepted only for an anonymous user, in the hook and in the auth.users
+-- insert trigger alike; it never creates a registered account. Turning any
+-- guest into an account (guest-email-confirm) takes a passing age gate: the
+-- gate is the guest's own user_metadata, which they can remove or change, so
+-- the database refuses to clear is_anonymous unless age_gate_problem passes,
+-- and guest-email-confirm asks the age screen first when it would not.
+--
+-- D8: idle link guests are deleted after a window each score owner sets (1 to
+-- 90 days, 30 by default). A guest on several owners' scores is kept until the
+-- longest of their windows passes, never beyond 90 days; every other guest
+-- stays at 90 days.
+--
+-- Safe to run twice.
+
+-- ---------------------------------------------------------------------------
+-- The age gate
+-- ---------------------------------------------------------------------------
+-- age_gate_problem (20261111180000), with the one gate that skips the age
+-- screen: an anonymous link guest's.
+create or replace function public.age_gate_problem_for (p_user_metadata jsonb, p_is_anonymous boolean) returns text language plpgsql immutable
+set search_path = '' as $$
+begin
+    if p_user_metadata -> 'age_gate' = '{"source": "link_guest", "v": 2}'::jsonb then
+        return case when coalesce(p_is_anonymous, false) then null else 'age_check_missing' end;
+    end if;
+    return public.age_gate_problem (p_user_metadata);
+end;
+$$;
+
+revoke all on function public.age_gate_problem_for (jsonb, boolean) from public, anon, authenticated;
+grant execute on function public.age_gate_problem_for (jsonb, boolean) to service_role, supabase_auth_admin;
+
+-- 20261021120000's hook: the event carries is_anonymous (spike e).
+create or replace function public.hook_before_user_created (event jsonb) returns jsonb language plpgsql stable
+set search_path = '' as $$
+declare
+    problem text := public.age_gate_problem_for (
+        coalesce(event -> 'user' -> 'user_metadata', '{}'::jsonb),
+        coalesce(event -> 'user' -> 'is_anonymous', 'false'::jsonb) = 'true'::jsonb
+    );
+begin
+    if problem is null then
+        return '{}'::jsonb;
+    end if;
+    if problem = 'age_check_missing' then
+        return jsonb_build_object(
+            'error',
+            jsonb_build_object(
+                'http_code', 400,
+                'message', 'Sign-up needs the age check first. Reload the page and try again.'
+            )
+        );
+    end if;
+    return jsonb_build_object(
+        'error',
+        jsonb_build_object('http_code', 403, 'message', 'Sorry, you can’t create a Cleffy account.')
+    );
+end;
+$$;
+
+-- 20261111180000's insert trigger, reading the row's own is_anonymous.
+create or replace function public.enforce_age_gate_on_user () returns trigger language plpgsql
+set search_path = '' as $$
+declare
+    problem text;
+begin
+    if current_user is distinct from 'supabase_auth_admin' then
+        return new;
+    end if;
+    problem := public.age_gate_problem_for (coalesce(new.raw_user_meta_data, '{}'::jsonb), new.is_anonymous);
+    if problem is null then
+        return new;
+    end if;
+    if problem = 'age_check_missing' then
+        raise exception 'Sign-up needs the age check first. Reload the page and try again.'
+            using errcode = '22023';
+    end if;
+    raise exception 'Sorry, you can’t create a Cleffy account.'
+        using errcode = '42501';
+end;
+$$;
+
+-- 20261010120200's guard, plus: a guest leaves anonymity only with a passing
+-- age gate. guest-email-confirm writes the age screen's gate first.
+create or replace function public.guard_guest_email () returns trigger language plpgsql security definer
+set search_path = '' as $$
+declare
+    v_upgrades text := coalesce(current_setting('cleffy.guest_upgrades', true), '');
+    v_leaving boolean := old.is_anonymous and not new.is_anonymous;
+    v_email_changes boolean := nullif(new.email, '') is not null
+        and lower(coalesce(old.email, '')) is distinct from lower(new.email);
+    v_proven text;
+begin
+    if not (v_leaving or v_email_changes) or new.deleted_at is not null then
+        return new;
+    end if;
+    if v_leaving and public.age_gate_problem (coalesce(new.raw_user_meta_data, '{}'::jsonb)) is not null then
+        raise exception 'a guest takes the age check before getting an account'
+            using errcode = '42501';
+    end if;
+    if not (old.is_anonymous or new.is_anonymous or strpos(v_upgrades, new.id::text) > 0) then
+        return new;
+    end if;
+
+    select g.verified_email into v_proven
+    from public.guest_email_verifications g
+    where g.user_id = new.id
+        and g.verified_at > clock_timestamp() - interval '10 minutes';
+    if not found then
+        raise exception 'a guest account gets an email address only through guest-email-confirm'
+            using errcode = '42501';
+    end if;
+    if v_email_changes and lower(new.email) <> v_proven then
+        raise exception 'that is not the address the guest proved'
+            using errcode = '42501';
+    end if;
+
+    if v_leaving then
+        perform set_config('cleffy.guest_upgrades', v_upgrades || new.id::text || ',', true);
+    end if;
+    return new;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- D8: the owner's idle window for link guests
+-- ---------------------------------------------------------------------------
+create table if not exists public.share_owner_settings (
+    owner_id uuid primary key references auth.users (id) on delete cascade,
+    link_guest_idle_days integer not null default 30 check (link_guest_idle_days between 1 and 90),
+    updated_at timestamptz not null default now()
+);
+
+alter table public.share_owner_settings enable row level security;
+revoke all on table public.share_owner_settings from public, anon, authenticated;
+grant select, insert, update, delete on table public.share_owner_settings to service_role;
+
+create or replace function public.share_settings_assert_caller () returns uuid language plpgsql stable security definer
+set search_path = '' as $$
+declare
+    v_uid uuid := auth.uid ();
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+    if exists (select 1 from auth.users u where u.id = v_uid and u.is_anonymous)
+       or exists (select 1 from public.managed_students ms where ms.student_user_id = v_uid) then
+        raise exception 'only a score owner''s account has sharing settings' using errcode = '42501';
+    end if;
+    return v_uid;
+end;
+$$;
+
+revoke all on function public.share_settings_assert_caller () from public, anon, authenticated;
+
+create or replace function public.set_link_guest_retention (p_days integer) returns integer language plpgsql security definer
+set search_path = '' as $$
+declare
+    v_uid uuid := public.share_settings_assert_caller ();
+begin
+    if p_days is null or p_days not between 1 and 90 then
+        raise exception 'idle link guests are deleted after 1 to 90 days'
+            using errcode = '22023', detail = json_build_object('code', 'invalid_retention_days')::text;
+    end if;
+    insert into public.share_owner_settings as s (owner_id, link_guest_idle_days)
+    values (v_uid, p_days)
+    on conflict (owner_id) do update set link_guest_idle_days = excluded.link_guest_idle_days, updated_at = now();
+    return p_days;
+end;
+$$;
+
+revoke all on function public.set_link_guest_retention (integer) from public, anon;
+grant execute on function public.set_link_guest_retention (integer) to authenticated;
+
+create or replace function public.my_share_settings () returns jsonb language sql stable security definer
+set search_path = '' as $$
+    select jsonb_build_object(
+        'link_guest_idle_days',
+        coalesce(
+            (select s.link_guest_idle_days from public.share_owner_settings s where s.owner_id = public.share_settings_assert_caller ()),
+            30
+        )
+    );
+$$;
+
+revoke all on function public.my_share_settings () from public, anon;
+grant execute on function public.my_share_settings () to authenticated;
+
+-- How long p_user may sit idle before the purge: for a link guest, the longest
+-- window among the owners of the scores they are on (30 days for an owner who
+-- never chose), at most 90 days; for anyone else, p_default.
+create or replace function public.retention_guest_idle_window (p_user uuid, p_default interval) returns interval language sql stable security definer
+set search_path = '' as $$
+    select case
+        when u.raw_user_meta_data -> 'age_gate' ->> 'source' is distinct from 'link_guest' then p_default
+        else least(
+            interval '90 days',
+            make_interval(days => coalesce((
+                select max(coalesce(s.link_guest_idle_days, 30))
+                from public.document_members dm
+                join public.documents d on d.id = dm.document_id
+                left join public.share_owner_settings s on s.owner_id = d.owner_id
+                where dm.user_id = u.id
+            ), 30))
+        )
+    end
+    from auth.users u
+    where u.id = p_user;
+$$;
+
+revoke all on function public.retention_guest_idle_window (uuid, interval) from public, anon, authenticated;
+
+-- 20261021120500's purge, with each guest's own window (the cron passes 90
+-- days, which stays every other guest's). The scan asks the full question, so
+-- a batch is never filled with guests still inside their window.
+create or replace function public.retention_purge_stale_guests (p_idle interval default '90 days', p_batch integer default 1000) returns integer language plpgsql security definer
+set search_path = public as $$
+declare
+    candidate record;
+    v_floor timestamptz := now() - least(p_idle, interval '1 day');
+    purged int := 0;
+begin
+    for candidate in
+        select u.id
+        from auth.users u
+        where u.is_anonymous
+          and public.retention_guest_last_active (u.id) < v_floor
+          and public.retention_guest_last_active (u.id) < now() - public.retention_guest_idle_window (u.id, p_idle)
+        order by u.created_at
+        limit greatest(p_batch, 0)
+    loop
+        perform 1
+        from auth.users u
+        where u.id = candidate.id
+          and u.is_anonymous
+          and public.retention_guest_last_active (u.id) < now() - public.retention_guest_idle_window (u.id, p_idle)
+        for update skip locked;
+
+        if not found then
+            continue;
+        end if;
+
+        delete from auth.users where id = candidate.id;
+        purged := purged + 1;
+    end loop;
+    return purged;
+end;
+$$;

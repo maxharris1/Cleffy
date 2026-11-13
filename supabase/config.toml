@@ -602,6 +602,19 @@ verify_jwt = true
 [functions.content-notices]
 verify_jwt = false
 
+# Share v2 (#104), each answering 404 until SHARE_V2_ENABLED=1. share-session
+# serves signed-out link viewers, who have no JWT: the link token is the gate.
+[functions.share-session]
+verify_jwt = false
+
+# An owner inviting people to a score by email: their JWT is required.
+[functions.share-invite]
+verify_jwt = true
+
+# /invite: the invitee may not have an account yet; the invite token is the gate.
+[functions.share-invite-accept]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54427

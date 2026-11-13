@@ -233,6 +233,10 @@ set constraints all immediate;
 \ir ../../supabase/migrations/20261111170000_age_gate_auth_users_insert.sql
 \ir ../../supabase/migrations/20261111180000_age_gate_problem_missing_min_age.sql
 \ir ../../supabase/migrations/20261112120000_web_events.sql
+\ir ../../supabase/migrations/20261113120000_share_v2_links.sql
+\ir ../../supabase/migrations/20261113120100_share_v2_viewer_auth.sql
+\ir ../../supabase/migrations/20261113120200_share_v2_invites.sql
+\ir ../../supabase/migrations/20261113120300_share_v2_link_guests.sql
 
 reset client_min_messages;
 

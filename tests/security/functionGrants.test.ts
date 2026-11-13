@@ -152,7 +152,7 @@ describe('peek_share_link is meant to be callable by anon', () => {
         );
     });
 
-    it('answers only whether a link works and at what role — never which document', () => {
+    it('answers only whether a link works, at what role and why not — never which document', () => {
         // This is what makes the anon grant safe, and it is the thing to
         // protect: the signature leaks no document identity, no title, no
         // owner, no member list. Someone holding a share token learns only
@@ -161,9 +161,13 @@ describe('peek_share_link is meant to be callable by anon', () => {
         //
         // If a future edit adds a column here, the anon grant has to be
         // reconsidered at the same time — which is exactly why the signature
-        // is pinned rather than merely described.
+        // is pinned rather than merely described. Share v2 (#104) added
+        // `state` (live, revoked, expired, unavailable, invalid) and was
+        // reconsidered: it tells the holder of a real token why it stopped
+        // working, which the link page shows them anyway, and a guessed token
+        // (128 random bits) is still only `invalid`.
         expect(sql).toMatch(
-            /create\s+or\s+replace\s+function\s+public\.peek_share_link\s*\(\s*p_token\s+text\s*\)\s+returns\s+table\s*\(\s*valid\s+boolean\s*,\s*role\s+text\s*\)/i,
+            /create\s+or\s+replace\s+function\s+public\.peek_share_link\s*\(\s*p_token\s+text\s*\)\s+returns\s+table\s*\(\s*valid\s+boolean\s*,\s*role\s+text\s*,\s*state\s+text\s*\)/i,
         );
     });
 
@@ -247,10 +251,119 @@ describe('student_write_allowed is not executable by anon', () => {
         // outcome for anon was the same: uid is null, the function returned
         // true, the trigger never refused.
         const body =
-            trigger.match(/create\s+or\s+replace\s+function\s+public\.refuse_revoked_student_write[\s\S]*?\$\$;/i)?.[0] ??
-            '';
+            trigger.match(
+                /create\s+or\s+replace\s+function\s+public\.refuse_revoked_student_write[\s\S]*?\$\$;/i,
+            )?.[0] ?? '';
         expect(body).toMatch(/current_user\s*=\s*'authenticated'/);
         expect(body).not.toMatch(/\banon\b/);
         expect(body).toMatch(/student_write_allowed/);
+    });
+});
+
+/**
+ * The functions anon may execute, worked out from every migration in order the
+ * way PostgreSQL would: a new function in `public` is executable by PUBLIC and
+ * (through this schema's default privileges, until 20261113120100 removed
+ * anon from them) by anon; `revoke` and `grant` change that; `drop` forgets
+ * it. Trigger functions are left out (nobody calls them). A Share v2 viewer
+ * token runs as anon, so this list is everything it can call besides
+ * PostgREST's tables, where anon holds nothing (tests/sql/explicit_grants.sql,
+ * check 31). tests/sql/share_v2.sql (checks 091-092) proves the same list
+ * against a database.
+ */
+describe('anon executes exactly the allow-list', () => {
+    const ANON_ALLOW_LIST = [
+        'consent_age',
+        'link_view_access',
+        'link_view_snapshot',
+        'link_view_topic_ok',
+        'peek_share_link',
+        'record_web_events',
+    ];
+
+    const roles = (list: string): string[] =>
+        list
+            .toLowerCase()
+            .split(',')
+            .map((role) => role.trim());
+
+    const anonExecutable = (): string[] => {
+        const state = new Map<string, { anon: boolean; public: boolean; trigger: boolean }>();
+        let defaultAnon = true;
+        const names = (list: string): string[] =>
+            [...list.matchAll(/public\.(\w+)\s*\(/gi)].map((match) => (match[1] ?? '').toLowerCase());
+        const change = (fns: string[], list: string, to: boolean): void => {
+            for (const fn of fns) {
+                const entry = state.get(fn);
+                for (const role of roles(list)) {
+                    if (entry && role === 'anon') entry.anon = to;
+                    if (entry && role === 'public') entry.public = to;
+                }
+            }
+        };
+        // In file order: create, drop, revoke and grant (one function or a
+        // list), the `foreach fn in array array[...] loop execute format('revoke
+        // ... %s from ...')` loops the district migrations use, and the
+        // default-privileges change.
+        const statement = new RegExp(
+            [
+                /create\s+(?:or\s+replace\s+)?function\s+public\.(\w+)\s*\([\s\S]*?\)\s*returns\s+(\w+)/.source,
+                /drop\s+function\s+(?:if\s+exists\s+)?public\.(\w+)/.source,
+                /revoke\s+(?:all|execute)(?:\s+privileges)?\s+on\s+function\s+([\s\S]*?)\s+from\s+([\w\s,]+?);/.source,
+                /grant\s+(?:all|execute)(?:\s+privileges)?\s+on\s+function\s+([\s\S]*?)\s+to\s+([\w\s,]+?);/.source,
+                /foreach\s+fn\s+in\s+array\s+array\[([\s\S]*?)\]\s*loop\s*execute\s+format\s*\(\s*'revoke\s+all\s+on\s+function\s+%s\s+from\s+([\w\s,]+)'/
+                    .source,
+                /alter\s+default\s+privileges\s+for\s+role\s+postgres\s+in\s+schema\s+public\s+revoke\s+execute\s+on\s+functions\s+from\s+anon/
+                    .source,
+            ].join('|'),
+            'gi',
+        );
+        for (const file of readdirSync(MIGRATIONS_DIR)
+            .filter((name) => name.endsWith('.sql'))
+            .sort()) {
+            const sql = readFileSync(resolve(MIGRATIONS_DIR, file), 'utf8').replace(/--[^\n]*/g, '');
+            for (const match of sql.matchAll(statement)) {
+                const [, created, returns, dropped, revoked, revokedFrom, granted, grantedTo, looped, loopedFrom] =
+                    match;
+                if (created) {
+                    const name = created.toLowerCase();
+                    if (!state.has(name)) {
+                        state.set(name, {
+                            anon: defaultAnon,
+                            public: true,
+                            trigger: returns?.toLowerCase() === 'trigger',
+                        });
+                    }
+                } else if (dropped) {
+                    state.delete(dropped.toLowerCase());
+                } else if (revoked && revokedFrom) {
+                    change(names(revoked), revokedFrom, false);
+                } else if (granted && grantedTo) {
+                    change(names(granted), grantedTo, true);
+                } else if (looped && loopedFrom) {
+                    change(names(looped), loopedFrom, false);
+                } else {
+                    defaultAnon = false;
+                }
+            }
+        }
+        return [...state]
+            .filter(([, entry]) => !entry.trigger && (entry.anon || entry.public))
+            .map(([name]) => name)
+            .sort();
+    };
+
+    it('is the list: the age screen, /join, signed-out page events and the three Share v2 viewer reads', () => {
+        expect(anonExecutable()).toEqual(ANON_ALLOW_LIST);
+    });
+
+    it('is the same list tests/sql/share_v2.sql proves against a database', () => {
+        const proof = readFileSync(resolve(process.cwd(), 'tests/sql/share_v2.sql'), 'utf8');
+        const listed = [
+            ...(proof.match(/insert into t_allow values([\s\S]*?);/)?.[1] ?? '').matchAll(/'public\.(\w+)\(/g),
+        ]
+            .map((match) => match[1])
+            .sort();
+        expect(listed).toEqual(ANON_ALLOW_LIST);
     });
 });

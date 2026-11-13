@@ -77,5 +77,45 @@ Deno.serve((req) =>
             return 'failed';
         },
         deletePending,
+        currentAgeGate: async (userId) => {
+            const admin = serviceClient();
+            if (!admin) {
+                return null;
+            }
+            const { data, error } = await admin.auth.admin.getUserById(userId);
+            if (error || !data.user) {
+                console.error(`could not read the age gate for ${userId}: ${error?.message ?? 'no user'}`);
+                return null;
+            }
+            return { gate: (data.user.user_metadata as Record<string, unknown> | undefined)?.['age_gate'] };
+        },
+        ageGateProblem: async (gate) => {
+            const admin = serviceClient();
+            if (!admin) {
+                return 'unknown';
+            }
+            const { data, error } = await admin.rpc('age_gate_problem_for', {
+                p_user_metadata: { age_gate: gate },
+                p_is_anonymous: false,
+            });
+            if (error) {
+                console.error(`age_gate_problem_for failed: ${error.message}`);
+                return 'unknown';
+            }
+            return typeof data === 'string' ? data : null;
+        },
+        // GoTrue merges user_metadata by top-level key, so only age_gate changes.
+        writeAgeGate: async (userId, gate) => {
+            const admin = serviceClient();
+            if (!admin) {
+                return false;
+            }
+            const { error } = await admin.auth.admin.updateUserById(userId, { user_metadata: { age_gate: gate } });
+            if (error) {
+                console.error(`could not write the age gate for ${userId}: ${error.message}`);
+                return false;
+            }
+            return true;
+        },
     }),
 );

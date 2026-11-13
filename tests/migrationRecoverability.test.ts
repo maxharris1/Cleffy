@@ -207,6 +207,11 @@ describe('imslp-sync — the cron job the push has to pause', () => {
             // 12 months after the newest under the same key.
             'retention-content-strikes': ['20261022130100_content_strikes_survive_deletion.sql'],
             'retention-rate-limits': retention,
+            // Share v2 (#104), the same pattern: each calls a function its own
+            // migration defines and deletes only links or invites already 30
+            // days past their end, from tables nothing pending drops.
+            'retention-share-invites': ['20261113120200_share_v2_invites.sql'],
+            'retention-share-links': ['20261113120200_share_v2_invites.sql'],
             'retention-stale-guests': retention,
             'retention-support-messages': retention,
             // The same pattern again: it calls a function its own migration

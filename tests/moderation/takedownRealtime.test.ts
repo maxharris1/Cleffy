@@ -98,7 +98,10 @@ describe('a takedown cuts off viewers already connected', () => {
         expect(bump).toBeLessThan(rotate.indexOf('realtime.send'));
         expect(rotate).toMatch(/public\.document_topic_at \('doc-db', p_document, v_epoch - 1\)/);
         expect(rotate).toMatch(/public\.document_topic_at \('doc', p_document, v_epoch - 1\)/);
-        expect(rotate.match(new RegExp(`'${TOPIC_ROTATED_EVENT}', -- event`, 'g'))).toHaveLength(2);
+        // Share v2 (20261113120100): a third hint on the old doc-view topic, for a
+        // score that has had a general link.
+        expect(rotate).toMatch(/public\.document_topic_at \('doc-view', p_document, v_epoch - 1\)/);
+        expect(rotate.match(new RegExp(`'${TOPIC_ROTATED_EVENT}', -- event`, 'g'))).toHaveLength(3);
         // The payload the client checks.
         expect(rotate).toMatch(/jsonb_build_object\('document_id', p_document\)/);
         expect(parseTopicRotated({ id: 'x', document_id: 'd' })).toEqual({ document_id: 'd' });

@@ -125,15 +125,16 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
  * category whose sender is not on a branch yet keeps its entry anyway, which is
  * what keeps the merged total what each branch tests:
  *
- *     guestEmailCode          14/85   guest and automated: share-link codes
- *     contentReportAck         8/35   legal: report acknowledgments (#63)
+ *     guestEmailCode           9/60   guest and automated: share-link codes
+ *     contentReportAck         6/25   legal: report acknowledgments (#63)
  *     moderationNotice         4/20   legal: statements of reasons (#63)
  *     billingCancelLink        8/40   transactional: signed-out cancel link (#62)
  *     billingConfirmation      7/30   transactional: purchase and cancellation
  *                                     confirmations (#62)
  *     retentionNotice          5/25   legal: district export notice before purge (#64)
- *     supportInbound           8/35   inbound support@/privacy@/legal@ forwards (#70)
- *     studentAccountMail       6/30   student invites and email-method reset links (#70)
+ *     supportInbound           6/25   inbound support@/privacy@/legal@ forwards (#70)
+ *     studentAccountMail       5/25   student invites and email-method reset links (#70)
+ *     shareInvite             10/50   Share v2 "Specific people" invites (#104)
  *                             ------
  *                             60/300  = budget 100/500 minus the 40/200 reserve
  *
@@ -146,6 +147,10 @@ export const AUTH_MAIL_RESERVE: Record<MailWindowName, number> = {
  * shared and gives no category priority. Student invites and resets go out through
  * GoTrue, so they would otherwise spend the very auth capacity the reserve
  * protects, with nothing in our code counting them.
+ *
+ * shareInvite (Share v2, #104) was carved out the same way: 5/25 from
+ * guestEmailCode, 2/10 each from contentReportAck and supportInbound, and 1/5
+ * from studentAccountMail. Billing, moderation and retention mail kept theirs.
  *
  * Adding a sender is the whole registration step, and no sender sends outside
  * one: if the total then exceeds budget minus reserve,
@@ -161,12 +166,12 @@ export const LAUNCH_MAIL_SPLIT = {
      * needed room; 28/150 until the P3 fix round gave inbound support mail and
      * student account mail their own shares.
      */
-    guestEmailCode: { hour: 14, day: 85 },
+    guestEmailCode: { hour: 9, day: 60 },
     /**
      * `content-report`: the acknowledgment a reporter gets, blind-copied to the
      * legal mailbox. The endpoint is open to anyone, so it is the aimable one.
      */
-    contentReportAck: { hour: 8, day: 35 },
+    contentReportAck: { hour: 6, day: 25 },
     /**
      * `content-moderation`: statements of reasons and decisions mailed after a
      * moderator acts. Moderator-initiated, so a handful a day; capped anyway so
@@ -195,7 +200,7 @@ export const LAUNCH_MAIL_SPLIT = {
      * and it has buckets of its own: a flood of inbound mail defers inbound
      * forwards (stored, retried when the window reopens) and nothing else.
      */
-    supportInbound: { hour: 8, day: 35 },
+    supportInbound: { hour: 6, day: 25 },
     /**
      * `student-provision`: the invitation an email-method student gets on
      * create, and the sign-in link a teacher's reset sends. GoTrue mails these,
@@ -203,7 +208,13 @@ export const LAUNCH_MAIL_SPLIT = {
      * teacher session) cannot spend the reserve resets and sign-ups rely on.
      * Per-teacher and per-recipient limits sit under this in student-provision.
      */
-    studentAccountMail: { hour: 6, day: 30 },
+    studentAccountMail: { hour: 5, day: 25 },
+    /**
+     * `share-invite`: an owner inviting someone to a score by email, and
+     * Resend. Per-owner and per-recipient limits sit under this in the
+     * function.
+     */
+    shareInvite: { hour: 10, day: 50 },
 } as const;
 
 /** The caps the budget functions below read: the launch split. */

@@ -82,6 +82,7 @@ insert into t_client_expected values
 ('billing_customers', 'authenticated', 'SELECT'),
 ('document_favorites', 'authenticated', 'SELECT INSERT DELETE'),
 ('document_imports', 'authenticated', 'SELECT INSERT UPDATE'),
+('document_invites', 'authenticated', 'SELECT(accepted_at,accepted_by,created_at,document_id,email,expires_at,id,invited_by,revoked_at,role)'),
 ('document_members', 'authenticated', 'SELECT'),
 ('document_storage_cleanup', 'authenticated', 'SELECT'),
 ('document_tags', 'authenticated', 'SELECT INSERT DELETE'),

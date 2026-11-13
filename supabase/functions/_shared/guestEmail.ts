@@ -194,6 +194,9 @@ export const GUEST_EMAIL_ERRORS = {
     codeExpired: { error: 'That code has expired. Send a new one.', code: 'code_expired' },
     codeLocked: { error: 'Too many wrong codes. Send a new one.', code: 'code_locked' },
     attachFailed: { error: 'We couldn’t save your email. Try again.', code: 'attach_failed' },
+    /** A guest without a passing age gate (an editor-link guest skipped the screen) answers it before the account. */
+    ageCheckRequired: { error: 'Answer the age question first, then try again.', code: 'age_check_required' },
+    belowConsentAge: { error: 'Sorry, you can’t create a Cleffy account.', code: 'below_consent_age' },
     /**
      * The account is being deleted (launch-fix item 16, decision 70(1)): a new
      * guest email verification is a user-originated write nothing requires,
@@ -337,6 +340,12 @@ export interface GuestEmailConfirmDeps extends CommonDeps {
     ) => Promise<'ok' | 'email_taken' | 'weak_password' | 'invalid_email' | 'failed'>;
     deletePending: (userId: string) => Promise<void>;
     password: Pick<typeof PasswordPolicy, 'passwordProblem' | 'passwordProblemMessage'>;
+    /** The guest's user_metadata.age_gate (`gate` undefined when there is none); null when it could not be read. */
+    currentAgeGate: (userId: string) => Promise<{ gate: unknown } | null>;
+    /** age_gate_problem_for({age_gate: gate}, false): null when it passes, `unknown` when it could not be asked. */
+    ageGateProblem: (gate: unknown) => Promise<string | null>;
+    /** Replace the guest's age_gate before the attach clears is_anonymous; false on failure. */
+    writeAgeGate: (userId: string, gate: Record<string, unknown>) => Promise<boolean>;
 }
 
 const tooMany = (json: CommonDeps['json'], retryAfterSec: number): Response =>
@@ -644,6 +653,37 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
         return pendingConfirm;
     }
 
+    // The database clears is_anonymous only with a passing age gate. The gate
+    // is the guest's own user_metadata, which they can remove or change, so it
+    // is asked about, never inferred; asked here first so a refusal spends none
+    // of the code's tries.
+    const current = await deps.currentAgeGate(userId);
+    if (!current) {
+        return json(GUEST_EMAIL_ERRORS.unavailable, 503);
+    }
+    const currentProblem = await deps.ageGateProblem(current.gate);
+    if (currentProblem === 'unknown') {
+        return json(GUEST_EMAIL_ERRORS.unavailable, 503);
+    }
+    let newAgeGate: Record<string, unknown> | null = null;
+    if (currentProblem !== null) {
+        const offered = body?.['age_gate'];
+        if (!offered || typeof offered !== 'object' || Array.isArray(offered)) {
+            return json(GUEST_EMAIL_ERRORS.ageCheckRequired, 400);
+        }
+        newAgeGate = offered as Record<string, unknown>;
+        const ageProblem = await deps.ageGateProblem(newAgeGate);
+        if (ageProblem === 'unknown') {
+            return json(GUEST_EMAIL_ERRORS.unavailable, 503);
+        }
+        if (ageProblem === 'below_consent_age') {
+            return json(GUEST_EMAIL_ERRORS.belowConsentAge, 403);
+        }
+        if (ageProblem !== null) {
+            return json(GUEST_EMAIL_ERRORS.ageCheckRequired, 400);
+        }
+    }
+
     const secret = deps.secret();
     if (!secret) {
         deps.logError('guest-email-confirm: no secret to hash codes with');
@@ -672,6 +712,10 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
     // Unknown (null) goes ahead: the attach itself cannot take a used address.
     if ((await deps.emailTaken(email)) === true) {
         return emailInUse();
+    }
+
+    if (newAgeGate && !(await deps.writeAgeGate(userId, newAgeGate))) {
+        return json(GUEST_EMAIL_ERRORS.attachFailed, 502);
     }
 
     const attached = await deps.attach(userId, email, password);

@@ -206,6 +206,30 @@ select pg_temp.gotrue_check(
     '%Sign-up needs the age check first%'
 );
 
+-- ---- Share v2's editor-link guest (20261113120300): no age screen, so the
+-- gate is accepted only on an anonymous user
+select pg_temp.gotrue_check(
+    '34 gotrue insert of an anonymous link guest is allowed',
+    $i$
+        insert into auth.users (id, aud, role, email, is_anonymous, raw_user_meta_data)
+        values ('a9e00000-0000-4000-8000-000000000034', 'authenticated', 'authenticated',
+                null, true,
+                '{"display_name":"Ada","age_gate":{"source":"link_guest","v":2}}')
+    $i$,
+    'INSERT 0 1'
+);
+
+select pg_temp.gotrue_check(
+    '35 gotrue insert of a registered account with the link guest gate is refused',
+    $i$
+        insert into auth.users (id, aud, role, email, is_anonymous, raw_user_meta_data)
+        values ('a9e00000-0000-4000-8000-000000000035', 'authenticated', 'authenticated',
+                'ag-admin-link-guest@example.invalid', false,
+                '{"age_gate":{"source":"link_guest","v":2}}')
+    $i$,
+    '%Sign-up needs the age check first%'
+);
+
 select extensions.dblink_exec('gotrue', 'rollback');
 select extensions.dblink_disconnect('gotrue');
 

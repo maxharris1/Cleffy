@@ -71,7 +71,9 @@ select pg_temp.chk('05 anon: unknown token is invalid, no role', $q$select not v
 select pg_temp.chk('06 anon: null and empty tokens are invalid', $q$select (select not valid from public.peek_share_link(null)) and (select not valid from public.peek_share_link(''))$q$);
 select pg_temp.chk('07 anon: an over-long token is invalid without a match', $q$select not valid and role is null from public.peek_share_link(repeat('x', 5000))$q$);
 select pg_temp.chk('08 always exactly one row', $q$select (select count(*) from public.peek_share_link('5e7aEDIT')) = 1 and (select count(*) from public.peek_share_link('5e7aNOSUCH')) = 1$q$);
-select pg_temp.chk('09 the answer has only valid and role', $q$select array_agg(key order by key) = array['role', 'valid'] from json_object_keys((select row_to_json(p) from public.peek_share_link('5e7aEDIT') p)) key$q$);
+-- Share v2 (20261113120000) added the link's state beside them; valid and
+-- role keep their meaning (tests/sql/share_v2.sql, checks 050-054).
+select pg_temp.chk('09 the answer has only valid, role and state', $q$select array_agg(key order by key) = array['role', 'state', 'valid'] from json_object_keys((select row_to_json(p) from public.peek_share_link('5e7aEDIT') p)) key$q$);
 select pg_temp.chk('10 anon still cannot redeem', $q$select not has_function_privilege('anon', 'public.redeem_share_link(text)', 'execute')$q$);
 
 -- ---- peek, signed in
