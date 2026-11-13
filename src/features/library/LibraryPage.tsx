@@ -66,6 +66,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { LibrarySkeleton } from '@/ui/Skeleton';
+import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
 import { toast } from '@/ui/toast';
 import { ViewToggle } from '@/ui/ViewToggle';
@@ -1585,7 +1586,7 @@ const RenameDialog = ({
                     Cancel
                 </Button>
                 <Button size="sm" onClick={() => void submit()} disabled={busy}>
-                    {busy ? 'Saving…' : 'Save changes'}
+                    <SwapLabel labels={{ idle: 'Save changes', busy: 'Saving…' }} active={busy ? 'busy' : 'idle'} />
                 </Button>
             </div>
         </Dialog>
@@ -1609,10 +1610,13 @@ const UploadButton = ({
         )}
     >
         <UploadIcon size={16} />
-        {uploading ? 'Uploading…' : 'Upload score'}
+        <SwapLabel labels={{ idle: 'Upload score', busy: 'Uploading…' }} active={uploading ? 'busy' : 'idle'} />
         <input
             type="file"
             accept={UPLOAD_ACCEPT}
+            // Named outright: the wrapping label carries the inactive caption
+            // too (aria-hidden), which a plain text match would read as one.
+            aria-label={uploading ? 'Uploading…' : 'Upload score'}
             className="hidden"
             disabled={uploading || quotaExhausted}
             onChange={(e) => {

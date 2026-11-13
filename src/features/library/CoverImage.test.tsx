@@ -110,7 +110,10 @@ describe('CoverImage', () => {
 
     it('fades on opacity alone, and only quicker under reduced motion', () => {
         const css = readFileSync(`${process.cwd()}/src/index.css`, 'utf8');
-        expect(css).toMatch(/\.cover-fade \{\s*opacity: 0;\s*transition: opacity 200ms var\(--ease-out\);\s*\}/);
+        expect(css).toMatch(/--duration-fade: 200ms;/);
+        expect(css).toMatch(
+            /\.cover-fade \{\s*opacity: 0;\s*transition: opacity var\(--duration-fade\) var\(--ease-out\);\s*\}/,
+        );
         expect(css).toMatch(
             /@media \(prefers-reduced-motion: reduce\) \{\s*\.cover-fade \{\s*transition-duration: var\(--duration-exit\);/,
         );

@@ -1253,7 +1253,7 @@ export const SyncDot = ({ status }: { status: SyncDotStatus }) => {
                         key={key}
                         data-sync-dot={key}
                         data-active={key === shown || undefined}
-                        className={`h-2.5 w-2.5 rounded-full [grid-area:1/1] transition-opacity duration-200 ease-out motion-reduce:transition-none ${
+                        className={`h-2.5 w-2.5 rounded-full [grid-area:1/1] transition-opacity duration-(--duration-fade) ease-out motion-reduce:transition-none ${
                             SYNC_DOT_STYLES[key].dot
                         } ${key === shown ? 'opacity-100' : 'opacity-0'}`}
                     />

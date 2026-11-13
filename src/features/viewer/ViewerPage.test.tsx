@@ -939,9 +939,12 @@ describe('SyncDot', () => {
         expect(synced).toHaveClass(
             'opacity-100',
             'transition-opacity',
-            'duration-200',
+            'duration-(--duration-fade)',
             'motion-reduce:transition-none',
         );
+        for (const dot of document.querySelectorAll('[data-sync-dot]')) {
+            expect(dot).toHaveClass('duration-(--duration-fade)');
+        }
         expect(offline).toHaveClass('opacity-0');
         rerender(<SyncDot status="offline" />);
         // The same nodes, so a quick flip back retargets mid-fade.
