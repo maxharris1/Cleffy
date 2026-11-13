@@ -96,7 +96,10 @@ insert into t_client_expected values
 ('subscriptions', 'authenticated', 'SELECT'),
 ('teacher_attestations', 'authenticated', 'SELECT'),
 ('thumbnail_storage_cleanup', 'authenticated', 'SELECT'),
-('usage_counters', 'authenticated', 'SELECT');
+('usage_counters', 'authenticated', 'SELECT'),
+-- 20261112130000_view_links.sql: the owner reads through RLS; writes go
+-- through create/rotate/revoke_view_link.
+('view_links', 'authenticated', 'SELECT');
 
 -- The fifteen tables BL-3 names.
 create temp table t_bl3 (tbl text);

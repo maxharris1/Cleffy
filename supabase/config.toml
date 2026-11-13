@@ -602,6 +602,15 @@ verify_jwt = true
 [functions.content-notices]
 verify_jwt = false
 
+# Under-13 view links (20261112130000_view_links.sql): called only by the
+# Vercel proxy (api/view.ts), which holds no user session. The
+# x-cleffy-view-proxy header, checked against VIEW_PROXY_SECRET in constant
+# time, is the gate, and the function refuses everything unless its
+# VIEW_LINKS_ENABLED secret is 1. Flow in functions/_shared/viewLink.ts.
+# `supabase functions deploy view-link --no-verify-jwt`
+[functions.view-link]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54427

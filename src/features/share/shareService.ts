@@ -1,5 +1,6 @@
 import { getSupabase } from '@/lib/supabase';
-import type { DocumentMemberListing, ShareLinkRow, ShareRole } from '@/types/database';
+import type { DocumentMemberListing, ShareLinkRow, ShareRole, ViewLinkRow } from '@/types/database';
+import { isViewToken, viewLinkUrl } from '@/view/viewToken';
 
 /**
  * How long a new link keeps admitting people. Expiry only stops NEW joins —
@@ -231,3 +232,54 @@ export const peekShareLink = async (token: string): Promise<LinkPeek | null> => 
 export const shareUrlFor = (token: string): string => {
     return `${window.location.origin}/join/${token}`;
 };
+
+// ---------------------------------------------------------------------------
+// Under-13 view links (behind features.viewLinks). Owner only, on a live
+// score; the server refuses everyone else (20261112130000_view_links.sql).
+
+/** The score's active view link, or null. RLS shows it to the owner only. */
+export const getViewLink = async (docId: string): Promise<ViewLinkRow | null> => {
+    const { data, error } = await getSupabase()
+        .from('view_links')
+        .select('*')
+        .eq('document_id', docId)
+        .is('revoked_at', null)
+        .maybeSingle();
+    if (error) {
+        throw new Error(`Could not load the view link: ${error.message}`);
+    }
+    return data;
+};
+
+const viewLinkRpc = async (
+    name: 'create_view_link' | 'rotate_view_link',
+    docId: string,
+    failure: string,
+): Promise<string> => {
+    const { data, error } = await getSupabase().rpc(name, { p_document: docId });
+    if (error) {
+        throw new Error(`${failure}: ${error.message}`);
+    }
+    if (!isViewToken(data)) {
+        throw new Error(`${failure}: the server sent no link.`);
+    }
+    return data;
+};
+
+/** The active link's token, or a new one. */
+export const createViewLink = (docId: string): Promise<string> =>
+    viewLinkRpc('create_view_link', docId, 'Could not create the view link');
+
+/** A new token; the old link stops working at once. */
+export const rotateViewLink = (docId: string): Promise<string> =>
+    viewLinkRpc('rotate_view_link', docId, 'Could not replace the view link');
+
+export const revokeViewLink = async (docId: string): Promise<void> => {
+    const { error } = await getSupabase().rpc('revoke_view_link', { p_document: docId });
+    if (error) {
+        throw new Error(`Could not turn off the view link: ${error.message}`);
+    }
+};
+
+/** `https://<host>/v#<token>`: the token in the fragment, never sent to a server. */
+export const viewLinkUrlFor = (token: string): string => viewLinkUrl(window.location.origin, token);

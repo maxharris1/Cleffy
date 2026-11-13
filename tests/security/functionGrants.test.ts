@@ -247,10 +247,82 @@ describe('student_write_allowed is not executable by anon', () => {
         // outcome for anon was the same: uid is null, the function returned
         // true, the trigger never refused.
         const body =
-            trigger.match(/create\s+or\s+replace\s+function\s+public\.refuse_revoked_student_write[\s\S]*?\$\$;/i)?.[0] ??
-            '';
+            trigger.match(
+                /create\s+or\s+replace\s+function\s+public\.refuse_revoked_student_write[\s\S]*?\$\$;/i,
+            )?.[0] ?? '';
         expect(body).toMatch(/current_user\s*=\s*'authenticated'/);
         expect(body).not.toMatch(/\banon\b/);
         expect(body).toMatch(/student_write_allowed/);
+    });
+});
+
+describe('view-link functions (20261112130000_view_links.sql)', () => {
+    // Settled here so a hardening pass does not have to re-ask. The three
+    // owner RPCs are the Share dialog's, so authenticated must hold them; the
+    // advisor's "looks internal" does not apply. The two reads and the purge
+    // are the Edge Function's and pg_cron's: no client role may call them, or
+    // a token alone would read a score without the proxy, its secret and its
+    // switch. tests/sql/view_links.sql checks the same against a database.
+    const sql = latestDefining('view_link_poll');
+
+    it.each(['create_view_link', 'rotate_view_link', 'revoke_view_link'])(
+        '%s: authenticated only, never anon or PUBLIC',
+        (name) => {
+            expect(sql).toMatch(
+                new RegExp(
+                    `revoke\\s+all\\s+on\\s+function\\s+public\\.${name}\\s*\\(\\s*uuid\\s*\\)\\s+from\\s+public\\s*,\\s*anon\\s*;`,
+                    'i',
+                ),
+            );
+            expect(sql).toMatch(
+                new RegExp(
+                    `grant\\s+execute\\s+on\\s+function\\s+public\\.${name}\\s*\\(\\s*uuid\\s*\\)\\s+to\\s+authenticated\\s*;`,
+                    'i',
+                ),
+            );
+        },
+    );
+
+    it.each([
+        ['view_link_poll', 'text, bigint, integer'],
+        ['view_link_pdf', 'text'],
+        ['view_links_retention_purge', ''],
+    ])('%s: service_role only', (name, args) => {
+        const sig = args
+            .split(',')
+            .map((a) => a.trim())
+            .filter(Boolean)
+            .join('\\s*,\\s*');
+        expect(sql).toMatch(
+            new RegExp(
+                `revoke\\s+all\\s+on\\s+function\\s+public\\.${name}\\s*\\(\\s*${sig}\\s*\\)\\s+from\\s+public\\s*,\\s*anon\\s*,\\s*authenticated\\s*;`,
+                'i',
+            ),
+        );
+        expect(sql).toMatch(
+            new RegExp(
+                `grant\\s+execute\\s+on\\s+function\\s+public\\.${name}\\s*\\(\\s*${sig}\\s*\\)\\s+to\\s+service_role\\s*;`,
+                'i',
+            ),
+        );
+        expect(sql).not.toMatch(
+            new RegExp(
+                `grant\\s+execute\\s+on\\s+function\\s+public\\.${name}\\s*\\([^)]*\\)\\s+to\\s+[^;]*\\b(anon|authenticated)\\b`,
+                'i',
+            ),
+        );
+    });
+
+    it('every view-link function is SECURITY DEFINER with an empty search_path', () => {
+        const defs = sql.match(/create\s+or\s+replace\s+function\s+public\.view_link[\s\S]*?as\s+\$\$/gi) ?? [];
+        const owner =
+            sql.match(
+                /create\s+or\s+replace\s+function\s+public\.(create|rotate|revoke)_view_link[\s\S]*?as\s+\$\$/gi,
+            ) ?? [];
+        expect(defs.length + owner.length).toBeGreaterThanOrEqual(8);
+        for (const def of [...defs, ...owner]) {
+            expect(def).toMatch(/security\s+definer/i);
+            expect(def).toMatch(/set\s+search_path\s*=\s*''/i);
+        }
     });
 });

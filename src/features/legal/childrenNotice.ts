@@ -30,6 +30,7 @@ const viewLinkSections: LegalSection[] = features.viewLinks
                   list(
                       'needs no account, no name and no other input from the person opening it, and sets no cookies and stores nothing on their device;',
                       'means our hosting provider processes the viewer’s IP address, only to deliver the page and keep it secure and working;',
+                      'for a large score, has the device download the score file directly from our storage provider through a link that works for one minute, so that provider also processes the viewer’s IP address, only to deliver the file;',
                       `stores nothing about the viewer in ${brand}’s database;`,
                       'is never used to contact anyone, to show advertising or to build a profile.',
                   ),

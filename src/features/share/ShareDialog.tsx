@@ -6,6 +6,8 @@ import {
     DEFAULT_LINK_ROLE,
     LINK_EXPIRY_CHOICES,
     createShareLink,
+    createViewLink,
+    getViewLink,
     isLinkExpired,
     leaveDocument,
     linkExpiryLabel,
@@ -14,10 +16,14 @@ import {
     memberLabel,
     removeMember,
     revokeShareLink,
+    revokeViewLink,
+    rotateViewLink,
     setMemberRole,
     shareUrlFor,
+    viewLinkUrlFor,
     type LinkExpiry,
 } from '@/features/share/shareService';
+import { features } from '@/lib/features';
 import type { DocumentMemberListing, MemberRole, ShareLinkRow, ShareRole } from '@/types/database';
 import { middleEllipsis, useFlash } from '@/lib/useFlash';
 import { Badge } from '@/ui/Badge';
@@ -438,6 +444,8 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                 ) : null}
             </section>
 
+            {features.viewLinks ? <ViewLinkSection docId={docId} /> : null}
+
             {revokeTarget ? (
                 <RevokeLinkDialog
                     link={revokeTarget}
@@ -531,6 +539,172 @@ const RevokeLinkDialog = ({
                 </Button>
             </div>
         </Dialog>
+    );
+};
+
+// ---------------------------------------------------------------------------
+// Under-13 view link (owner only, behind features.viewLinks)
+
+const VIEW_LINK_EXPLAINER =
+    'Shows this score live to anyone with the link. No account, nothing to type. Use it for students under 13 instead of an account.';
+
+/**
+ * One read-only link per score that needs no account: the way to share with
+ * a student under 13. The owner creates and copies it, rotates it (the old
+ * link stops working) or revokes it. Loads on its own, so a failure here never
+ * hides the share links or the people above.
+ */
+const ViewLinkSection = ({ docId }: { docId: string }) => {
+    /** undefined while loading; null when there is no active link. */
+    const [token, setToken] = useState<string | null | undefined>(undefined);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [confirming, setConfirming] = useState<'rotate' | 'revoke' | null>(null);
+    const [copiedToken, flashCopied] = useFlash<string>(1500);
+
+    useEffect(() => {
+        let current = true;
+        getViewLink(docId)
+            .then((row) => {
+                if (current) {
+                    setToken(row?.token ?? null);
+                }
+            })
+            .catch((err: unknown) => {
+                if (current) {
+                    setToken(null);
+                    setError(errorText(err, 'Could not load the view link.'));
+                }
+            });
+        return () => {
+            current = false;
+        };
+    }, [docId]);
+
+    const copy = async (value: string) => {
+        try {
+            await navigator.clipboard.writeText(viewLinkUrlFor(value));
+            flashCopied(value);
+        } catch {
+            setError('Could not copy — long-press the link to copy it manually.');
+        }
+    };
+
+    const run = async (action: () => Promise<void>, fallback: string) => {
+        setBusy(true);
+        setError(null);
+        try {
+            await action();
+        } catch (err) {
+            setError(errorText(err, fallback));
+        } finally {
+            setBusy(false);
+            setConfirming(null);
+        }
+    };
+
+    const create = () =>
+        run(async () => {
+            const next = await createViewLink(docId);
+            setToken(next);
+            await copy(next);
+        }, 'Could not create the view link.');
+
+    const rotate = () =>
+        run(async () => {
+            setToken(await rotateViewLink(docId));
+        }, 'Could not replace the view link.');
+
+    const revoke = () =>
+        run(async () => {
+            await revokeViewLink(docId);
+            setToken(null);
+        }, 'Could not turn off the view link.');
+
+    const url = token ? viewLinkUrlFor(token) : null;
+
+    return (
+        <section className="mt-5">
+            <h3 className="text-sm font-medium text-stone-600">View link for students (no account)</h3>
+            <p className="mt-1 text-xs leading-relaxed text-stone-500">{VIEW_LINK_EXPLAINER}</p>
+            {error ? <ErrorText className="mt-2">{error}</ErrorText> : null}
+            {token === undefined ? (
+                <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
+            ) : token === null || url === null ? (
+                <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => void create()}
+                    className="mt-2 w-full"
+                >
+                    {busy ? 'Working…' : 'Create view link'}
+                </Button>
+            ) : (
+                <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 px-3 py-2">
+                    <span className="min-w-0 flex-1 truncate text-xs text-stone-500" title={url}>
+                        {middleEllipsis(url, 36)}
+                    </span>
+                    <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void copy(token)}
+                        className="rounded px-2 py-1 text-xs text-accent transition-colors hover:bg-accent-soft disabled:opacity-40 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    >
+                        <SwapLabel
+                            scale
+                            labels={{
+                                copy: 'Copy',
+                                copied: (
+                                    <span className="inline-flex items-center gap-1">
+                                        <CheckIcon size={12} aria-hidden="true" />
+                                        Copied!
+                                    </span>
+                                ),
+                            }}
+                            active={copiedToken === token ? 'copied' : 'copy'}
+                        />
+                    </button>
+                    <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setConfirming('rotate')}
+                        className="rounded px-2 py-1 text-xs text-stone-600 transition-colors hover:bg-ink/5 disabled:opacity-40 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    >
+                        Rotate
+                    </button>
+                    <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setConfirming('revoke')}
+                        className="rounded px-2 py-1 text-xs text-danger transition-colors hover:bg-red-50 disabled:opacity-40 pointer-coarse:ml-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    >
+                        Revoke
+                    </button>
+                </div>
+            )}
+            {confirming === 'rotate' ? (
+                <ConfirmDialog
+                    title="Make a new view link?"
+                    body="The old link stops working. Anyone using it will need the new one."
+                    confirmLabel="Rotate link"
+                    busy={busy}
+                    onConfirm={() => void rotate()}
+                    onCancel={() => setConfirming(null)}
+                />
+            ) : null}
+            {confirming === 'revoke' ? (
+                <ConfirmDialog
+                    title="Turn off the view link?"
+                    body="The link stops working right away. Anyone who opens it sees that it was turned off."
+                    confirmLabel="Revoke link"
+                    danger
+                    busy={busy}
+                    onConfirm={() => void revoke()}
+                    onCancel={() => setConfirming(null)}
+                />
+            ) : null}
+        </section>
     );
 };
 

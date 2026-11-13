@@ -212,6 +212,22 @@ export type ShareLinkRow = {
 };
 
 /**
+ * An under-13 view link (20261112130000_view_links.sql). Readable by the
+ * score's owner only (RLS); written only by create/rotate/revoke_view_link.
+ * The token is plaintext, like share_links.token, so the owner can copy it
+ * again; it is shared as `/v#<token>`.
+ */
+export type ViewLinkRow = {
+    id: string;
+    document_id: string;
+    created_by: string;
+    token: string;
+    created_at: string;
+    expires_at: string;
+    revoked_at: string | null;
+};
+
+/**
  * One row of list_document_members(). Labels are resolved server-side because
  * auth.users is not client-readable; `email`, `joined_via_link` and
  * `is_assigned` are only ever filled for the score's owner (an editor may be a
@@ -666,6 +682,12 @@ export type Database = {
                 Update: Partial<Pick<ShareLinkRow, 'revoked_at' | 'expires_at'>>;
                 Relationships: [];
             };
+            view_links: {
+                Row: ViewLinkRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
             annotations: {
                 Row: AnnotationRow;
                 Insert: AnnotationInsert;
@@ -844,6 +866,21 @@ export type Database = {
             };
             // Owner only. Returns how many members' link-granted access was
             // withdrawn (always 0 unless p_remove_members).
+            // Owner of a live score only; never a guest or a roster student.
+            // create returns the active link's token (or a new one), rotate a
+            // new one (the old stops working), revoke nothing.
+            create_view_link: {
+                Args: { p_document: string };
+                Returns: string;
+            };
+            rotate_view_link: {
+                Args: { p_document: string };
+                Returns: string;
+            };
+            revoke_view_link: {
+                Args: { p_document: string };
+                Returns: undefined;
+            };
             revoke_share_link: {
                 Args: { p_token: string; p_remove_members?: boolean };
                 Returns: number;

@@ -213,6 +213,10 @@ describe('imslp-sync — the cron job the push has to pause', () => {
             // defines and deletes only web events older than 13 months, from a
             // table that same migration creates -- nothing on its first night.
             'retention-web-events': ['20261112120000_web_events.sql'],
+            // defines and deletes only view links revoked or expired over 30
+            // days ago, from a table that same migration creates -- nothing on
+            // its first night.
+            'retention-view-links': ['20261112130000_view_links.sql'],
             // Launchfix P3: safe to leave running across a push for the same
             // reason as content-notice-retry -- it calls a function its own
             // migration defines, and only pokes resend-inbound while inbound

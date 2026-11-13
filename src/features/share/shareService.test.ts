@@ -4,7 +4,9 @@ import {
     DEFAULT_LINK_EXPIRY,
     DEFAULT_LINK_ROLE,
     createShareLink,
+    createViewLink,
     expiresAtFor,
+    getViewLink,
     isLinkExpired,
     leaveDocument,
     linkExpiryLabel,
@@ -14,7 +16,10 @@ import {
     redeemShareLink,
     removeMember,
     revokeShareLink,
+    revokeViewLink,
+    rotateViewLink,
     setMemberRole,
+    viewLinkUrlFor,
 } from '@/features/share/shareService';
 import { getSupabase } from '@/lib/supabase';
 
@@ -201,5 +206,54 @@ describe('peekShareLink', () => {
             rpc: () => Promise.reject(new TypeError('Failed to fetch')),
         } as never);
         await expect(peekShareLink('tok')).resolves.toBeNull();
+    });
+});
+
+describe('view links', () => {
+    const TOKEN = 'w'.repeat(43);
+
+    it('creates, rotates and revokes through the owner-only RPCs', async () => {
+        const rpc = stubRpc({ data: TOKEN });
+        await expect(createViewLink('doc-1')).resolves.toBe(TOKEN);
+        await expect(rotateViewLink('doc-1')).resolves.toBe(TOKEN);
+        stubRpc({ data: null });
+        expect(rpc).toHaveBeenNthCalledWith(1, 'create_view_link', { p_document: 'doc-1' });
+        expect(rpc).toHaveBeenNthCalledWith(2, 'rotate_view_link', { p_document: 'doc-1' });
+        const revoke = stubRpc({ data: null });
+        await expect(revokeViewLink('doc-1')).resolves.toBeUndefined();
+        expect(revoke).toHaveBeenCalledWith('revoke_view_link', { p_document: 'doc-1' });
+    });
+
+    it('turns a refusal into a readable error', async () => {
+        stubRpc({ error: { message: 'only the owner of a live score can share a view link', code: '42501' } });
+        await expect(createViewLink('doc-1')).rejects.toThrow(/Could not create the view link/);
+        await expect(rotateViewLink('doc-1')).rejects.toThrow(/Could not replace the view link/);
+        await expect(revokeViewLink('doc-1')).rejects.toThrow(/Could not turn off the view link/);
+    });
+
+    it('refuses a token that is not 43 base64url characters', async () => {
+        stubRpc({ data: 'short' });
+        await expect(createViewLink('doc-1')).rejects.toThrow(/Could not create the view link/);
+    });
+
+    it('reads the active link (RLS: owner only), or null', async () => {
+        const maybeSingle = vi.fn(() => Promise.resolve({ data: { token: TOKEN }, error: null }));
+        const is = vi.fn(() => ({ maybeSingle }));
+        const eq = vi.fn(() => ({ is }));
+        const select = vi.fn(() => ({ eq }));
+        const from = vi.fn(() => ({ select }));
+        vi.mocked(getSupabase).mockReturnValue({ from } as never);
+        await expect(getViewLink('doc-1')).resolves.toEqual({ token: TOKEN });
+        expect(from).toHaveBeenCalledWith('view_links');
+        expect(eq).toHaveBeenCalledWith('document_id', 'doc-1');
+        expect(is).toHaveBeenCalledWith('revoked_at', null);
+    });
+
+    it('builds /v#<token> on this origin: the token in the fragment, never the path or query', () => {
+        const url = new URL(viewLinkUrlFor(TOKEN));
+        expect(url.origin).toBe(window.location.origin);
+        expect(url.pathname).toBe('/v');
+        expect(url.search).toBe('');
+        expect(url.hash).toBe(`#${TOKEN}`);
     });
 });

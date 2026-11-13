@@ -4274,6 +4274,67 @@ At ~500 msg/s, one 10-person lesson where everyone draws at once already
 reaches Pro's limit; the realistic patterns in the table above fit ~20 such
 lessons at once.
 
+## 11. Under-13 view links — OFF in production until counsel signs off
+
+A teacher shares a read-only link to one score (`/v#<token>`); anyone holding
+it, a child with no account included, watches the score and its marks. Code:
+`20261112130000_view_links.sql`, `supabase/functions/view-link`,
+`api/view.ts` (the first Vercel Function), `view.html` + `src/view/`, and the
+"View link for students (no account)" section of the Share dialog.
+
+**Three switches. All must be on for a link to work. Production leaves all
+three unset until the lawyer has signed off** (`docs/LEGAL_REVIEW.md` §23).
+Max sets the dev/Preview values; no agent sets any of them.
+
+| Switch                      | Where                                         | Off (default)                                                                                              |
+| --------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `VITE_FEATURE_VIEW_LINKS=1` | Vercel env, build time (Preview / `dev` only) | No Share-dialog section, no view-link clause on the age screen or in the notice; `/v` says "not available" |
+| `VIEW_LINKS_ENABLED=1`      | Vercel env, runtime (Preview / `dev` only)    | `/api/view` answers 404                                                                                    |
+| `VIEW_LINKS_ENABLED=1`      | Edge Function secret on the Supabase project  | `view-link` answers 404                                                                                    |
+
+The proxy also needs, on Vercel (Preview / `dev`):
+
+- `VIEW_LINKS_SUPABASE_URL` — the project URL, e.g. `https://qdbnlrgylelelvwbkvnm.supabase.co` for dev.
+- `VIEW_LINKS_ANON_KEY` — that project's anon (publishable) key.
+- `VIEW_PROXY_SECRET` — a random secret, `openssl rand -hex 32`, the same value
+  as the Edge Function secret of that name.
+
+And the Edge Function, on the Supabase project:
+
+```bash
+supabase secrets set VIEW_LINKS_ENABLED=1 VIEW_PROXY_SECRET=<same value> --project-ref <ref>
+supabase functions deploy view-link --no-verify-jwt --project-ref <ref>
+```
+
+Optional: `VIEW_PDF_PROXY_MAX` (bytes, default `4000000`) — PDFs up to this
+size stream through the proxy; larger ones get a 60-second signed Storage URL
+the browser fetches directly. It must stay under Vercel's 4.5 MB function body
+limit. `VIEW_RATE_PER_MIN` (default 60) — the per-link limit, shared by
+everyone holding that link (see "Rate limit" below).
+
+The service-role key never leaves Supabase. The child's browser talks only to
+the Cleffy origin, except for that large-PDF fallback, which the Children's
+Privacy Notice discloses.
+
+**What is stored.** Nothing about viewers. `view_links` holds the link (owner,
+score, token, dates). The rate limiter's `edge_rate_buckets` row is keyed
+`view:<sha256(token)>`, never an IP. Vercel's own runtime logs record the
+request (IP included) under Vercel's retention; `api/view.ts` logs nothing.
+
+**Retention.** `retention-view-links` (pg_cron, 04:13 daily, scheduled by the
+migration) deletes links revoked or expired more than 30 days ago. Links
+expire 90 days after creation.
+
+**Rate limit.** 60 requests a minute per link, all viewers of that link
+together. The viewer polls every 2.5 s (24 a minute), so about two people can
+watch one link at full speed; more get `429` and the page backs off and
+retries. Raise `VIEW_RATE_PER_MIN` before a class uses one link together.
+
+**Turning it off in a hurry.** Unset `VIEW_LINKS_ENABLED` on Vercel (takes
+effect on the next request) or set the Edge secret to `0`. Every open viewer
+then shows "not available" on its next poll. A single link: the teacher
+revokes it in the Share dialog.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were both hard-reset and rebuilt from

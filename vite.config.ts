@@ -8,6 +8,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+import type * as ViewProxy from './api/view';
 import { DEMO_SCORE_CACHE_PATTERN } from './src/features/demo/demoScore';
 import { PDFJS_ASSET_DIRS, type PdfjsAssetDir } from './src/features/viewer/pdf/pdfjsAssets';
 import {
@@ -30,6 +31,94 @@ const GATED_CHUNK_IGNORES = [
     ...(releaseFlags['VITE_FEATURE_PLAYALONG'] === '1' ? [] : ['**/assets/TransportBar-*.js']),
     ...(releaseFlags['VITE_FEATURE_FINGERING'] === '1' ? [] : ['**/assets/FingeringFlow-*.js']),
 ];
+
+/**
+ * The under-13 viewer (view.html, src/view/main.tsx) is its own entry and must
+ * leave nothing on a child's device, so the service worker never precaches it
+ * and never answers /v or /api/* with the app shell (navigateFallbackDenylist).
+ * Chunks shared with the app (React, pdf.js) stay precached for the app's sake;
+ * the viewer itself registers no worker, so it never uses that cache.
+ */
+const VIEW_PRECACHE_IGNORES = ['view.html', '**/assets/view-*.js', '**/assets/view-*.css'];
+
+/**
+ * Dev server only: what Vercel does for /v and /api/view in a deploy. /v
+ * serves view.html (vercel.json's rewrite), and POST /api/view runs
+ * api/view.ts, reading VIEW_* from the environment or .env.local. Nothing here
+ * is in a build.
+ */
+type ViewProxyModule = typeof ViewProxy;
+
+const isViewPage = (filename: string): boolean => path.basename(filename) === 'view.html';
+
+/**
+ * view.html is not the app: VitePWA adds its manifest link to every page, and
+ * the viewer must not be installable, register anything or reach any other
+ * origin. Runs after VitePWA (both post; this one is later in the list), drops
+ * the manifest link, and fails the build if anything in the page still points
+ * off this origin or at Supabase.
+ */
+const viewPageHtmlPlugin = (): Plugin => ({
+    name: 'view-page-html',
+    enforce: 'post',
+    transformIndexHtml: {
+        order: 'post',
+        handler(html, ctx) {
+            if (!isViewPage(ctx.filename)) {
+                return html;
+            }
+            const stripped = html.replace(/\s*<link rel="manifest"[^>]*>/g, '');
+            if (/https?:\/\/|supabase|rel="manifest"|registerSW|sw\.js/i.test(stripped)) {
+                throw new Error(
+                    'view.html must not reference another origin, Supabase, a manifest or a service worker',
+                );
+            }
+            return stripped;
+        },
+    },
+});
+
+const viewLinkDevPlugin = (): Plugin => ({
+    name: 'view-link-dev',
+    apply: 'serve',
+    configureServer(server) {
+        const env = loadEnv(server.config.mode, process.cwd(), 'VIEW_');
+        server.middlewares.use((req, res, next) => {
+            const path = req.url?.split(/[?#]/)[0];
+            if (path === '/v') {
+                req.url = '/view.html';
+                next();
+                return;
+            }
+            if (path !== '/api/view') {
+                next();
+                return;
+            }
+            void (async () => {
+                for (const [key, value] of Object.entries(env)) {
+                    process.env[key] ??= value;
+                }
+                const chunks: Buffer[] = [];
+                for await (const chunk of req) {
+                    chunks.push(chunk as Buffer);
+                }
+                const mod = (await server.ssrLoadModule('/api/view.ts')) as ViewProxyModule;
+                const request = new Request('http://localhost/api/view', {
+                    method: req.method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: req.method === 'POST' ? Buffer.concat(chunks) : undefined,
+                });
+                const answer = req.method === 'POST' ? await mod.POST(request) : mod.GET();
+                res.statusCode = answer.status;
+                answer.headers.forEach((value, key) => res.setHeader(key, value));
+                res.end(Buffer.from(await answer.arrayBuffer()));
+            })().catch(() => {
+                res.statusCode = 502;
+                res.end();
+            });
+        });
+    },
+});
 
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
 const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev', '.trycloudflare.com'];
@@ -143,7 +232,12 @@ const supabasePreconnectPlugin = (): Plugin => {
                 });
             }
         },
-        transformIndexHtml() {
+        transformIndexHtml(_html, ctx) {
+            // The under-13 viewer talks to this origin only: no preconnect to
+            // Supabase, which would hand the child's address to it.
+            if (isViewPage(ctx.filename)) {
+                return [];
+            }
             switch (plan.kind) {
                 case 'static':
                     return [
@@ -232,6 +326,7 @@ export default defineConfig({
         pdfjsAssetsPlugin(),
         supabasePreconnectPlugin(),
         buildConstantsPlugin(),
+        viewLinkDevPlugin(),
         VitePWA({
             registerType: 'autoUpdate',
             // Registered by the app (src/lib/serviceWorker.ts), not the
@@ -268,9 +363,11 @@ export default defineConfig({
                 // The SMuFL music-text face (~450 KB) serves only the opt-in
                 // handwriting → print feature; like the piano samples it is
                 // fetched on first use and then kept, not precached.
-                globIgnores: ['**/fonts/BravuraText.woff2', ...GATED_CHUNK_IGNORES],
+                globIgnores: ['**/fonts/BravuraText.woff2', ...GATED_CHUNK_IGNORES, ...VIEW_PRECACHE_IGNORES],
                 navigateFallback: '/index.html',
-                navigateFallbackDenylist: [/^\/auth\/callback/],
+                // /v is the under-13 viewer (its own page, never the app shell)
+                // and /api/* are Vercel Functions.
+                navigateFallbackDenylist: [/^\/auth\/callback/, /^\/v(\/|$)/, /^\/api\//],
                 maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
                 // Piano samples (~0.85 MB) are deliberately NOT precached — they
                 // load on first Play and then replay (and work offline) from here.
@@ -322,10 +419,20 @@ export default defineConfig({
                 ],
             },
         }),
+        viewPageHtmlPlugin(),
     ],
     resolve: {
         alias: {
             '@': fileURLToPath(new URL('./src', import.meta.url)),
+        },
+    },
+    build: {
+        rollupOptions: {
+            // The under-13 viewer is a second page with its own module graph.
+            input: {
+                main: fileURLToPath(new URL('./index.html', import.meta.url)),
+                view: fileURLToPath(new URL('./view.html', import.meta.url)),
+            },
         },
     },
     server: {

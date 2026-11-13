@@ -72,6 +72,8 @@ describe('the children’s privacy notice', () => {
         const text = legalText({ sections: section ? [section] : [] });
         expect(text).toMatch(/stores nothing about the viewer/);
         expect(text).toMatch(/never used to contact anyone/);
+        // The large-PDF fallback (over 4 MB): the one time the device talks to Supabase.
+        expect(text).toMatch(/directly from our storage provider through a link that works for one minute/);
         expect(section?.blocks).toContainEqual({
             kind: 'placeholder',
             text: 'Counsel: retention wording (Vercel runtime logs 1 h; …)',
