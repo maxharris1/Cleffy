@@ -13,7 +13,7 @@ import type * as FeaturesModule from '@/lib/features';
  * the internal drafts counsel reads. The notice and policies are drafts that
  * counsel has not signed off (docs/LEGAL_REVIEW.md §23).
  */
-const COPPA_CLAIM = /COPPA[- ]?(compliant|certified)|compliant with COPPA/i;
+const COPPA_CLAIM = /COPPA[- ]?(compliant|certified)|compl(iant|y|ies) with COPPA/i;
 
 const ROOT = process.cwd();
 
@@ -82,7 +82,14 @@ describe('the children’s privacy notice', () => {
 
 describe('no COPPA compliance claim', () => {
     it('makes sure the pattern catches the claims it is meant to', () => {
-        for (const claim of ['COPPA compliant', 'COPPA-compliant', 'coppa certified', 'fully compliant with COPPA']) {
+        for (const claim of [
+            'COPPA compliant',
+            'COPPA-compliant',
+            'coppa certified',
+            'fully compliant with COPPA',
+            'Cleffy complies with COPPA',
+            'we comply with COPPA',
+        ]) {
             expect(claim).toMatch(COPPA_CLAIM);
         }
         expect('not a statement of compliance').not.toMatch(COPPA_CLAIM);

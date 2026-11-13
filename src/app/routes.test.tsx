@@ -62,6 +62,7 @@ describe('AppRoutes public pages', () => {
 
     it.each([
         ['/privacy', 'Privacy Policy'],
+        ['/children-privacy', 'Children’s Privacy Notice'],
         ['/terms', 'Terms of Service'],
         ['/refunds', 'Refund Policy'],
         ['/copyright', 'Copyright and Content Policy'],

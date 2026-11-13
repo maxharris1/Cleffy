@@ -2,6 +2,7 @@ import { cleanup, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { AppRoutes } from '@/app/routes';
 import { sendsToAnthropic } from '@/features/legal/aiFeatures';
 import {
     CHILDREN_NOTICE,
@@ -337,13 +338,14 @@ describe('LegalPage', () => {
         );
     });
 
-    it('renders the children’s privacy notice as a draft that is not in effect', () => {
+    it('serves the children’s privacy notice at /children-privacy, as a draft that is not in effect', async () => {
+        // Through the app's own routes, so dropping the route fails here too.
         render(
-            <MemoryRouter>
-                <ChildrenPrivacyPage />
+            <MemoryRouter initialEntries={['/children-privacy']}>
+                <AppRoutes />
             </MemoryRouter>,
         );
-        expect(screen.getByRole('heading', { level: 1, name: 'Children’s Privacy Notice' })).toBeInTheDocument();
+        expect(await screen.findByRole('heading', { level: 1, name: 'Children’s Privacy Notice' })).toBeInTheDocument();
         expect(screen.getByText(/Version 2026-11-12-draft/)).toBeInTheDocument();
         expect(screen.getByRole('note')).toHaveTextContent(/awaiting final legal review/);
         expect(screen.getByText('DRAFT — awaiting legal review. Not in effect.')).toBeInTheDocument();
