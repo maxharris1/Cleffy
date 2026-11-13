@@ -190,6 +190,41 @@ select pg_temp.refused('31 a batch with one bad event among good ones is refused
 reset role;
 select pg_temp.chk('32 ... and none of the refused batches wrote a row', $q$select pg_temp.rows_for(pg_temp.k(3)) = 0$q$);
 
+-- ---- path must be a listed route pattern (public.web_route_patterns(), held
+-- equal to src/app/routePatterns.ts by routePatterns.test.ts). A hand-made
+-- call with a raw invite token or document id loses that event, not the batch.
+select pg_temp.as_anon();
+select pg_temp.runs('33 a batch mixing raw, unlisted and listed paths raises nothing', $q$
+    select public.record_web_events(jsonb_build_array(
+        pg_temp.ev(pg_temp.k(14), '{"path":"/join/Zx9-secretInviteToken_42"}'),
+        pg_temp.ev(pg_temp.k(14), '{"path":"/doc/0b6f6a0e-1b1c-4b8e-9f39-0e8c2f7b1a11"}'),
+        pg_temp.ev(pg_temp.k(14), '{"path":"/reset/some-secret"}'),
+        pg_temp.ev(pg_temp.k(14), '{"path":"/join/:token"}'),
+        pg_temp.ev(pg_temp.k(14), '{"path":"/doc/:documentId"}'),
+        pg_temp.ev(pg_temp.k(14), '{"path":"*"}'),
+        pg_temp.ev(pg_temp.k(14), '{"path":null}')))$q$);
+reset role;
+select pg_temp.chk('34 ... the raw invite token is not stored', $q$
+    select not exists (select 1 from public.web_events where path like '%secretInviteToken%')$q$);
+select pg_temp.chk('35 ... the raw document id is not stored', $q$
+    select not exists (select 1 from public.web_events where path like '%0b6f6a0e%')$q$);
+select pg_temp.chk('36 ... the unlisted path is not stored', $q$
+    select not exists (select 1 from public.web_events where path = '/reset/some-secret')$q$);
+select pg_temp.chk('37 ... the listed patterns, * and a null path are stored', $q$
+    select count(*) = 4
+       and count(*) filter (where path = '/join/:token') = 1
+       and count(*) filter (where path = '/doc/:documentId') = 1
+       and count(*) filter (where path = '*') = 1
+       and count(*) filter (where path is null) = 1
+    from public.web_events where session_key = pg_temp.k(14)$q$);
+select pg_temp.chk('37b web_route_patterns(): immutable, empty search_path, not callable by clients', $q$
+    select p.provolatile = 'i' and p.proconfig = array['search_path=""']
+       and not has_function_privilege('anon', p.oid, 'execute')
+       and not has_function_privilege('authenticated', p.oid, 'execute')
+       and '/doc/:documentId' = any (public.web_route_patterns())
+       and not '*' = any (public.web_route_patterns())
+    from pg_proc p where p.oid = 'public.web_route_patterns()'::regprocedure$q$);
+
 -- ---- guests, roster students and anonymous JWTs are dropped
 select pg_temp.as_guest(2);
 select pg_temp.runs('40 a guest''s (anonymous JWT) batch raises nothing', $q$
@@ -227,6 +262,27 @@ select pg_temp.runs('51 a session whose 500 are all older than a day sends one',
 reset role;
 select pg_temp.chk('52 ... the first stops at 500, the second is not capped', $q$
     select pg_temp.rows_for(pg_temp.k(9)) = 500 and pg_temp.rows_for(pg_temp.k(10)) = 501$q$);
+
+-- ---- and 1000 rows per signed-in user per day, whatever session_key they send
+insert into auth.users (id, aud, role, email, raw_app_meta_data) values
+(pg_temp.u(6), 'authenticated', 'authenticated', 'we-busy@example.invalid', '{"provider":"email"}');
+insert into public.web_events (event, path, session_key, user_id, occurred_at)
+select 'page_view', '/', gen_random_uuid(), pg_temp.u(6), now() - interval '1 hour' from generate_series(1, 998);
+insert into public.web_events (event, path, session_key, user_id, occurred_at)
+select 'page_view', '/', gen_random_uuid(), pg_temp.u(6), now() - interval '25 hours' from generate_series(1, 50);
+select pg_temp.as_teacher(6);
+select pg_temp.runs('53 a user at 998 today sends three events on three fresh session keys', $q$
+    select public.record_web_events(jsonb_build_array(pg_temp.ev(pg_temp.k(15)), pg_temp.ev(pg_temp.k(16)), pg_temp.ev(pg_temp.k(17))))$q$);
+reset role;
+select pg_temp.chk('54 ... two are stored and the user stops at 1000 for the day', $q$
+    select (select count(*) from public.web_events where user_id = pg_temp.u(6) and occurred_at > now() - interval '1 day') = 1000
+       and pg_temp.rows_for(pg_temp.k(15)) + pg_temp.rows_for(pg_temp.k(16)) + pg_temp.rows_for(pg_temp.k(17)) = 2$q$);
+select pg_temp.as_anon();
+select pg_temp.runs('55 a visitor with no session on the same keys is not held to that user''s cap', $q$
+    select public.record_web_events(jsonb_build_array(pg_temp.ev(pg_temp.k(17))))$q$);
+reset role;
+select pg_temp.chk('56 ... and is stored', $q$
+    select count(*) = 1 from public.web_events where session_key = pg_temp.k(17) and user_id is null$q$);
 
 -- ---- the sign-up trigger
 select pg_temp.chk('60 the trigger is an enabled AFTER INSERT ROW trigger on auth.users', $q$
@@ -277,6 +333,24 @@ select pg_temp.runs('68 sign-ups whose attribution is a string, has no valid tag
 select pg_temp.chk('69 ... the first two and the one with none get no row; the future date is dropped, the tag kept', $q$
     select not exists (select 1 from public.signup_attribution where user_id in (pg_temp.u(24), pg_temp.u(25), pg_temp.u(27)))
        and (select first_seen_at is null and utm_campaign = 'launch_v1' from public.signup_attribution where user_id = pg_temp.u(26))$q$);
+
+-- landing_path must be a listed route pattern too: a raw token, a raw id or an
+-- unlisted path is left out (null) and the sign-up still goes through.
+select pg_temp.runs('75 sign-ups whose landing_path is a raw invite token, a raw document id or unlisted are created', $q$
+    insert into auth.users (id, aud, role, email, raw_user_meta_data) values
+    (pg_temp.u(30), 'authenticated', 'authenticated', 'we-lp1@example.invalid', '{"attribution":{"utm_campaign":"launch_v1","landing_path":"/join/Zx9-secretInviteToken_42"}}'),
+    (pg_temp.u(31), 'authenticated', 'authenticated', 'we-lp2@example.invalid', '{"attribution":{"utm_campaign":"launch_v1","landing_path":"/doc/0b6f6a0e-1b1c-4b8e-9f39-0e8c2f7b1a11"}}'),
+    (pg_temp.u(32), 'authenticated', 'authenticated', 'we-lp3@example.invalid', '{"attribution":{"utm_campaign":"launch_v1","landing_path":"/reset/some-secret"}}')$q$);
+select pg_temp.chk('76 ... each keeps its tag, with landing_path null', $q$
+    select count(*) = 3 and bool_and(utm_campaign = 'launch_v1' and landing_path is null)
+    from public.signup_attribution where user_id in (pg_temp.u(30), pg_temp.u(31), pg_temp.u(32))$q$);
+select pg_temp.runs('77 sign-ups landing on listed patterns are created', $q$
+    insert into auth.users (id, aud, role, email, raw_user_meta_data) values
+    (pg_temp.u(33), 'authenticated', 'authenticated', 'we-lp4@example.invalid', '{"attribution":{"utm_campaign":"launch_v1","landing_path":"/join/:token"}}'),
+    (pg_temp.u(34), 'authenticated', 'authenticated', 'we-lp5@example.invalid', '{"attribution":{"utm_campaign":"launch_v1","landing_path":"*"}}')$q$);
+select pg_temp.chk('78 ... and keep their landing_path', $q$
+    select (select landing_path = '/join/:token' from public.signup_attribution where user_id = pg_temp.u(33))
+       and (select landing_path = '*' from public.signup_attribution where user_id = pg_temp.u(34))$q$);
 
 -- ---- GoTrue's role: a sign-up with good or bad attribution is never blocked
 create extension if not exists dblink with schema extensions;

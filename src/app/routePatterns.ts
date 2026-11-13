@@ -4,7 +4,8 @@ import { matchPath } from 'react-router';
  * Every path routes.tsx declares, as written there. web events and sign-up
  * attribution record which of these a page matched, never the path itself:
  * `/join/:token`, not the invite token. routePatterns.test.ts holds this list
- * equal to routes.tsx.
+ * equal to routes.tsx, and public.web_route_patterns() (the database copy the
+ * server checks against) equal to this list.
  */
 export const ROUTE_PATTERNS = [
     '/',
@@ -27,6 +28,7 @@ export const ROUTE_PATTERNS = [
     '/join/:token',
     '/auth/callback',
     '/privacy',
+    '/children-privacy',
     '/terms',
     '/cancel',
     '/refunds',

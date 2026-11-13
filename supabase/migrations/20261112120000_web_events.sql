@@ -24,6 +24,12 @@
 -- default ACL hands anon and authenticated everything on a new table, so the
 -- revoke is load-bearing there.
 --
+-- Paths: only a route pattern listed in public.web_route_patterns() is ever
+-- stored (record_web_events drops any other event; the trigger leaves
+-- landing_path null). The browser sends the same patterns (routePatternOf), so
+-- this only bites a hand-made call: it can never store a raw /join/<token> or
+-- /doc/<uuid>.
+--
 -- Retention: events older than 13 months are purged daily by pg_cron. An
 -- account's attribution and events go with the account (on delete cascade).
 --
@@ -58,8 +64,10 @@ create index if not exists web_events_event_occurred_at_idx on public.web_events
 
 create index if not exists web_events_session_key_occurred_at_idx on public.web_events (session_key, occurred_at);
 
--- For the cascade on account deletion, which would otherwise scan the table.
-create index if not exists web_events_user_id_idx on public.web_events (user_id) where user_id is not null;
+-- For the per-user daily cap in record_web_events, and the cascade on account
+-- deletion, which would otherwise scan the table.
+create index if not exists web_events_user_id_occurred_at_idx on public.web_events (user_id, occurred_at)
+where user_id is not null;
 
 create table if not exists public.signup_attribution (
     user_id uuid primary key references auth.users (id) on delete cascade,
@@ -83,6 +91,56 @@ revoke all on table public.web_events, public.signup_attribution from public, an
 grant all on table public.web_events, public.signup_attribution to service_role;
 
 -- ---------------------------------------------------------------------------
+-- web_route_patterns: the route patterns a web event's path or a sign-up's
+-- landing_path may hold, besides '*' (the not-found route). This is
+-- ROUTE_PATTERNS in src/app/routePatterns.ts, which is every path routes.tsx
+-- declares; src/app/routePatterns.test.ts fails when they differ. A new route
+-- therefore needs a migration that redefines this function. Until it lands,
+-- events on that route are dropped and its landing_path is null: data is
+-- lost, nothing breaks.
+-- ---------------------------------------------------------------------------
+create or replace function public.web_route_patterns () returns text[]
+language sql
+immutable
+parallel safe
+set search_path = ''
+as $$
+    select array[
+        '/',
+        '/login',
+        '/register',
+        '/forgot-password',
+        '/update-password',
+        '/student',
+        '/student/claim',
+        '/student/welcome',
+        '/assignments',
+        '/library',
+        '/search',
+        '/students',
+        '/account',
+        '/admin/reports',
+        '/settings',
+        '/doc/:documentId',
+        '/try',
+        '/join/:token',
+        '/auth/callback',
+        '/privacy',
+        '/children-privacy',
+        '/terms',
+        '/cancel',
+        '/refunds',
+        '/copyright',
+        '/report',
+        '/account-deleted'
+    ]::text[]
+$$;
+
+revoke all on function public.web_route_patterns () from public, anon, authenticated;
+
+grant execute on function public.web_route_patterns () to service_role;
+
+-- ---------------------------------------------------------------------------
 -- record_web_events: the browser's only way in.
 --
 -- A batch is up to 20 events. Every event is checked before any is stored,
@@ -90,11 +148,26 @@ grant all on table public.web_events, public.signup_attribution to service_role;
 -- the same rules, so a refusal is a bug to see, not data to half-keep. An
 -- event may carry only the keys below -- no user_id, no timestamp.
 --
+-- A path must also be '*' or listed in web_route_patterns(). One that has the
+-- right shape but is not listed (a raw /join/<token>, /doc/<uuid>, or a route
+-- this database does not know yet) drops that event only, quietly: a client
+-- a deploy ahead of the migration loses those events, not its whole batch.
+--
 -- user_id is auth.uid(): null for a visitor with no session. A guest, a
 -- roster student or any anonymous JWT gets nothing stored and no error.
 --
--- At most 500 rows per session_key in any 24 hours; the rest are dropped
--- quietly. The advisory lock makes the count exact under concurrent calls.
+-- Caps, the rest dropped quietly; advisory locks make the counts exact under
+-- concurrent calls (the user's lock first, then each session's):
+-- * 500 rows per session_key in any 24 hours;
+-- * 1000 rows per signed-in user in any 24 hours, whatever session_key they
+--   send, so rotating keys does not get a signed-in caller past the cap.
+-- A visitor with no session has only the session_key cap, and session_key is
+-- the caller's choice: a script with the public anon key can mint keys and
+-- add rows without limit. There is deliberately no global cap for those
+-- visitors: one script could fill it and blank out every real visitor's
+-- funnel for the day. The rows hold no personal data (strict patterns, no free
+-- text), so the cost is table growth and noisy counts; the defence is a rate
+-- limit in front of PostgREST, not here.
 -- ---------------------------------------------------------------------------
 create or replace function public.record_web_events (p_events jsonb) returns void
 language plpgsql
@@ -109,10 +182,12 @@ declare
         'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
     v_uid uuid := auth.uid();
     v_claims jsonb := coalesce(auth.jwt(), '{}'::jsonb);
+    v_patterns constant text[] := public.web_route_patterns();
     v_event jsonb;
     v_key text;
     v_session uuid;
     v_count bigint;
+    v_user_count bigint := 0;
 begin
     if p_events is null or jsonb_typeof(p_events) <> 'array' then
         raise exception 'web events must be a JSON array' using errcode = '22023';
@@ -176,7 +251,22 @@ begin
         return;
     end if;
 
+    if v_uid is not null then
+        perform pg_advisory_xact_lock(hashtextextended('web_events:user:' || v_uid::text, 0));
+        select count(*) into v_user_count
+        from public.web_events w
+        where w.user_id = v_uid and w.occurred_at > now() - interval '1 day';
+    end if;
+
     for v_event in select e from jsonb_array_elements(p_events) e loop
+        if v_event ->> 'path' is not null
+           and v_event ->> 'path' <> '*'
+           and not (v_event ->> 'path') = any (v_patterns) then
+            continue;
+        end if;
+        if v_uid is not null and v_user_count >= 1000 then
+            exit;
+        end if;
         v_session := (v_event ->> 'session_key')::uuid;
         perform pg_advisory_xact_lock(hashtextextended('web_events:' || v_session::text, 0));
         select count(*) into v_count
@@ -191,6 +281,7 @@ begin
                 v_event ->> 'utm_source', v_event ->> 'utm_medium', v_event ->> 'utm_campaign',
                 v_event ->> 'utm_content', v_event ->> 'utm_term',
                 v_event ->> 'referrer_host', v_event ->> 'device_class', v_session, v_uid);
+        v_user_count := v_user_count + 1;
     end loop;
 end;
 $$;
@@ -206,8 +297,9 @@ grant execute on function public.record_web_events (jsonb) to anon, authenticate
 -- sign-in) but acts only for a user whose user_metadata carries
 -- `attribution`, who is not anonymous and not a roster student. Each value
 -- is checked on its own and a bad one is left out; with no valid utm tag
--- left, nothing is written. It must never raise -- a bad tag must not block
--- a sign-up -- so any error is swallowed.
+-- left, nothing is written. landing_path must be '*' or listed in
+-- web_route_patterns(), else it is left null. It must never raise -- a bad
+-- tag must not block a sign-up -- so any error is swallowed.
 -- ---------------------------------------------------------------------------
 create or replace function public.record_signup_attribution () returns trigger
 language plpgsql
@@ -241,8 +333,7 @@ begin
             return null;
         end if;
         if jsonb_typeof(a -> 'landing_path') = 'string'
-           and char_length(a ->> 'landing_path') <= 200
-           and a ->> 'landing_path' ~ '^(\*|/[A-Za-z0-9/:._-]*)$' then
+           and (a ->> 'landing_path' = '*' or a ->> 'landing_path' = any (public.web_route_patterns())) then
             v_landing := a ->> 'landing_path';
         end if;
         if jsonb_typeof(a -> 'first_seen_at') = 'string' then

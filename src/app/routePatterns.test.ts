@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -10,6 +10,34 @@ describe('ROUTE_PATTERNS', () => {
         const source = readFileSync(resolve(process.cwd(), 'src/app/routes.tsx'), 'utf8');
         const declared = [...source.matchAll(/\bpath="([^"]+)"/g)].map((m) => m[1]).filter((p) => p !== '*');
         expect([...ROUTE_PATTERNS].sort()).toEqual([...new Set(declared)].sort());
+    });
+});
+
+// The database keeps its own copy in public.web_route_patterns(): record_web_events
+// drops an event, and the sign-up trigger nulls landing_path, for any path not in
+// it. The newest migration that defines the function is the copy that counts.
+const serverRoutePatterns = (): string[] => {
+    const dir = resolve(process.cwd(), 'supabase/migrations');
+    const definitions = readdirSync(dir)
+        .filter((name) => name.endsWith('.sql'))
+        .sort()
+        .map((name) => readFileSync(resolve(dir, name), 'utf8'))
+        .map((sql) =>
+            /function\s+public\.web_route_patterns\s*\(\s*\)[\s\S]*?\barray\s*\[([\s\S]*?)\]\s*::\s*text\[\]/i.exec(
+                sql,
+            ),
+        )
+        .filter((match): match is RegExpExecArray => match !== null);
+    const latest = definitions.at(-1);
+    if (!latest) {
+        throw new Error('no migration defines public.web_route_patterns()');
+    }
+    return [...(latest[1] ?? '').matchAll(/'((?:[^']|'')*)'/g)].map((m) => (m[1] ?? '').replace(/''/g, "'"));
+};
+
+describe('public.web_route_patterns()', () => {
+    it('is ROUTE_PATTERNS: a new route needs a migration that redefines it', () => {
+        expect(serverRoutePatterns().sort()).toEqual([...ROUTE_PATTERNS].sort());
     });
 });
 
