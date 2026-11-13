@@ -267,8 +267,10 @@ export default defineConfig({
                 globPatterns: ['**/*.{js,css,html,png,svg,woff2,wasm}'],
                 // The SMuFL music-text face (~450 KB) serves only the opt-in
                 // handwriting → print feature; like the piano samples it is
-                // fetched on first use and then kept, not precached.
-                globIgnores: ['**/fonts/BravuraText.woff2', ...GATED_CHUNK_IGNORES],
+                // fetched on first use and then kept, not precached. The
+                // landing page's handwriting face (Caveat) is for guests, who
+                // do not need it offline.
+                globIgnores: ['**/fonts/BravuraText.woff2', '**/caveat-*.woff2', ...GATED_CHUNK_IGNORES],
                 navigateFallback: '/index.html',
                 navigateFallbackDenylist: [/^\/auth\/callback/],
                 maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
