@@ -19,6 +19,11 @@ export const features = {
      * (analyze-annotations → Anthropic). Off at launch.
      */
     smartImport: flag(import.meta.env.VITE_FEATURE_SMART_IMPORT),
-    /** Under-13 view links: read-only score link, no account. Off until counsel signs off. */
-    viewLinks: flag(import.meta.env.VITE_FEATURE_VIEW_LINKS),
+    /** Share v2: Google-Docs-style sharing (general access link, specific people). Off until Max turns it on. */
+    shareV2: flag(import.meta.env.VITE_FEATURE_SHARE_V2),
+    /**
+     * @deprecated Read `shareV2`. Kept only because AgeScreen.tsx (a held path)
+     * still reads it; the Share v2 UI change deletes it.
+     */
+    viewLinks: flag(import.meta.env.VITE_FEATURE_SHARE_V2),
 } as const;

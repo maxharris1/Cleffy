@@ -234,6 +234,9 @@ export type DocumentMemberListing = {
     joined_at: string;
 };
 
+/** Why a share link does or does not open its score (share_link_state). */
+export type ShareLinkState = 'live' | 'revoked' | 'expired' | 'unavailable' | 'invalid';
+
 /** The token is always minted by the server (share_links_guard_columns). */
 export type ShareLinkInsert = {
     document_id: string;
@@ -820,7 +823,50 @@ export type Database = {
             // Anon-callable; exactly one row, role null unless valid (20261009120200).
             peek_share_link: {
                 Args: { p_token: string };
-                Returns: Array<{ valid: boolean; role: ShareRole | null }>;
+                Returns: Array<{ valid: boolean; role: ShareRole | null; state: ShareLinkState }>;
+            };
+            // Share v2 (#104). Owner only; p_expires_in is an interval ('7 days'),
+            // null for never, 1 hour to 365 days otherwise.
+            set_general_access: {
+                Args: {
+                    p_document: string;
+                    p_mode: 'restricted' | 'anyone';
+                    p_role?: ShareRole;
+                    p_expires_in?: string | null;
+                };
+                Returns: Array<{ link_id: string; token: string; role: ShareRole; expires_at: string | null }>;
+            };
+            reset_general_link: {
+                Args: { p_document: string };
+                Returns: Array<{ link_id: string; token: string; role: ShareRole; expires_at: string | null }>;
+            };
+            renew_share_link: {
+                Args: { p_link: string; p_expires_in?: string | null };
+                Returns: string | null;
+            };
+            my_share_settings: {
+                Args: Record<string, never>;
+                Returns: { link_guest_idle_days: number };
+            };
+            set_link_guest_retention: {
+                Args: { p_days: number };
+                Returns: number;
+            };
+            // A signed-out viewer token's reads (anon, cleffy_link claim).
+            link_view_access: {
+                Args: Record<string, never>;
+                Returns:
+                    | { status: 'open'; epoch: number; doc: string; link_expires_at: string | null }
+                    | { status: Exclude<ShareLinkState, 'live'> };
+            };
+            link_view_snapshot: {
+                Args: { p_since?: number; p_limit?: number };
+                Returns: {
+                    doc: { title: string; page_count: number | null; content_rev: number };
+                    marks: Array<Record<string, unknown>>;
+                    max_seq: number;
+                    more: boolean;
+                };
             };
             // Owners and editors only; see DocumentMemberListing for what each sees.
             list_document_members: {
