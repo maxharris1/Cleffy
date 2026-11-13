@@ -915,6 +915,53 @@ select pg_temp.chk('206 ... and so is accepting it: no membership', $q$
        and pg_temp.member_role(pg_temp.d(1), pg_temp.u(23)) is null$q$);
 select pg_temp.as_postgres();
 
+-- A pending invite never outlasts the owner's later choice for its address.
+-- d14 (owner 13): 24, 25 and 26 are each invited as editors before they have
+-- an account, then sign up on their own. The owner then invites 24 again as a
+-- viewer, sets 25 (a member by then) to viewer, and removes 26; each old
+-- editor token is then accepted. 24's address is also invited to d2, which
+-- owner 1 leaves alone.
+insert into public.documents (id, owner_id, title, storage_path, page_count)
+values (pg_temp.d(14), pg_temp.u(13), 'Share v2 score 14', pg_temp.d(14)::text || '/original.pdf', 3);
+select pg_temp.as_service();
+select public.share_invite_create(pg_temp.u(13), pg_temp.d(14), 'stale.reinvite@example.test', 'editor', pg_temp.sha('tok-30'));
+select public.share_invite_create(pg_temp.u(1), pg_temp.d(2), 'stale.reinvite@example.test', 'editor', pg_temp.sha('tok-31'));
+select public.share_invite_create(pg_temp.u(13), pg_temp.d(14), 'stale.role@example.test', 'editor', pg_temp.sha('tok-32'));
+select public.share_invite_create(pg_temp.u(13), pg_temp.d(14), 'stale.removed@example.test', 'editor', pg_temp.sha('tok-33'));
+select public.share_invite_create(pg_temp.u(13), pg_temp.d(14), 'bystander@example.test', 'editor', pg_temp.sha('tok-34'));
+select pg_temp.as_postgres();
+insert into auth.users (id, email, raw_user_meta_data, is_anonymous) values
+(pg_temp.u(24), 'stale.reinvite@example.test', '{}', false),
+(pg_temp.u(25), 'Stale.Role@Example.test', '{}', false),
+(pg_temp.u(26), 'stale.removed@example.test', '{}', false);
+insert into public.document_members (document_id, user_id, role) values
+(pg_temp.d(14), pg_temp.u(25), 'viewer'),
+(pg_temp.d(14), pg_temp.u(26), 'viewer');
+select pg_temp.as_service();
+select pg_temp.run('reinvite_viewer', $q$public.share_invite_create(pg_temp.u(13), pg_temp.d(14), 'stale.reinvite@example.test', 'viewer', pg_temp.sha('tok-35'))$q$);
+select pg_temp.as_user(13);
+select public.set_document_member_role(pg_temp.d(14), pg_temp.u(25), 'viewer');
+select public.remove_document_member(pg_temp.d(14), pg_temp.u(26));
+select pg_temp.as_service();
+select pg_temp.run('stale_reinvite', $q$public.share_invite_consume(pg_temp.sha('tok-30'), pg_temp.u(24))$q$);
+select pg_temp.run('stale_role', $q$public.share_invite_consume(pg_temp.sha('tok-32'), pg_temp.u(25))$q$);
+select pg_temp.run('stale_removed', $q$public.share_invite_consume(pg_temp.sha('tok-33'), pg_temp.u(26))$q$);
+select pg_temp.as_postgres();
+select pg_temp.chk('207 re-inviting a now-registered address as a viewer cancels its pending editor invite', $q$
+    select pg_temp.out('reinvite_viewer') ->> 'kind' = 'member'
+       and pg_temp.out('stale_reinvite') = '{"ok":false,"state":"cancelled"}'
+       and public.share_invite_peek(pg_temp.sha('tok-30')) = '{"state":"cancelled"}'
+       and pg_temp.member_role(pg_temp.d(14), pg_temp.u(24)) = 'viewer'$q$);
+select pg_temp.chk('208 setting a member''s role cancels the pending invite for their address', $q$
+    select pg_temp.out('stale_role') = '{"ok":false,"state":"cancelled"}'
+       and pg_temp.member_role(pg_temp.d(14), pg_temp.u(25)) = 'viewer'$q$);
+select pg_temp.chk('209 removing a member cancels the pending invite for their address', $q$
+    select pg_temp.out('stale_removed') = '{"ok":false,"state":"cancelled"}'
+       and pg_temp.member_role(pg_temp.d(14), pg_temp.u(26)) is null$q$);
+select pg_temp.chk('209b another address''s invite, and the same address''s invite to another score, stay pending', $q$
+    select public.share_invite_peek(pg_temp.sha('tok-34')) ->> 'state' = 'pending'
+       and public.share_invite_peek(pg_temp.sha('tok-31')) ->> 'state' = 'pending'$q$);
+
 -- ===========================================================================
 -- Retention
 -- ===========================================================================

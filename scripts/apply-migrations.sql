@@ -29403,6 +29403,140 @@ $$;
 
 revoke all on function public.share_invite_grant (uuid, uuid, text) from public, anon, authenticated;
 
+-- The owner has just chosen p_user's access to p_document (invited the
+-- account, set its role or removed it): a pending invite for the account's
+-- address would undo that choice when accepted, so it is cancelled. Called
+-- before the membership row is locked, the order share_invite_consume takes.
+create or replace function public.share_invite_retire (p_document uuid, p_user uuid) returns void language sql security definer
+set search_path = '' as $$
+    update public.document_invites i
+    set revoked_at = now()
+    where i.document_id = p_document
+      and i.accepted_at is null
+      and i.revoked_at is null
+      and i.email = (select lower(u.email) from auth.users u where u.id = p_user);
+$$;
+
+revoke all on function public.share_invite_retire (uuid, uuid) from public, anon, authenticated;
+
+-- 20261007120000's set_document_member_role and remove_document_member, each
+-- cancelling a pending invite for the member's address first.
+create or replace function public.set_document_member_role (p_document uuid, p_user uuid, p_role text) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_caller uuid := auth.uid();
+    v_current text;
+begin
+    if v_caller is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    -- document_role() reads auth.uid(), which is still the CALLER inside a
+    -- definer function (see assign_score).
+    if public.document_role (p_document) is distinct from 'owner' then
+        raise exception 'only the score owner can change roles' using errcode = '42501';
+    end if;
+
+    -- 'owner' is not on offer: there is one owner, fixed by documents.owner_id,
+    -- and handing the role out here would make a second one RLS would believe.
+    if p_role is null or p_role not in ('editor', 'viewer') then
+        raise exception 'role must be editor or viewer' using errcode = '22023';
+    end if;
+
+    perform public.share_invite_retire (p_document, p_user);
+
+    select dm.role into v_current
+    from public.document_members dm
+    where dm.document_id = p_document and dm.user_id = p_user
+    for update;
+
+    if not found then
+        raise exception 'not a member of this score' using errcode = 'P0002';
+    end if;
+
+    if v_current = 'owner' or exists (
+        select 1 from public.documents d where d.id = p_document and d.owner_id = p_user
+    ) then
+        raise exception 'the owner''s access cannot be changed' using errcode = '42501';
+    end if;
+
+    -- Recorded even when the role is unchanged: the owner looked at this
+    -- member and chose this role, and a link opened later must not change it
+    -- (see document_member_role_locks).
+    insert into public.document_member_role_locks (document_id, user_id)
+    values (p_document, p_user)
+    on conflict (document_id, user_id) do update
+        set locked_at = now();
+
+    if v_current = p_role then
+        return;
+    end if;
+
+    update public.document_members
+    set role = p_role
+    where document_id = p_document and user_id = p_user;
+
+    -- A roster student's access is the assignment's access. Keep them in step
+    -- so the next assign_score (which re-applies `access`) does not silently
+    -- undo this, and the teacher's Assign dialog shows what is true.
+    update public.assignments
+    set access = case when p_role = 'viewer' then 'view' else 'edit' end,
+        updated_at = now()
+    where document_id = p_document and student_user_id = p_user;
+end;
+$$;
+
+revoke all on function public.set_document_member_role (uuid, uuid, text) from public;
+revoke all on function public.set_document_member_role (uuid, uuid, text) from anon;
+grant execute on function public.set_document_member_role (uuid, uuid, text) to authenticated;
+
+create or replace function public.remove_document_member (p_document uuid, p_user uuid) returns void language plpgsql security definer
+set search_path = public as $$
+declare
+    v_caller uuid := auth.uid();
+    v_current text;
+begin
+    if v_caller is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    if public.document_role (p_document) is distinct from 'owner' then
+        raise exception 'only the score owner can remove collaborators' using errcode = '42501';
+    end if;
+
+    perform public.share_invite_retire (p_document, p_user);
+
+    select dm.role into v_current
+    from public.document_members dm
+    where dm.document_id = p_document and dm.user_id = p_user
+    for update;
+
+    if not found then
+        raise exception 'not a member of this score' using errcode = 'P0002';
+    end if;
+
+    if v_current = 'owner' or exists (
+        select 1 from public.documents d where d.id = p_document and d.owner_id = p_user
+    ) then
+        raise exception 'the owner cannot be removed from their own score' using errcode = '42501';
+    end if;
+
+    -- The assignment goes with the membership: an assignment whose score the
+    -- student can no longer open is the drift unassign_score exists to prevent.
+    delete from public.assignments
+    where document_id = p_document and student_user_id = p_user;
+
+    delete from public.document_members
+    where document_id = p_document and user_id = p_user;
+
+    perform public.forget_document_for_user (p_document, p_user);
+end;
+$$;
+
+revoke all on function public.remove_document_member (uuid, uuid) from public;
+revoke all on function public.remove_document_member (uuid, uuid) from anon;
+grant execute on function public.remove_document_member (uuid, uuid) to authenticated;
+
 -- ---------------------------------------------------------------------------
 -- The owner's check, under the caller's JWT
 -- ---------------------------------------------------------------------------
@@ -29463,6 +29597,7 @@ begin
 
     if v_user is not null and not v_anonymous then
         if v_user <> p_caller then
+            perform public.share_invite_retire (p_document, v_user);
             perform public.share_invite_grant (p_document, v_user, p_role);
         end if;
         return jsonb_build_object(
