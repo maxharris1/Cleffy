@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router';
 
+import { demoViewerModule } from '@/features/demo/demoPreload';
 import { DEMO_DOC_ID } from '@/features/demo/demoScore';
 import { sendDemoVisitOnce } from '@/features/demo/demoVisit';
 import { DemoScoreUnavailableError, loadDemoScore } from '@/features/demo/loadDemoScore';
@@ -10,15 +11,6 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { LoadingText } from '@/ui/Loading';
 import { linkClassName } from '@/ui/classNames';
-import { lazyModule } from '@/ui/lazyModule';
-
-/**
- * The viewer (pdf.js, the ink stack, Dexie) is its own chunk, requested the
- * moment this page mounts, so it downloads while the score does rather than
- * after it. A lazyModule rather than React.lazy, so a failed import shows the
- * demo's own error state rather than the app's crash screen.
- */
-const demoViewerModule = lazyModule(() => import('@/features/demo/DemoViewer'));
 
 const DEMO_DOCUMENT_TITLE = 'Try Cleffy';
 
@@ -86,7 +78,11 @@ export const DemoPage = () => {
                 setFailure((current) => (current === 'missing' ? current : kind));
             }
         };
-        // Both at once, either failing shows the same state, and Try again retries whichever is missing.
+        // The viewer's chunk (demoPreload) is requested the moment this page
+        // mounts, if the landing page has not already started it, so it
+        // downloads while the score does rather than after it. Both at once,
+        // either failing shows the same state, and Try again retries whichever
+        // is missing.
         loadDemoScore()
             .then((loaded) => {
                 if (!cancelled) {

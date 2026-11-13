@@ -34,6 +34,16 @@
     --color-accent-soft: rgb(67 56 202 / 0.1);
     --color-scrim: rgb(28 25 23 / 0.45);
 
+    /* The landing page's ink bands (features/marketing/landing.css). The
+       accent is too dark on ink, so the filled button there is indigo-600;
+       handwriting on ink is yellow, on paper the danger red. */
+    --font-hand: 'Caveat', 'Bradley Hand', cursive;
+    --color-ink-cta: #4f46e5;
+    --color-ink-rule: #818cf8;
+    --color-ink-hand: #facc15;
+    --color-highlighter: #fde047;
+    --color-tick: #15803d;
+
     /* Motion. One strong ease-out for anything entering or responding (UI
        motion should start fast and settle), a drawer curve for sheets, and
        short durations: a press is felt, not watched. */

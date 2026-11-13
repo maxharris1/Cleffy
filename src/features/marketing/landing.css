@@ -1,0 +1,359 @@
+/*
+ * The landing page's own styles ("Ink"). Imported by LandingPage.tsx, not by
+ * index.css, so they and the handwriting face ship in the landing chunk and
+ * nothing in the app shell's stylesheet grows for them. The colour tokens
+ * live in @theme (index.css); `.landing-page`, which the auth, join and 404
+ * screens share, is untouched.
+ */
+
+/*
+ * Caveat (SIL OFL 1.1, src/assets/fonts/Caveat-OFL.txt), subset to Basic
+ * Latin and typographic punctuation, weights 500 to 700: the page's
+ * handwritten phrases and the notes on the score. Kept out of the service
+ * worker's precache (vite.config.ts globIgnores): guests do not need it
+ * offline. The notes on the score wait for it (useHandwritingReady).
+ */
+@font-face {
+    font-family: 'Caveat';
+    font-style: normal;
+    font-weight: 500 700;
+    font-display: swap;
+    src: url('../../assets/fonts/caveat-latin-wght.woff2') format('woff2-variations');
+}
+
+/*
+ * The page root. Optical size 10 on every Bodoni element: left alone, large
+ * headings get the face's display cut, whose hairlines disappear.
+ */
+.ink-landing {
+    background-color: var(--color-ink);
+    font-variation-settings: 'opsz' 10;
+}
+
+/* While the page is mounted (LandingPage), overscroll at either end shows ink, not paper. */
+html.ink-landing-root,
+html.ink-landing-root body {
+    background-color: var(--color-ink);
+}
+
+/* Ink bands: faint paper staves, five 1px lines 12px apart every 200px (10px and 170px on a phone). */
+.ink-band {
+    --ink-stave: rgb(247 245 239 / 0.06);
+    --ink-stave-gap: 12px;
+    background-color: var(--color-ink);
+    color: var(--color-paper);
+    background-image: linear-gradient(
+        to bottom,
+        var(--ink-stave) 0 1px,
+        transparent 1px var(--ink-stave-gap),
+        var(--ink-stave) var(--ink-stave-gap) calc(var(--ink-stave-gap) + 1px),
+        transparent calc(var(--ink-stave-gap) + 1px) calc(var(--ink-stave-gap) * 2),
+        var(--ink-stave) calc(var(--ink-stave-gap) * 2) calc(var(--ink-stave-gap) * 2 + 1px),
+        transparent calc(var(--ink-stave-gap) * 2 + 1px) calc(var(--ink-stave-gap) * 3),
+        var(--ink-stave) calc(var(--ink-stave-gap) * 3) calc(var(--ink-stave-gap) * 3 + 1px),
+        transparent calc(var(--ink-stave-gap) * 3 + 1px) calc(var(--ink-stave-gap) * 4),
+        var(--ink-stave) calc(var(--ink-stave-gap) * 4) calc(var(--ink-stave-gap) * 4 + 1px),
+        transparent calc(var(--ink-stave-gap) * 4 + 1px)
+    );
+    background-size: 100% 200px;
+}
+
+@media (width < 40rem) {
+    .ink-band {
+        --ink-stave-gap: 10px;
+        background-size: 100% 170px;
+    }
+}
+
+/* The closing band and footer: ink without the staves. */
+.ink-plain {
+    background-color: var(--color-ink);
+    color: var(--color-paper);
+}
+
+/* The global ring is the accent, nearly invisible on ink: paper on the ink bands. */
+.ink-band :focus-visible,
+.ink-plain :focus-visible {
+    outline: 2px solid var(--color-paper);
+    outline-offset: 2px;
+}
+
+/*
+ * The hero: one column on a phone and a tablet (copy, score, buttons), two
+ * from lg, the copy and buttons on the left and the score centred beside them.
+ */
+.ink-hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+        'copy'
+        'score'
+        'actions';
+}
+
+.ink-hero-copy {
+    grid-area: copy;
+}
+
+.ink-hero-score {
+    grid-area: score;
+}
+
+.ink-hero-actions {
+    grid-area: actions;
+}
+
+@media (min-width: 64rem) {
+    .ink-hero-grid {
+        grid-template-columns: minmax(0, 46fr) minmax(0, 58fr);
+        grid-template-areas:
+            'copy score'
+            'actions score';
+        grid-template-rows: auto auto;
+        column-gap: 4rem;
+        align-content: center;
+    }
+
+    .ink-hero-copy {
+        align-self: end;
+    }
+
+    .ink-hero-actions {
+        align-self: start;
+    }
+
+    .ink-hero-score {
+        align-self: center;
+    }
+}
+
+/* The two buttons on ink. The filled one carries a hairline ring so it holds its edge on the ground. */
+.ink-button {
+    transition:
+        background-color var(--duration-press) var(--ease-out),
+        border-color var(--duration-press) var(--ease-out),
+        transform var(--duration-press) var(--ease-out);
+}
+
+.ink-button-fill {
+    box-shadow:
+        0 0 0 1px rgb(255 255 255 / 0.14),
+        0 14px 30px -10px rgb(79 70 229 / 0.7);
+}
+
+.ink-button-line {
+    border: 1.5px solid rgb(247 245 239 / 0.7);
+}
+
+.ink-button-line.ink-button-nav {
+    border-color: var(--color-paper);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .ink-button:hover {
+        transform: translateY(-1px);
+    }
+
+    .ink-button-fill:hover {
+        background-color: var(--color-accent);
+    }
+
+    .ink-button-line:hover {
+        border-color: var(--color-paper);
+        background-color: rgb(247 245 239 / 0.06);
+    }
+}
+
+.ink-button:active {
+    transform: scale(0.97);
+}
+
+/* The score card in the hero: a white page on ink, lifted a little under a pointer. */
+.ink-score-card {
+    box-shadow: 0 30px 60px -24px rgb(0 0 0 / 0.85);
+    transition: transform var(--duration-ui) var(--ease-out);
+}
+
+@media (min-width: 40rem) {
+    .ink-score-card {
+        box-shadow: 0 50px 90px -30px rgb(0 0 0 / 0.85);
+    }
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .ink-score-card:hover {
+        transform: translateY(-2px);
+    }
+}
+
+/* The device frames in "Draw here": plain rounded slabs, no maker's details. */
+.ink-device {
+    background-color: #0c0a09;
+    box-shadow:
+        0 0 0 1px rgb(247 245 239 / 0.18),
+        0 30px 60px -24px rgb(0 0 0 / 0.9);
+}
+
+@media (min-width: 64rem) {
+    .ink-device {
+        box-shadow:
+            0 0 0 1px rgb(247 245 239 / 0.18),
+            0 40px 80px -30px rgb(0 0 0 / 0.9);
+    }
+}
+
+/* The Teacher card, inverted on paper. */
+.ink-plan-featured {
+    box-shadow: 0 30px 50px -28px rgb(28 25 23 / 0.7);
+}
+
+/*
+ * The footer's shared links (LegalLinks, CancelSubscriptionLink,
+ * LocalOpenControl) keep their markup and are re-coloured for ink here, so
+ * they look the same everywhere else.
+ */
+.ink-footer-links,
+.ink-footer-links p,
+.ink-footer-links a,
+.ink-footer-links label {
+    color: #d6d3d1;
+    font-size: 0.875rem;
+}
+
+.ink-footer-links a,
+.ink-footer-links label {
+    text-decoration-line: underline;
+    text-decoration-color: rgb(214 211 209 / 0.5);
+    text-underline-offset: 2px;
+}
+
+.ink-footer-links [aria-hidden='true'] {
+    display: none;
+}
+
+.ink-footer-links > p {
+    column-gap: 18px;
+    row-gap: 6px;
+}
+
+@media (pointer: coarse) {
+    .ink-footer-links > p {
+        row-gap: 14px;
+    }
+}
+
+.ink-footer-links [role='status'] {
+    color: #fca5a5;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .ink-footer-links a:hover,
+    .ink-footer-links label:hover {
+        color: var(--color-paper);
+        text-decoration-color: var(--color-paper);
+    }
+}
+
+/*
+ * Motion. Bands rise into place once as they enter view (400ms, 8px, 60ms
+ * between siblings; LandingPage latches .is-revealed). The hero, in view on
+ * arrival, does the same straight away. Ink marks (.hero-ink, index.css) and
+ * the score's notes draw once their frame has .is-inview.
+ */
+.ink-rise {
+    opacity: 0;
+    transform: translateY(8px);
+}
+
+:where(.is-revealed) .ink-rise,
+.ink-rise-now {
+    animation: ink-rise 400ms var(--ease-out) calc(var(--i, 0) * 60ms) forwards;
+}
+
+.ink-rise-now {
+    opacity: 0;
+    transform: translateY(8px);
+}
+
+@keyframes ink-rise {
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+/* A handwritten note on the score, uncovered left to right by its clip rect. */
+.ink-write {
+    transform: scaleX(0);
+    transform-box: fill-box;
+    transform-origin: left center;
+}
+
+:where(.is-inview) .ink-write {
+    animation: ink-write var(--dur, 0.7s) var(--ease-out) var(--d, 0s) forwards;
+}
+
+@keyframes ink-write {
+    to {
+        transform: scaleX(1);
+    }
+}
+
+/* The highlighter stroke behind "Or: one link.", swept on from the left. */
+.ink-highlighter {
+    position: relative;
+    z-index: 0;
+    display: inline-block;
+    white-space: nowrap;
+}
+
+.ink-highlighter::before {
+    content: '';
+    position: absolute;
+    inset: 50% -0.05em 6% -0.05em;
+    z-index: -1;
+    background-color: var(--color-highlighter, #fde047);
+    transform: scaleX(0);
+    transform-origin: left center;
+}
+
+:where(.is-inview) .ink-highlighter::before {
+    animation: ink-write 0.6s var(--ease-out) var(--d, 0.5s) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    /* Opacity stays; the travel goes. */
+    .ink-rise,
+    .ink-rise-now {
+        transform: none;
+    }
+
+    :where(.is-revealed) .ink-rise,
+    .ink-rise-now {
+        animation-name: ink-fade;
+    }
+
+    /* Every mark is already drawn. */
+    .ink-write,
+    .ink-highlighter::before {
+        animation: none;
+        transform: none;
+    }
+
+    .ink-button,
+    .ink-score-card {
+        transition: none;
+    }
+
+    .ink-button:hover,
+    .ink-button:active,
+    .ink-score-card:hover {
+        transform: none;
+    }
+}
+
+@keyframes ink-fade {
+    to {
+        opacity: 1;
+    }
+}
