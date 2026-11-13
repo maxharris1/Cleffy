@@ -23,6 +23,8 @@ export interface InviteCaller {
     userType: 'student' | null;
     /** share_owner_ready under the caller's JWT; false for any refusal or error. */
     ownerReady: (documentId: string) => Promise<boolean>;
+    /** The address of one of the caller's pending invites, read under their JWT; null data when there is none. */
+    pendingInviteEmail: (inviteId: string) => Promise<RpcResult<string | null>>;
 }
 
 export type RpcResult<T> = { ok: true; data: T } | { ok: false; code: string | null };
@@ -32,13 +34,16 @@ export type CreateResult =
     | { kind: 'member'; title: string | null; inviter_name: string | null }
     | { kind: 'invite'; invite_id: string; title: string | null; inviter_name: string | null };
 
-export interface ReissueResult {
-    invite_id: string;
-    email: string;
-    role: 'viewer' | 'editor';
-    title: string | null;
-    inviter_name: string | null;
-}
+export type ReissueResult =
+    | { kind: 'roster_refused' }
+    | {
+          kind: 'invite';
+          invite_id: string;
+          email: string;
+          role: 'viewer' | 'editor';
+          title: string | null;
+          inviter_name: string | null;
+      };
 
 export interface InviteMessage {
     subject: string;
@@ -269,22 +274,41 @@ export const handleShareInvite = async (req: Request, deps: ShareInviteDeps): Pr
         return json({ error: 'send_failed' }, 502);
     };
 
+    const rosterRefused = (): Response =>
+        json(
+            {
+                error: 'cannot_invite',
+                hint: 'assign',
+                message: 'This address can’t be invited here. If they’re your student, use Assign instead.',
+            },
+            403,
+        );
+
     if (action === 'resend') {
-        const budget = await reserveBudget();
-        if (budget) {
-            return budget;
+        // Every allowance is reserved before the token changes: a refusal must
+        // leave the last mailed invitation working.
+        const pending = await caller.pendingInviteEmail(inviteId);
+        if (!pending.ok) {
+            return refusal(json, pending.code);
+        }
+        if (!pending.data) {
+            return json({ error: 'not_pending' }, 404);
+        }
+        const limited = (await reserveRecipient(pending.data)) ?? (await reserveBudget());
+        if (limited) {
+            return limited;
         }
         const reissued = await deps.reissueInvite(caller.userId, inviteId, tokenHash);
         if (!reissued.ok || !reissued.data) {
             await release();
             return reissued.ok ? json({ error: 'not_pending' }, 404) : refusal(json, reissued.code);
         }
-        const recipient = await reserveRecipient(reissued.data.email);
-        if (recipient) {
-            return recipient;
+        if (reissued.data.kind === 'roster_refused') {
+            await release();
+            return rosterRefused();
         }
         return send(
-            reissued.data.email,
+            pending.data,
             inviteMessage({
                 inviterName: reissued.data.inviter_name,
                 title: reissued.data.title,
@@ -316,14 +340,7 @@ export const handleShareInvite = async (req: Request, deps: ShareInviteDeps): Pr
     }
     if (created.data.kind === 'roster_refused') {
         await release();
-        return json(
-            {
-                error: 'cannot_invite',
-                hint: 'assign',
-                message: 'This address can’t be invited here. If they’re your student, use Assign instead.',
-            },
-            403,
-        );
+        return rosterRefused();
     }
     const pending = created.data.kind === 'invite';
     return send(

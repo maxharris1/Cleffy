@@ -810,7 +810,7 @@ select public.share_invite_create(pg_temp.u(1), pg_temp.d(1), 'cancel.me@example
 select public.share_invite_create(pg_temp.u(1), pg_temp.d(1), 'expire.me@example.test', 'viewer', pg_temp.sha('tok-9'));
 select pg_temp.run('reissue', $q$public.share_invite_reissue(pg_temp.u(1), (select id from public.document_invites where email = 'cancel.me@example.test'), pg_temp.sha('tok-10'))$q$);
 select pg_temp.chk('193 resend gives a pending invite a new token and 14 more days', $q$
-    select pg_temp.out('reissue') ->> 'email' = 'cancel.me@example.test'
+    select pg_temp.out('reissue') ->> 'kind' = 'invite' and pg_temp.out('reissue') ->> 'email' = 'cancel.me@example.test'
        and (select token_hash = pg_temp.sha('tok-10') and expires_at = now() + interval '14 days' from public.document_invites where email = 'cancel.me@example.test')$q$);
 select pg_temp.run('cancel', $q$public.share_invite_cancel(pg_temp.u(1), (select id from public.document_invites where email = 'cancel.me@example.test'))$q$);
 select pg_temp.chk('194 cancel: the invite peeks cancelled and cannot be accepted', $q$
@@ -845,6 +845,60 @@ select pg_temp.chk('201 no client writes invites; anon reads nothing; the servic
          unnest(array['public.share_invite_create(uuid, uuid, text, text, bytea)', 'public.share_invite_reissue(uuid, uuid, bytea)',
                       'public.share_invite_cancel(uuid, uuid)', 'public.share_invite_peek(bytea)',
                       'public.share_invite_consume(bytea, uuid)']::regprocedure[]) f$q$);
+
+-- A direct invite outlasts the general link. d13 (owner 13) has a general
+-- viewer link; 5, 6 and 22 join through it. 22's address was invited before
+-- they had an account; 5 is invited after joining, as an existing account.
+insert into public.documents (id, owner_id, title, storage_path, page_count)
+values (pg_temp.d(13), pg_temp.u(13), 'Share v2 score 13', pg_temp.d(13)::text || '/original.pdf', 3);
+select pg_temp.as_user(13);
+select * from public.set_general_access(pg_temp.d(13), 'anyone', 'viewer', '7 days');
+select pg_temp.keep_link('d13', pg_temp.d(13));
+select pg_temp.as_service();
+select public.share_invite_create(pg_temp.u(13), pg_temp.d(13), 'late.joiner@example.test', 'editor', pg_temp.sha('tok-20'));
+select pg_temp.as_postgres();
+insert into auth.users (id, email, raw_user_meta_data, is_anonymous) values (pg_temp.u(22), 'late.joiner@example.test', '{}', false);
+select pg_temp.as_user(5);
+select * from public.redeem_share_link(pg_temp.link_token('d13'));
+select pg_temp.as_user(6);
+select * from public.redeem_share_link(pg_temp.link_token('d13'));
+select pg_temp.as_user(22);
+select * from public.redeem_share_link(pg_temp.link_token('d13'));
+select pg_temp.as_service();
+select pg_temp.run('direct_invite', $q$public.share_invite_create(pg_temp.u(13), pg_temp.d(13), 's2-5@sharev2.test', 'editor', pg_temp.sha('tok-21'))$q$);
+select pg_temp.run('late_accept', $q$public.share_invite_consume(pg_temp.sha('tok-20'), pg_temp.u(22))$q$);
+select pg_temp.as_postgres();
+select pg_temp.chk('202 setup: 5 (invited as an account) and 22 (a pending invite accepted) are editors; 6 is the link''s viewer', $q$
+    select pg_temp.out('direct_invite') ->> 'kind' = 'member' and pg_temp.out('late_accept') ->> 'ok' = 'true'
+       and pg_temp.member_role(pg_temp.d(13), pg_temp.u(5)) = 'editor' and pg_temp.member_role(pg_temp.d(13), pg_temp.u(22)) = 'editor'
+       and pg_temp.member_role(pg_temp.d(13), pg_temp.u(6)) = 'viewer'$q$);
+select pg_temp.chk('203 a direct invite, either way, ends the link''s record of the person', $q$
+    select (select array_agg(user_id) from public.share_link_redemptions where document_id = pg_temp.d(13)) = array[pg_temp.u(6)]$q$);
+select pg_temp.as_user(13);
+select * from public.set_general_access(pg_temp.d(13), 'restricted');
+select pg_temp.as_postgres();
+select pg_temp.chk('204 Restricted withdraws the link''s viewer and keeps both people invited directly', $q$
+    select pg_temp.member_role(pg_temp.d(13), pg_temp.u(6)) is null
+       and pg_temp.member_role(pg_temp.d(13), pg_temp.u(5)) = 'editor'
+       and pg_temp.member_role(pg_temp.d(13), pg_temp.u(22)) = 'editor'$q$);
+
+-- D7 after the invite went out: its address becomes another teacher's roster
+-- student (23, teacher 2) before the owner resends it or the student accepts.
+select pg_temp.as_service();
+select pg_temp.run('roster_late', $q$public.share_invite_create(pg_temp.u(1), pg_temp.d(1), 'late.student@example.test', 'editor', pg_temp.sha('tok-22'))$q$);
+select pg_temp.as_postgres();
+insert into auth.users (id, email, raw_app_meta_data, raw_user_meta_data, is_anonymous)
+values (pg_temp.u(23), 'late.student@example.test', '{"user_type":"student"}', '{}', false);
+insert into public.managed_students (id, teacher_id, student_user_id, display_name, auth_method, username, claimed_at, student_email)
+values (pg_temp.d(92), pg_temp.u(2), pg_temp.u(23), 'Late', 'code', 's2_late', now(), null);
+select pg_temp.as_service();
+select pg_temp.chk('205 resending it is refused as a roster student (D7), and the mailed token still stands', $q$
+    select public.share_invite_reissue(pg_temp.u(1), (pg_temp.out('roster_late') ->> 'invite_id')::uuid, pg_temp.sha('tok-23')) = '{"kind":"roster_refused"}'
+       and (select token_hash = pg_temp.sha('tok-22') from public.document_invites where email = 'late.student@example.test')$q$);
+select pg_temp.chk('206 ... and so is accepting it: no membership', $q$
+    select public.share_invite_consume(pg_temp.sha('tok-22'), pg_temp.u(23)) = '{"ok":false,"state":"roster_refused"}'
+       and pg_temp.member_role(pg_temp.d(1), pg_temp.u(23)) is null$q$);
+select pg_temp.as_postgres();
 
 -- ===========================================================================
 -- Retention
@@ -915,6 +969,26 @@ select pg_temp.refused('225 a link guest cannot become an account while the gate
 update auth.users set raw_user_meta_data = '{"age_gate":{"country":"US","min_age":13}}' where id = pg_temp.u(30);
 select pg_temp.chk('226 ... and can once the age screen''s gate is written first', $q$
     with s as (update auth.users set email = 'lg30@example.test', is_anonymous = false where id = pg_temp.u(30) returning is_anonymous)
+    select count(*) = 1 and not bool_or(is_anonymous) from s$q$);
+-- The marker is the guest's own user_metadata: a guest may remove or change
+-- it. Leaving anonymity takes a passing gate whatever it says (33 removed it,
+-- 34 altered it, 35 claims an age below consent; 36 is a regular guest).
+insert into auth.users (id, raw_user_meta_data, is_anonymous) values
+(pg_temp.u(33), '{"age_gate":null}', true),
+(pg_temp.u(34), '{"age_gate":{"source":"link_guest","v":3}}', true),
+(pg_temp.u(35), '{"age_gate":{"country":"DE","min_age":13,"source":"self","v":1}}', true),
+(pg_temp.u(36), '{"age_gate":{"country":"US","min_age":13,"source":"self","v":1}}', true);
+insert into public.guest_email_verifications (user_id, email, code_hash, expires_at, verified_email, verified_at)
+select pg_temp.u(n), 'lg' || n || '@example.test', 'x', now() + interval '10 minutes', 'lg' || n || '@example.test', clock_timestamp()
+from generate_series(33, 36) n;
+select pg_temp.refused('227 a guest whose gate was removed cannot become an account', $q$
+    update auth.users set email = 'lg33@example.test', is_anonymous = false where id = pg_temp.u(33)$q$, '42501');
+select pg_temp.refused('228 nor one whose link-guest gate was altered', $q$
+    update auth.users set email = 'lg34@example.test', is_anonymous = false where id = pg_temp.u(34)$q$, '42501');
+select pg_temp.refused('229 nor one whose gate is below the consent age', $q$
+    update auth.users set email = 'lg35@example.test', is_anonymous = false where id = pg_temp.u(35)$q$, '42501');
+select pg_temp.chk('229b a guest with a passing gate becomes an account', $q$
+    with s as (update auth.users set email = 'lg36@example.test', is_anonymous = false where id = pg_temp.u(36) returning is_anonymous)
     select count(*) = 1 and not bool_or(is_anonymous) from s$q$);
 
 -- ===========================================================================

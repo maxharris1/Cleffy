@@ -132,7 +132,9 @@ export const handleShareInviteAccept = async (req: Request, deps: ShareInviteAcc
               ? json({ ok: true, document_id: result.document_id })
               : result.state === 'email_mismatch'
                 ? json({ error: 'email_mismatch' }, 409)
-                : json({ state: result.state }, 410);
+                : result.state === 'roster_refused'
+                  ? json({ error: 'roster_refused' }, 403)
+                  : json({ state: result.state }, 410);
 
     const user = await deps.signedInUser(req);
     if (user) {

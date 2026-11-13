@@ -10,7 +10,8 @@
 --     accepting it creates the account (age screen and password) and attaches
 --     the membership in one step (D5).
 -- A roster student's address is refused unless the inviter is their teacher,
--- who should use Assign instead (D7).
+-- who should use Assign instead (D7), when the invite is sent, resent and
+-- accepted.
 --
 -- Every write goes through the service-role RPCs below, each starting with
 -- share_assert_owner for the caller; the Edge Function checks ownership under
@@ -84,14 +85,33 @@ $$;
 
 revoke all on function public.share_display_name (uuid) from public, anon, authenticated;
 
+-- D7: p_email (or p_user's account) is a roster student of a teacher other
+-- than p_inviter.
+create or replace function public.share_invite_roster_refused (p_email text, p_inviter uuid, p_user uuid default null) returns boolean language sql stable security definer
+set search_path = '' as $$
+    select exists (
+        select 1
+        from public.managed_students ms
+        left join auth.users su on su.id = ms.student_user_id
+        where (lower(ms.student_email) = p_email or lower(su.email) = p_email or ms.student_user_id = p_user)
+          and ms.teacher_id <> p_inviter
+    );
+$$;
+
+revoke all on function public.share_invite_roster_refused (text, uuid, uuid) from public, anon, authenticated;
+
 -- Give p_user the score as p_role, recorded as the owner's choice (a role
 -- lock), as set_document_member_role does. An existing owner row is never
 -- changed, and an existing editor is not lowered by a viewer invite. A roster
--- student's row is locked first, as redeem_share_link does.
+-- student's row is locked first, as redeem_share_link does. The person now
+-- has the score by invite, not through a link, so its redemption goes and
+-- Restricted no longer withdraws them.
 create or replace function public.share_invite_grant (p_document uuid, p_user uuid, p_role text) returns void language plpgsql security definer
 set search_path = public as $$
 begin
     perform public.lock_student_for_grant (p_user);
+    delete from public.share_link_redemptions r
+    where r.document_id = p_document and r.user_id = p_user;
     insert into public.document_members (document_id, user_id, role)
     values (p_document, p_user, p_role)
     on conflict (document_id, user_id) do update
@@ -160,13 +180,7 @@ begin
             using errcode = '22023', detail = json_build_object('code', 'invalid_email')::text;
     end if;
 
-    if exists (
-        select 1
-        from public.managed_students ms
-        left join auth.users su on su.id = ms.student_user_id
-        where (lower(ms.student_email) = v_email or lower(su.email) = v_email)
-          and ms.teacher_id <> p_caller
-    ) then
+    if public.share_invite_roster_refused (v_email, p_caller) then
         return jsonb_build_object('kind', 'roster_refused');
     end if;
 
@@ -211,7 +225,9 @@ revoke all on function public.share_invite_create (uuid, uuid, text, text, bytea
 grant execute on function public.share_invite_create (uuid, uuid, text, text, bytea) to service_role;
 
 -- Resend: a new token for a pending (or lapsed, never used or cancelled)
--- invite, good for another 14 days. Null when there is nothing to resend.
+-- invite, good for another 14 days. Null when there is nothing to resend;
+-- {kind:'roster_refused'}, the token unchanged, when the address has since
+-- become another teacher's roster student (D7).
 create or replace function public.share_invite_reissue (p_caller uuid, p_invite uuid, p_token_hash bytea) returns jsonb language plpgsql security definer
 set search_path = public as $$
 declare
@@ -225,12 +241,16 @@ begin
     if v_invite.accepted_at is not null or v_invite.revoked_at is not null then
         return null;
     end if;
+    if public.share_invite_roster_refused (v_invite.email, p_caller) then
+        return jsonb_build_object('kind', 'roster_refused');
+    end if;
 
     update public.document_invites i
     set token_hash = p_token_hash, expires_at = now() + interval '14 days'
     where i.id = p_invite;
 
     return jsonb_build_object(
+        'kind', 'invite',
         'invite_id', v_invite.id,
         'email', v_invite.email,
         'role', v_invite.role,
@@ -289,7 +309,8 @@ grant execute on function public.share_invite_peek (bytea) to service_role;
 
 -- Accept: p_user, whose address must be the invite's, gets the score. Answers
 -- {ok:true, document_id} or {ok:false, state} (state 'email_mismatch' for
--- another account). A pending invite is used once.
+-- another account, 'roster_refused' for another teacher's roster student, D7,
+-- asked with their roster row locked). A pending invite is used once.
 create or replace function public.share_invite_consume (p_token_hash bytea, p_user uuid) returns jsonb language plpgsql security definer
 set search_path = public as $$
 declare
@@ -306,6 +327,10 @@ begin
         where u.id = p_user and lower(u.email) = v_invite.email and not u.is_anonymous
     ) then
         return jsonb_build_object('ok', false, 'state', 'email_mismatch');
+    end if;
+    perform public.lock_student_for_grant (p_user);
+    if public.share_invite_roster_refused (v_invite.email, v_invite.invited_by, p_user) then
+        return jsonb_build_object('ok', false, 'state', 'roster_refused');
     end if;
 
     perform public.share_invite_grant (v_invite.document_id, p_user, v_invite.role);

@@ -220,9 +220,10 @@ insert into auth.users (id, aud, role, email, raw_app_meta_data, is_anonymous)
 values ('c1fa3000-0000-4000-8000-0000000000a2', 'authenticated', 'authenticated',
         'student-c1fa3000@students.example.invalid', '{"user_type":"student"}', false);
 
--- A share-link guest: anonymous, no address yet.
-insert into auth.users (id, aud, role, email, is_anonymous)
-values ('c1fa3000-0000-4000-8000-0000000000a3', 'authenticated', 'authenticated', null, true);
+-- A share-link guest: anonymous, no address yet, past the age screen.
+insert into auth.users (id, aud, role, email, is_anonymous, raw_user_meta_data)
+values ('c1fa3000-0000-4000-8000-0000000000a3', 'authenticated', 'authenticated', null, true,
+        '{"age_gate":{"country":"US","min_age":13,"source":"self","v":1}}');
 
 insert into auth.sessions (id, user_id)
 values

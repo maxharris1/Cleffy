@@ -133,20 +133,15 @@ select set_config('request.jwt.claims', '', true);
 -- ---- guard_guest_email: GoTrue cannot give a guest an unproven address
 -- 6-17 guests. Codes for 9-17 are sent; 11-17 are then checked 'ok' (as
 -- guest-email-confirm does) for the address named here; 13's proof is aged
--- past the 10-minute window. 9 and 10 never have theirs checked.
+-- past the 10-minute window. 9 and 10 never have theirs checked. Each guest
+-- carries the age gate the before_user_created hook let it in with.
 reset role;
-insert into auth.users (id, email, is_anonymous)
-select pg_temp.u(n), null, true from generate_series(6, 9) n;
-insert into auth.users (id, email, is_anonymous) values
-('9e5e1000-5ac0-4000-8000-000000000010', null, true),
-('9e5e1000-5ac0-4000-8000-000000000011', null, true),
-('9e5e1000-5ac0-4000-8000-000000000012', null, true),
-('9e5e1000-5ac0-4000-8000-000000000013', null, true),
-('9e5e1000-5ac0-4000-8000-000000000014', null, true),
-('9e5e1000-5ac0-4000-8000-000000000015', null, true),
-('9e5e1000-5ac0-4000-8000-000000000016', null, true),
-('9e5e1000-5ac0-4000-8000-000000000017', null, true),
-('9e5e1000-5ac0-4000-8000-000000000018', null, false);
+insert into auth.users (id, email, is_anonymous, raw_user_meta_data)
+select pg_temp.u(n), null, true, '{"age_gate":{"country":"US","min_age":13,"source":"self","v":1}}'
+from generate_series(6, 9) n;
+insert into auth.users (id, email, is_anonymous, raw_user_meta_data)
+select ('9e5e1000-5ac0-4000-8000-0000000000' || n)::uuid, null, n <> 18, '{"age_gate":{"country":"US","min_age":13,"source":"self","v":1}}'
+from generate_series(10, 18) n;
 create function pg_temp.g(n int) returns uuid language sql immutable as $f$ select ('9e5e1000-5ac0-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid $f$;
 grant execute on function pg_temp.g(int) to public;
 insert into public.guest_email_verifications (user_id, email, code_hash, expires_at)

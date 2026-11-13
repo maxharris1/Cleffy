@@ -46,6 +46,20 @@ Deno.serve((req) =>
                     const { data, error } = await userClient.rpc('share_owner_ready', { p_document: documentId });
                     return !error && data === true;
                 },
+                pendingInviteEmail: async (inviteId) => {
+                    const { data, error } = await userClient
+                        .from('document_invites')
+                        .select('email')
+                        .eq('id', inviteId)
+                        .is('accepted_at', null)
+                        .is('revoked_at', null)
+                        .maybeSingle();
+                    if (error) {
+                        console.error(`share-invite: invite lookup failed: ${error.code ?? ''} ${error.message}`);
+                        return { ok: false, code: error.code ?? null };
+                    }
+                    return { ok: true, data: (data as { email: string } | null)?.email ?? null };
+                },
             };
         },
         checkRateLimit,

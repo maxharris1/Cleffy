@@ -46,6 +46,7 @@ const harness = (
         owner?: boolean;
         create?: RpcResult<CreateResult>;
         reissue?: RpcResult<ReissueResult | null>;
+        pendingEmail?: RpcResult<string | null>;
         send?: 'sent' | 'rejected' | 'unknown';
         refuse?: string;
     } = {},
@@ -65,6 +66,10 @@ const harness = (
                   ownerReady: (doc) => {
                       calls.push(`owner:${doc}`);
                       return Promise.resolve(options.owner ?? true);
+                  },
+                  pendingInviteEmail: (inviteId) => {
+                      calls.push(`pending:${inviteId}`);
+                      return Promise.resolve(options.pendingEmail ?? { ok: true, data: 'ada@example.com' });
                   },
                   ...options.caller,
               };
@@ -105,6 +110,7 @@ const harness = (
                 options.reissue ?? {
                     ok: true,
                     data: {
+                        kind: 'invite',
                         invite_id: INVITE,
                         email: 'ada@example.com',
                         role: 'viewer',
@@ -227,7 +233,55 @@ Deno.test('resend mails a fresh token for a pending invite, and 404s when nothin
     const gone = harness({ reissue: { ok: true, data: null } });
     const missing = await handleShareInvite(post({ action: 'resend', document_id: DOC, invite_id: INVITE }), gone.deps);
     assert(missing.status === 404);
-    assert(gone.mail.length === 0 && gone.refunded.length === 2);
+    assert(gone.mail.length === 0 && gone.refunded.length === 3);
+
+    const notListed = harness({ pendingEmail: { ok: true, data: null } });
+    const unlisted = await handleShareInvite(
+        post({ action: 'resend', document_id: DOC, invite_id: INVITE }),
+        notListed.deps,
+    );
+    assert(unlisted.status === 404);
+    assert(!notListed.calls.includes('reissue') && notListed.mail.length === 0);
+});
+
+Deno.test('resend reserves the recipient allowance and the mail budget before the token changes', async () => {
+    const h = harness();
+    await handleShareInvite(post({ action: 'resend', document_id: DOC, invite_id: INVITE }), h.deps);
+    const reissueAt = h.calls.indexOf('reissue');
+    assert(h.calls.indexOf(`pending:${INVITE}`) < h.calls.indexOf('rate:share-invite:to'));
+    assert(h.calls.indexOf('rate:share-invite:to') < reissueAt);
+    assert(h.calls.indexOf('rate:mail:share-invite') < reissueAt);
+    assert(h.mail[0]?.to === 'ada@example.com');
+});
+
+Deno.test('a resend refused by an allowance is 429 and leaves the last mailed token working', async () => {
+    for (const refuse of ['share-invite:to:', 'mail:share-invite:hour', 'mail:share-invite:day']) {
+        const h = harness({ refuse });
+        const response = await handleShareInvite(
+            post({ action: 'resend', document_id: DOC, invite_id: INVITE }),
+            h.deps,
+        );
+        assert(response.status === 429, refuse);
+        assert(!h.calls.includes('reissue'), refuse);
+        assert(h.mail.length === 0, refuse);
+    }
+});
+
+Deno.test("a resend to an address that has since become another teacher's roster student is refused", async () => {
+    const h = harness({ reissue: { ok: true, data: { kind: 'roster_refused' } } });
+    const response = await handleShareInvite(post({ action: 'resend', document_id: DOC, invite_id: INVITE }), h.deps);
+    assert(response.status === 403);
+    const body = await response.json();
+    assert(body.error === 'cannot_invite' && body.hint === 'assign');
+    assert(h.mail.length === 0);
+    assert(h.refunded.length === h.reserved.filter((key) => !key.startsWith('share-invite:user:')).length);
+});
+
+Deno.test('a resend whose invite cannot be looked up is 503 and changes nothing', async () => {
+    const h = harness({ pendingEmail: { ok: false, code: null } });
+    const response = await handleShareInvite(post({ action: 'resend', document_id: DOC, invite_id: INVITE }), h.deps);
+    assert(response.status === 503);
+    assert(!h.calls.includes('reissue') && h.mail.length === 0);
 });
 
 Deno.test('cancel answers whether a pending invite was cancelled, and mails nothing', async () => {

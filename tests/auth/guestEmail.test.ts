@@ -582,6 +582,7 @@ const confirmHarness = (
         deletion?: 'clear' | 'pending' | 'unknown';
         /** The guest's current user_metadata.age_gate; null when it could not be read. */
         currentGate?: { gate: unknown } | null;
+        /** Set: age_gate_problem_for answers this for every gate (`unknown` when it cannot be asked). */
         ageProblem?: string | null;
         writeGate?: boolean;
     } = {},
@@ -614,9 +615,9 @@ const confirmHarness = (
         currentAgeGate: vi.fn(async () =>
             options.currentGate === undefined ? { gate: { country: 'US', min_age: 13 } } : options.currentGate,
         ),
-        ageGateProblem: vi.fn(async () => {
+        ageGateProblem: vi.fn(async (gate: unknown) => {
             calls.push('age');
-            return options.ageProblem === undefined ? null : options.ageProblem;
+            return options.ageProblem === undefined ? ageGateProblemOf(gate) : options.ageProblem;
         }),
         writeAgeGate: vi.fn(async (userId: string, gate: Record<string, unknown>) => {
             calls.push('write-gate');
@@ -625,6 +626,18 @@ const confirmHarness = (
         }),
     };
     return { deps, calls, checked, attached, gatesWritten };
+};
+
+/** age_gate_problem_for(..., false) for the gates these tests use (13 everywhere). */
+const ageGateProblemOf = (gate: unknown): string | null => {
+    if (!gate || typeof gate !== 'object' || Array.isArray(gate)) {
+        return 'age_check_missing';
+    }
+    const { country, min_age: minAge } = gate as Record<string, unknown>;
+    if (typeof country !== 'string' || !/^[A-Za-z]{2}$/.test(country) || typeof minAge !== 'number') {
+        return 'age_check_missing';
+    }
+    return minAge < 13 ? 'below_consent_age' : null;
 };
 
 const LINK_GUEST_GATE = { gate: { source: 'link_guest', v: 2 } };
@@ -764,22 +777,48 @@ describe('guest-email-confirm', () => {
     });
 });
 
-describe('guest-email-confirm for an editor-link guest (age_gate link_guest, #104)', () => {
-    it('refuses without an age answer, before the code is tried', async () => {
-        const h = confirmHarness({ currentGate: LINK_GUEST_GATE });
-        const response = await handleGuestEmailConfirm(post(goodConfirm), h.deps);
-        expect(response.status).toBe(400);
-        expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.ageCheckRequired);
-        expect(h.calls).not.toContain('check');
-        expect(h.attached).toEqual([]);
+// The guest's gate is their own user_metadata: they can remove or change it
+// (auth.updateUser), so none of these is taken as a past age check.
+const GATES_WITHOUT_A_PASS = [
+    ['the editor-link guest gate', LINK_GUEST_GATE],
+    ['no gate (removed)', { gate: undefined }],
+    ['a null gate', { gate: null }],
+    ['an altered link-guest gate', { gate: { source: 'link_guest', v: 3 } }],
+    ['a link-guest gate with an extra key', { gate: { source: 'link_guest', v: 2, x: 1 } }],
+    ['a gate below the consent age', { gate: { country: 'US', min_age: 10 } }],
+    ['a gate with no country', { gate: { min_age: 16 } }],
+] as const;
+
+describe('guest-email-confirm for a guest without a passing age gate (#104)', () => {
+    it.each(GATES_WITHOUT_A_PASS)(
+        '%s: refuses without an age answer, before the code is tried',
+        async (_, currentGate) => {
+            const h = confirmHarness({ currentGate });
+            const response = await handleGuestEmailConfirm(post(goodConfirm), h.deps);
+            expect(response.status).toBe(400);
+            expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.ageCheckRequired);
+            expect(h.calls).not.toContain('check');
+            expect(h.attached).toEqual([]);
+        },
+    );
+
+    it.each(GATES_WITHOUT_A_PASS)('%s: writes a passing answer before the attach', async (_, currentGate) => {
+        const h = confirmHarness({ currentGate });
+        const response = await handleGuestEmailConfirm(post({ ...goodConfirm, age_gate: AGE_ANSWER }), h.deps);
+        expect(response.status).toBe(200);
+        expect(h.gatesWritten).toEqual([{ userId: GUEST.userId, gate: AGE_ANSWER }]);
+        expect(h.calls.indexOf('write-gate')).toBeLessThan(h.calls.indexOf('attach'));
     });
 
     it('refuses an answer below the consent age, and one the check finds incomplete', async () => {
-        const young = confirmHarness({ currentGate: LINK_GUEST_GATE, ageProblem: 'below_consent_age' });
-        const refused = await handleGuestEmailConfirm(post({ ...goodConfirm, age_gate: AGE_ANSWER }), young.deps);
+        const young = confirmHarness({ currentGate: LINK_GUEST_GATE });
+        const refused = await handleGuestEmailConfirm(
+            post({ ...goodConfirm, age_gate: { country: 'US', min_age: 10 } }),
+            young.deps,
+        );
         expect(refused.status).toBe(403);
         expect(await refused.json()).toEqual(GUEST_EMAIL_ERRORS.belowConsentAge);
-        const incomplete = confirmHarness({ currentGate: LINK_GUEST_GATE, ageProblem: 'age_check_missing' });
+        const incomplete = confirmHarness({ currentGate: LINK_GUEST_GATE });
         expect((await handleGuestEmailConfirm(post({ ...goodConfirm, age_gate: {} }), incomplete.deps)).status).toBe(
             400,
         );
@@ -806,19 +845,17 @@ describe('guest-email-confirm for an editor-link guest (age_gate link_guest, #10
         const unread = confirmHarness({ currentGate: null });
         expect((await handleGuestEmailConfirm(post(goodConfirm), unread.deps)).status).toBe(503);
         expect(unread.attached).toEqual([]);
+        const unasked = confirmHarness({ ageProblem: 'unknown' });
+        expect((await handleGuestEmailConfirm(post(goodConfirm), unasked.deps)).status).toBe(503);
+        expect(unasked.attached).toEqual([]);
     });
 
-    it('changes nothing for any other guest: no age question, no gate written', async () => {
-        for (const currentGate of [
-            { gate: AGE_ANSWER },
-            { gate: undefined },
-            { gate: { source: 'link_guest', v: 2, x: 1 } },
-        ]) {
-            const h = confirmHarness({ currentGate });
-            expect((await handleGuestEmailConfirm(post(goodConfirm), h.deps)).status).toBe(200);
-            expect(h.calls).not.toContain('age');
-            expect(h.gatesWritten).toEqual([]);
-        }
+    it('asks no age question of a guest whose gate passes, and writes none', async () => {
+        const h = confirmHarness({ currentGate: { gate: AGE_ANSWER } });
+        expect((await handleGuestEmailConfirm(post({ ...goodConfirm, age_gate: { min_age: 1 } }), h.deps)).status).toBe(
+            200,
+        );
+        expect(h.gatesWritten).toEqual([]);
     });
 });
 

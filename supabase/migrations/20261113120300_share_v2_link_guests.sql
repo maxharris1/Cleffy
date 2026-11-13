@@ -5,10 +5,11 @@
 -- no age screen (Max, 2026-11-13). The app signs them in as an anonymous guest
 -- whose age gate is exactly {"source":"link_guest","v":2}. That gate is
 -- accepted only for an anonymous user, in the hook and in the auth.users
--- insert trigger alike; it never creates a registered account. Turning such a
--- guest into an account (guest-email-confirm) asks the age screen first: the
--- new gate must be written before is_anonymous is cleared, and the database
--- refuses the flip while the gate is still link_guest.
+-- insert trigger alike; it never creates a registered account. Turning any
+-- guest into an account (guest-email-confirm) takes a passing age gate: the
+-- gate is the guest's own user_metadata, which they can remove or change, so
+-- the database refuses to clear is_anonymous unless age_gate_problem passes,
+-- and guest-email-confirm asks the age screen first when it would not.
 --
 -- D8: idle link guests are deleted after a window each score owner sets (1 to
 -- 90 days, 30 by default). A guest on several owners' scores is kept until the
@@ -85,8 +86,8 @@ begin
 end;
 $$;
 
--- 20261010120200's guard, plus: a guest whose gate is still link_guest stays
--- a guest. guest-email-confirm writes the age screen's gate first.
+-- 20261010120200's guard, plus: a guest leaves anonymity only with a passing
+-- age gate. guest-email-confirm writes the age screen's gate first.
 create or replace function public.guard_guest_email () returns trigger language plpgsql security definer
 set search_path = '' as $$
 declare
@@ -99,8 +100,8 @@ begin
     if not (v_leaving or v_email_changes) or new.deleted_at is not null then
         return new;
     end if;
-    if v_leaving and new.raw_user_meta_data -> 'age_gate' ->> 'source' = 'link_guest' then
-        raise exception 'a link guest takes the age check before getting an account'
+    if v_leaving and public.age_gate_problem (coalesce(new.raw_user_meta_data, '{}'::jsonb)) is not null then
+        raise exception 'a guest takes the age check before getting an account'
             using errcode = '42501';
     end if;
     if not (old.is_anonymous or new.is_anonymous or strpos(v_upgrades, new.id::text) > 0) then

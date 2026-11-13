@@ -165,6 +165,16 @@ Deno.test('a signed-in account with another address is refused', async () => {
     assert(!h.calls.some((call) => call.startsWith('consume')));
 });
 
+Deno.test('a roster student of another teacher cannot accept, and is told so (D7)', async () => {
+    const h = harness({
+        user: { userId: 'u1', email: 'jane@example.com' },
+        consume: { ok: false, state: 'roster_refused' },
+    });
+    const response = await handleShareInviteAccept(post(accept()), h.deps);
+    assert(response.status === 403);
+    assert((await response.json()).error === 'roster_refused');
+});
+
 Deno.test('signed out, an address that already has an account must sign in', async () => {
     const h = harness({ taken: true });
     const response = await handleShareInviteAccept(post(accept()), h.deps);
