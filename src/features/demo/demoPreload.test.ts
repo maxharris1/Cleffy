@@ -28,6 +28,7 @@ beforeEach(() => {
     h.loadDemoScore.mockReset();
     h.viewerImported.mockReset();
     h.pageImported.mockReset();
+    window.sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -78,5 +79,45 @@ describe('preloadDemo', () => {
         const { preloadDemo } = await import('@/features/demo/demoPreload');
 
         await expect(preloadDemo()).resolves.toBeUndefined();
+    });
+
+    /**
+     * What Vite's preload helper does when a chunk is gone (lib/staleChunk.test):
+     * dispatch vite:preloadError on window with the error, then reject the
+     * import with that same error.
+     */
+    const viteImport = (error: Error) => () =>
+        Promise.resolve().then((): never => {
+            window.dispatchEvent(
+                Object.assign(new Event('vite:preloadError', { cancelable: true }), { payload: error }),
+            );
+            throw error;
+        });
+
+    it('does not reload the page when a chunk it warms is from an older build', async () => {
+        vi.useFakeTimers();
+        h.loadDemoScore.mockResolvedValue(new ArrayBuffer(8));
+        // Imported after resetModules, so the recovery shares demoPreload's
+        // copy of lib/staleChunk, as it does in the app (main.tsx).
+        const { installStaleChunkRecovery, resetStaleChunkStateForTests } = await import('@/lib/staleChunk');
+        const { preloadDemo, demoChunks } = await import('@/features/demo/demoPreload');
+        const stale = (name: string) =>
+            new TypeError(`Failed to fetch dynamically imported module: https://cleffy.io/assets/${name}-Dk3l2Qa1.js`);
+        const page = vi.spyOn(demoChunks, 'page').mockImplementation(viteImport(stale('DemoPage')));
+        const viewer = vi.spyOn(demoChunks, 'viewer').mockImplementation(viteImport(stale('DemoViewer')));
+        const reload = vi.fn();
+        const uninstall = installStaleChunkRecovery(window, reload);
+        try {
+            await expect(preloadDemo()).resolves.toBeUndefined();
+            await vi.runAllTimersAsync();
+
+            expect(page).toHaveBeenCalledTimes(1);
+            expect(viewer).toHaveBeenCalledTimes(1);
+            expect(reload).not.toHaveBeenCalled();
+        } finally {
+            uninstall();
+            resetStaleChunkStateForTests();
+            vi.useRealTimers();
+        }
     });
 });

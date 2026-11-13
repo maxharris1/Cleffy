@@ -173,7 +173,8 @@ const Nav = () => (
             {/* Students arrive here too, sent by a teacher, and their door is
                 not the one marked "Log in": it takes a username, not an
                 account. A phone has no room for it here, so there it moves
-                under the hero's buttons. */}
+                under the hero's buttons, and the hero's gaps are tighter on a
+                phone so it still shows on a 390 x 844 first screen. */}
             <Link to="/student" className={`hidden sm:inline-flex ${INK_LINK}`}>
                 Student sign in
             </Link>
@@ -197,7 +198,10 @@ const Hero = () => (
     <header className="ink-band">
         <div className="safe-landing-gutter mx-auto w-full max-w-6xl">
             <Nav />
-            <section aria-labelledby="hero-title" className="ink-hero-grid pt-5 pb-12 lg:pt-[72px] lg:pb-[104px]">
+            <section
+                aria-labelledby="hero-title"
+                className="ink-hero-grid pt-3 pb-12 sm:pt-5 lg:pt-[72px] lg:pb-[104px]"
+            >
                 <div className="ink-hero-copy">
                     <p
                         className="ink-rise-now flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 text-base font-semibold text-stone-300 sm:gap-x-3 sm:gap-y-1 sm:text-[19px]"
@@ -216,13 +220,13 @@ const Hero = () => (
                         <span className="block">Draw on</span> <em className="block">Für Elise.</em>
                     </h1>
                     <p
-                        className="ink-rise-now mt-[18px] text-lg leading-[1.45] text-stone-300 sm:mt-7 sm:text-[21px] sm:leading-normal"
+                        className="ink-rise-now mt-3.5 text-lg leading-[1.45] text-stone-300 sm:mt-7 sm:text-[21px] sm:leading-normal"
                         style={rise(2)}
                     >
                         Right now, in your browser. No account, no download.
                     </p>
                 </div>
-                <div className="ink-hero-score ink-rise-now mt-[26px] lg:mt-0" style={rise(3)}>
+                <div className="ink-hero-score ink-rise-now mt-5 sm:mt-[26px] lg:mt-0" style={rise(3)}>
                     <HeroDemo />
                     <div
                         aria-hidden="true"
@@ -245,7 +249,7 @@ const Hero = () => (
                         </span>
                     </div>
                 </div>
-                <div className="ink-hero-actions ink-rise-now mt-[18px] lg:mt-9" style={rise(3)}>
+                <div className="ink-hero-actions ink-rise-now mt-3 sm:mt-[18px] lg:mt-9" style={rise(3)}>
                     <div className={BUTTON_ROW}>
                         <TryLink className={TRY_BUTTON}>
                             <PenIcon />
@@ -255,10 +259,10 @@ const Hero = () => (
                     </div>
                     {/* Keep in sync with FREE_LIMITS.cloud_scores (billing/entitlementsService.ts)
                         and priceFor() (billing/pricing.ts). */}
-                    <p className="mt-3.5 text-center text-[13px] leading-normal text-stone-400 sm:mt-4 sm:text-left sm:text-sm">
+                    <p className="mt-2.5 text-center text-[13px] leading-normal text-stone-400 sm:mt-4 sm:text-left sm:text-sm">
                         Free for 3 cloud scores · plans from {priceLine()}
                     </p>
-                    <p className="mt-1.5 text-center sm:hidden">
+                    <p className="text-center sm:hidden">
                         <Link to="/student" className={`inline-flex ${INK_LINK}`}>
                             Student sign in
                         </Link>

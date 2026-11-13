@@ -2,8 +2,18 @@ import type { ReactNode } from 'react';
 import { Link, useLocation } from 'react-router';
 
 import { preloadDemo } from '@/features/demo/demoPreload';
-import { utmSearch } from '@/features/marketing/utmSearch';
+import { parseUtm } from '@/lib/attribution';
 import { track } from '@/lib/webEvents';
+
+/**
+ * The query to carry on to /try and /register: exactly the utm_ tags
+ * lib/attribution records for this page (parseUtm), and nothing else from the
+ * query string. '' when there are none.
+ */
+const utmQuery = (search: string): string => {
+    const query = new URLSearchParams(parseUtm(search) as Record<string, string>).toString();
+    return query ? `?${query}` : '';
+};
 
 const warmDemo = () => {
     void preloadDemo();
@@ -27,7 +37,7 @@ export const TryLink = ({
     const { search } = useLocation();
     return (
         <Link
-            to={`/try${utmSearch(search)}`}
+            to={`/try${utmQuery(search)}`}
             aria-label={ariaLabel}
             className={className}
             onPointerEnter={warmDemo}
@@ -46,7 +56,7 @@ export const TryLink = ({
 export const StartFreeLink = ({ className }: { className: string }) => {
     const { search } = useLocation();
     return (
-        <Link to={`/register${utmSearch(search)}`} onClick={() => track('signup_click')} className={className}>
+        <Link to={`/register${utmQuery(search)}`} onClick={() => track('signup_click')} className={className}>
             Start free
         </Link>
     );

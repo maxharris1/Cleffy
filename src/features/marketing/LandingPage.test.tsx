@@ -69,7 +69,7 @@ describe('LandingPage (cloud)', () => {
         const registerLinks = screen.getAllByRole('link', { name: 'Start free' });
         expect(registerLinks).toHaveLength(3);
         for (const link of registerLinks) {
-            expect(link).toHaveAttribute('href', '/register?utm_campaign=launch_v1&utm_source=newsletter');
+            expect(link).toHaveAttribute('href', '/register?utm_source=newsletter&utm_campaign=launch_v1');
         }
         expect(webEvents.track).not.toHaveBeenCalled();
 
@@ -90,6 +90,15 @@ describe('LandingPage (cloud)', () => {
         for (const link of links) {
             const href = link.getAttribute('href') ?? '';
             expect(href).toMatch(/^\/(register|try)\?utm_source=newsletter&utm_medium=email$/);
+        }
+    });
+
+    it('forwards the same utm_ tags that attribution records, even for a repeated key', () => {
+        // parseUtm reads the first value of a key and drops it when invalid;
+        // the links must not forward a later value attribution never stored.
+        renderLanding('/?utm_source=bad%20value&utm_source=newsletter&utm_medium=email&utm_medium=social');
+        for (const link of screen.getAllByRole('link', { name: /Start free|Try it now/ })) {
+            expect(link.getAttribute('href')).toMatch(/^\/(register|try)\?utm_medium=email$/);
         }
     });
 
