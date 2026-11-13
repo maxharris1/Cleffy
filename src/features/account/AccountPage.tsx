@@ -578,7 +578,10 @@ export const AccountPage = () => {
                         disabled={storage === null || nothingCached || clearBusy}
                         onClick={() => setClearOpen(true)}
                     >
-                        {clearBusy ? 'Removing…' : 'Remove downloaded scores'}
+                        <SwapLabel
+                            labels={{ idle: 'Remove downloaded scores', busy: 'Removing…' }}
+                            active={clearBusy ? 'busy' : 'idle'}
+                        />
                     </Button>
                     {clearedFlag ? (
                         <p role="status" className={CONFIRMATION}>

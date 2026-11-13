@@ -47,6 +47,8 @@
        exits are quicker than entrances. */
     --duration-ui: 180ms;
     --duration-exit: 150ms;
+    /* An opacity-only arrival or colour change: a cover, a status dot. */
+    --duration-fade: 200ms;
 }
 
 /*
@@ -796,12 +798,12 @@ body {
  * Toasts keep Sonner's own motion (ui/AppToaster). Under reduced motion Sonner
  * drops every transition, so a toast would pop in and out: keep the fade, drop
  * the travel. Transforms (which also lay the stack out) land at once, opacity
- * eases over 200ms. More specific than Sonner's own `transition: none
+ * eases over --duration-fade. More specific than Sonner's own `transition: none
  * !important`, so it wins.
  */
 @media (prefers-reduced-motion: reduce) {
     [data-sonner-toaster] [data-sonner-toast] {
-        transition: opacity 200ms ease !important;
+        transition: opacity var(--duration-fade) ease !important;
     }
 }
 
@@ -860,7 +862,7 @@ body {
  */
 .cover-fade {
     opacity: 0;
-    transition: opacity 200ms var(--ease-out);
+    transition: opacity var(--duration-fade) var(--ease-out);
 }
 
 .cover-fade[data-loaded] {

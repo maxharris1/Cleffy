@@ -9,6 +9,7 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
 import { toast } from '@/ui/toast';
 import { buttonClassName } from '@/ui/classNames';
@@ -227,7 +228,13 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                             Cancel
                         </Button>
                         <Button size="sm" onClick={() => void submit()} disabled={busy || pickedCount === 0}>
-                            {busy ? 'Assigning…' : pickedCount > 1 ? `Assign to ${pickedCount} students` : 'Assign'}
+                            <SwapLabel
+                                labels={{
+                                    idle: pickedCount > 1 ? `Assign to ${pickedCount} students` : 'Assign',
+                                    busy: 'Assigning…',
+                                }}
+                                active={busy ? 'busy' : 'idle'}
+                            />
                         </Button>
                     </div>
                 </>

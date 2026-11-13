@@ -13,6 +13,7 @@ import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 import { TextField } from '@/ui/TextField';
+import { SwapLabel } from '@/ui/SwapLabel';
 import { linkClassName } from '@/ui/classNames';
 
 /**
@@ -198,7 +199,7 @@ const CredentialEntry = () => {
                 </div>
                 <TurnstileField key={captchaRound} action="student-login" onToken={setCaptchaToken} />
                 <Button type="submit" disabled={busy} className="mt-4 w-full">
-                    {busy ? 'Opening…' : 'Open my music'}
+                    <SwapLabel labels={{ idle: 'Open my music', busy: 'Opening…' }} active={busy ? 'busy' : 'idle'} />
                 </Button>
                 {error ? (
                     <ErrorText key={`refusal-${refusals}`} className="mt-2.5">

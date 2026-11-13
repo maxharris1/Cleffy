@@ -280,7 +280,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                 </label>
             </div>
             <Button size="sm" disabled={busy} onClick={() => void create()} className="mt-2 w-full">
-                {busy ? 'Working…' : 'Create link & copy'}
+                <SwapLabel labels={{ idle: 'Create link & copy', busy: 'Working…' }} active={busy ? 'busy' : 'idle'} />
             </Button>
 
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}

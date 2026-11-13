@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -210,7 +210,10 @@ describe('StudentLoginPage', () => {
         await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
         await user.click(screen.getByRole('button', { name: 'Open my music' }));
 
-        expect(screen.getByRole('button', { name: 'Opening…' })).toBeDisabled();
+        const opening = screen.getByRole('button', { name: 'Opening…' });
+        expect(opening).toBeDisabled();
+        // Swapped in place (ui/SwapLabel): the idle label stays, hidden, holding the width.
+        expect(within(opening).getByText('Open my music')).toHaveAttribute('aria-hidden', 'true');
         expect(screen.getByLabelText('Username or email')).toBeDisabled();
         expect(screen.getByLabelText('Password')).toBeDisabled();
     });

@@ -415,6 +415,21 @@ describe('AccountPage', () => {
         expect(screen.getByText('No scores are downloaded to this device yet.')).toBeInTheDocument();
     });
 
+    it('swaps Remove downloaded scores for Removing… in place while it clears', async () => {
+        const user = userEvent.setup();
+        clearOfflineStorage.mockReturnValue(new Promise(() => undefined));
+        await renderSettled();
+
+        const remove = await screen.findByRole('button', { name: 'Remove downloaded scores' });
+        await waitFor(() => expect(remove).toBeEnabled());
+        await user.click(remove);
+        await user.click(await screen.findByRole('button', { name: 'Remove' }));
+
+        const removing = await screen.findByRole('button', { name: 'Removing…' });
+        expect(removing).toBeDisabled();
+        expect(within(removing).getByText('Remove downloaded scores')).toHaveAttribute('aria-hidden', 'true');
+    });
+
     it('drops the cached plan before signing out', async () => {
         const user = userEvent.setup();
         await renderSettled();

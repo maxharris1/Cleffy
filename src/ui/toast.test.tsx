@@ -102,7 +102,7 @@ describe('toast', () => {
         // Sonner's own reduced-motion rule is `transition: none !important` on
         // [data-sonner-toast]; this one is more specific, so it wins.
         expect(css).toMatch(
-            /@media \(prefers-reduced-motion: reduce\) \{\s*\[data-sonner-toaster\] \[data-sonner-toast\] \{\s*transition: opacity 200ms ease !important;/,
+            /@media \(prefers-reduced-motion: reduce\) \{\s*\[data-sonner-toaster\] \[data-sonner-toast\] \{\s*transition: opacity var\(--duration-fade\) ease !important;/,
         );
     });
 });

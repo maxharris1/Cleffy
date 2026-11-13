@@ -96,6 +96,18 @@ describe('ShareDialog for the owner', () => {
         await waitFor(() => expect(createShareLink).toHaveBeenCalledWith('doc-1', 'viewer', 'owner-1', '7d'));
     });
 
+    it('swaps Create link & copy for Working… in place while the link is made', async () => {
+        const user = userEvent.setup();
+        createShareLink.mockReturnValue(new Promise(() => undefined));
+        renderOwner();
+
+        await user.click(await screen.findByRole('button', { name: 'Create link & copy' }));
+
+        const working = await screen.findByRole('button', { name: 'Working…' });
+        expect(working).toBeDisabled();
+        expect(within(working).getByText('Create link & copy')).toHaveAttribute('aria-hidden', 'true');
+    });
+
     it('creates the link the owner picked', async () => {
         const user = userEvent.setup();
         createShareLink.mockResolvedValue(link('tok-new'));

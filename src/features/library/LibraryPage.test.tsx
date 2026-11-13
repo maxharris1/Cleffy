@@ -638,6 +638,36 @@ describe('LibraryPage', () => {
         expect(await screen.findByText('BWV 855')).toBeInTheDocument();
     });
 
+    it('swaps Save changes for Saving… in place while a rename saves', async () => {
+        const user = userEvent.setup();
+        renameDocument.mockReturnValue(new Promise(() => undefined));
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        await openScoreMenu(user, 0);
+        await user.click(await screen.findByRole('menuitem', { name: 'Rename' }));
+        await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+        const saving = await screen.findByRole('button', { name: 'Saving…' });
+        expect(saving).toBeDisabled();
+        expect(within(saving).getByText('Save changes')).toHaveAttribute('aria-hidden', 'true');
+    });
+
+    it('swaps the empty library’s Upload score caption in place while a score uploads', async () => {
+        mockBootstrap({ documents: [] });
+        outletContext.uploading = true;
+        try {
+            renderLibrary();
+            await screen.findByText('No scores yet');
+            const input = screen.getByLabelText('Uploading…', { selector: 'input' });
+            expect(input).toBeDisabled();
+            const caption = screen.getByText('Uploading…', { selector: '[data-swap-active]' });
+            expect(caption.parentElement).toHaveClass('swap-label');
+            expect(screen.getByText('Upload score', { selector: 'span' })).toHaveAttribute('aria-hidden', 'true');
+        } finally {
+            outletContext.uploading = false;
+        }
+    });
+
     it('deletes after confirmation', async () => {
         const user = userEvent.setup();
         deleteDocument.mockResolvedValue(undefined);

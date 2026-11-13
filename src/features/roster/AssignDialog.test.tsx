@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -106,6 +106,20 @@ describe('AssignDialog', () => {
         expect(ada).toBeDisabled();
         expect(screen.getByRole('checkbox', { name: /Bo Diddley/ })).toBeEnabled();
         expect(screen.getByText('Assigned')).toBeInTheDocument();
+    });
+
+    it('swaps the Assign label for Assigning… in place while it saves', async () => {
+        const user = userEvent.setup();
+        assignScore.mockReturnValue(new Promise(() => undefined));
+        renderDialog();
+
+        await user.click(await screen.findByRole('checkbox', { name: /Ada Lovelace/ }));
+        await user.click(screen.getByRole('checkbox', { name: /Bo Diddley/ }));
+        await user.click(screen.getByRole('button', { name: 'Assign to 2 students' }));
+
+        const assigning = await screen.findByRole('button', { name: 'Assigning…' });
+        expect(assigning).toBeDisabled();
+        expect(within(assigning).getByText('Assign to 2 students')).toHaveAttribute('aria-hidden', 'true');
     });
 
     it('assigns only the students who did not already have the score', async () => {
