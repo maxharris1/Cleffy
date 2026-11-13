@@ -28760,8 +28760,12 @@ revoke all on function public.peek_share_link (text) from public;
 grant execute on function public.peek_share_link (text) to anon;
 grant execute on function public.peek_share_link (text) to authenticated;
 
--- 20261022120200's redeem, unchanged but for the refusal's detail, which now
--- carries the link's state beside the code the client matches on.
+-- 20261022120200's redeem. The refusal's detail now carries the link's state
+-- beside the code the client matches on. The live link row is held FOR SHARE
+-- until commit, after the score row (deletion's order) and before the roster
+-- and membership rows. Revoke, Restricted, reset and a role change all update
+-- that row: they wait for a join in flight and then withdraw or demote it, or
+-- the join waits for them and reads the link as they left it.
 create or replace function public.redeem_share_link (p_token text) returns table (document_id uuid, granted_role text) language plpgsql security definer
 set search_path = public as $$
 #variable_conflict use_column
@@ -28775,11 +28779,17 @@ begin
         raise exception 'not authenticated' using errcode = '28000';
     end if;
 
+    perform 1
+    from public.documents d
+    where d.id = (select sl.document_id from public.share_links sl where sl.token = p_token)
+    for key share;
+
     select sl.document_id, sl.role into link
     from public.share_links sl
     where sl.token = p_token
       and sl.revoked_at is null
-      and (sl.expires_at is null or sl.expires_at > now());
+      and (sl.expires_at is null or sl.expires_at > now())
+    for share;
 
     if not found then
         raise exception 'invalid or expired share link'
