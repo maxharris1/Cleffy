@@ -40,6 +40,12 @@ jobs:
         timeout-minutes: 25
         steps:
             - uses: actions/checkout@v4
+            # Before anything else opens connections, so no outbound socket
+            # holds one of the stack's ports when `supabase start` publishes it.
+            - name: Reserve the stack's ports from the ephemeral range
+              run: |
+                  bash scripts/ci/reserve-supabase-ports.test.sh
+                  sudo bash scripts/ci/reserve-supabase-ports.sh supabase/config.toml
             - uses: actions/setup-node@v4
               with:
                   node-version: 22
