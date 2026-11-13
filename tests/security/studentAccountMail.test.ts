@@ -39,9 +39,9 @@ const limiter = () => {
 
 describe('the student account mail budget', () => {
     it('has a share of its own in the split, under the per-teacher and per-address limits', () => {
-        expect(mailLimit('studentAccountMail', 'hour')).toEqual({ limit: 6, windowMs: MAIL_WINDOW_MS.hour });
-        expect(mailLimit('studentAccountMail', 'day')).toEqual({ limit: 30, windowMs: MAIL_WINDOW_MS.day });
-        expect(STUDENT_ACCOUNT_MAIL_LIMITS.perTeacher.hour.limit).toBeLessThan(6);
+        expect(mailLimit('studentAccountMail', 'hour')).toEqual({ limit: 5, windowMs: MAIL_WINDOW_MS.hour });
+        expect(mailLimit('studentAccountMail', 'day')).toEqual({ limit: 25, windowMs: MAIL_WINDOW_MS.day });
+        expect(STUDENT_ACCOUNT_MAIL_LIMITS.perTeacher.hour.limit).toBeLessThan(5);
         expect(STUDENT_ACCOUNT_MAIL_LIMITS.perRecipient.hour.limit).toBeLessThan(
             STUDENT_ACCOUNT_MAIL_LIMITS.perTeacher.hour.limit,
         );

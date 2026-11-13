@@ -652,11 +652,12 @@ describe('resend-inbound: the mail budget', () => {
         expect(source).not.toContain('content-report-ack');
         expect(supportInboundBudgetKey('hour')).toBe('mail:support-inbound:hour');
         expect(supportInboundBudgetKey('day')).toBe('mail:support-inbound:day');
-        // Decision 51: inbound gets 8/35 of its own; acknowledgments keep 8/35.
-        expect(mailLimit('supportInbound', 'hour').limit).toBe(8);
-        expect(mailLimit('supportInbound', 'day').limit).toBe(35);
-        expect(mailLimit('contentReportAck', 'hour').limit).toBe(8);
-        expect(mailLimit('contentReportAck', 'day').limit).toBe(35);
+        // Decision 51: inbound gets a share of its own, separate from the
+        // acknowledgments'. Both gave 2/10 to Share v2 invites (#104).
+        expect(mailLimit('supportInbound', 'hour').limit).toBe(6);
+        expect(mailLimit('supportInbound', 'day').limit).toBe(25);
+        expect(mailLimit('contentReportAck', 'hour').limit).toBe(6);
+        expect(mailLimit('contentReportAck', 'day').limit).toBe(25);
     });
 
     it('a spent inbound budget defers inbound only: the retry run waits, nothing else is touched', async () => {

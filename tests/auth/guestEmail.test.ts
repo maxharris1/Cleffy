@@ -580,11 +580,16 @@ const confirmHarness = (
         /** guest_email_taken's answers, one per call (the last one repeats). */
         taken?: (boolean | null)[];
         deletion?: 'clear' | 'pending' | 'unknown';
+        /** The guest's current user_metadata.age_gate; null when it could not be read. */
+        currentGate?: { gate: unknown } | null;
+        ageProblem?: string | null;
+        writeGate?: boolean;
     } = {},
 ) => {
     const calls: string[] = [];
     const checked: { userId: string; email: string; codeHash: string }[] = [];
     const attached: { userId: string; email: string; password: string }[] = [];
+    const gatesWritten: { userId: string; gate: Record<string, unknown> }[] = [];
     const deps: GuestEmailConfirmDeps = {
         ...common(calls, options.caller, options.deletion),
         password: { passwordProblem, passwordProblemMessage },
@@ -606,9 +611,24 @@ const confirmHarness = (
         deletePending: vi.fn(async () => {
             calls.push('delete');
         }),
+        currentAgeGate: vi.fn(async () =>
+            options.currentGate === undefined ? { gate: { country: 'US', min_age: 13 } } : options.currentGate,
+        ),
+        ageGateProblem: vi.fn(async () => {
+            calls.push('age');
+            return options.ageProblem === undefined ? null : options.ageProblem;
+        }),
+        writeAgeGate: vi.fn(async (userId: string, gate: Record<string, unknown>) => {
+            calls.push('write-gate');
+            gatesWritten.push({ userId, gate });
+            return options.writeGate ?? true;
+        }),
     };
-    return { deps, calls, checked, attached };
+    return { deps, calls, checked, attached, gatesWritten };
 };
+
+const LINK_GUEST_GATE = { gate: { source: 'link_guest', v: 2 } };
+const AGE_ANSWER = { country: 'US', min_age: 13 };
 
 const goodConfirm = { email: 'Ada@Example.com', code: '482 913', password: 'Correct1horse ' };
 
@@ -740,6 +760,64 @@ describe('guest-email-confirm', () => {
             );
             expect((await handleGuestEmailConfirm(post(goodConfirm), h.deps)).status, blocked).toBe(429);
             expect(h.attached).toEqual([]);
+        }
+    });
+});
+
+describe('guest-email-confirm for an editor-link guest (age_gate link_guest, #104)', () => {
+    it('refuses without an age answer, before the code is tried', async () => {
+        const h = confirmHarness({ currentGate: LINK_GUEST_GATE });
+        const response = await handleGuestEmailConfirm(post(goodConfirm), h.deps);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.ageCheckRequired);
+        expect(h.calls).not.toContain('check');
+        expect(h.attached).toEqual([]);
+    });
+
+    it('refuses an answer below the consent age, and one the check finds incomplete', async () => {
+        const young = confirmHarness({ currentGate: LINK_GUEST_GATE, ageProblem: 'below_consent_age' });
+        const refused = await handleGuestEmailConfirm(post({ ...goodConfirm, age_gate: AGE_ANSWER }), young.deps);
+        expect(refused.status).toBe(403);
+        expect(await refused.json()).toEqual(GUEST_EMAIL_ERRORS.belowConsentAge);
+        const incomplete = confirmHarness({ currentGate: LINK_GUEST_GATE, ageProblem: 'age_check_missing' });
+        expect((await handleGuestEmailConfirm(post({ ...goodConfirm, age_gate: {} }), incomplete.deps)).status).toBe(
+            400,
+        );
+        for (const h of [young, incomplete]) {
+            expect(h.calls).not.toContain('check');
+            expect(h.attached).toEqual([]);
+        }
+    });
+
+    it('writes the new age gate before the attach clears is_anonymous', async () => {
+        const h = confirmHarness({ currentGate: LINK_GUEST_GATE });
+        const response = await handleGuestEmailConfirm(post({ ...goodConfirm, age_gate: AGE_ANSWER }), h.deps);
+        expect(response.status).toBe(200);
+        expect(h.gatesWritten).toEqual([{ userId: GUEST.userId, gate: AGE_ANSWER }]);
+        expect(h.calls.indexOf('age')).toBeLessThan(h.calls.indexOf('check'));
+        expect(h.calls.indexOf('write-gate')).toBeLessThan(h.calls.indexOf('attach'));
+    });
+
+    it('attaches nothing when the new gate could not be written, or the current one read', async () => {
+        const failed = confirmHarness({ currentGate: LINK_GUEST_GATE, writeGate: false });
+        const response = await handleGuestEmailConfirm(post({ ...goodConfirm, age_gate: AGE_ANSWER }), failed.deps);
+        expect(response.status).toBe(502);
+        expect(failed.attached).toEqual([]);
+        const unread = confirmHarness({ currentGate: null });
+        expect((await handleGuestEmailConfirm(post(goodConfirm), unread.deps)).status).toBe(503);
+        expect(unread.attached).toEqual([]);
+    });
+
+    it('changes nothing for any other guest: no age question, no gate written', async () => {
+        for (const currentGate of [
+            { gate: AGE_ANSWER },
+            { gate: undefined },
+            { gate: { source: 'link_guest', v: 2, x: 1 } },
+        ]) {
+            const h = confirmHarness({ currentGate });
+            expect((await handleGuestEmailConfirm(post(goodConfirm), h.deps)).status).toBe(200);
+            expect(h.calls).not.toContain('age');
+            expect(h.gatesWritten).toEqual([]);
         }
     });
 });

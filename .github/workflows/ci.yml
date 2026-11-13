@@ -243,3 +243,10 @@ jobs:
               run: deno check --config supabase/functions/deno.json supabase/functions/*/index.ts
             - name: Shared IMSLP cache Deno regression tests
               run: deno test --config supabase/functions/deno.json supabase/functions/_shared/imslpPdfCacheStore_test.ts
+            - name: Share v2 Edge Function Deno tests
+              run: >-
+                  deno test --config supabase/functions/deno.json
+                  supabase/functions/_shared/shareSession_test.ts
+                  supabase/functions/share-session/handler_test.ts
+                  supabase/functions/share-invite/handler_test.ts
+                  supabase/functions/share-invite-accept/handler_test.ts

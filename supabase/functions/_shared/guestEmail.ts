@@ -194,6 +194,9 @@ export const GUEST_EMAIL_ERRORS = {
     codeExpired: { error: 'That code has expired. Send a new one.', code: 'code_expired' },
     codeLocked: { error: 'Too many wrong codes. Send a new one.', code: 'code_locked' },
     attachFailed: { error: 'We couldn’t save your email. Try again.', code: 'attach_failed' },
+    /** A guest who joined through an editor link skipped the age screen, so it comes before the account. */
+    ageCheckRequired: { error: 'Answer the age question first, then try again.', code: 'age_check_required' },
+    belowConsentAge: { error: 'Sorry, you can’t create a Cleffy account.', code: 'below_consent_age' },
     /**
      * The account is being deleted (launch-fix item 16, decision 70(1)): a new
      * guest email verification is a user-originated write nothing requires,
@@ -337,7 +340,29 @@ export interface GuestEmailConfirmDeps extends CommonDeps {
     ) => Promise<'ok' | 'email_taken' | 'weak_password' | 'invalid_email' | 'failed'>;
     deletePending: (userId: string) => Promise<void>;
     password: Pick<typeof PasswordPolicy, 'passwordProblem' | 'passwordProblemMessage'>;
+    /** The guest's user_metadata.age_gate (`gate` undefined when there is none); null when it could not be read. */
+    currentAgeGate: (userId: string) => Promise<{ gate: unknown } | null>;
+    /** age_gate_problem_for({age_gate: gate}, false): null when it passes, `unknown` when it could not be asked. */
+    ageGateProblem: (gate: Record<string, unknown>) => Promise<string | null>;
+    /** Replace the guest's age_gate before the attach clears is_anonymous; false on failure. */
+    writeAgeGate: (userId: string, gate: Record<string, unknown>) => Promise<boolean>;
 }
+
+/** The gate an editor-link guest signs in with (20261113120300): it holds no age answer. */
+export const isLinkGuestAgeGate = (gate: unknown): boolean => {
+    if (!gate || typeof gate !== 'object' || Array.isArray(gate)) {
+        return false;
+    }
+    const keys = Object.keys(gate).sort();
+    const record = gate as Record<string, unknown>;
+    return (
+        keys.length === 2 &&
+        keys[0] === 'source' &&
+        keys[1] === 'v' &&
+        record['source'] === 'link_guest' &&
+        record['v'] === 2
+    );
+};
 
 const tooMany = (json: CommonDeps['json'], retryAfterSec: number): Response =>
     json(
@@ -644,6 +669,31 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
         return pendingConfirm;
     }
 
+    // The database refuses to clear is_anonymous while the gate is still
+    // link_guest; asked here first so a refusal spends none of the code's tries.
+    const current = await deps.currentAgeGate(userId);
+    if (!current) {
+        return json(GUEST_EMAIL_ERRORS.unavailable, 503);
+    }
+    let newAgeGate: Record<string, unknown> | null = null;
+    if (isLinkGuestAgeGate(current.gate)) {
+        const offered = body?.['age_gate'];
+        if (!offered || typeof offered !== 'object' || Array.isArray(offered)) {
+            return json(GUEST_EMAIL_ERRORS.ageCheckRequired, 400);
+        }
+        newAgeGate = offered as Record<string, unknown>;
+        const ageProblem = await deps.ageGateProblem(newAgeGate);
+        if (ageProblem === 'unknown') {
+            return json(GUEST_EMAIL_ERRORS.unavailable, 503);
+        }
+        if (ageProblem === 'below_consent_age') {
+            return json(GUEST_EMAIL_ERRORS.belowConsentAge, 403);
+        }
+        if (ageProblem !== null) {
+            return json(GUEST_EMAIL_ERRORS.ageCheckRequired, 400);
+        }
+    }
+
     const secret = deps.secret();
     if (!secret) {
         deps.logError('guest-email-confirm: no secret to hash codes with');
@@ -672,6 +722,10 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
     // Unknown (null) goes ahead: the attach itself cannot take a used address.
     if ((await deps.emailTaken(email)) === true) {
         return emailInUse();
+    }
+
+    if (newAgeGate && !(await deps.writeAgeGate(userId, newAgeGate))) {
+        return json(GUEST_EMAIL_ERRORS.attachFailed, 502);
     }
 
     const attached = await deps.attach(userId, email, password);
