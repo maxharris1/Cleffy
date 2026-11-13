@@ -4274,6 +4274,84 @@ At ~500 msg/s, one 10-person lesson where everyone draws at once already
 reaches Pro's limit; the realistic patterns in the table above fit ~20 such
 lessons at once.
 
+## Share v2 — off until Max turns it on
+
+Google-Docs-style sharing (#104 backend; the UI and the privacy docs follow in
+their own PRs). Everything ships inert: the four migrations
+(`20261113120000`-`20261113120300`) only add tables, columns, functions,
+policies and two retention jobs, and the three Edge Functions answer 404 until
+`SHARE_V2_ENABLED=1`. `VITE_FEATURE_SHARE_V2` replaces the retired
+`VITE_FEATURE_VIEW_LINKS` (PR #98 is not merged; its view links never existed
+on any project).
+
+**Switches.** Both default off; turn on the backend first.
+
+| Where                       | Name                    | Value                                                                       |
+| --------------------------- | ----------------------- | --------------------------------------------------------------------------- |
+| Edge secret                 | `SHARE_V2_ENABLED`      | `1` turns on `share-session`, `share-invite` and `share-invite-accept`      |
+| Vercel (Production/Preview) | `VITE_FEATURE_SHARE_V2` | `1` shows the new Share dialog (UI PR); also drives the legal text's switch |
+
+**Secrets** (`supabase secrets set …`, per project; never in the repo):
+
+- **The viewer token's signing key (D9), one of:**
+    - `SHARE_JWT_SECRET`: the project's legacy HS256 JWT secret (Dashboard →
+      Project Settings → JWT Keys → "Legacy JWT secret"). Use this while the
+      project still verifies with the shared secret.
+    - `SHARE_JWT_PRIVATE_JWK`: if the project has moved to asymmetric JWT
+      signing keys, create a standby ES256 (or RS256) key in Dashboard → JWT
+      Keys, import it so Supabase trusts it, and set its private JWK here
+      (with its `kid`). Only `share-session` reads it (R1).
+    - Check which one applies in Dashboard → JWT Keys before prod; the local
+      stack and today's projects are HS256.
+- `SHARE_VIEWER_CAP` (optional, default `40`): new signed-out viewers a link
+  admits per 10 minutes (D10). A viewer renewing its own token is not counted
+  again. Above the cap the page shows "busy, retry".
+- `SHARE_INVITE_SECRET` (optional): HMAC key for the per-recipient invite
+  limit; falls back to the service-role key.
+- `SHARE_INVITE_FROM` (optional, default `Cleffy <noreply@cleffy.io>`) and the
+  existing `APP_URL` (links in invite mail) and `RESEND_API_KEY`.
+
+**Mail budget.** `share-invite` takes 10/hour and 50/day out of
+`LAUNCH_MAIL_SPLIT` (guest codes 9/60, content-report acks 6/25, support
+inbound 6/25, student account mail 5/25); the total stays 60/300.
+
+**Cron jobs** (scheduled by `20261113120200`, nothing to do by hand):
+
+- `retention-share-links` at 03:53 UTC: links revoked or expired more than
+  30 days ago (their redemptions cascade; members keep the score).
+- `retention-share-invites` at 04:03 UTC: invites 30 days after they were
+  accepted, cancelled or expired.
+- `retention-stale-guests` (unchanged schedule) now deletes idle editor-link
+  guests after their score owners' window (D8: 1-90 days, default 30); every
+  other guest stays at 90 days.
+
+**Functions.** `share-session` and `share-invite-accept` take no JWT
+(`verify_jwt = false` in `supabase/config.toml`); `share-invite` does:
+
+```bash
+supabase functions deploy share-session --no-verify-jwt
+supabase functions deploy share-invite-accept --no-verify-jwt
+supabase functions deploy share-invite
+supabase functions deploy guest-email-confirm   # link-guest age step
+```
+
+**Rollout, by Max:**
+
+1. Merge `dev` → `main`. The migrations go out with the GitHub integration,
+   inert.
+2. Check Dashboard → JWT Keys and set the signing secret above, then
+   `SHARE_V2_ENABLED=1` on the `dev` project first.
+3. Deploy the four functions. Smoke-test on dev: open a viewer link signed out
+   (the score and live ink appear), restrict it (the page is cut off within
+   seconds), invite an address, accept the invite.
+4. When the UI PR has landed and counsel has answered (D11), set
+   `VITE_FEATURE_SHARE_V2=1` on Vercel and bump the Privacy Policy and
+   Children's Notice versions (D12).
+
+**Rollback.** Unset `VITE_FEATURE_SHARE_V2` and `SHARE_V2_ENABLED`. Optionally
+rotate the signing secret; outstanding viewer tokens die within 10 minutes
+anyway. The migrations can stay: with no general links, nothing reads them.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were both hard-reset and rebuilt from
