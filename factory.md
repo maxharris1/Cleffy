@@ -10,7 +10,10 @@ review:
     low: 1
     high: 3
   verify: none
-ship: handoff
+ship: merge
+hold:
+  approver: maxharris1
+  paths: ["src/**/*.tsx", "src/**/*.css", "src/ui/**", "src/assets/**", "public/**", "index.html"]
 skills: []
 ---
 
@@ -18,7 +21,7 @@ skills: []
 One reviewer from a different model family than the builder gives the final verdict. `review.verify` is `none`. The `ui-check` skill stays available for UI changes. Low-risk changes get one round; leftover minors are batched into a follow-up issue. High-risk changes get up to three rounds; every extra round needs Max's own words.
 
 ## Ship
-Temporary (Max 2026-11-12 8:28 PM ET: "switch Cleffy to wait for my OK on every merge until #86 lands"): `ship: handoff`. On APPROVE of the covered head with green CI, the factory marks the PR ready and stops; Max merges into `dev` or OKs the merge in his own words. Revert to `ship: merge` plus `hold.paths` for UI files once maxharris1/factory#86 lands. `dev` → `main` is Max's merge. Never push to `dev` or `main` directly.
+`ship: merge` with a UI hold (Max 2026-11-12 10:50 PM ET: "Yes, switch Cleffy back to ship: merge with the UI hold"; maxharris1/factory#86). On APPROVE of the covered head with green CI the factory merges into `dev`, except a PR whose diff touches a `hold.paths` glob or carries the `factory:hold` label: it waits in `orch:state/awaiting-ok` for maxharris1's `kind=ok head=<sha>` at the current head. `dev` → `main` is Max's merge. Never push to `dev` or `main` directly.
 
 ## Context
 - Risky areas: migrations, RLS, Edge Functions under `supabase/`, and billing/Stripe. Never apply migrations or change config on a hosted Supabase project from an agent session.
