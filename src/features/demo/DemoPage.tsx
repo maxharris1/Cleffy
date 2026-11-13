@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router';
 
 import { DEMO_DOC_ID } from '@/features/demo/demoScore';
+import { sendDemoVisitOnce } from '@/features/demo/demoVisit';
 import { DemoScoreUnavailableError, loadDemoScore } from '@/features/demo/loadDemoScore';
 import { getLocalDoc } from '@/lib/localDocs';
 import { isChunkLoadError, reloadForStaleChunk } from '@/lib/staleChunk';
@@ -45,9 +46,10 @@ const DemoLoading = () => (
 
 /**
  * /try: where the ads land. Straight into a score with the pen ready — no
- * account, no form, nothing sent anywhere. Public and ungated on purpose: a
- * signed-in teacher who taps an ad gets the demo too. The URL stays /try (and
- * keeps whatever UTM query it came with) for the whole visit.
+ * account, no form. The only thing sent is a first-party demo_visit count
+ * (never the score or the ink). Public and ungated on purpose: a signed-in
+ * teacher who taps an ad gets the demo too. The URL stays /try (and keeps
+ * whatever UTM query it came with) for the whole visit.
  */
 export const DemoPage = () => {
     // A return to /try in the same page load already has the bytes.
@@ -62,6 +64,10 @@ export const DemoPage = () => {
     const [viewerFailed, setViewerFailed] = useState(false);
     /** Bumped by Try again. */
     const [attempt, setAttempt] = useState(0);
+
+    useEffect(() => {
+        sendDemoVisitOnce();
+    }, []);
 
     useEffect(() => {
         const previous = document.title;

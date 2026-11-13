@@ -1,8 +1,11 @@
-import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { LandingPage } from '@/features/marketing/LandingPage';
+
+const webEvents = vi.hoisted(() => ({ track: vi.fn() }));
+vi.mock('@/lib/webEvents', () => webEvents);
 
 vi.mock('@/lib/supabase', () => ({
     isSupabaseConfigured: () => true,
@@ -24,6 +27,30 @@ afterEach(() => {
 });
 
 describe('LandingPage (cloud)', () => {
+    it('keeps the query on every Start free, and counts the click', () => {
+        webEvents.track.mockReset();
+        render(
+            <MemoryRouter initialEntries={['/?utm_campaign=launch_v1&utm_source=newsletter']}>
+                <Routes>
+                    <Route path="/" element={<LandingPage />} />
+                    <Route path="/register" element={<p>Sign-up page</p>} />
+                </Routes>
+            </MemoryRouter>,
+        );
+        const registerLinks = screen.getAllByRole('link', { name: 'Start free' });
+        expect(registerLinks).toHaveLength(3);
+        for (const link of registerLinks) {
+            expect(link).toHaveAttribute('href', '/register?utm_campaign=launch_v1&utm_source=newsletter');
+        }
+        expect(webEvents.track).not.toHaveBeenCalled();
+
+        fireEvent.click(registerLinks[1]!);
+
+        expect(screen.getByText('Sign-up page')).toBeInTheDocument();
+        expect(webEvents.track).toHaveBeenCalledTimes(1);
+        expect(webEvents.track).toHaveBeenCalledWith('signup_click');
+    });
+
     it('renders the hero with register and login links', () => {
         render(
             <MemoryRouter>

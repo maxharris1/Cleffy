@@ -1,4 +1,4 @@
-import { Link } from 'react-router';
+import { Link, useLocation } from 'react-router';
 
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { initialBillingCountry } from '@/features/billing/billingRegion';
@@ -9,6 +9,7 @@ import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { HeroDemo } from '@/features/marketing/HeroDemo';
 import { ProductShowcase } from '@/features/marketing/ProductShowcase';
 import { isSupabaseConfigured } from '@/lib/supabase';
+import { track } from '@/lib/webEvents';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 
 import { currencyForCountry } from '../../../supabase/functions/_shared/billingTerms';
@@ -60,6 +61,19 @@ const Footer = () => (
     </footer>
 );
 
+/**
+ * A Start free link: on to sign-up with the query this page arrived with (its
+ * UTM tags), counted as a first-party signup_click (lib/webEvents).
+ */
+const StartFreeLink = ({ className }: { className: string }) => {
+    const { search } = useLocation();
+    return (
+        <Link to={`/register${search}`} onClick={() => track('signup_click')} className={className}>
+            Start free
+        </Link>
+    );
+};
+
 /** Cloud landing: top bar, self-annotating hero, how-it-works, features, CTA. */
 const CloudLanding = () => (
     <main className="landing-page min-h-full">
@@ -80,9 +94,7 @@ const CloudLanding = () => (
                     <Link to="/login" className={buttonClassName('ghost', 'sm')}>
                         Log in
                     </Link>
-                    <Link to="/register" className={buttonClassName('primary', 'sm')}>
-                        Start free
-                    </Link>
+                    <StartFreeLink className={buttonClassName('primary', 'sm')} />
                 </div>
             </nav>
 
@@ -98,9 +110,7 @@ const CloudLanding = () => (
                     </p>
                     <div className="mx-auto mt-8 flex w-full max-w-sm flex-col items-center gap-4 lg:mx-0 lg:items-start">
                         <div className="flex flex-col items-center gap-2 lg:items-start">
-                            <Link to="/register" className={buttonClassName('primary')}>
-                                Start free
-                            </Link>
+                            <StartFreeLink className={buttonClassName('primary')} />
                             {/* Keep in sync with FREE_LIMITS.cloud_scores (billing/entitlementsService.ts)
                                 and priceFor() (billing/pricing.ts). */}
                             <p className="text-xs text-stone-500">
@@ -172,9 +182,7 @@ const CloudLanding = () => (
                     to tune.
                 </p>
                 <div className="mt-7 flex justify-center">
-                    <Link to="/register" className={buttonClassName('primary')}>
-                        Start free
-                    </Link>
+                    <StartFreeLink className={buttonClassName('primary')} />
                 </div>
             </section>
 

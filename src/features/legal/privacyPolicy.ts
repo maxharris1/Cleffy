@@ -138,6 +138,8 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'Our hosting providers record standard request logs (for example IP address, time and page requested).',
                     // src/lib/monitoring.
                     'If the app crashes, an error report may be sent to our error-monitoring provider. Reports are stripped of email addresses, sign-in tokens, the contents of your markings and web-address parameters before they leave your device, and identify you, if at all, only by an internal account number — never for a student account.',
+                    // src/lib/attribution.ts -> signup_attribution (20261112120000_web_events.sql).
+                    'If you arrive from a link that carries a campaign tag (for example utm_campaign=launch_v1), we keep the tag and save it with your account if you sign up.',
                 ),
             ],
         },
@@ -151,6 +153,9 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'To answer support requests and handle reports about content.',
                     'To keep Cleffy secure and working: preventing abuse, investigating problems and fixing errors.',
                     'To meet legal obligations, such as keeping billing and tax records and acting on notices about illegal content.',
+                    // src/lib/webEvents.ts -> web_events (20261112120000_web_events.sql);
+                    // dropped client- and server-side for students and guests.
+                    'To understand how Cleffy is used and which of our emails and campaigns bring people to it, we record which pages are opened and a few actions (such as opening the demo or signing up), in our own database. We do not record your IP address or browser details, and we do not do this for student accounts or guests.',
                 ),
                 p(
                     'We do not use your scores or markings to train artificial-intelligence models, and we do not sell your personal information or use it for advertising.',
@@ -233,6 +238,8 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'Offline copies of the scores you open, their markings, changes not yet synced, and a copy of your library and plan so the app opens quickly — in your browser’s IndexedDB storage.',
                     // *Prefs.ts.
                     'Display preferences, such as your library view and page layout, in local storage.',
+                    // cleffy:attribution (localStorage) and cleffy:web-session (sessionStorage).
+                    'A campaign tag from the link you arrived by, in local storage, for up to 30 days, and a random number for the current tab.',
                     // vite-plugin-pwa.
                     'The app itself, cached so it can start without a connection.',
                 ),
@@ -281,6 +288,8 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'Deleting a score removes its file, its preview images, its markings and its history.',
                     `Emails you send us are kept for 24 months after we receive them; you can ask us to delete yours sooner at ${emails.privacy}.`,
                     'Counters used to limit how often a feature can be used are cleared daily.',
+                    // retention-web-events (pg_cron, 20261112120000_web_events.sql).
+                    'Usage records are deleted after 13 months.',
                     // District retention (decisions item 1): contract_ends_at on the
                     // district billing record (mh/district-seats), purged by the
                     // retention job (mh/launch-consent); null never purges.

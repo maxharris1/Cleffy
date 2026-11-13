@@ -2,9 +2,11 @@ import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
 
 import type { AgeGate } from '@/features/auth/ageCheck';
+import { readAttribution } from '@/lib/attribution';
 import { perfMark } from '@/lib/perf';
 import { safePresenceName } from '@/lib/presenceName';
 import { getSupabase, type TypedSupabaseClient } from '@/lib/supabase';
+import { track } from '@/lib/webEvents';
 import { noteAccountSignedIn } from '@/sync/inkRecoverySignal';
 
 export interface SessionState {
@@ -134,12 +136,20 @@ export const signUpWithPassword = async (
         password,
         // age_gate is what the before_user_created hook checks
         // (20261021120000_consent_age.sql): country and the age it requires,
-        // never the birthday the age screen compared it with.
-        options: { emailRedirectTo: authCallbackUrl(), data: { age_gate: ageGate }, ...captchaOptions(captchaToken) },
+        // never the birthday the age screen compared it with. attribution is
+        // the first-touch campaign tags (lib/attribution), copied into
+        // signup_attribution by a trigger (20261112120000_web_events.sql);
+        // undefined, and so left out of the request, when there are none.
+        options: {
+            emailRedirectTo: authCallbackUrl(),
+            data: { age_gate: ageGate, attribution: readAttribution() ?? undefined },
+            ...captchaOptions(captchaToken),
+        },
     });
     if (error) {
         throw error;
     }
+    track('signup_completed');
     // When confirmations are enabled, session is null until the user clicks the email link.
     return { needsEmailConfirmation: !data.session };
 };
