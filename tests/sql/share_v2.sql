@@ -881,6 +881,21 @@ select pg_temp.chk('204 Restricted withdraws the link''s viewer and keeps both p
     select pg_temp.member_role(pg_temp.d(13), pg_temp.u(6)) is null
        and pg_temp.member_role(pg_temp.d(13), pg_temp.u(5)) = 'editor'
        and pg_temp.member_role(pg_temp.d(13), pg_temp.u(22)) = 'editor'$q$);
+-- The owner opens d13 again as an editor link; 21 joins as an editor and is
+-- then invited directly as a viewer: the owner's choice, not the link's role.
+select pg_temp.as_user(13);
+select * from public.set_general_access(pg_temp.d(13), 'anyone', 'editor', '7 days');
+select pg_temp.keep_link('d13_editor', pg_temp.d(13));
+select pg_temp.as_user(21);
+select * from public.redeem_share_link(pg_temp.link_token('d13_editor'));
+select pg_temp.as_service();
+select public.share_invite_create(pg_temp.u(13), pg_temp.d(13), 'someone.else@example.test', 'viewer', pg_temp.sha('tok-24'));
+select pg_temp.as_user(13);
+select * from public.set_general_access(pg_temp.d(13), 'restricted');
+select pg_temp.as_postgres();
+select pg_temp.chk('204b a link''s editor invited directly as a viewer is a viewer, and stays one after Restricted', $q$
+    select pg_temp.member_role(pg_temp.d(13), pg_temp.u(21)) = 'viewer'
+       and pg_temp.member_role(pg_temp.d(13), pg_temp.u(5)) = 'editor'$q$);
 
 -- D7 after the invite went out: its address becomes another teacher's roster
 -- student (23, teacher 2) before the owner resends it or the student accepts.

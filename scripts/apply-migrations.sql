@@ -29369,22 +29369,25 @@ revoke all on function public.share_invite_roster_refused (text, uuid, uuid) fro
 
 -- Give p_user the score as p_role, recorded as the owner's choice (a role
 -- lock), as set_document_member_role does. An existing owner row is never
--- changed, and an existing editor is not lowered by a viewer invite. A roster
--- student's row is locked first, as redeem_share_link does. The person now
--- has the score by invite, not through a link, so its redemption goes and
--- Restricted no longer withdraws them.
+-- changed. The person now has the score by invite, not through a link: its
+-- redemption goes, so Restricted no longer withdraws them, and a role the link
+-- gave yields to p_role; any other editor is not lowered by a viewer invite.
+-- A roster student's row is locked first, as redeem_share_link does.
 create or replace function public.share_invite_grant (p_document uuid, p_user uuid, p_role text) returns void language plpgsql security definer
 set search_path = public as $$
+declare
+    v_via_link boolean;
 begin
     perform public.lock_student_for_grant (p_user);
     delete from public.share_link_redemptions r
-    where r.document_id = p_document and r.user_id = p_user;
+    where r.document_id = p_document and r.user_id = p_user
+    returning true into v_via_link;
     insert into public.document_members (document_id, user_id, role)
     values (p_document, p_user, p_role)
     on conflict (document_id, user_id) do update
         set role = case
             when public.document_members.role = 'owner' then 'owner'
-            when public.document_members.role = 'editor' then 'editor'
+            when public.document_members.role = 'editor' and v_via_link is null then 'editor'
             else excluded.role
         end;
     if not exists (
