@@ -13,6 +13,23 @@ vi.mock('@/lib/features', () => ({ features: flags }));
 const REFUSAL_SUBTITLE = 'Cleffy accounts are for people who meet the minimum age where they live.';
 const REFUSAL_BODY = /^If your teacher uses Cleffy, ask them to show your score on their screen\.$/;
 
+/** Attributes that carry words a reader or a screen reader can meet, besides aria-*. */
+const WORDED_ATTRIBUTES = ['title', 'alt', 'placeholder', 'value', 'data-testid'];
+
+/**
+ * Every string on the page someone could read: its text, and each worded
+ * attribute as `name="value"`. Styling attributes (class, svg geometry) are
+ * left out, they are not copy.
+ */
+const readableStrings = (): string[] => [
+    document.body.textContent ?? '',
+    ...[...document.body.querySelectorAll('*')].flatMap((element) =>
+        [...element.attributes]
+            .filter(({ name }) => name.startsWith('aria-') || WORDED_ATTRIBUTES.includes(name))
+            .map(({ name, value }) => `${name}="${value}"`),
+    ),
+];
+
 afterEach(() => {
     cleanup();
     window.localStorage.clear();
@@ -101,16 +118,33 @@ describe('AgeScreen', () => {
         expect(screen.getByText(REFUSAL_SUBTITLE)).toBeInTheDocument();
     });
 
-    it.each(['register', 'join'] as const)('shows the same refusal, with no digit in it, for %s', async (purpose) => {
+    it.each(['register', 'join'] as const)('shows the same refusal for %s', async (purpose) => {
         renderScreen(purpose);
         await passAgeScreen('US', String(new Date().getFullYear() - 5));
         expect(screen.getByRole('heading', { level: 1, name: 'Sorry' })).toBeInTheDocument();
         expect(screen.getByText(REFUSAL_SUBTITLE)).toBeInTheDocument();
         expect(screen.getByText(REFUSAL_BODY)).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Back to home' })).toHaveAttribute('href', '/');
-        // No age, number or year: nothing on the refusal hints at what would pass.
-        expect(document.body.textContent).not.toMatch(/\d/);
         expect(document.body.textContent).not.toMatch(/view link/i);
+    });
+
+    it.each([
+        ['register', false],
+        ['join', false],
+        ['register', true],
+        ['join', true],
+    ] as const)('puts no digit in the refusal for %s, view links on: %s', async (purpose, viewLinks) => {
+        flags.viewLinks = viewLinks;
+        renderScreen(purpose);
+        await passAgeScreen('US', String(new Date().getFullYear() - 5));
+        expect(screen.getByRole('heading', { level: 1, name: 'Sorry' })).toBeInTheDocument();
+        // No age, number or year, in the text or in an attribute (aria-*, title,
+        // data-testid…): nothing on the refusal hints at what would pass.
+        const strings = readableStrings();
+        expect(strings.length).toBeGreaterThan(1);
+        for (const text of strings) {
+            expect(text).not.toMatch(/\d/);
+        }
     });
 
     it('offers a view link only when view links are switched on', async () => {
@@ -122,7 +156,6 @@ describe('AgeScreen', () => {
                 'If your teacher uses Cleffy, ask them to show your score on their screen or send you a view link.',
             ),
         ).toBeInTheDocument();
-        expect(document.body.textContent).not.toMatch(/\d/);
     });
 
     it('lets a 15-year-old through where the age is 13', async () => {

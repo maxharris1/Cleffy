@@ -8,6 +8,19 @@ import {
     LEGAL_VERSIONS as SERVER_LEGAL_VERSIONS,
 } from '../../../supabase/functions/_shared/legalVersions';
 
+/**
+ * The stamps as published, written out. The mirror check below only holds the
+ * two sides equal, so a bump made on both sides at once would slip past it;
+ * pinning the literals makes every bump a deliberate edit here too.
+ */
+const PUBLISHED_VERSIONS = {
+    privacy: '2026-10-20-draft',
+    children: '2026-11-12-draft',
+    terms: '2026-10-20-draft',
+    refunds: '2026-10-20-draft',
+    copyright: '2026-10-20-draft',
+};
+
 describe('LEGAL_VERSIONS', () => {
     it('covers each document, with a date, a page and a route', () => {
         expect(Object.keys(LEGAL_VERSIONS).sort()).toEqual([...LEGAL_DOCUMENT_IDS].sort());
@@ -32,5 +45,10 @@ describe('LEGAL_VERSIONS', () => {
             supportEmail: LEGAL_ENTITY.emails.support,
             website: LEGAL_ENTITY.website,
         });
+    });
+
+    it('is pinned to the published stamps, on both sides', () => {
+        expect(LEGAL_VERSIONS).toEqual(PUBLISHED_VERSIONS);
+        expect(SERVER_LEGAL_VERSIONS).toEqual(PUBLISHED_VERSIONS);
     });
 });
