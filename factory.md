@@ -10,7 +10,7 @@ review:
     low: 1
     high: 3
   verify: none
-ship: merge
+ship: handoff
 skills: []
 ---
 
@@ -18,7 +18,7 @@ skills: []
 One reviewer from a different model family than the builder gives the final verdict. `review.verify` is `none`. The `ui-check` skill stays available for UI changes. Low-risk changes get one round; leftover minors are batched into a follow-up issue. High-risk changes get up to three rounds; every extra round needs Max's own words.
 
 ## Ship
-`ship: merge` applies to PRs into `dev`. On APPROVE of the covered head, squash-merge with `--match-head-commit`, with green CI on that head. `dev` → `main` is Max's merge. Never push to `dev` or `main` directly.
+Temporary (Max 2026-11-12 8:28 PM ET: "switch Cleffy to wait for my OK on every merge until #86 lands"): `ship: handoff`. On APPROVE of the covered head with green CI, the factory marks the PR ready and stops; Max merges into `dev` or OKs the merge in his own words. Revert to `ship: merge` plus `hold.paths` for UI files once maxharris1/factory#86 lands. `dev` → `main` is Max's merge. Never push to `dev` or `main` directly.
 
 ## Context
 - Risky areas: migrations, RLS, Edge Functions under `supabase/`, and billing/Stripe. Never apply migrations or change config on a hosted Supabase project from an agent session.
