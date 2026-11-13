@@ -256,6 +256,83 @@ describe('the poll answer', () => {
         expect(text).not.toMatch(/created_by|createdBy|email|display_name|owner_id|storage_path/);
     });
 
+    it('sends an erased mark as {id, seq, deleted:true} only, whatever the lookup returned', async () => {
+        const rows = [
+            {
+                id: 'gone1',
+                page: 1,
+                kind: 'text',
+                color: '#f00',
+                payload: { x: 0.1, y: 0.1, size: 0.03, text: 'ERASED-SECRET' },
+                seq: 9,
+                deleted: true,
+            },
+            // No `deleted` at all: treated as erased, not as live.
+            { id: 'gone2', page: 0, kind: 'stroke', color: '#000', payload: { pts: [0, 0, 1], w: 0.01 }, seq: 10 },
+        ] as never[];
+        const d = deps({ poll: vi.fn(async () => ({ ...POLL, annotations: rows })) });
+        const res = await handleViewLink(post({ token: TOKEN }), d);
+        const body = (await res.json()) as { annotations: unknown[] };
+        expect(JSON.stringify(body)).not.toMatch(/ERASED-SECRET/);
+        expect(body.annotations).toEqual([
+            { id: 'gone1', seq: 9, deleted: true },
+            { id: 'gone2', seq: 10, deleted: true },
+        ]);
+    });
+
+    it('keeps only the payload keys the renderer draws with, per kind', async () => {
+        const rows = [
+            {
+                id: 't',
+                page: 0,
+                kind: 'text',
+                color: '#000',
+                payload: {
+                    x: 0.1,
+                    y: 0.2,
+                    size: 0.03,
+                    text: 'cresc.',
+                    hw: 1,
+                    font: 'serif',
+                    bold: 1,
+                    italic: 0,
+                    src: 1,
+                    sf: 1,
+                    note: 'PRIVATE-NOTE',
+                },
+                seq: 1,
+                deleted: false,
+            },
+            {
+                id: 's',
+                page: 0,
+                kind: 'highlight',
+                color: '#ff0',
+                payload: { pts: [0, 0, 1], w: 0.02, sp: 1, src: 1, note: { deep: 'PRIVATE-NOTE' } },
+                seq: 2,
+                deleted: false,
+            },
+            {
+                id: 'u',
+                page: 0,
+                kind: 'mystery',
+                color: '#000',
+                payload: { note: 'PRIVATE-NOTE' },
+                seq: 3,
+                deleted: false,
+            },
+        ] as never[];
+        const d = deps({ poll: vi.fn(async () => ({ ...POLL, annotations: rows })) });
+        const res = await handleViewLink(post({ token: TOKEN }), d);
+        const body = (await res.json()) as { annotations: { payload: unknown }[] };
+        expect(JSON.stringify(body)).not.toMatch(/PRIVATE-NOTE|"src"|"sf"/);
+        expect(body.annotations.map((a) => a.payload)).toEqual([
+            { x: 0.1, y: 0.2, size: 0.03, text: 'cresc.', hw: 1, font: 'serif', bold: 1, italic: 0 },
+            { pts: [0, 0, 1], w: 0.02, sp: 1 },
+            {},
+        ]);
+    });
+
     it('says direct when the PDF is over the proxy limit, or its size is unknown', async () => {
         for (const bytes of [VIEW_PDF_PROXY_MAX_DEFAULT + 1, null]) {
             const d = deps({ poll: vi.fn(async () => ({ ...POLL, pdf_bytes: bytes })) });

@@ -6,7 +6,7 @@ import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import type { Annotation, AnnotationPayload, PageSize } from '@/types/models';
 import type { ViewScoreProps } from '@/view/ViewApp';
-import type { ViewAnnotation } from '@/view/viewLinkClient';
+import type { ViewMark } from '@/view/viewLinkClient';
 
 /**
  * The read-only score for /v: pdf.js pages fitted to the width, each with an
@@ -18,7 +18,7 @@ import type { ViewAnnotation } from '@/view/viewLinkClient';
 /** Backing pixels per CSS pixel, capped: a phone at 3x would triple memory for no visible gain. */
 const MAX_DPR = 2;
 
-const toAnnotation = (mark: ViewAnnotation): Annotation => ({
+const toAnnotation = (mark: ViewMark): Annotation => ({
     id: mark.id,
     docId: '',
     page: mark.page,
@@ -39,7 +39,7 @@ export const ViewScore = ({ bytes, annotations }: ViewScoreProps) => (
     </PdfProvider>
 );
 
-const Pages = ({ annotations }: { annotations: readonly ViewAnnotation[] }) => {
+const Pages = ({ annotations }: { annotations: readonly ViewMark[] }) => {
     const { doc, pageSizes, status } = usePdf();
     const containerRef = useRef<HTMLDivElement | null>(null);
     const [width, setWidth] = useState(0);

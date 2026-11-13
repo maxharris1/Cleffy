@@ -18,6 +18,10 @@
  *   is one indistinguishable 410 {gone:true}.
  * - Never sends created_by, a name or an email: marks are rebuilt here from a
  *   fixed list of fields, whatever the database returned.
+ * - Never sends an erased mark's content: a tombstone goes out as
+ *   {id, seq, deleted:true} only. A live mark's payload keeps only the keys
+ *   the renderer draws with (VIEW_PAYLOAD_KEYS). view_mark_for_viewer in the
+ *   migration does the same; this is the second lock on the same door.
  */
 
 export const VIEW_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -43,15 +47,35 @@ export const VIEW_RATE_LIMIT = { limit: 60, windowMs: 60_000 } as const;
 /** Marks per poll answer; the viewer asks again at once while `more` is true. */
 export const VIEW_PAGE_SIZE = 500;
 
-export interface ViewAnnotationOut {
+/**
+ * The payload keys a viewer may see, per kind: what strokeRenderer.ts and
+ * musicFont.ts draw with. Provenance flags (src, sf) and any unknown key a
+ * payload may carry are dropped.
+ */
+export const VIEW_PAYLOAD_KEYS = {
+    stroke: ['pts', 'w', 'sp'],
+    highlight: ['pts', 'w', 'sp'],
+    text: ['x', 'y', 'size', 'text', 'hw', 'font', 'bold', 'italic'],
+} as const;
+
+export interface ViewMarkOut {
     id: string;
     page: number;
     kind: string;
     color: string;
-    payload: unknown;
+    payload: Record<string, unknown>;
     seq: number;
-    deleted: boolean;
+    deleted: false;
 }
+
+/** An erased mark: which one, and when. Nothing of what it was. */
+export interface ViewTombstoneOut {
+    id: string;
+    seq: number;
+    deleted: true;
+}
+
+export type ViewAnnotationOut = ViewMarkOut | ViewTombstoneOut;
 
 /** What view_link_poll returns (20261112130000_view_links.sql). */
 export interface ViewPollRow {
@@ -99,15 +123,35 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
     return Number.isInteger(n) && n > 0 ? n : fallback;
 };
 
-const pickAnnotation = (row: ViewAnnotationOut): ViewAnnotationOut => ({
-    id: String(row.id),
-    page: Number(row.page),
-    kind: String(row.kind),
-    color: String(row.color),
-    payload: row.payload,
-    seq: Number(row.seq),
-    deleted: row.deleted === true,
-});
+const pickPayload = (kind: string, payload: unknown): Record<string, unknown> => {
+    const keys: readonly string[] = VIEW_PAYLOAD_KEYS[kind as keyof typeof VIEW_PAYLOAD_KEYS] ?? [];
+    const source = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+    const out: Record<string, unknown> = {};
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) {
+            out[key] = source[key];
+        }
+    }
+    return out;
+};
+
+const pickAnnotation = (row: ViewAnnotationOut): ViewAnnotationOut => {
+    // Anything but an explicit `false` is treated as erased: when in doubt,
+    // send nothing of the mark.
+    if (row.deleted !== false) {
+        return { id: String(row.id), seq: Number(row.seq), deleted: true };
+    }
+    const kind = String(row.kind);
+    return {
+        id: String(row.id),
+        page: Number(row.page),
+        kind,
+        color: String(row.color),
+        payload: pickPayload(kind, row.payload),
+        seq: Number(row.seq),
+        deleted: false,
+    };
+};
 
 export const handleViewLink = async (req: Request, deps: ViewLinkDeps): Promise<Response> => {
     if (deps.env('VIEW_LINKS_ENABLED') !== '1') {

@@ -6,6 +6,8 @@ import { join, resolve } from 'node:path';
 import { build } from 'vite';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { expectDenylist } from './swDenylist';
+
 /**
  * Builds the app with the real vite.config.ts (both pages, the PWA, every
  * plugin) into a temporary directory, then reads what /v actually ships: the
@@ -98,9 +100,9 @@ describe('the service worker', () => {
         expect(sw()).toMatch(/"url":\s*"index\.html"/);
     });
 
-    it('never answers /v or /api/* with the app shell', () => {
-        const denylist = sw().match(/denylist:\s*\[([^\]]*)\]/)?.[1] ?? '';
-        expect(denylist).toContain('/^\\/v(\\/|$)/');
-        expect(denylist).toContain('/^\\/api\\//');
+    it('never answers /v, /v?…, /view.html or /api/* with the app shell, and still serves the app', () => {
+        // Workbox emits `new NavigationRoute(handler, { denylist: [...] })`.
+        const list = sw().match(/denylist:\s*\[[^\]]*\]/)?.[0] ?? '';
+        expectDenylist(list.replace(/^denylist/, 'navigateFallbackDenylist'));
     });
 });

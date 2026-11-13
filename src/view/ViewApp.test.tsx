@@ -18,15 +18,19 @@ const json = (body: unknown, status = 200) =>
 const pdf = (bytes: number[] = [0x25, 0x50]) =>
     new Response(new Uint8Array(bytes), { headers: { 'Content-Type': 'application/pdf' } });
 
-const mark = (id: string, seq: number, deleted = false): ViewAnnotation => ({
-    id,
-    page: 0,
-    kind: 'stroke',
-    color: '#000',
-    payload: { pts: [0, 0, 1], w: 0.01 },
-    seq,
-    deleted,
-});
+/** A live mark, or (deleted) the tombstone the server sends for it: id and seq only. */
+const mark = (id: string, seq: number, deleted = false): ViewAnnotation =>
+    deleted
+        ? { id, seq, deleted: true }
+        : {
+              id,
+              page: 0,
+              kind: 'stroke',
+              color: '#000',
+              payload: { pts: [0, 0, 1], w: 0.01 },
+              seq,
+              deleted: false,
+          };
 
 const poll = (annotations: ViewAnnotation[], maxSeq: number, extra: Record<string, unknown> = {}) =>
     json({ doc: { pages: 1, pdf_rev: 0 }, pdf: 'proxy', annotations, max_seq: maxSeq, more: false, ...extra });

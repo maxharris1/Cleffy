@@ -4,11 +4,13 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import { expectDenylist } from './swDenylist';
+
 /**
  * The wiring around view links that no unit can see: Vercel routing and
  * headers, the PWA's reach, the build inputs, the Edge Function's JWT setting,
- * one token format in three places, and the deploy notes for the three
- * switches.
+ * one token format in three places, and the deploy notes for the switches
+ * (two runtime switches gate serving; the build flag gates only the UI).
  */
 
 const read = (file: string) => readFileSync(resolve(process.cwd(), file), 'utf8');
@@ -75,12 +77,8 @@ describe('vite.config.ts', () => {
         expect(config).toMatch(/input:\s*\{[^}]*main:\s*[^,]*index\.html[^}]*view:\s*[^,]*view\.html/s);
     });
 
-    it('keeps the service worker away from /v and /api', () => {
-        expect(config).toContain('/^\\/v(\\/|$)/');
-        expect(config).toContain('/^\\/api\\//');
-        expect(config).toMatch(
-            /navigateFallbackDenylist:\s*\[[^\]]*\/\^\\\/v\(\\\/\|\$\)\/[^\]]*\/\^\\\/api\\\/\/[^\]]*\]/,
-        );
+    it('keeps the service worker away from /v, /v?…, /view.html and /api, and not from the app', () => {
+        expectDenylist(config);
     });
 
     it('precaches neither view.html nor the viewer chunks', () => {
@@ -123,7 +121,7 @@ describe('one token format', () => {
 describe('DEPLOY.md', () => {
     const deploy = read('DEPLOY.md');
 
-    it('documents the three switches and the proxy settings', () => {
+    it('documents the switches and the proxy settings', () => {
         for (const name of [
             'VITE_FEATURE_VIEW_LINKS',
             'VIEW_LINKS_ENABLED',

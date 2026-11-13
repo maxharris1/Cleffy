@@ -28165,10 +28165,12 @@ select cron.schedule ('retention-web-events', '13 5 * * *', $$select public.rete
 -- browser never talks to Supabase (bar the large-PDF fallback, a 60 s signed
 -- URL), and nothing about who opens a link is stored anywhere.
 --
--- Behind three switches, all off in production until counsel signs off
--- (DEPLOY.md, "View links"). This migration is inert on its own: no client can
--- reach a link's contents without the Edge Function, which refuses unless its
--- VIEW_LINKS_ENABLED secret is 1.
+-- Off in production until counsel signs off (DEPLOY.md, "View links"). Two
+-- runtime switches gate serving (VIEW_LINKS_ENABLED on Vercel and as the Edge
+-- Function secret); the build flag VITE_FEATURE_VIEW_LINKS gates only the UI.
+-- This migration is inert on its own: no client can reach a link's contents
+-- without the Edge Function, which refuses unless its VIEW_LINKS_ENABLED
+-- secret is 1.
 --
 --   * public.view_links: one row per link. The token is plaintext, like
 --     share_links.token, so the owner can copy it again. One active link per
@@ -28179,8 +28181,11 @@ select cron.schedule ('retention-web-events', '13 5 * * *', $$select public.rete
 --     roster student.
 --   * view_link_poll / view_link_pdf: service_role only, for the Edge
 --     Function. They answer only for an active, unexpired link on a live score,
---     and never return created_by, a name or an email.
---   * Retention: pg_cron deletes rows revoked or expired more than 30 days ago.
+--     and never return created_by, a name or an email. An erased mark goes out
+--     as {id, seq, deleted} only, and a live mark's payload keeps only the
+--     keys the renderer draws with (view_mark_for_viewer).
+--   * Retention: pg_cron deletes a row 30 days after it was revoked, or once
+--     it has expired, whichever comes first.
 --
 -- Sorts after 20261112120000_web_events.sql. Rerunnable: IF NOT EXISTS for the
 -- table and index, CREATE OR REPLACE for functions, policies dropped first, and
@@ -28377,10 +28382,64 @@ $$;
 
 revoke all on function public.view_link_document (text) from public, anon, authenticated;
 
--- The score and the marks with seq > p_since, oldest first, at most p_limit.
--- Each mark carries exactly id, page, kind, color, payload, seq and deleted
--- (tombstones included, so the viewer can drop an erased mark). `more` says
--- another page is waiting; max_seq is the watermark of what was sent.
+-- What a no-account viewer may see of one mark. A live mark is exactly id,
+-- page, kind, color, seq, deleted=false and a payload rebuilt from the keys the
+-- renderer draws with (strokeRenderer.ts / musicFont.ts): pts, w, sp for ink;
+-- x, y, size, text, hw, font, bold, italic for text. Anything else a payload
+-- holds -- provenance flags, or an unknown key annotation_payload_valid lets
+-- through -- is dropped. An erased mark is only {id, seq, deleted:true}:
+-- erasing keeps the row's content (deleted_at is set, the payload stays), and
+-- none of it may reach a viewer, not even one asking from since=0.
+create or replace function public.view_mark_for_viewer (
+    p_id uuid,
+    p_page integer,
+    p_kind text,
+    p_color text,
+    p_payload jsonb,
+    p_seq bigint,
+    p_deleted_at timestamptz
+) returns jsonb language sql immutable parallel safe
+set search_path = '' as $$
+    select case
+        when p_deleted_at is not null then
+            jsonb_build_object('id', p_id, 'seq', p_seq, 'deleted', true)
+        else
+            jsonb_build_object(
+                'id', p_id,
+                'page', p_page,
+                'kind', p_kind,
+                'color', p_color,
+                'payload', jsonb_strip_nulls(case
+                    when p_kind = 'text' then jsonb_build_object(
+                        'x', p_payload -> 'x',
+                        'y', p_payload -> 'y',
+                        'size', p_payload -> 'size',
+                        'text', p_payload -> 'text',
+                        'hw', p_payload -> 'hw',
+                        'font', p_payload -> 'font',
+                        'bold', p_payload -> 'bold',
+                        'italic', p_payload -> 'italic'
+                    )
+                    else jsonb_build_object(
+                        'pts', p_payload -> 'pts',
+                        'w', p_payload -> 'w',
+                        'sp', p_payload -> 'sp'
+                    )
+                end),
+                'seq', p_seq,
+                'deleted', false
+            )
+    end;
+$$;
+
+revoke all on function public.view_mark_for_viewer (uuid, integer, text, text, jsonb, bigint, timestamptz) from public, anon, authenticated;
+
+grant execute on function public.view_mark_for_viewer (uuid, integer, text, text, jsonb, bigint, timestamptz) to service_role;
+
+-- The score and the marks with seq > p_since, oldest first, at most p_limit,
+-- each shaped by view_mark_for_viewer (tombstones included, so the viewer can drop
+-- an erased mark). `more` says another page is waiting; max_seq is the
+-- watermark of what was sent.
 create or replace function public.view_link_poll (p_token text, p_since bigint, p_limit integer) returns jsonb language plpgsql stable security definer
 set search_path = '' as $$
 declare
@@ -28400,14 +28459,8 @@ begin
     end if;
 
     select
-        coalesce(jsonb_agg(jsonb_build_object(
-            'id', a.id,
-            'page', a.page,
-            'kind', a.kind,
-            'color', a.color,
-            'payload', a.payload,
-            'seq', a.seq,
-            'deleted', a.deleted_at is not null
+        coalesce(jsonb_agg(public.view_mark_for_viewer (
+            a.id, a.page, a.kind, a.color, a.payload, a.seq, a.deleted_at
         ) order by a.seq), '[]'::jsonb),
         count(*),
         max(a.seq)
@@ -28458,8 +28511,10 @@ grant execute on function public.view_link_poll (text, bigint, integer) to servi
 grant execute on function public.view_link_pdf (text) to service_role;
 
 -- ---------------------------------------------------------------------------
--- Retention: a dead link is kept 30 days (so an owner's "I revoked it" can be
--- checked), then deleted.
+-- Retention (docs/CHILDREN_DATA_RETENTION.md): a revoked link is kept 30 days
+-- (so an owner's "I revoked it" can be checked), then deleted; an expired link
+-- is deleted at the first run after it expires. The daily job means "at most
+-- a day late".
 -- ---------------------------------------------------------------------------
 create or replace function public.view_links_retention_purge () returns integer language plpgsql volatile security definer
 set search_path = '' as $$
@@ -28468,7 +28523,7 @@ declare
 begin
     delete from public.view_links
     where revoked_at < now() - interval '30 days'
-       or expires_at < now() - interval '30 days';
+       or expires_at <= now();
     get diagnostics v_deleted = row_count;
     return v_deleted;
 end;

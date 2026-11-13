@@ -7,15 +7,25 @@
 
 export const VIEW_ENDPOINT = '/api/view';
 
-export interface ViewAnnotation {
+/** A mark to draw. */
+export interface ViewMark {
     id: string;
     page: number;
     kind: 'stroke' | 'highlight' | 'text';
     color: string;
     payload: unknown;
     seq: number;
-    deleted: boolean;
+    deleted: false;
 }
+
+/** An erased mark: the server sends which one and when, nothing of what it was. */
+export interface ViewTombstone {
+    id: string;
+    seq: number;
+    deleted: true;
+}
+
+export type ViewAnnotation = ViewMark | ViewTombstone;
 
 export interface ViewPoll {
     doc: { pages: number | null; pdf_rev: number };
@@ -108,8 +118,11 @@ export const loadViewPdf = async (token: string, fetchImpl: FetchLike = defaultF
 };
 
 /**
- * Merge a poll's marks into what is shown, by seq: a newer version replaces
- * an older one, a tombstone removes the mark. Returns a new map.
+ * Merge a poll's marks into what is known, by seq: a newer version replaces
+ * an older one, and a tombstone replaces the mark it erased. Tombstones stay
+ * in the map (id and seq only, nothing to draw) so a row older than the
+ * erase can never bring the mark back. Returns a new map; visibleMarks()
+ * gives what to draw.
  */
 export const mergeAnnotations = (
     current: ReadonlyMap<string, ViewAnnotation>,
@@ -121,11 +134,11 @@ export const mergeAnnotations = (
         if (existing && existing.seq >= mark.seq) {
             continue;
         }
-        if (mark.deleted) {
-            next.delete(mark.id);
-        } else {
-            next.set(mark.id, mark);
-        }
+        next.set(mark.id, mark.deleted ? { id: mark.id, seq: mark.seq, deleted: true } : mark);
     }
     return next;
 };
+
+/** The marks to draw, oldest first: everything in the map but the tombstones. */
+export const visibleMarks = (known: ReadonlyMap<string, ViewAnnotation>): ViewMark[] =>
+    [...known.values()].filter((mark): mark is ViewMark => !mark.deleted).sort((a, b) => a.seq - b.seq);

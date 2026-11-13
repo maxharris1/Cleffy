@@ -4282,15 +4282,19 @@ it, a child with no account included, watches the score and its marks. Code:
 `api/view.ts` (the first Vercel Function), `view.html` + `src/view/`, and the
 "View link for students (no account)" section of the Share dialog.
 
-**Three switches. All must be on for a link to work. Production leaves all
-three unset until the lawyer has signed off** (`docs/LEGAL_REVIEW.md` §23).
-Max sets the dev/Preview values; no agent sets any of them.
+**Two runtime switches gate serving; the build flag gates only the UI.** A
+link is served only while both `VIEW_LINKS_ENABLED` switches are on, whatever
+the build flag says (a direct POST to `/api/view` with a valid token needs no
+UI). `VITE_FEATURE_VIEW_LINKS` only shows or hides the Share-dialog section,
+the view-link copy and the `/v` page. **Production leaves all three unset
+until the lawyer has signed off** (`docs/LEGAL_REVIEW.md` §23). Max sets the
+dev/Preview values; no agent sets any of them.
 
-| Switch                      | Where                                         | Off (default)                                                                                              |
-| --------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `VITE_FEATURE_VIEW_LINKS=1` | Vercel env, build time (Preview / `dev` only) | No Share-dialog section, no view-link clause on the age screen or in the notice; `/v` says "not available" |
-| `VIEW_LINKS_ENABLED=1`      | Vercel env, runtime (Preview / `dev` only)    | `/api/view` answers 404                                                                                    |
-| `VIEW_LINKS_ENABLED=1`      | Edge Function secret on the Supabase project  | `view-link` answers 404                                                                                    |
+| Switch                      | Gates   | Where                                         | Off (default)                                                                                              |
+| --------------------------- | ------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `VITE_FEATURE_VIEW_LINKS=1` | UI only | Vercel env, build time (Preview / `dev` only) | No Share-dialog section, no view-link clause on the age screen or in the notice; `/v` says "not available" |
+| `VIEW_LINKS_ENABLED=1`      | Serving | Vercel env, runtime (Preview / `dev` only)    | `/api/view` answers 404                                                                                    |
+| `VIEW_LINKS_ENABLED=1`      | Serving | Edge Function secret on the Supabase project  | `view-link` answers 404                                                                                    |
 
 The proxy also needs, on Vercel (Preview / `dev`):
 
@@ -4322,8 +4326,9 @@ score, token, dates). The rate limiter's `edge_rate_buckets` row is keyed
 request (IP included) under Vercel's retention; `api/view.ts` logs nothing.
 
 **Retention.** `retention-view-links` (pg_cron, 04:13 daily, scheduled by the
-migration) deletes links revoked or expired more than 30 days ago. Links
-expire 90 days after creation.
+migration) deletes a link 30 days after it was revoked, or at the first run
+after it expires, whichever comes first (`docs/CHILDREN_DATA_RETENTION.md`).
+Links expire 90 days after creation.
 
 **Rate limit.** 60 requests a minute per link, all viewers of that link
 together. The viewer polls every 2.5 s (24 a minute), so about two people can

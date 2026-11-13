@@ -36,13 +36,16 @@ const HEADING = 'View link for students (no account)';
 const COPY =
     'Shows this score live to anyone with the link. No account, nothing to type. Use it for students under 13 instead of an account.';
 
-const row = (token: string): ViewLinkRow => ({
+const DAY = 24 * 60 * 60 * 1000;
+
+/** An unrevoked row; live for another 30 days unless `expiresInMs` says otherwise. */
+const row = (token: string, expiresInMs = 30 * DAY): ViewLinkRow => ({
     id: 'vl-1',
     document_id: 'doc-1',
     created_by: 'owner-1',
     token,
-    created_at: '2026-11-12T00:00:00Z',
-    expires_at: '2027-02-10T00:00:00Z',
+    created_at: new Date(Date.now() + expiresInMs - 90 * DAY).toISOString(),
+    expires_at: new Date(Date.now() + expiresInMs).toISOString(),
     revoked_at: null,
 });
 
@@ -143,6 +146,26 @@ describe('with the switch on', () => {
         await user.click(within(dialog).getByRole('button', { name: 'Revoke link' }));
         expect(revokeViewLink).toHaveBeenCalledWith('doc-1');
         expect(await within(el).findByRole('button', { name: 'Create view link' })).toBeInTheDocument();
+    });
+
+    it('never shows or copies an expired link: it says the link expired and offers Create', async () => {
+        const user = userEvent.setup();
+        // Expired a second ago and not yet purged: the server answers 410 for it.
+        getViewLink.mockResolvedValue(row(TOKEN, -1000));
+        createViewLink.mockResolvedValue(NEW_TOKEN);
+        renderAs('owner');
+        const el = await section();
+        expect(await within(el).findByText(/expired/i)).toBeInTheDocument();
+        expect(within(el).queryByTitle(`${window.location.origin}/v#${TOKEN}`)).toBeNull();
+        expect(within(el).queryByText(new RegExp(TOKEN))).toBeNull();
+        expect(within(el).queryByRole('button', { name: 'Copy' })).toBeNull();
+        expect(within(el).queryByRole('button', { name: 'Rotate' })).toBeNull();
+        expect(within(el).queryByRole('button', { name: 'Revoke' })).toBeNull();
+        await user.click(within(el).getByRole('button', { name: 'Create view link' }));
+        expect(createViewLink).toHaveBeenCalledWith('doc-1');
+        expect(await navigator.clipboard.readText()).toBe(`${window.location.origin}/v#${NEW_TOKEN}`);
+        expect(await within(el).findByTitle(`${window.location.origin}/v#${NEW_TOKEN}`)).toBeInTheDocument();
+        expect(within(el).queryByText(/expired/i)).toBeNull();
     });
 
     it('says so when a call fails, and keeps the rest of the dialog working', async () => {

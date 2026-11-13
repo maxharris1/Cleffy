@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { VIEW_ENDPOINT, loadViewPdf, mergeAnnotations, pollView, type ViewAnnotation } from '@/view/viewLinkClient';
+import {
+    VIEW_ENDPOINT,
+    loadViewPdf,
+    mergeAnnotations,
+    pollView,
+    visibleMarks,
+    type ViewMark,
+    type ViewTombstone,
+} from '@/view/viewLinkClient';
 import { tokenFromHash, viewLinkUrl } from '@/view/viewToken';
 
 const TOKEN = 'T'.repeat(40) + '-_9';
@@ -8,7 +16,7 @@ const TOKEN = 'T'.repeat(40) + '-_9';
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 
-const mark = (id: string, seq: number, overrides: Partial<ViewAnnotation> = {}): ViewAnnotation => ({
+const mark = (id: string, seq: number, overrides: Partial<ViewMark> = {}): ViewMark => ({
     id,
     page: 0,
     kind: 'stroke',
@@ -18,6 +26,9 @@ const mark = (id: string, seq: number, overrides: Partial<ViewAnnotation> = {}):
     deleted: false,
     ...overrides,
 });
+
+/** What the server sends for an erased mark: id and seq, nothing else. */
+const tomb = (id: string, seq: number): ViewTombstone => ({ id, seq, deleted: true });
 
 describe('the token', () => {
     it('is read from the fragment only', () => {
@@ -141,20 +152,34 @@ describe('mergeAnnotations', () => {
     it('adds new marks and keeps the newest version of each by seq', () => {
         const start = mergeAnnotations(new Map(), [mark('a', 1), mark('b', 2)]);
         const next = mergeAnnotations(start, [mark('a', 5, { color: '#f00' }), mark('b', 1, { color: '#0f0' })]);
-        expect(next.get('a')?.color).toBe('#f00');
-        expect(next.get('b')?.color).toBe('#000');
-        expect(start.get('a')?.color).toBe('#000');
+        expect((next.get('a') as ViewMark | undefined)?.color).toBe('#f00');
+        expect((next.get('b') as ViewMark | undefined)?.color).toBe('#000');
+        expect((start.get('a') as ViewMark | undefined)?.color).toBe('#000');
     });
 
     it('removes a mark on its tombstone, and ignores a tombstone for one never seen', () => {
         const start = mergeAnnotations(new Map(), [mark('a', 1), mark('b', 2)]);
-        const next = mergeAnnotations(start, [mark('a', 3, { deleted: true }), mark('z', 4, { deleted: true })]);
-        expect([...next.keys()]).toEqual(['b']);
+        const next = mergeAnnotations(start, [tomb('a', 3), tomb('z', 4)]);
+        expect(visibleMarks(next).map((m) => m.id)).toEqual(['b']);
     });
 
     it('does not resurrect a mark from an older row after its tombstone', () => {
         const start = mergeAnnotations(new Map(), [mark('a', 1)]);
-        const erased = mergeAnnotations(start, [mark('a', 3, { deleted: true })]);
-        expect(erased.has('a')).toBe(false);
+        const erased = mergeAnnotations(start, [tomb('a', 3)]);
+        expect(visibleMarks(erased)).toEqual([]);
+        // The tombstone keeps its seq, and only that.
+        expect(erased.get('a')).toEqual({ id: 'a', seq: 3, deleted: true });
+        // A row older than the erase arrives afterwards (in the same poll or a
+        // later one): the mark stays gone.
+        const late = mergeAnnotations(erased, [mark('a', 2, { color: '#f00' })]);
+        expect(visibleMarks(late)).toEqual([]);
+        expect(late.get('a')).toEqual({ id: 'a', seq: 3, deleted: true });
+        // A newer version than the erase is a real edit and does come back.
+        expect(visibleMarks(mergeAnnotations(late, [mark('a', 4)])).map((m) => m.seq)).toEqual([4]);
+    });
+
+    it('lists visible marks oldest first, without tombstones', () => {
+        const known = mergeAnnotations(new Map(), [mark('c', 5), tomb('x', 2), mark('a', 1), mark('b', 3)]);
+        expect(visibleMarks(known).map((m) => m.id)).toEqual(['a', 'b', 'c']);
     });
 });

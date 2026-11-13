@@ -7,7 +7,10 @@
 --   * Archived and taken-down scores are refused.
 --   * The service-role reads behind the view-link Edge Function answer only for
 --     a live link on a live score, and never carry created_by.
---   * The retention job exists and deletes only rows dead for over 30 days.
+--   * An erased mark never comes back with its content, from any since; a
+--     live mark's payload keeps only the keys the renderer draws with.
+--   * The retention job exists and deletes rows revoked over 30 days ago or
+--     expired, and nothing else.
 --
 -- Runs inside one transaction and ROLLS BACK. Same harness and reading as
 -- tests/sql/share_link_errors.sql:
@@ -207,14 +210,70 @@ select pg_temp.chk('55 a page limit sets more and the watermark of what was sent
 select pg_temp.as_postgres();
 update public.annotations set deleted_at = now() where id = '71e300a0-0000-4000-8000-000000000001';
 select pg_temp.as_service();
-select pg_temp.chk('56 an erased mark comes back as a tombstone', $q$
+select pg_temp.chk('56 an erased mark comes back as a tombstone: exactly id, seq and deleted:true', $q$
     select a ->> 'deleted' = 'true'
+       and (select array_agg(k order by k) from jsonb_object_keys(a) k) = array['deleted', 'id', 'seq']
     from jsonb_array_elements(public.view_link_poll((select token from t_tok where step = 'after_revoke'),
         (select (body ->> 'max_seq')::bigint from t_poll where step = 'live'), 500) -> 'annotations') a
     where a ->> 'id' = '71e300a0-0000-4000-8000-000000000001'$q$);
 select pg_temp.chk('57 the pdf read gives the object and its size', $q$
     select storage_path = pg_temp.d(1)::text || '/original.pdf' and pdf_bytes = 1234567
     from public.view_link_pdf((select token from t_tok where step = 'after_revoke'))$q$);
+-- Erased content and unknown payload keys never reach a viewer, whatever
+-- `since` it asks from. Mark 5 is erased before anyone polls it; its text must
+-- not appear anywhere in a since=0 answer.
+select pg_temp.as_postgres();
+insert into public.annotations (id, document_id, page, kind, color, payload, created_by) values
+('71e300a0-0000-4000-8000-000000000003', pg_temp.d(1), 0, 'text', '#000',
+ '{"x":0.1,"y":0.2,"size":0.03,"text":"cresc.","hw":1,"bold":1,"italic":0,"font":"serif","src":1,"sf":1,"note":"PRIVATE-NOTE"}', pg_temp.u(1)),
+('71e300a0-0000-4000-8000-000000000004', pg_temp.d(1), 2, 'stroke', '#00f',
+ '{"pts":[0.5,0.5,1],"w":0.01,"sp":1,"src":1,"note":{"deep":"PRIVATE-NOTE"}}', pg_temp.u(1)),
+('71e300a0-0000-4000-8000-000000000005', pg_temp.d(1), 0, 'text', '#f00',
+ '{"x":0.3,"y":0.3,"size":0.03,"text":"ERASED-SECRET"}', pg_temp.u(1)),
+('71e300a0-0000-4000-8000-000000000006', pg_temp.d(1), 1, 'stroke', '#0f0',
+ '{"pts":[0.25,0.75,1],"w":0.02}', pg_temp.u(1));
+update public.annotations set deleted_at = now()
+where id in ('71e300a0-0000-4000-8000-000000000005', '71e300a0-0000-4000-8000-000000000006');
+select pg_temp.as_service();
+insert into t_poll select 'full', public.view_link_poll((select token from t_tok where step = 'after_revoke'), 0, 500);
+select pg_temp.chk('56a every erased mark, from since 0, is exactly {id, seq, deleted:true}', $q$
+    select count(*) = 3
+       and bool_and((select array_agg(k order by k) from jsonb_object_keys(a) k) = array['deleted', 'id', 'seq'])
+       and bool_and(a -> 'deleted' = 'true'::jsonb)
+    from t_poll, jsonb_array_elements(body -> 'annotations') a
+    where step = 'full' and a ->> 'id' in ('71e300a0-0000-4000-8000-000000000001',
+        '71e300a0-0000-4000-8000-000000000005', '71e300a0-0000-4000-8000-000000000006')$q$);
+select pg_temp.chk('56b erased content never comes back: no text, payload, kind, colour or page of an erased mark', $q$
+    select position('ERASED-SECRET' in body::text) = 0
+       and not exists (
+           select 1 from jsonb_array_elements(body -> 'annotations') a
+           where a -> 'deleted' = 'true'::jsonb and (a ? 'payload' or a ? 'kind' or a ? 'color' or a ? 'page'))
+    from t_poll where step = 'full'$q$);
+select pg_temp.chk('56c ... and not from a since just below the erased mark either', $q$
+    select position('ERASED-SECRET' in b::text) = 0 and jsonb_array_length(b -> 'annotations') > 0
+    from (select public.view_link_poll((select token from t_tok where step = 'after_revoke'),
+          (select seq - 1 from public.annotations where id = '71e300a0-0000-4000-8000-000000000005'), 500) as b) p$q$);
+select pg_temp.chk('56d no unknown or provenance payload key reaches the viewer, at any depth', $q$
+    select position('PRIVATE-NOTE' in body::text) = 0
+       and not exists (select 1 from pg_temp.all_keys(body) k where k in ('note', 'deep', 'src', 'sf'))
+    from t_poll where step = 'full'$q$);
+select pg_temp.chk('56e a text mark keeps exactly x, y, size, text, hw, font, bold, italic, unchanged', $q$
+    select a -> 'payload' = '{"x":0.1,"y":0.2,"size":0.03,"text":"cresc.","hw":1,"bold":1,"italic":0,"font":"serif"}'::jsonb
+       and a -> 'deleted' = 'false'::jsonb and a ->> 'kind' = 'text' and a ->> 'color' = '#000' and (a ->> 'page')::int = 0
+    from t_poll, jsonb_array_elements(body -> 'annotations') a
+    where step = 'full' and a ->> 'id' = '71e300a0-0000-4000-8000-000000000003'$q$);
+select pg_temp.chk('56f an ink mark keeps exactly pts, w, sp, unchanged; absent keys stay absent', $q$
+    select bool_and(case a ->> 'id'
+        when '71e300a0-0000-4000-8000-000000000004' then a -> 'payload' = '{"pts":[0.5,0.5,1],"w":0.01,"sp":1}'::jsonb
+        when '71e300a0-0000-4000-8000-000000000002' then a -> 'payload' = '{"pts":[0,0,1],"w":0.02}'::jsonb
+        end) and count(*) = 2
+    from t_poll, jsonb_array_elements(body -> 'annotations') a
+    where step = 'full' and a ->> 'id' in ('71e300a0-0000-4000-8000-000000000004', '71e300a0-0000-4000-8000-000000000002')$q$);
+select pg_temp.chk('56g live marks still carry exactly id, page, kind, color, payload, seq, deleted:false', $q$
+    select count(*) = 3
+       and bool_and((select array_agg(k order by k) from jsonb_object_keys(a) k) = array['color', 'deleted', 'id', 'kind', 'page', 'payload', 'seq'])
+    from t_poll, jsonb_array_elements(body -> 'annotations') a
+    where step = 'full' and a -> 'deleted' = 'false'::jsonb$q$);
 select pg_temp.chk('58 a revoked link answers null', $q$select public.view_link_poll((select token from t_tok where step = 'first'), 0, 500) is null$q$);
 select pg_temp.chk('59 a rotated-away link answers null', $q$select public.view_link_poll((select token from t_tok where step = 'rotated'), 0, 500) is null$q$);
 select pg_temp.chk('60 an unknown token answers null', $q$select public.view_link_poll(repeat('A', 43), 0, 500) is null$q$);
@@ -250,7 +309,8 @@ select pg_temp.chk('71 the Edge Function reads: service_role only', $q$
     select bool_and(has_function_privilege('service_role', f, 'execute')
                     and not has_function_privilege('anon', f, 'execute')
                     and not has_function_privilege('authenticated', f, 'execute'))
-    from unnest(array['public.view_link_poll(text, bigint, integer)'::regprocedure, 'public.view_link_pdf(text)'::regprocedure]) f$q$);
+    from unnest(array['public.view_link_poll(text, bigint, integer)'::regprocedure, 'public.view_link_pdf(text)'::regprocedure,
+                      'public.view_mark_for_viewer(uuid, integer, text, text, jsonb, bigint, timestamptz)'::regprocedure]) f$q$);
 select pg_temp.chk('72 all definer functions with an empty search_path', $q$
     select bool_and(prosecdef and proconfig @> array['search_path=""']) and count(*) = 6
     from pg_proc where oid in ('public.create_view_link(uuid)'::regprocedure, 'public.rotate_view_link(uuid)'::regprocedure,
@@ -271,8 +331,8 @@ select pg_temp.chk('81 the purge is not callable by clients', $q$
        and not has_function_privilege('authenticated', 'public.view_links_retention_purge()', 'execute')$q$);
 update public.view_links set revoked_at = now() - interval '31 days' where token = (select token from t_tok where step = 'first');
 update public.view_links set revoked_at = now() - interval '29 days' where token = (select token from t_tok where step = 'rotated');
-update public.view_links set expires_at = now() - interval '31 days' where token = (select token from t_tok where step = 'second_doc');
-select pg_temp.chk('82 the purge deletes rows revoked or expired over 30 days ago', $q$select public.view_links_retention_purge() = 2$q$);
+update public.view_links set expires_at = now() - interval '1 minute' where token = (select token from t_tok where step = 'second_doc');
+select pg_temp.chk('82 the purge deletes rows revoked over 30 days ago, and expired ones at once', $q$select public.view_links_retention_purge() = 2$q$);
 select pg_temp.chk('83 ... and keeps the rest', $q$
     select (select array_agg(token order by token) from public.view_links)
          = (select array_agg(token order by token) from t_tok where step in ('rotated', 'after_revoke'))$q$);

@@ -552,11 +552,15 @@ const VIEW_LINK_EXPLAINER =
  * One read-only link per score that needs no account: the way to share with
  * a student under 13. The owner creates and copies it, rotates it (the old
  * link stops working) or revokes it. Loads on its own, so a failure here never
- * hides the share links or the people above.
+ * hides the share links or the people above. An expired link (90 days, not yet
+ * purged) is never shown or copied: the server refuses it, so the section says
+ * it expired and offers Create, which replaces it.
  */
 const ViewLinkSection = ({ docId }: { docId: string }) => {
     /** undefined while loading; null when there is no active link. */
     const [token, setToken] = useState<string | null | undefined>(undefined);
+    /** The last link ran out (not revoked); shown until a new one is made. */
+    const [expired, setExpired] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [confirming, setConfirming] = useState<'rotate' | 'revoke' | null>(null);
@@ -567,7 +571,9 @@ const ViewLinkSection = ({ docId }: { docId: string }) => {
         getViewLink(docId)
             .then((row) => {
                 if (current) {
-                    setToken(row?.token ?? null);
+                    const dead = row !== null && isLinkExpired(row);
+                    setExpired(dead);
+                    setToken(row && !dead ? row.token : null);
                 }
             })
             .catch((err: unknown) => {
@@ -607,6 +613,7 @@ const ViewLinkSection = ({ docId }: { docId: string }) => {
         run(async () => {
             const next = await createViewLink(docId);
             setToken(next);
+            setExpired(false);
             await copy(next);
         }, 'Could not create the view link.');
 
@@ -631,15 +638,22 @@ const ViewLinkSection = ({ docId }: { docId: string }) => {
             {token === undefined ? (
                 <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
             ) : token === null || url === null ? (
-                <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => void create()}
-                    className="mt-2 w-full"
-                >
-                    {busy ? 'Working…' : 'Create view link'}
-                </Button>
+                <>
+                    {expired ? (
+                        <p className="mt-2 text-xs text-stone-500">
+                            The last view link expired and no longer works. Create a new one to share.
+                        </p>
+                    ) : null}
+                    <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={busy}
+                        onClick={() => void create()}
+                        className="mt-2 w-full"
+                    >
+                        {busy ? 'Working…' : 'Create view link'}
+                    </Button>
+                </>
             ) : (
                 <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 px-3 py-2">
                     <span className="min-w-0 flex-1 truncate text-xs text-stone-500" title={url}>

@@ -287,6 +287,7 @@ describe('view-link functions (20261112130000_view_links.sql)', () => {
         ['view_link_poll', 'text, bigint, integer'],
         ['view_link_pdf', 'text'],
         ['view_links_retention_purge', ''],
+        ['view_mark_for_viewer', 'uuid, integer, text, text, jsonb, bigint, timestamptz'],
     ])('%s: service_role only', (name, args) => {
         const sig = args
             .split(',')

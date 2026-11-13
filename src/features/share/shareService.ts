@@ -237,7 +237,11 @@ export const shareUrlFor = (token: string): string => {
 // Under-13 view links (behind features.viewLinks). Owner only, on a live
 // score; the server refuses everyone else (20261112130000_view_links.sql).
 
-/** The score's active view link, or null. RLS shows it to the owner only. */
+/**
+ * The score's unrevoked view link, or null. RLS shows it to the owner only.
+ * It may have expired (90 days) and not been purged yet; the server refuses
+ * an expired link, so check isLinkExpired before showing or copying it.
+ */
 export const getViewLink = async (docId: string): Promise<ViewLinkRow | null> => {
     const { data, error } = await getSupabase()
         .from('view_links')

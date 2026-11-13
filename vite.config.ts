@@ -365,9 +365,12 @@ export default defineConfig({
                 // fetched on first use and then kept, not precached.
                 globIgnores: ['**/fonts/BravuraText.woff2', ...GATED_CHUNK_IGNORES, ...VIEW_PRECACHE_IGNORES],
                 navigateFallback: '/index.html',
-                // /v is the under-13 viewer (its own page, never the app shell)
-                // and /api/* are Vercel Functions.
-                navigateFallbackDenylist: [/^\/auth\/callback/, /^\/v(\/|$)/, /^\/api\//],
+                // /v is the under-13 viewer (its own page, never the app shell),
+                // also reachable as /view.html, and /api/* are Vercel Functions.
+                // Workbox matches pathname + search (never the #token), so /v
+                // must stop at "/", "?" or the end: /v?x=1 is the viewer too,
+                // /video is not. tests/viewLinks/ check each URL.
+                navigateFallbackDenylist: [/^\/auth\/callback/, /^\/v(?:\/|\?|$)/, /^\/view\.html/, /^\/api\//],
                 maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
                 // Piano samples (~0.85 MB) are deliberately NOT precached — they
                 // load on first Play and then replay (and work offline) from here.

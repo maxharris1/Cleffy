@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState, type ComponentType } from 'react';
 
 import { ViewScore } from '@/view/ViewScore';
-import { loadViewPdf, mergeAnnotations, pollView, type ViewAnnotation } from '@/view/viewLinkClient';
+import {
+    loadViewPdf,
+    mergeAnnotations,
+    pollView,
+    visibleMarks,
+    type ViewAnnotation,
+    type ViewMark,
+} from '@/view/viewLinkClient';
 
 /**
  * The /v page: a score shown read-only through an under-13 view link.
@@ -14,7 +21,7 @@ import { loadViewPdf, mergeAnnotations, pollView, type ViewAnnotation } from '@/
 
 export interface ViewScoreProps {
     bytes: ArrayBuffer;
-    annotations: readonly ViewAnnotation[];
+    annotations: readonly ViewMark[];
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -34,14 +41,12 @@ export const VIEW_POLL_MS = 2500;
 
 type Phase = 'loading' | 'ready' | 'gone' | 'unavailable';
 
-const bySeq = (a: ViewAnnotation, b: ViewAnnotation) => a.seq - b.seq;
-
 export const ViewApp = ({ token, enabled, fetchImpl, Score = ViewScore, pollMs = VIEW_POLL_MS }: ViewAppProps) => {
     const active = enabled && token !== null;
     const [phase, setPhase] = useState<Phase>(active ? 'loading' : 'unavailable');
     const [offline, setOffline] = useState(false);
     const [bytes, setBytes] = useState<ArrayBuffer | null>(null);
-    const [marks, setMarks] = useState<readonly ViewAnnotation[]>([]);
+    const [marks, setMarks] = useState<readonly ViewMark[]>([]);
     const retryNow = useRef<() => void>(() => undefined);
 
     useEffect(() => {
@@ -110,7 +115,7 @@ export const ViewApp = ({ token, enabled, fetchImpl, Score = ViewScore, pollMs =
             }
             shown = mergeAnnotations(shown, poll.annotations);
             since = poll.max_seq;
-            setMarks([...shown.values()].sort(bySeq));
+            setMarks(visibleMarks(shown));
             setOffline(false);
             setPhase('ready');
             schedule(poll.more ? 0 : pollMs);
