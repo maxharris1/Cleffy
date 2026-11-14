@@ -4,7 +4,9 @@ import { useEffect, useState } from 'react';
 import type { AgeGate } from '@/features/auth/ageCheck';
 import { readAttribution } from '@/lib/attribution';
 import { perfMark } from '@/lib/perf';
-import { safePresenceName } from '@/lib/presenceName';
+import { anonymousName } from '@/features/share/anonymousAnimals';
+import { features } from '@/lib/features';
+import { chosenPresenceName, safePresenceName } from '@/lib/presenceName';
 import { getSupabase, type TypedSupabaseClient } from '@/lib/supabase';
 import { track } from '@/lib/webEvents';
 import { noteAccountSignedIn } from '@/sync/inkRecoverySignal';
@@ -628,8 +630,18 @@ export const clearAccountCachesFromDevice = async ({
  * The name this account announces in a score's presence bar: its display name,
  * else "Guest" / "Collaborator" — never its email (src/lib/presenceName.ts).
  */
-export const presenceNameOf = (session: Session | null): string =>
-    safePresenceName(storedDisplayNameOf(session), Boolean(session?.user.is_anonymous));
+export const presenceNameOf = (session: Session | null): string => {
+    const isAnonymous = Boolean(session?.user.is_anonymous);
+    const chosen = chosenPresenceName(storedDisplayNameOf(session));
+    if (chosen) {
+        return chosen;
+    }
+    // Share v2: a link guest who left the name blank is "Anonymous <animal>".
+    if (features.shareV2 && isAnonymous && session) {
+        return anonymousName(session.user.id);
+    }
+    return safePresenceName(null, isAnonymous);
+};
 
 /**
  * This account's own label (top bar, account page): metadata name, else email,

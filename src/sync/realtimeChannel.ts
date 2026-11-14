@@ -4,6 +4,9 @@ import { safePresenceName } from '@/lib/presenceName';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import {
     INK_PROGRESS_EVENT,
+    LINK_VIEW_MARK_EVENT,
+    parseLinkViewMark,
+    type LinkViewMark,
     MEMBERSHIP_EVENT,
     SCORE_ANALYSIS_EVENT,
     TOPIC_ROTATED_EVENT,
@@ -118,8 +121,8 @@ export const epochRetryDelayMs = (attempt: number, random: () => number = Math.r
  */
 export const ROTATION_JITTER_MAX_MS = 2000;
 
-export const rotationJitterMs = (random: () => number = Math.random): number =>
-    Math.round(random() * ROTATION_JITTER_MAX_MS);
+export const rotationJitterMs = (random: () => number = Math.random, maxMs = ROTATION_JITTER_MAX_MS): number =>
+    Math.round(random() * maxMs);
 
 /**
  * How often an open score that is archived asks whether it has been restored
@@ -213,6 +216,18 @@ export interface DocRealtimeChannelOptions {
      * 'failed'. Absent: always generation 0.
      */
     fetchTopicEpoch?: () => Promise<TopicEpochRead>;
+    /**
+     * The receive-only topic committed marks arrive on. 'doc-db' (members):
+     * row changes, through onDbChange. 'doc-view' (a signed-out link viewer,
+     * 20261113120100): the trimmed `mark` events, through onViewMark, and a
+     * pull once it first joins, since marks committed before the join reach
+     * the viewer only by pulling.
+     */
+    dbTopic?: 'doc-db' | 'doc-view';
+    /** A committed mark (or tombstone) on doc-view:{id}. */
+    onViewMark?: (mark: LinkViewMark) => void;
+    /** Spread before a rotation hint is followed (default ROTATION_JITTER_MAX_MS). */
+    rotationJitterMaxMs?: number;
 }
 
 /**
@@ -253,6 +268,9 @@ export const docTopic = (docId: string, epoch = 0): string => `doc:${docId}${gen
  * would apply as a committed row (forged author, forged seq).
  */
 export const docDbTopic = (docId: string, epoch = 0): string => `doc-db:${docId}${generation(epoch)}`;
+
+/** Receive-only topic of trimmed committed marks for signed-out link viewers (20261113120100). */
+export const docViewTopic = (docId: string, epoch = 0): string => `doc-view:${docId}${generation(epoch)}`;
 
 /**
  * The score's topic generation for fetchTopicEpoch, from realtime_topic_access
@@ -681,10 +699,13 @@ export class DocRealtimeChannel {
             return;
         }
         this.clearEpochRetry();
-        this.rotationTimer = setTimeout(() => {
-            this.rotationTimer = null;
-            this.refreshEpoch();
-        }, rotationJitterMs());
+        this.rotationTimer = setTimeout(
+            () => {
+                this.rotationTimer = null;
+                this.refreshEpoch();
+            },
+            rotationJitterMs(Math.random, this.opts.rotationJitterMaxMs),
+        );
     }
 
     /** Nobody is reachable on doc:{id} until a presence sync says so again. */
@@ -790,30 +811,40 @@ export class DocRealtimeChannel {
 
     private openDb(): void {
         const { supabase, docId } = this.opts;
+        const viewTopic = this.opts.dbTopic === 'doc-view';
         // Receive-only: no presence, and nothing is ever sent on it.
-        const dbChannel = supabase.channel(docDbTopic(docId, this.epoch), {
+        const dbChannel = supabase.channel((viewTopic ? docViewTopic : docDbTopic)(docId, this.epoch), {
             config: { private: true, broadcast: { self: false, ack: false } },
         });
-        const onDb = ({ payload }: { payload: unknown }) => {
-            // The topic multiplexes two tables: documents (bytes replaced) and annotations.
-            const docChange = parseDocumentChange(payload);
-            if (docChange) {
-                this.opts.onDocReplaced?.(docChange.content_rev);
-                return;
-            }
-            const row = parseDbChange(payload);
-            if (row) {
-                this.opts.onDbChange(row);
-            }
-        };
-        dbChannel.on('broadcast', { event: 'INSERT' }, onDb);
-        dbChannel.on('broadcast', { event: 'UPDATE' }, onDb);
-        dbChannel.on('broadcast', { event: SCORE_ANALYSIS_EVENT }, ({ payload }) => {
-            const msg = parseScoreAnalysisBroadcast(payload);
-            if (msg && msg.document_id === docId) {
-                this.opts.onScoreAnalysis?.(msg);
-            }
-        });
+        if (viewTopic) {
+            dbChannel.on('broadcast', { event: LINK_VIEW_MARK_EVENT }, ({ payload }) => {
+                const mark = parseLinkViewMark(payload);
+                if (mark) {
+                    this.opts.onViewMark?.(mark);
+                }
+            });
+        } else {
+            const onDb = ({ payload }: { payload: unknown }) => {
+                // The topic multiplexes two tables: documents (bytes replaced) and annotations.
+                const docChange = parseDocumentChange(payload);
+                if (docChange) {
+                    this.opts.onDocReplaced?.(docChange.content_rev);
+                    return;
+                }
+                const row = parseDbChange(payload);
+                if (row) {
+                    this.opts.onDbChange(row);
+                }
+            };
+            dbChannel.on('broadcast', { event: 'INSERT' }, onDb);
+            dbChannel.on('broadcast', { event: 'UPDATE' }, onDb);
+            dbChannel.on('broadcast', { event: SCORE_ANALYSIS_EVENT }, ({ payload }) => {
+                const msg = parseScoreAnalysisBroadcast(payload);
+                if (msg && msg.document_id === docId) {
+                    this.opts.onScoreAnalysis?.(msg);
+                }
+            });
+        }
         // Server-authored, so unforgeable here: a takedown or a lost membership moved the score.
         dbChannel.on('broadcast', { event: TOPIC_ROTATED_EVENT }, ({ payload }) =>
             this.onTopicRotated(payload, dbChannel),
@@ -880,7 +911,7 @@ export class DocRealtimeChannel {
             // Committed rows flow again. Rows committed while it was down (or
             // since the last fallback poll) reached nobody: pull them now,
             // whether or not doc:{id} is back yet.
-            const missedRows = rejoined || this.dbFallback;
+            const missedRows = rejoined || this.dbFallback || this.opts.dbTopic === 'doc-view';
             this.leaveDbFallback();
             if (this.joined.live && this.liveRejoined) {
                 this.liveRejoined = false;

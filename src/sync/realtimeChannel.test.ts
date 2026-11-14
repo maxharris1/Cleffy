@@ -21,6 +21,7 @@ import {
     archivedRecheckDelayMs,
     docDbTopic,
     docTopic,
+    docViewTopic,
     epochRetryDelayMs,
     fetchRealtimeTopicEpoch,
     rejoinDelayMs,
@@ -30,6 +31,7 @@ import {
 } from '@/sync/realtimeChannel';
 import {
     INK_PROGRESS_EVENT,
+    LINK_VIEW_MARK_EVENT,
     MEMBERSHIP_EVENT,
     SCORE_ANALYSIS_EVENT,
     TOPIC_ROTATED_EVENT,
@@ -1854,5 +1856,104 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
             // One gap-fill pull per move.
             expect(opts.onReconnect).toHaveBeenCalledTimes(2);
         });
+    });
+});
+
+describe('DocRealtimeChannel for a signed-out link viewer (dbTopic doc-view)', () => {
+    const viewSetup = (overrides: Partial<DocRealtimeChannelOptions> = {}) => {
+        const channels: FakeChannel[] = [];
+        const supabase = {
+            realtime: { isConnected: () => true },
+            channel: (topic: string, options: unknown) => {
+                const ch = new FakeChannel(topic, options);
+                channels.push(ch);
+                return ch;
+            },
+            removeChannel: async () => 'ok',
+        } as unknown as TypedSupabaseClient;
+        const opts: DocRealtimeChannelOptions = {
+            supabase,
+            docId: DOC,
+            self: { userId: SELF, name: 'Anonymous Otter', color: '#123456', page: 0, isAnonymous: true, via: 'link' },
+            onRemoteInk: vi.fn(),
+            onDbChange: vi.fn(),
+            onPeers: vi.fn(),
+            onReconnect: vi.fn(),
+            onResync: vi.fn(),
+            onViewMark: vi.fn(),
+            dbTopic: 'doc-view',
+            ...overrides,
+        };
+        const rt = new DocRealtimeChannel(opts);
+        rt.start();
+        return { rt, opts, channels };
+    };
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('names the topic doc-view:{id}, with the generation after a rotation', () => {
+        expect(docViewTopic(DOC)).toBe(`doc-view:${DOC}`);
+        expect(docViewTopic(DOC, 3)).toBe(`doc-view:${DOC}:3`);
+        const { channels } = viewSetup();
+        expect(channels.map((c) => c.topic)).toEqual([`doc:${DOC}`, `doc-view:${DOC}`]);
+    });
+
+    it('hands doc-view marks and tombstones to onViewMark, and drops malformed ones and row changes', () => {
+        const { opts, channels } = viewSetup();
+        const view = channels[1]!;
+        const mark = {
+            id: 'm1',
+            page: 0,
+            kind: 'stroke',
+            color: '#000',
+            payload: { pts: [0, 0, 1], w: 0.02 },
+            seq: 4,
+            deleted: false,
+        };
+        view.broadcast(LINK_VIEW_MARK_EVENT, mark);
+        view.broadcast(LINK_VIEW_MARK_EVENT, { id: 'm1', seq: 5, deleted: true });
+        view.broadcast(LINK_VIEW_MARK_EVENT, { id: 'm2', seq: 'x' });
+        view.broadcast('INSERT', dbChange(row()));
+        expect(opts.onViewMark).toHaveBeenCalledTimes(2);
+        expect(opts.onViewMark).toHaveBeenNthCalledWith(1, mark);
+        expect(opts.onViewMark).toHaveBeenNthCalledWith(2, { id: 'm1', seq: 5, deleted: true });
+        expect(opts.onDbChange).not.toHaveBeenCalled();
+    });
+
+    it('pulls once doc-view first joins, so marks committed before the join are not missed', () => {
+        const { opts, channels } = viewSetup();
+        channels[0]!.status('SUBSCRIBED');
+        expect(opts.onResync).not.toHaveBeenCalled();
+        channels[1]!.status('SUBSCRIBED');
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+        expect(opts.onReconnect).not.toHaveBeenCalled();
+    });
+
+    it('a member channel listens for no doc-view marks and does not pull on its first join', () => {
+        const { opts, db, live } = setup({ onViewMark: vi.fn() });
+        expect(db.events('broadcast')).not.toContain(LINK_VIEW_MARK_EVENT);
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        expect(opts.onResync).not.toHaveBeenCalled();
+    });
+
+    it('follows a rotation hint within rotationJitterMaxMs, and closes when the link is no longer open', async () => {
+        vi.useFakeTimers();
+        const fetchTopicEpoch = vi
+            .fn<() => Promise<TopicEpochRead>>()
+            .mockResolvedValueOnce({ status: 'epoch', epoch: 0 })
+            .mockResolvedValue({ status: 'denied' });
+        const onMembershipChanged = vi.fn();
+        const { channels } = viewSetup({ fetchTopicEpoch, onMembershipChanged, rotationJitterMaxMs: 250 });
+        await vi.advanceTimersByTimeAsync(0);
+        const view = channels.find((c) => c.topic === docViewTopic(DOC))!;
+        view.status('SUBSCRIBED');
+        vi.spyOn(Math, 'random').mockReturnValue(0.999);
+        view.broadcast(TOPIC_ROTATED_EVENT, { document_id: DOC });
+        await vi.advanceTimersByTimeAsync(250);
+        expect(fetchTopicEpoch).toHaveBeenCalledTimes(2);
+        expect(onMembershipChanged).toHaveBeenCalled();
     });
 });

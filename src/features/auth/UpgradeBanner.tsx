@@ -2,16 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 
 import { passwordProblem, passwordProblemMessage } from '../../../supabase/functions/_shared/passwordPolicy';
+import type { AgeGate } from '@/features/auth/ageCheck';
+import { AgeScreen } from '@/features/auth/AgeScreen';
 import { confirmGuestEmailUpgrade, GuestUpgradeError, startGuestEmailUpgrade } from '@/features/auth/guestUpgrade';
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { ViewerNotice } from '@/features/viewer/ViewerNotice';
+import { features } from '@/lib/features';
 import { refuseInput } from '@/lib/shake';
-import { fieldClassName } from '@/ui/classNames';
+import type { MemberRole } from '@/types/database';
+import { fieldClassName, linkClassName } from '@/ui/classNames';
 import { CloseButton } from '@/ui/CloseButton';
 import { SwapLabel } from '@/ui/SwapLabel';
 
-type BannerState = 'collapsed' | 'details' | 'code' | 'done' | 'signInNeeded' | 'dismissed';
+type BannerState = 'collapsed' | 'age' | 'details' | 'code' | 'done' | 'signInNeeded' | 'dismissed';
 
 /* The shared field: 16px on touch (no iOS zoom) and the app's focus ring. */
 const INPUT_CLASS = fieldClassName('sm', 'min-w-40 flex-1 py-1');
@@ -38,8 +42,14 @@ const isPlausibleEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(va
  * guest's old session is already gone server-side, so the banner says the
  * email is saved and asks them to sign in with it instead.
  */
-export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
+export const UpgradeBanner = ({ isGuest, role }: { isGuest: boolean; role?: MemberRole | null }) => {
     const [state, setState] = useState<BannerState>('collapsed');
+    /**
+     * Share v2: an editor-link guest made no age screen to get in, so it comes
+     * first here, before any address is asked for; guest-email-confirm needs
+     * its answer to make the account a registered one.
+     */
+    const [ageGate, setAgeGate] = useState<AgeGate | null>(null);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [code, setCode] = useState('');
@@ -83,6 +93,12 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     if (state === 'dismissed' || (!isGuest && state !== 'done' && state !== 'signInNeeded')) {
         return null;
     }
+    // A view-only guest has no work of their own to keep (Share v2).
+    if (features.shareV2 && role === 'viewer' && state !== 'done' && state !== 'signInNeeded') {
+        return null;
+    }
+    /** Where "Add your email" goes: the age screen first under Share v2, once. */
+    const startStep: BannerState = features.shareV2 && !ageGate ? 'age' : 'details';
 
     /** Move to another step with a clean slate: no spent token, a new challenge. */
     const goTo = (next: BannerState) => {
@@ -157,7 +173,13 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
             return;
         }
         void run(async () => {
-            const outcome = await confirmGuestEmailUpgrade({ email, code, password, captchaToken });
+            const outcome = await confirmGuestEmailUpgrade({
+                email,
+                code,
+                password,
+                captchaToken,
+                ...(ageGate ? { ageGate } : {}),
+            });
             setPassword('');
             setState(outcome === 'signed_in' ? 'done' : 'signInNeeded');
         });
@@ -246,6 +268,23 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     </button>
                     {errorLine}
                 </form>
+            ) : state === 'age' ? (
+                <div className="fixed inset-0 z-50 overflow-y-auto bg-white">
+                    <AgeScreen
+                        purpose="register"
+                        onPass={(gate) => {
+                            setAgeGate(gate);
+                            goTo('details');
+                        }}
+                        footer={
+                            <p className="mt-6 text-center">
+                                <button type="button" onClick={() => goTo('collapsed')} className={linkClassName}>
+                                    Not now
+                                </button>
+                            </p>
+                        }
+                    />
+                </div>
             ) : state === 'details' ? (
                 <form
                     className="flex flex-wrap items-center gap-2"
@@ -289,7 +328,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                 <div className="flex items-center justify-between gap-2">
                     <p>
                         You&apos;re annotating as a guest — this work lives only in this browser.{' '}
-                        <button type="button" onClick={() => goTo('details')} className="font-medium underline">
+                        <button type="button" onClick={() => goTo(startStep)} className="font-medium underline">
                             Add your email to keep it
                         </button>
                     </p>
