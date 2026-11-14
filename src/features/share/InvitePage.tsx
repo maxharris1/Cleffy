@@ -214,10 +214,10 @@ export const InvitePage = () => {
                         submitLabel="Create account and open"
                         busyLabel="Creating your account…"
                         describeError={(err) => (err instanceof Error ? err.message : 'Something went wrong.')}
-                        onSubmit={async ({ password }) => {
+                        onSubmit={async ({ password, captchaToken }) => {
                             const result = await acceptInvite(token, null, { password, ageGate: step.ageGate });
                             if (result.kind === 'ok' && result.email) {
-                                await signInWithPassword(result.email, password);
+                                await signInWithPassword(result.email, password, captchaToken);
                             }
                             if (!finish(result)) {
                                 throw new Error(

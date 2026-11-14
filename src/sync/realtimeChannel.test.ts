@@ -1922,6 +1922,16 @@ describe('DocRealtimeChannel for a signed-out link viewer (dbTopic doc-view)', (
         expect(opts.onDbChange).not.toHaveBeenCalled();
     });
 
+    it('hands a replaced PDF revision on doc-view to onDocReplaced, and drops malformed ones', () => {
+        const { opts, channels } = viewSetup({ onDocReplaced: vi.fn() });
+        const view = channels[1]!;
+        view.broadcast('doc', { content_rev: 1 });
+        view.broadcast('doc', { content_rev: -1 });
+        view.broadcast('doc', {});
+        expect(opts.onDocReplaced).toHaveBeenCalledTimes(1);
+        expect(opts.onDocReplaced).toHaveBeenCalledWith(1);
+    });
+
     it('pulls once doc-view first joins, so marks committed before the join are not missed', () => {
         const { opts, channels } = viewSetup();
         channels[0]!.status('SUBSCRIBED');

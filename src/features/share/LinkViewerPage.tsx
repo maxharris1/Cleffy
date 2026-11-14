@@ -37,7 +37,9 @@ interface LinkViewerPageProps {
  * A signed-out visitor on a view link: the score, read-only and live, with
  * nothing asked and nothing kept. Marks live in an in-memory database, the
  * token in a LinkSession, the PDF in an ArrayBuffer; all of it is dropped
- * when the link dies or the page closes.
+ * when the link dies or the page closes. Each renewal re-arms the expiry
+ * deadline from the server's answer and brings in a replaced PDF; a `doc`
+ * event or a pull reporting a newer content_rev asks for that renewal early.
  */
 export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) => {
     const [open, setOpen] = useState<{ backend: LinkViewerBackend; bytes: ArrayBuffer } | null>(null);
@@ -45,6 +47,7 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
     const onDeadRef = useRef(onDead);
     const membershipRef = useRef<() => void>(() => undefined);
     const renewRef = useRef<() => void>(() => undefined);
+    const docReplacedRef = useRef<(contentRev: number) => void>(() => undefined);
     const selfId = useMemo(() => crypto.randomUUID(), []);
 
     useEffect(() => {
@@ -66,10 +69,48 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
                 onDeadRef.current(answer);
             }
         };
+        let stopExpiry: () => void = () => undefined;
+        const armExpiry = (linkExpiresAt: string | null) => {
+            stopExpiry();
+            stopExpiry = linkExpiresAt
+                ? armAt(new Date(linkExpiresAt).getTime(), () =>
+                      die({ kind: 'dead', state: 'expired', expiredAt: linkExpiresAt }),
+                  )
+                : () => undefined;
+        };
+        cleanups.push(() => stopExpiry());
+        let shownRev = first.doc.content_rev;
+        let wantedRev = shownRev;
+        let pdfLoad = 0;
+        const loadPdf = (answer: ViewerAnswer) => {
+            const load = ++pdfLoad;
+            const rev = answer.doc.content_rev;
+            void fetch(pdfUrlOnProject(answer.pdfUrl), {
+                cache: 'no-store',
+                credentials: 'omit',
+                referrerPolicy: 'no-referrer',
+            })
+                .then((res) => (res.ok ? res.arrayBuffer() : Promise.reject(new Error(`pdf ${res.status}`))))
+                .then((bytes) => {
+                    if (live && load === pdfLoad) {
+                        shownRev = rev;
+                        setOpen({ backend, bytes });
+                    }
+                })
+                .catch(() => {
+                    if (answer === first) {
+                        die({ kind: 'dead', state: 'unavailable', expiredAt: null });
+                    }
+                });
+        };
         const session = new LinkSession(token, first, {
-            onRenewed: (jwt) => {
-                void session.client.realtime.setAuth(jwt);
+            onRenewed: (answer) => {
+                void session.client.realtime.setAuth(answer.jwt);
                 setBusySec(null);
+                armExpiry(answer.linkExpiresAt);
+                if (answer.doc.content_rev > shownRev) {
+                    loadPdf(answer);
+                }
             },
             onDead: die,
             onBusy: setBusySec,
@@ -80,6 +121,12 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
             () => void backend.dispose(),
         );
         renewRef.current = () => void session.renew();
+        docReplacedRef.current = (contentRev) => {
+            if (contentRev > Math.max(shownRev, wantedRev)) {
+                wantedRev = contentRev;
+                void session.renew();
+            }
+        };
         membershipRef.current = () => {
             void readLinkAccess(session.client).then((access) => {
                 if (access.status !== 'open') {
@@ -91,25 +138,9 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
                 }
             });
         };
-        if (first.linkExpiresAt) {
-            const expiredAt = first.linkExpiresAt;
-            cleanups.push(
-                armAt(new Date(expiredAt).getTime(), () => die({ kind: 'dead', state: 'expired', expiredAt })),
-            );
-        }
+        armExpiry(first.linkExpiresAt);
         session.start();
-        void fetch(pdfUrlOnProject(first.pdfUrl), {
-            cache: 'no-store',
-            credentials: 'omit',
-            referrerPolicy: 'no-referrer',
-        })
-            .then((res) => (res.ok ? res.arrayBuffer() : Promise.reject(new Error(`pdf ${res.status}`))))
-            .then((bytes) => {
-                if (live) {
-                    setOpen({ backend, bytes });
-                }
-            })
-            .catch(() => die({ kind: 'dead', state: 'unavailable', expiredAt: null }));
+        loadPdf(first);
         return end;
     }, [token, first]);
 
@@ -129,6 +160,7 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
             via: 'link' as const,
             canWrite: false,
             onMembershipChanged: () => membershipRef.current(),
+            onDocReplaced: (contentRev: number) => docReplacedRef.current(contentRev),
         }),
         [selfId],
     );

@@ -143,7 +143,7 @@ describe('LinkSession', () => {
         expect(fetchMock).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(1_000);
         expect(fetchMock).toHaveBeenCalledTimes(1);
-        expect(events.onRenewed).toHaveBeenCalledWith('jwt-2');
+        expect(events.onRenewed).toHaveBeenCalledWith(expect.objectContaining({ jwt: 'jwt-2' }));
         await expect(client.token()).resolves.toBe('jwt-2');
         session.dispose();
         await expect(client.token()).resolves.toBe('');
@@ -178,7 +178,7 @@ describe('LinkSession', () => {
         expect(events.onBusy).toHaveBeenCalledWith(30);
         expect(events.onDead).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(30_000);
-        expect(events.onRenewed).toHaveBeenCalledWith('jwt-2');
+        expect(events.onRenewed).toHaveBeenCalledWith(expect.objectContaining({ jwt: 'jwt-2' }));
         session.dispose();
     });
 
@@ -190,5 +190,22 @@ describe('LinkSession', () => {
         expect(events.onDead).toHaveBeenCalledWith({ kind: 'dead', state: 'revoked', expiredAt: null });
         await vi.advanceTimersByTimeAsync(3_600_000);
         expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('renews again when asked while a renewal is already on its way', async () => {
+        let answer: (res: Response) => void = () => undefined;
+        fetchMock
+            .mockReturnValueOnce(new Promise<Response>((resolve) => (answer = resolve)))
+            .mockResolvedValueOnce(reply(200, viewerBody('jwt-3', nowSec + 2000)));
+        const session = new LinkSession(TOKEN, first, events, fakeClient);
+        session.start();
+        const firstRenewal = session.renew();
+        await session.renew();
+        answer(reply(200, viewerBody('jwt-2', nowSec + 1080)));
+        await firstRenewal;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(events.onRenewed).toHaveBeenLastCalledWith(expect.objectContaining({ jwt: 'jwt-3' }));
+        session.dispose();
     });
 });

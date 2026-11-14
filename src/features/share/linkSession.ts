@@ -108,7 +108,7 @@ export const renewDelayMs = (exp: number, nowSec: number): number =>
     Math.max(0, Math.floor((exp - nowSec) * RENEW_FRACTION * 1000));
 
 export interface LinkSessionEvents {
-    onRenewed(jwt: string): void;
+    onRenewed(answer: ViewerAnswer): void;
     onDead(answer: DeadAnswer): void;
     onBusy(retryAfterSec: number): void;
 }
@@ -124,6 +124,7 @@ export class LinkSession {
     private exp: number;
     private timer: ReturnType<typeof setTimeout> | null = null;
     private renewing = false;
+    private renewAgain = false;
     private disposed = false;
     private readonly onVisibility = () => {
         if (document.visibilityState === 'visible' && this.exp - nowSec() < RENEW_ON_VISIBLE_UNDER_SEC) {
@@ -159,13 +160,19 @@ export class LinkSession {
     }
 
     async renew(): Promise<void> {
-        if (this.disposed || this.renewing || !this.jwt) {
+        if (this.renewing) {
+            this.renewAgain = true;
+            return;
+        }
+        if (this.disposed || !this.jwt) {
             return;
         }
         this.renewing = true;
         this.clearTimer();
         const answer = await requestShareSession(this.token, this.jwt);
         this.renewing = false;
+        const again = this.renewAgain;
+        this.renewAgain = false;
         if (this.disposed) {
             return;
         }
@@ -173,7 +180,11 @@ export class LinkSession {
             case 'viewer':
                 this.jwt = answer.jwt;
                 this.exp = answer.exp;
-                this.on.onRenewed(answer.jwt);
+                this.on.onRenewed(answer);
+                if (again) {
+                    void this.renew();
+                    return;
+                }
                 this.schedule(renewDelayMs(answer.exp, nowSec()));
                 return;
             case 'dead':

@@ -1,9 +1,10 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useSyncExternalStore } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { resetTurnstileLoaderForTests, type TurnstileRenderOptions } from '@/features/auth/turnstile';
 import { InvitePage } from '@/features/share/InvitePage';
 import { passAgeScreen } from '@/test/ageScreen';
 import type * as InviteApiModule from '@/features/share/inviteApi';
@@ -75,7 +76,27 @@ afterEach(() => {
     window.localStorage.clear();
     window.sessionStorage.clear();
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
+    resetTurnstileLoaderForTests();
+    delete (window as { turnstile?: unknown }).turnstile;
+    document.getElementById('cf-turnstile-script')?.remove();
 });
+
+const withTurnstile = () => {
+    vi.stubEnv('VITE_TURNSTILE_SITE_KEY', '1x00000000000000000000AA');
+    const rendered: TurnstileRenderOptions[] = [];
+    Object.assign(window, {
+        turnstile: {
+            render: (_host: HTMLElement, options: TurnstileRenderOptions) => {
+                rendered.push(options);
+                return `widget-${rendered.length}`;
+            },
+            remove: () => undefined,
+            reset: () => undefined,
+        },
+    });
+    return rendered;
+};
 
 describe('InvitePage', () => {
     it.each([
@@ -137,7 +158,7 @@ describe('InvitePage', () => {
             password: 'a-long-passphrase-1',
             ageGate: expect.objectContaining({ country: 'US', source: 'self' }),
         });
-        expect(signInWithPassword).toHaveBeenCalledWith('jo@example.org', 'a-long-passphrase-1');
+        expect(signInWithPassword).toHaveBeenCalledWith('jo@example.org', 'a-long-passphrase-1', null);
     });
 
     it('sends nothing more when the age screen refuses, so no account is made', async () => {
@@ -161,5 +182,40 @@ describe('InvitePage', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Create account and open' }));
         expect(await screen.findByText('Choose a longer password.')).toBeTruthy();
         expect(signInWithPassword).not.toHaveBeenCalled();
+    });
+
+    describe('with Turnstile on', () => {
+        it('signs an existing account in with the solved token', async () => {
+            const rendered = withTurnstile();
+            acceptInvite.mockResolvedValueOnce({ kind: 'sign_in_required' });
+            renderInvite();
+            await userEvent.click(await screen.findByRole('button', { name: 'Continue' }));
+            await userEvent.type(await screen.findByLabelText('Email'), 'jo@example.org');
+            await userEvent.type(screen.getByLabelText('Password'), 'a-long-passphrase-1');
+            await waitFor(() => expect(rendered).toHaveLength(1));
+            rendered[0]!.callback('cf-login');
+            await userEvent.click(screen.getByRole('button', { name: 'Sign in and accept' }));
+            await waitFor(() =>
+                expect(signInWithPassword).toHaveBeenCalledWith('jo@example.org', 'a-long-passphrase-1', 'cf-login'),
+            );
+        });
+
+        it('signs a new account in with the solved token after accepting', async () => {
+            const rendered = withTurnstile();
+            acceptInvite
+                .mockResolvedValueOnce({ kind: 'age_check_missing' })
+                .mockResolvedValueOnce({ kind: 'ok', documentId: 'doc-1', email: 'jo@example.org' });
+            renderInvite();
+            await userEvent.click(await screen.findByRole('button', { name: 'Continue' }));
+            await passAgeScreen();
+            expect(await screen.findByText('Choose a password')).toBeTruthy();
+            await userEvent.type(screen.getByLabelText('Password'), 'a-long-passphrase-1');
+            await userEvent.type(screen.getByLabelText(/Confirm/i), 'a-long-passphrase-1');
+            await waitFor(() => expect(rendered).toHaveLength(1));
+            rendered[0]!.callback('cf-signup');
+            await userEvent.click(screen.getByRole('button', { name: 'Create account and open' }));
+            expect(await screen.findByText('score open')).toBeTruthy();
+            expect(signInWithPassword).toHaveBeenCalledWith('jo@example.org', 'a-long-passphrase-1', 'cf-signup');
+        });
     });
 });

@@ -50,7 +50,8 @@ export const createLinkViewerBackend = (client: TypedSupabaseClient): LinkViewer
         db,
         supabase: client,
         connect({ docId, store, ink, self, callbacks }) {
-            const sync = new LinkViewSync({ client, store });
+            const onDocReplaced = (contentRev: number) => callbacks.onDocReplaced?.(contentRev);
+            const sync = new LinkViewSync({ client, store, onContentRev: onDocReplaced });
             const channel = new DocRealtimeChannel({
                 supabase: client,
                 docId,
@@ -63,6 +64,7 @@ export const createLinkViewerBackend = (client: TypedSupabaseClient): LinkViewer
                     void sync.applyMark(mark).then(() => ink.remoteInkCommitted(mark.id));
                 },
                 onPeers: (peers) => callbacks.onPeers?.(peers),
+                onDocReplaced,
                 onReconnect: () => {
                     ink.clearRemoteInk();
                     void sync.pull();

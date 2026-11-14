@@ -4,7 +4,9 @@ import { safePresenceName } from '@/lib/presenceName';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import {
     INK_PROGRESS_EVENT,
+    LINK_VIEW_DOC_EVENT,
     LINK_VIEW_MARK_EVENT,
+    parseLinkViewDoc,
     parseLinkViewMark,
     type LinkViewMark,
     MEMBERSHIP_EVENT,
@@ -197,7 +199,7 @@ export interface DocRealtimeChannelOptions {
      * pulls, and once it finally joins (to cover the gap until then).
      */
     onResync: () => void;
-    /** Another member replaced the document's PDF bytes (smart-import cleanup). */
+    /** Another member replaced the document's PDF bytes (smart-import cleanup; on doc-view too). */
     onDocReplaced?: (contentRev: number) => void;
     /** Play-along analysis lifecycle changed (trimmed broadcast). */
     onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
@@ -821,6 +823,12 @@ export class DocRealtimeChannel {
                 const mark = parseLinkViewMark(payload);
                 if (mark) {
                     this.opts.onViewMark?.(mark);
+                }
+            });
+            dbChannel.on('broadcast', { event: LINK_VIEW_DOC_EVENT }, ({ payload }) => {
+                const contentRev = parseLinkViewDoc(payload);
+                if (contentRev !== null) {
+                    this.opts.onDocReplaced?.(contentRev);
                 }
             });
         } else {

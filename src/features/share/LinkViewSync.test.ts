@@ -98,4 +98,27 @@ describe('LinkViewSync', () => {
         await expect(pulling).resolves.toBeUndefined();
         await expect(sync.applyMark(stroke('later', 2))).resolves.toBeUndefined();
     });
+
+    it('keeps a mark erased when its tombstone lands while the live copy is still being written', async () => {
+        const freshDb = new ScribblerDb(`link-view-test-${crypto.randomUUID()}`);
+        const fresh = new AnnotationStore(freshDb, 'd1');
+        const loading = fresh.load();
+        const freshSync = new LinkViewSync({ client: { rpc } as unknown as TypedSupabaseClient, store: fresh });
+        await Promise.all([loading, freshSync.applyMark(stroke('a', 1)), freshSync.applyMark(tomb('a', 2))]);
+        expect(fresh.getPage(0).has('a')).toBe(false);
+        await freshDb.delete();
+    });
+
+    it('keeps a mark erased when its tombstone follows it in the same pulled page', async () => {
+        rpc.mockResolvedValueOnce(page([stroke('a', 1), tomb('a', 2), stroke('b', 3), stroke('b', 2)], 3, false));
+        await sync.pull();
+        expect(store.getPage(0).has('a')).toBe(false);
+        expect(store.get('b')?.seq).toBe(3);
+    });
+
+    it('keeps a mark erased when a pull page and a live tombstone race', async () => {
+        rpc.mockResolvedValueOnce(page([stroke('a', 1)], 1, false));
+        await Promise.all([sync.pull(), sync.applyMark(tomb('a', 2))]);
+        expect(store.getPage(0).has('a')).toBe(false);
+    });
 });

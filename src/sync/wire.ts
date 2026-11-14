@@ -236,3 +236,13 @@ export const parseLinkViewMark = (payload: unknown): LinkViewMark | null => {
     const parsed = linkViewMarkSchema.safeParse(payload);
     return parsed.success ? parsed.data : null;
 };
+
+/** The score's PDF was replaced (broadcast_document_changes on doc-view:{id}, 20261113120100). */
+export const LINK_VIEW_DOC_EVENT = 'doc';
+
+const linkViewDocSchema = z.object({ content_rev: z.number().int().nonnegative() });
+
+export const parseLinkViewDoc = (payload: unknown): number | null => {
+    const parsed = linkViewDocSchema.safeParse(payload);
+    return parsed.success ? parsed.data.content_rev : null;
+};

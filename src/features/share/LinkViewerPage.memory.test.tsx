@@ -12,6 +12,7 @@ import type * as RealtimeChannelModule from '@/sync/realtimeChannel';
 
 const channels = vi.hoisted(() => ({ started: 0, stopped: 0, opts: [] as Array<Record<string, unknown>> }));
 const storesSeen = vi.hoisted(() => ({ marks: [] as string[] }));
+const pdfsShown = vi.hoisted(() => ({ sizes: [] as number[] }));
 
 vi.mock('@/lib/supabase', async (importOriginal) => ({
     ...(await importOriginal<typeof SupabaseModule>()),
@@ -35,7 +36,12 @@ vi.mock('@/sync/realtimeChannel', async (importOriginal) => ({
 }));
 
 vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
-    PdfProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+    PdfProvider: ({ children, data }: { children: ReactNode; data: ArrayBuffer }) => {
+        if (pdfsShown.sizes.at(-1) !== data.byteLength) {
+            pdfsShown.sizes.push(data.byteLength);
+        }
+        return <>{children}</>;
+    },
 }));
 
 /** Stands in for the page renderer: opens the store on the injected backend as PdfViewport does. */
@@ -45,7 +51,13 @@ vi.mock('@/features/viewer/PdfViewport', () => ({
         sync,
     }: {
         docId: string;
-        sync: { userId: string; name: string; isAnonymous: boolean; onMembershipChanged: () => void };
+        sync: {
+            userId: string;
+            name: string;
+            isAnonymous: boolean;
+            onMembershipChanged: () => void;
+            onDocReplaced: (contentRev: number) => void;
+        };
     }) => {
         const backend = useViewerBackend();
         useEffect(() => {
@@ -59,7 +71,10 @@ vi.mock('@/features/viewer/PdfViewport', () => ({
                 ink: { applyRemoteInk() {}, remoteInkCommitted() {}, clearRemoteInk() {} } as never,
                 self: { userId: sync.userId, name: sync.name, isAnonymous: true, color: '#000', page: 0 },
                 canWrite: false,
-                callbacks: { onMembershipChanged: () => sync.onMembershipChanged() },
+                callbacks: {
+                    onMembershipChanged: () => sync.onMembershipChanged(),
+                    onDocReplaced: (contentRev) => sync.onDocReplaced(contentRev),
+                },
             });
             return () => {
                 unsubscribe();
@@ -76,6 +91,7 @@ const doc = { id: 'd1', title: 'Für Elise', page_count: 1, content_rev: 0 };
 describe('LinkViewerPage keeps nothing', () => {
     let fetchMock: ReturnType<typeof vi.fn>;
     let renewReply: unknown;
+    let snapshotDoc: typeof doc;
 
     beforeEach(() => {
         window.localStorage.clear();
@@ -84,6 +100,8 @@ describe('LinkViewerPage keeps nothing', () => {
         channels.stopped = 0;
         channels.opts = [];
         storesSeen.marks = [];
+        pdfsShown.sizes = [];
+        snapshotDoc = doc;
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
         renewReply = null;
         fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -92,13 +110,16 @@ describe('LinkViewerPage keeps nothing', () => {
             if (url.endsWith('/pdf')) {
                 return Promise.resolve(new Response(new ArrayBuffer(8)));
             }
+            if (url.endsWith('/pdf-rev-1')) {
+                return Promise.resolve(new Response(new ArrayBuffer(16)));
+            }
             if (url.includes('/functions/v1/share-session')) {
                 expect(JSON.parse(String(init?.body))).toMatchObject({ token: TOKEN, renew: expect.any(String) });
                 return json(renewReply);
             }
             if (url.includes('/rpc/link_view_snapshot')) {
                 return json({
-                    doc,
+                    doc: snapshotDoc,
                     marks: [
                         {
                             id: '00000000-0000-4000-8000-000000000001',
@@ -230,5 +251,81 @@ describe('LinkViewerPage keeps nothing', () => {
         await screen.findByText('score on screen');
         await vi.advanceTimersByTimeAsync(60_000);
         expect(onDead).toHaveBeenCalledWith({ kind: 'dead', state: 'expired', expiredAt });
+    });
+
+    const renewal = (overrides: Record<string, unknown> = {}) => ({
+        state: 'live',
+        role: 'viewer',
+        session_jwt: 'jwt-2',
+        exp: Math.floor(Date.now() / 1000) + 1500,
+        doc,
+        pdf_url: 'https://sb.test/pdf',
+        link_expires_at: null,
+        ...overrides,
+    });
+
+    it.each([
+        ['a later deadline', () => new Date(Date.now() + 86_400_000).toISOString()],
+        ['never', () => null],
+    ])('keeps the score open past the old deadline when a renewal moves the expiry to %s', async (_, next) => {
+        const onDead = vi.fn();
+        const expiredAt = new Date(Date.now() + 900_000).toISOString();
+        renewReply = renewal({ link_expires_at: next() });
+        render(
+            <MemoryRouter>
+                <LinkViewerPage token={TOKEN} first={{ ...first(), linkExpiresAt: expiredAt }} onDead={onDead} />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        await vi.advanceTimersByTimeAsync(480_000);
+        expect(fetchMock.mock.calls.some(([u]) => String(u).includes('share-session'))).toBe(true);
+        await vi.advanceTimersByTimeAsync(430_000);
+        expect(onDead).not.toHaveBeenCalled();
+    });
+
+    it('clears the score at the earlier deadline a renewal brings', async () => {
+        const onDead = vi.fn();
+        const sooner = new Date(Date.now() + 600_000).toISOString();
+        renewReply = renewal({ link_expires_at: sooner });
+        render(
+            <MemoryRouter>
+                <LinkViewerPage
+                    token={TOKEN}
+                    first={{ ...first(), linkExpiresAt: new Date(Date.now() + 86_400_000).toISOString() }}
+                    onDead={onDead}
+                />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        await vi.advanceTimersByTimeAsync(480_000);
+        expect(onDead).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(onDead).toHaveBeenCalledWith({ kind: 'dead', state: 'expired', expiredAt: sooner });
+    });
+
+    it('brings in the replaced PDF when the doc-view channel reports a new revision', async () => {
+        renewReply = renewal({ doc: { ...doc, content_rev: 1 }, pdf_url: 'https://sb.test/pdf-rev-1' });
+        render(
+            <MemoryRouter>
+                <LinkViewerPage token={TOKEN} first={first()} onDead={vi.fn()} />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        await vi.waitFor(() => expect(channels.opts).toHaveLength(1));
+        expect(pdfsShown.sizes).toEqual([8]);
+        (channels.opts[0]?.['onDocReplaced'] as (rev: number) => void)(1);
+        await vi.waitFor(() => expect(pdfsShown.sizes).toEqual([8, 16]));
+    });
+
+    it('brings in the replaced PDF when a pull finds a newer revision', async () => {
+        snapshotDoc = { ...doc, content_rev: 1 };
+        renewReply = renewal({ doc: snapshotDoc, pdf_url: 'https://sb.test/pdf-rev-1' });
+        render(
+            <MemoryRouter>
+                <LinkViewerPage token={TOKEN} first={first()} onDead={vi.fn()} />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        await vi.waitFor(() => expect(pdfsShown.sizes).toEqual([8, 16]));
     });
 });
