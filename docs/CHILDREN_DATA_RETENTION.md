@@ -12,26 +12,33 @@ a year, and whenever a feature that could touch children's information ships.
 
 ## Starting point
 
-- Children under 13 do not get Cleffy accounts. Self sign-up and share-link
-  guests pass the neutral age screen (`src/features/auth/AgeScreen.tsx`).
-  Teachers confirm each student meets the minimum age before
-  `student-provision` creates an account.
-- So Cleffy aims to hold no personal information from children under 13. This
-  policy covers the edges: a teacher using Cleffy with a young student, view
-  links (not live; behind `VITE_FEATURE_VIEW_LINKS`), our processors' logs, and
+- Children under 13 do not get Cleffy accounts. Self sign-up, invite
+  acceptance and guest upgrade pass the neutral age screen
+  (`src/features/auth/AgeScreen.tsx`). Teachers confirm each student meets the
+  minimum age before `student-provision` creates an account.
+- With Share v2 (`VITE_FEATURE_SHARE_V2`, off in production), people who open a
+  score by link no longer pass the age screen. A link viewer gives nothing. A
+  link guest who edits gets an anonymous guest profile and may type a name, so
+  a child can be a link guest.
+- So Cleffy aims to hold as little as possible from children under 13. This
+  policy covers the edges: a teacher using Cleffy with a young student, link
+  viewers and link guests, share links and invites, our processors' logs, and
   information we learn was collected from a child by mistake.
 
 ## Retention by item
 
-| Item                                                                                                      | Purpose                                                  | Business need                                    | Deletion                                                                                                                |
-| --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Teacher-device use (a teacher shows a score to a young student on the teacher's own screen)               | Teaching in a lesson                                     | None from the student                            | Nothing is collected from the student, so nothing to delete. The teacher's own account data follows the Privacy Policy. |
-| Age-screen refusal marker (`cleffy.ageCheck.refusedAt` in the browser's localStorage)                     | Stop a refused person retrying at once with another year | Keeps the age screen neutral                     | Stays on that device only, never sent to us, holds a time and no age. Ignored after 24 hours.                           |
-| View-link viewer data (when view links ship)                                                              | —                                                        | None                                             | Cleffy stores no viewer data in its database.                                                                           |
-| `view_links` rows (when view links ship): which score, which teacher, token, expiry, revocation time      | Let the teacher create, list and revoke links            | Teacher's own data, needed while the link exists | Deleted 30 days after the teacher revokes the link, or when it expires.                                                 |
-| Processor logs: Vercel runtime logs                                                                       | Deliver the page, keep it secure and working             | Debugging and abuse handling                     | Vercel Hobby runtime logs: 1 hour. Vercel security handling: per Vercel's DPA.                                          |
-| Processor logs: Supabase                                                                                  | Same                                                     | Same                                             | About 7 days, and only if the signed-URL fallback for view links is used. Otherwise a view does not reach Supabase.     |
-| Information we learn was collected from a child under 13 (for example a student account created in error) | None                                                     | None                                             | Deleted as soon as we confirm it, including the account and its markings. Backups age out on the provider's schedule.   |
+| Item                                                                                                      | Purpose                                                  | Business need                                  | Deletion                                                                                                                                                                                   |
+| --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Teacher-device use (a teacher shows a score to a young student on the teacher's own screen)               | Teaching in a lesson                                     | None from the student                          | Nothing is collected from the student, so nothing to delete. The teacher's own account data follows the Privacy Policy.                                                                    |
+| Age-screen refusal marker (`cleffy.ageCheck.refusedAt` in the browser's localStorage)                     | Stop a refused person retrying at once with another year | Keeps the age screen neutral                   | Stays on that device only, never sent to us, holds a time and no age. Ignored after 24 hours.                                                                                              |
+| Link viewer (Share v2, signed out)                                                                        | Show the score                                           | None                                           | Nothing in Cleffy's database. On the device: memory only. Realtime presence (random key, "Anonymous <animal>") is held in memory and gone when the tab closes.                             |
+| Link guest (Share v2, edits by link): `auth.users` row, optional name, IP in the GoTrue audit log         | Let the guest edit and sync markings                     | Needed while the guest uses the score          | Deleted after a period without use the score's owner chooses: 7 to 90 days, default 30 (`retention_guest_idle_window`); never more than 90 days. Markings stay on the score, unattributed. |
+| `share_links` rows: which score, which owner, token, role, expiry, revocation time                        | Let the owner create, renew, reset and revoke links      | Owner's own data, needed while the link exists | Expiry the owner chooses: 1 hour to 1 year, default 7 days, or never. Deleted 30 days after revoke or expiry (`retention-share-links`).                                                    |
+| `document_invites` rows: invitee email, role, inviter, token hash, dates                                  | Let the owner invite a person by email                   | Needed until the invite is accepted or closed  | Expires after 14 days. Deleted 30 days after it is accepted, cancelled or expires.                                                                                                         |
+| Processor logs: Vercel runtime logs                                                                       | Deliver the page, keep it secure and working             | Debugging and abuse handling                   | Vercel Hobby runtime logs: about 1 hour. Vercel security handling: per Vercel's DPA.                                                                                                       |
+| Processor logs: Supabase                                                                                  | Same                                                     | Same                                           | About 7 days.                                                                                                                                                                              |
+| Processor logs: Resend (invite mail)                                                                      | Send the invitation email                                | Delivery and abuse handling                    | Per Resend's DPA.                                                                                                                                                                          |
+| Information we learn was collected from a child under 13 (for example a student account created in error) | None                                                     | None                                           | Deleted as soon as we confirm it, including the account and its markings. Backups age out on the provider's schedule.                                                                      |
 
 ## Deletion method
 
@@ -47,5 +54,6 @@ a year, and whenever a feature that could touch children's information ships.
 
 - Exact log windows for Vercel and Supabase on the plans in use must be
   re-checked when a plan changes.
-- The `view_links` table does not exist yet (packet U13-2). This policy must be
-  re-read against the real schema when it lands.
+- Share v2 replaced the planned `view_links` table with `share_links`,
+  `document_invites` and link guests. Re-read this policy against the v2
+  schema before `VITE_FEATURE_SHARE_V2` is switched on in production.
