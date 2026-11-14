@@ -15,6 +15,10 @@ import type * as FeaturesModule from '@/lib/features';
  */
 const COPPA_CLAIM = /COPPA[- ]?(compliant|certified)|compl(iant|y|ies) with COPPA/i;
 
+/** A blanket statement that Cleffy keeps nothing about children, untrue once link guests can edit. */
+const HOLDS_NOTHING_FROM_CHILDREN =
+    /(does not|doesn’t|never) (hold|keep|store|collect) (their|any|children’s) (information|data)/i;
+
 const ROOT = process.cwd();
 
 /** The internal drafts that must not read as a statement of compliance either. */
@@ -30,16 +34,18 @@ const appSources = (): string[] =>
         .map((file) => join(ROOT, 'src', file))
         .concat(join(ROOT, 'index.html'));
 
-/** The legal documents as a build with VITE_FEATURE_SHARE_V2=1 would publish them. */
-const documentsWithViewLinks = async () => {
+/** The legal documents as a build with VITE_FEATURE_SHARE_V2 set to `shareV2` would publish them. */
+const documentsWithShareV2 = async (shareV2: boolean) => {
     vi.resetModules();
     vi.doMock('@/lib/features', async (importOriginal) => {
         const actual = await importOriginal<typeof FeaturesModule>();
-        return { features: { ...actual.features, shareV2: true } };
+        return { features: { ...actual.features, shareV2 } };
     });
     const content = await import('@/features/legal/legalContent');
     return content.LEGAL_DOCUMENTS;
 };
+
+const documentsWithViewLinks = () => documentsWithShareV2(true);
 
 afterEach(() => {
     vi.doUnmock('@/lib/features');
@@ -90,6 +96,23 @@ describe('the children’s privacy notice', () => {
         expect(ageCheck).toMatch(/Anyone who creates an account themselves first answers an age check\./);
         expect(ageCheck).not.toMatch(/joins a shared score as a guest through a share link/);
         expect(legalText(docs.terms)).toMatch(/own screen or share a view link, when available\./);
+    });
+
+    it('never says, once Share v2 is on, that Cleffy holds no information about children under 13', async () => {
+        const docs = await documentsWithViewLinks();
+        for (const id of LEGAL_DOCUMENT_IDS) {
+            expect(fullText(docs[id]), id).not.toMatch(HOLDS_NOTHING_FROM_CHILDREN);
+        }
+        const retention = docs.children.sections.find((candidate) => candidate.id === 'retention');
+        const text = legalText({ sections: retention ? [retention] : [] });
+        expect(text).toMatch(/guest profile/);
+        expect(text).toMatch(/between 7 and 90 days/);
+        expect(text).toMatch(/privacy@cleffy\.io/);
+    });
+
+    it('still says it holds no information about children under 13 while Share v2 is off', async () => {
+        const docs = await documentsWithShareV2(false);
+        expect(fullText(docs.children)).toMatch(HOLDS_NOTHING_FROM_CHILDREN);
     });
 });
 

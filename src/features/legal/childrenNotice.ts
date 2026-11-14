@@ -11,7 +11,7 @@ import { features } from '@/lib/features';
  * It must never claim COPPA compliance (childrenNotice.test.ts scans every
  * document for that).
  *
- * The "Opening a shared score by link" section appears only while VITE_FEATURE_SHARE_V2 is on
+ * The "Opening a shared score by link" section and the link-guest retention wording appear only while VITE_FEATURE_SHARE_V2 is on
  * (src/lib/features.ts), like the AI sections of the Privacy Policy: the
  * notice covers what this build does.
  */
@@ -91,7 +91,9 @@ export const CHILDREN_NOTICE: LegalDocument = {
             heading: 'How long we keep information',
             blocks: [
                 p(
-                    `Because children under 13 do not have accounts, ${brand} does not hold their information. If we learn that we hold some anyway, we delete it. How long we keep everyone else’s information is set out in our Privacy Policy.`,
+                    features.shareV2
+                        ? `Children under 13 do not have accounts, so ${brand} holds information about them only if one edits a shared score as a link guest. That guest profile, with the optional name and the guest’s markings, is deleted after the period without use the owner chooses, between 7 and 90 days. A parent or guardian can ask us to delete it sooner at ${emails.privacy}. If we learn that we hold anything else collected from a child under 13, we delete it. How long we keep everyone else’s information is set out in our Privacy Policy.`
+                        : `Because children under 13 do not have accounts, ${brand} does not hold their information. If we learn that we hold some anyway, we delete it. How long we keep everyone else’s information is set out in our Privacy Policy.`,
                 ),
             ],
         },
