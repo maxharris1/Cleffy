@@ -11,29 +11,37 @@ import { features } from '@/lib/features';
  * It must never claim COPPA compliance (childrenNotice.test.ts scans every
  * document for that).
  *
- * The view-links section appears only while VITE_FEATURE_SHARE_V2 is on
+ * The "Opening a shared score by link" section appears only while VITE_FEATURE_SHARE_V2 is on
  * (src/lib/features.ts), like the AI sections of the Privacy Policy: the
  * notice covers what this build does.
  */
 
 const { brand, name, legalForm, postalAddress, emails } = LEGAL_ENTITY;
 
-const viewLinkSections: LegalSection[] = features.shareV2
+const shareLinkSections: LegalSection[] = features.shareV2
     ? [
           {
-              id: 'view-links',
-              heading: 'View links',
+              id: 'opening-by-link',
+              heading: 'Opening a shared score by link',
               blocks: [
                   p(
-                      'A teacher can send a young student a view link: a read-only link to one score, so the student can see it at home. Opening a view link:',
+                      `Anyone with a score’s link, a young student included, can open it without an account and without answering an age check. Viewing a score this way:`,
                   ),
                   list(
-                      'needs no account, no name and no other input from the person opening it, and sets no cookies and stores nothing on their device;',
-                      'means our hosting provider processes the viewer’s IP address, only to deliver the page and keep it secure and working;',
-                      `stores nothing about the viewer in ${brand}’s database;`,
+                      `collects nothing from the person viewing, sets nothing on their device and leaves no record about them in ${brand}’s database;`,
+                      'means our hosting providers, Vercel and Supabase, process the viewer’s IP address, only to deliver the page and keep it secure; Vercel’s logs keep it for about 1 hour and Supabase’s for about 7 days;',
+                      'shows the score’s owner only an anonymous count of how many people are viewing;',
                       'is never used to contact anyone, to show advertising or to build a profile.',
                   ),
-                  placeholder('Counsel: retention wording (Vercel runtime logs 1 h; …)'),
+                  p(
+                      'If the owner lets people edit through the link, a guest who edits may type a name. We suggest a first name or nickname, and it is optional. The name and the guest’s markings are kept in a temporary guest profile, which is deleted after a period without use that the owner chooses, between 7 and 90 days (30 days by default). The markings stay on the score.',
+                  ),
+                  p(
+                      `A parent or guardian can ask us to delete a guest profile, or anything else about their child, at ${emails.privacy}.`,
+                  ),
+                  placeholder(
+                      'Counsel: link guests skip the age check. Confirm the internal-operations exception and a general-audience reading with an optional nickname hold.',
+                  ),
               ],
           },
       ]
@@ -61,7 +69,9 @@ export const CHILDREN_NOTICE: LegalDocument = {
             heading: 'Children under 13 don’t have Cleffy accounts',
             blocks: [
                 list(
-                    'Anyone who creates an account themselves, or joins a shared score as a guest through a share link, first answers an age check. If they do not meet the minimum age where they live (13, or older in some countries), no account is created.',
+                    features.shareV2
+                        ? 'Anyone who creates an account themselves first answers an age check. If they do not meet the minimum age where they live (13, or older in some countries), no account is created.'
+                        : 'Anyone who creates an account themselves, or joins a shared score as a guest through a share link, first answers an age check. If they do not meet the minimum age where they live (13, or older in some countries), no account is created.',
                     'A teacher who creates a student account confirms that the student meets the minimum age for the student’s country.',
                 ),
             ],
@@ -75,7 +85,7 @@ export const CHILDREN_NOTICE: LegalDocument = {
                 ),
             ],
         },
-        ...viewLinkSections,
+        ...shareLinkSections,
         {
             id: 'retention',
             heading: 'How long we keep information',

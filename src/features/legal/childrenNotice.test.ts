@@ -62,20 +62,33 @@ describe('the children’s privacy notice', () => {
 
     it('leaves out view links while they are switched off', () => {
         expect(CHILDREN_NOTICE.sections.map((section) => section.id)).not.toContain('view-links');
+        expect(CHILDREN_NOTICE.sections.map((section) => section.id)).not.toContain('opening-by-link');
         expect(fullText(CHILDREN_NOTICE)).not.toMatch(/view link/i);
     });
 
-    it('describes view links, as a draft, once they are switched on', async () => {
+    it('describes opening a shared score by link, as a draft, once Share v2 is on', async () => {
         const docs = await documentsWithViewLinks();
-        const section = docs.children.sections.find((candidate) => candidate.id === 'view-links');
-        expect(section).toBeDefined();
+        const ids = docs.children.sections.map((candidate) => candidate.id);
+        expect(ids).not.toContain('view-links');
+        const section = docs.children.sections.find((candidate) => candidate.id === 'opening-by-link');
+        expect(section?.heading).toBe('Opening a shared score by link');
         const text = legalText({ sections: section ? [section] : [] });
-        expect(text).toMatch(/stores nothing about the viewer/);
+        expect(text).toMatch(
+            /collects nothing from the person viewing, sets nothing on their device and leaves no record/,
+        );
+        expect(text).toMatch(/Vercel and Supabase, process the viewer’s IP address/);
+        expect(text).toMatch(/Vercel’s logs keep it for about 1 hour and Supabase’s for about 7 days/);
+        expect(text).toMatch(/shows the score’s owner only an anonymous count/);
+        expect(text).toMatch(/We suggest a first name or nickname, and it is optional\./);
+        expect(text).toMatch(/between 7 and 90 days \(30 days by default\)/);
+        expect(text).toMatch(/privacy@cleffy\.io/);
         expect(text).toMatch(/never used to contact anyone/);
-        expect(section?.blocks).toContainEqual({
-            kind: 'placeholder',
-            text: 'Counsel: retention wording (Vercel runtime logs 1 h; …)',
-        });
+        expect(section?.blocks.some((block) => block.kind === 'placeholder')).toBe(true);
+
+        const noAccounts = docs.children.sections.find((candidate) => candidate.id === 'no-accounts');
+        const ageCheck = legalText({ sections: noAccounts ? [noAccounts] : [] });
+        expect(ageCheck).toMatch(/Anyone who creates an account themselves first answers an age check\./);
+        expect(ageCheck).not.toMatch(/joins a shared score as a guest through a share link/);
         expect(legalText(docs.terms)).toMatch(/own screen or share a view link, when available\./);
     });
 });
