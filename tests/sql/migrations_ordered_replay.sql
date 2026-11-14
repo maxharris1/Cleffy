@@ -237,6 +237,8 @@ set constraints all immediate;
 \ir ../../supabase/migrations/20261113120100_share_v2_viewer_auth.sql
 \ir ../../supabase/migrations/20261113120200_share_v2_invites.sql
 \ir ../../supabase/migrations/20261113120300_share_v2_link_guests.sql
+\ir ../../supabase/migrations/20261114120000_share_v2_resolve_expiry.sql
+\ir ../../supabase/migrations/20261114120100_share_v2_route_patterns.sql
 
 reset client_min_messages;
 

@@ -98,13 +98,24 @@ Deno.test('an unknown or older link reads invalid; a dead general link gives onl
     const unknown = harness({ link: { state: 'invalid' } });
     const answer = await (await handleShareSession(post({ token: TOKEN }), unknown.deps)).json();
     assert(JSON.stringify(answer) === '{"state":"invalid"}');
-    for (const state of ['revoked', 'expired', 'unavailable'] as const) {
+    for (const state of ['revoked', 'unavailable'] as const) {
         const h = harness({ link: { state, link_id: LINK } });
         const response = await handleShareSession(post({ token: TOKEN }), h.deps);
         assert(response.status === 200);
         assert(JSON.stringify(await response.json()) === JSON.stringify({ state }), state);
         assert(!h.keys.some((key) => key.startsWith('share-viewers:')), state);
     }
+});
+
+Deno.test('an expired general link gives its state and the date it stopped, and mints nothing', async () => {
+    const h = harness({ link: { state: 'expired', link_id: LINK, link_expires_at: '2026-11-20T00:00:00+00:00' } });
+    const response = await handleShareSession(post({ token: TOKEN }), h.deps);
+    assert(response.status === 200);
+    assert(
+        JSON.stringify(await response.json()) ===
+            JSON.stringify({ state: 'expired', expired_at: '2026-11-20T00:00:00+00:00' }),
+    );
+    assert(!h.keys.some((key) => key.startsWith('share-viewers:')));
 });
 
 Deno.test('a failed lookup is 503', async () => {

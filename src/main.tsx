@@ -5,6 +5,7 @@ import ReactDOM from 'react-dom/client';
 
 import { App } from '@/app/App';
 import { captureAuthUrlError } from '@/features/auth/authUrlError';
+import { isLinkSessionPath } from '@/features/share/linkPaths';
 import { captureAttribution } from '@/lib/attribution';
 import { monitoringEnabled, monitoringUserIdOf, setMonitoringUser, startMonitoring } from '@/lib/monitoring';
 import { registerServiceWorker } from '@/lib/serviceWorker';
@@ -24,8 +25,12 @@ installStaleChunkRecovery();
 captureAuthUrlError();
 
 // The same, for the campaign tags of the link this visit arrived by: kept
-// first-touch for 30 days and sent with a sign-up (lib/attribution).
-captureAttribution();
+// first-touch for 30 days and sent with a sign-up (lib/attribution). Never on a
+// share link: a signed-out viewer there leaves nothing behind.
+const linkSession = isLinkSessionPath(window.location.pathname);
+if (!linkSession) {
+    captureAttribution();
+}
 
 // First-party page views and funnel events, to our own database only. Never
 // for a roster student or a guest (lib/webEvents, and the server again).
@@ -41,7 +46,10 @@ if (monitoringEnabled() && isSupabaseConfigured()) {
 }
 
 // Offline support. Not at load on a first visit: see registerServiceWorker.
-registerServiceWorker();
+// Not on a share link, whose viewer must leave no caches behind.
+if (!linkSession) {
+    registerServiceWorker();
+}
 
 // The dialog and menu chunks, warmed on idle or on the first hover or focus of a button.
 installPrimitivesPrefetch();

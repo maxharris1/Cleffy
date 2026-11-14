@@ -35,7 +35,7 @@ const documentsWithViewLinks = async () => {
     vi.resetModules();
     vi.doMock('@/lib/features', async (importOriginal) => {
         const actual = await importOriginal<typeof FeaturesModule>();
-        return { features: { ...actual.features, shareV2: true, viewLinks: true } };
+        return { features: { ...actual.features, shareV2: true } };
     });
     const content = await import('@/features/legal/legalContent');
     return content.LEGAL_DOCUMENTS;

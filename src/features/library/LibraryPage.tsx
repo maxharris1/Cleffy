@@ -1094,7 +1094,7 @@ export const LibraryPage = () => {
                                             aria-label="Filter by tag"
                                             value={activeTagId ?? ''}
                                             onChange={(e) => setActiveTagId(e.target.value || null)}
-                                            className={fieldClassName('xs', 'h-8 w-auto max-w-[10rem]')}
+                                            className={fieldClassName('xs', 'h-8 max-w-[10rem]', { width: 'auto' })}
                                         >
                                             <option value="">All tags</option>
                                             {tags.map((tag) => (

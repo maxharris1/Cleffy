@@ -1,5 +1,5 @@
 /// <reference types="vitest/config" />
-import { createReadStream, cpSync, existsSync, readFileSync } from 'node:fs';
+import { createReadStream, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 
@@ -29,7 +29,38 @@ const releaseFlags = loadEnv('production', process.cwd(), 'VITE_FEATURE_');
 const GATED_CHUNK_IGNORES = [
     ...(releaseFlags['VITE_FEATURE_PLAYALONG'] === '1' ? [] : ['**/assets/TransportBar-*.js']),
     ...(releaseFlags['VITE_FEATURE_FINGERING'] === '1' ? [] : ['**/assets/FingeringFlow-*.js']),
+    // The signed-out link viewer (with fake-indexeddb): members never need it offline.
+    '**/assets/LinkViewerPage-*.js',
 ];
+
+/**
+ * Writes each output chunk's modules and imports to
+ * node_modules/.cache/bundle-modules.json (outside dist, so it never ships)
+ * for scripts/ci/check-bundle.mjs.
+ */
+const bundleModulesPlugin = (): Plugin => ({
+    name: 'cleffy-bundle-modules',
+    apply: 'build',
+    generateBundle(_options, bundle) {
+        const chunks: Record<
+            string,
+            { isEntry: boolean; imports: string[]; dynamicImports: string[]; modules: string[] }
+        > = {};
+        for (const output of Object.values(bundle)) {
+            if (output.type === 'chunk') {
+                chunks[output.fileName] = {
+                    isEntry: output.isEntry,
+                    imports: output.imports,
+                    dynamicImports: output.dynamicImports,
+                    modules: Object.keys(output.modules),
+                };
+            }
+        }
+        const dir = path.resolve('node_modules/.cache');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(path.join(dir, 'bundle-modules.json'), JSON.stringify({ chunks }));
+    },
+});
 
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
 const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev', '.trycloudflare.com'];
@@ -229,6 +260,7 @@ export default defineConfig({
         react(),
         tailwindcss(),
         sonnerStylesPlugin(),
+        bundleModulesPlugin(),
         pdfjsAssetsPlugin(),
         supabasePreconnectPlugin(),
         buildConstantsPlugin(),

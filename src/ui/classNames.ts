@@ -42,18 +42,24 @@ export type FieldSize = 'md' | 'sm' | 'xs' | 'inline';
  * only under a fine pointer.
  */
 const FIELD_SIZE_CLASSES: Record<FieldSize, string> = {
-    md: 'w-full rounded-xl px-3.5 py-3',
-    sm: 'w-full rounded-lg px-3 py-2 text-base pointer-fine:text-sm',
-    xs: 'w-full rounded-lg px-3 py-0 text-base pointer-fine:text-xs',
+    md: 'rounded-xl px-3.5 py-3',
+    sm: 'rounded-lg px-3 py-2 text-base pointer-fine:text-sm',
+    xs: 'rounded-lg px-3 py-0 text-base pointer-fine:text-xs',
     inline: 'rounded-md px-1 py-0.5 text-center text-base tabular-nums pointer-fine:text-sm',
 };
+
+/** full: fills its row. auto: sizes to its content (selects beside a label). */
+export type FieldWidth = 'full' | 'auto';
 
 /**
  * Class string for text-like inputs. Focus treatment comes from .landing-input
  * in index.css (accent border + soft ring), which replaces the default outline.
+ * The inline size never takes a width class: its caller sets one.
  */
-export const fieldClassName = (size: FieldSize = 'md', extra = ''): string =>
-    `landing-input border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition-colors placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
+export const fieldClassName = (size: FieldSize = 'md', extra = '', opts: { width?: FieldWidth } = {}): string => {
+    const width = size === 'inline' ? '' : (opts.width ?? 'full') === 'full' ? 'w-full ' : 'w-auto ';
+    return `landing-input border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition-colors placeholder:text-stone-500 ${width}${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
+};
 
 /**
  * Filter/facet chip — pill toggle matching the transport bar's pill language.

@@ -134,14 +134,14 @@ describe('a takedown cuts off viewers already connected', () => {
 
 describe("a restriction never makes the owner's devices skip marks", () => {
     it('the viewer holds the watermark before every gap-fill pull (reconnect, resync, topic move)', () => {
-        const viewer = readFileSync(resolve(process.cwd(), 'src/features/viewer/PdfViewport.tsx'), 'utf8');
+        const viewer = readFileSync(resolve(process.cwd(), 'src/features/viewer/ViewerBackendContext.ts'), 'utf8');
         for (const hook of ['onReconnect', 'onResync']) {
             const start = viewer.indexOf(`${hook}: () => {`);
             expect(start, `${hook} is wired`).toBeGreaterThan(-1);
             const body = viewer.slice(start, viewer.indexOf('},', start));
-            const hold = body.indexOf('engine?.noteGap();');
+            const hold = body.indexOf('engine.noteGap();');
             expect(hold, `${hook} notes the gap`).toBeGreaterThan(-1);
-            expect(hold).toBeLessThan(body.indexOf('engine?.sync();'));
+            expect(hold).toBeLessThan(body.indexOf('engine.sync();'));
         }
     });
 });
