@@ -6,6 +6,7 @@ import { AuthCallbackPage } from '@/features/auth/AuthCallbackPage';
 import { LibraryPage } from '@/features/library/LibraryPage';
 import { LibraryShell } from '@/features/library/LibraryShell';
 import { NotFoundPage } from '@/features/marketing/NotFoundPage';
+import { features } from '@/lib/features';
 import { BrandLoading } from '@/ui/BrandShell';
 import { LoadingText } from '@/ui/Loading';
 
@@ -28,6 +29,11 @@ const UpdatePasswordPage = lazy(() =>
 const SearchPage = lazy(() => import('@/features/library/SearchPage').then((m) => ({ default: m.SearchPage })));
 // Lazy: the invite landing is reached once per share link, by a guest.
 const JoinPage = lazy(() => import('@/features/share/JoinPage').then((m) => ({ default: m.JoinPage })));
+const ShareLinkPage = lazy(() => import('@/features/share/ShareLinkPage').then((m) => ({ default: m.ShareLinkPage })));
+const LinkUnavailable = lazy(() =>
+    import('@/features/share/ShareLinkPage').then((m) => ({ default: m.LinkUnavailable })),
+);
+const InvitePage = lazy(() => import('@/features/share/InvitePage').then((m) => ({ default: m.InvitePage })));
 
 // Lazy: the /try demo is where the ads land. Its viewer (pdf.js and the ink
 // stack) is a further chunk the page requests itself (features/demo/DemoPage).
@@ -247,7 +253,24 @@ export const AppRoutes = () => {
                 path="/join/:token"
                 element={
                     <Suspense fallback={<PageFallback label="Opening invite…" />}>
-                        <JoinPage />
+                        {features.shareV2 ? <ShareLinkPage /> : <JoinPage />}
+                    </Suspense>
+                }
+            />
+            {/* Share v2: the token rides in the fragment (D14), which never reaches a server. */}
+            <Route
+                path="/s"
+                element={
+                    <Suspense fallback={<PageFallback label="Opening the score…" />}>
+                        {features.shareV2 ? <ShareLinkPage /> : <LinkUnavailable />}
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/invite"
+                element={
+                    <Suspense fallback={<PageFallback label="Opening invite…" />}>
+                        {features.shareV2 ? <InvitePage /> : <LinkUnavailable />}
                     </Suspense>
                 }
             />

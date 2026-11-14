@@ -1,7 +1,7 @@
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
 
-import type { AgeGate } from '@/features/auth/ageCheck';
+import type { AgeGate, LinkGuestGate } from '@/features/auth/ageCheck';
 import { readAttribution } from '@/lib/attribution';
 import { perfMark } from '@/lib/perf';
 import { anonymousName } from '@/features/share/anonymousAnimals';
@@ -227,15 +227,16 @@ export const updatePassword = async (password: string): Promise<void> => {
  * would stop a child getting into the score their teacher just shared.
  */
 export const signInAnonymouslyWithName = async (
-    displayName: string,
+    displayName: string | undefined,
     captchaToken: string | null | undefined,
-    ageGate: AgeGate,
+    ageGate: AgeGate | LinkGuestGate,
 ): Promise<void> => {
     const supabase = getSupabase();
     // A guest is a new auth user like any other, so the hook checks its
-    // age_gate too.
+    // age_gate too. An editor-link guest may leave the name blank.
+    const data = displayName === undefined ? { age_gate: ageGate } : { display_name: displayName, age_gate: ageGate };
     const { error } = await supabase.auth.signInAnonymously({
-        options: { data: { display_name: displayName, age_gate: ageGate }, ...captchaOptions(captchaToken) },
+        options: { data, ...captchaOptions(captchaToken) },
     });
     if (error) {
         throw error;

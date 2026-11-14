@@ -269,7 +269,7 @@ const intervalFor = (expiry: LinkExpiryChoice): string | null => {
     return choice ? choice.interval : '7 days';
 };
 
-const dateText = (iso: string): string =>
+export const linkDateText = (iso: string): string =>
     new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(iso));
 
 /** "Expires 20 Nov 2026 (in 7 days)", "Expires 20 Nov 2026 (today)", "Expired on 20 Nov 2026", "Never expires". */
@@ -279,11 +279,11 @@ export const linkExpiryText = (expiresAt: string | null, now: Date = new Date())
     }
     const remaining = new Date(expiresAt).getTime() - now.getTime();
     if (remaining <= 0) {
-        return `Expired on ${dateText(expiresAt)}`;
+        return `Expired on ${linkDateText(expiresAt)}`;
     }
     const days = Math.round(remaining / DAY_MS);
     const when = days < 1 ? 'today' : days === 1 ? 'in 1 day' : `in ${days} days`;
-    return `Expires ${dateText(expiresAt)} (${when})`;
+    return `Expires ${linkDateText(expiresAt)} (${when})`;
 };
 
 /** An owner action the server refused, by the code it gave; `message` is what to show. */

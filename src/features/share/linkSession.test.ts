@@ -92,7 +92,11 @@ describe('LinkSession', () => {
     const start = new Date('2026-11-13T12:00:00Z');
     const nowSec = start.getTime() / 1000;
     let fetchMock: ReturnType<typeof vi.fn>;
-    let events: { [K in keyof LinkSessionEvents]: ReturnType<typeof vi.fn> };
+    let events: {
+        onRenewed: ReturnType<typeof vi.fn<LinkSessionEvents['onRenewed']>>;
+        onDead: ReturnType<typeof vi.fn<LinkSessionEvents['onDead']>>;
+        onBusy: ReturnType<typeof vi.fn<LinkSessionEvents['onBusy']>>;
+    };
     const first: ViewerAnswer = {
         kind: 'viewer',
         jwt: 'jwt-1',
@@ -108,7 +112,11 @@ describe('LinkSession', () => {
         vi.useFakeTimers({ now: start, toFake: ['setTimeout', 'clearTimeout', 'Date'] });
         fetchMock = vi.fn();
         vi.stubGlobal('fetch', fetchMock);
-        events = { onRenewed: vi.fn(), onDead: vi.fn(), onBusy: vi.fn() };
+        events = {
+            onRenewed: vi.fn<LinkSessionEvents['onRenewed']>(),
+            onDead: vi.fn<LinkSessionEvents['onDead']>(),
+            onBusy: vi.fn<LinkSessionEvents['onBusy']>(),
+        };
     });
 
     afterEach(() => {

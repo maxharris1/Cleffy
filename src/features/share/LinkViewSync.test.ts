@@ -59,7 +59,7 @@ describe('LinkViewSync', () => {
 
     it('keeps newer marks over older copies and erases on a tombstone', async () => {
         await sync.applyMark(stroke('a', 5));
-        await sync.applyMark({ ...stroke('a', 4), color: '#ff0000' });
+        await sync.applyMark({ ...(stroke('a', 4) as Extract<LinkViewMark, { deleted: false }>), color: '#ff0000' });
         expect(store.get('a')?.color).toBe('#000000');
         await sync.applyMark(tomb('a', 6));
         expect(store.getPage(0).has('a')).toBe(false);

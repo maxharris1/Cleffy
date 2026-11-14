@@ -29,6 +29,8 @@ const releaseFlags = loadEnv('production', process.cwd(), 'VITE_FEATURE_');
 const GATED_CHUNK_IGNORES = [
     ...(releaseFlags['VITE_FEATURE_PLAYALONG'] === '1' ? [] : ['**/assets/TransportBar-*.js']),
     ...(releaseFlags['VITE_FEATURE_FINGERING'] === '1' ? [] : ['**/assets/FingeringFlow-*.js']),
+    // The signed-out link viewer (with fake-indexeddb): members never need it offline.
+    '**/assets/LinkViewerPage-*.js',
 ];
 
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
