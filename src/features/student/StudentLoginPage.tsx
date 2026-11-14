@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
 import { TurnstileField } from '@/features/auth/TurnstileField';
-import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { SignedOutByTeacherState } from '@/features/student/endedSignIn';
 import { discardedChangesNotice, keptChangesNotice } from '@/features/student/keptChangesNotice';
@@ -81,9 +81,7 @@ const CredentialEntry = () => {
      * at the sign-in box — the function has accepted a token since it was
      * written, and nothing was producing one.
      */
-    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
-    const [captchaRound, setCaptchaRound] = useState(0);
-    const captchaRequired = isTurnstileEnabled();
+    const captcha = useTurnstileToken();
     /**
      * How many times the server has said "that username and password did not
      * work". Each one shakes the two fields once they are enabled again (the
@@ -112,14 +110,17 @@ const CredentialEntry = () => {
             setError('Type your username and password.');
             return;
         }
-        // After the fields, so a child who left one empty is not first told off
-        // about the robot check. Never reached on a build with no site key.
-        if (captchaRequired && !captchaToken) {
-            setError('Finish the “I’m human” check, then try again.');
-            return;
-        }
         setError(null);
         setBusy(true);
+        // After the fields, so a child who left one empty is not first told off
+        // about the robot check.
+        const wait = await captcha.waitForToken();
+        if (!wait.ok) {
+            setError(wait.message);
+            setBusy(false);
+            return;
+        }
+        const captchaToken = wait.token;
         try {
             // Sent exactly as typed. The server folds case and space itself, so
             // reshaping it here could only ever turn a sign-in that would have
@@ -135,12 +136,11 @@ const CredentialEntry = () => {
                 setRefused(true);
                 setRefusals((n) => n + 1);
             }
-            if (captchaRequired) {
+            if (captcha.required) {
                 // The token is spent the moment it is redeemed, whatever became
                 // of the credential beside it, so a retry needs a new challenge
                 // rather than the dead proof in hand.
-                setCaptchaToken(null);
-                setCaptchaRound((round) => round + 1);
+                captcha.renew();
             }
         }
     };
@@ -197,7 +197,12 @@ const CredentialEntry = () => {
                         spaced
                     />
                 </div>
-                <TurnstileField key={captchaRound} action="student-login" onToken={setCaptchaToken} />
+                <TurnstileField
+                    key={captcha.round}
+                    action="student-login"
+                    onToken={captcha.onToken}
+                    onNeedsUser={captcha.onNeedsUser}
+                />
                 <Button type="submit" disabled={busy} className="mt-4 w-full">
                     <SwapLabel labels={{ idle: 'Open my music', busy: 'Opening…' }} active={busy ? 'busy' : 'idle'} />
                 </Button>

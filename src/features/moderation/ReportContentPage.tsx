@@ -2,7 +2,7 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router';
 
 import { TurnstileField } from '@/features/auth/TurnstileField';
-import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import {
     ILLEGAL_CATEGORY_LABELS,
@@ -121,8 +121,7 @@ export const ReportContentPage = () => {
     const [goodFaith, setGoodFaith] = useState(false);
     const [perjury, setPerjury] = useState(false);
     const [signature, setSignature] = useState('');
-    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
-    const [captchaRound, setCaptchaRound] = useState(0);
+    const captcha = useTurnstileToken();
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [done, setDone] = useState<{ reference: string; acknowledged: boolean } | null>(null);
@@ -142,12 +141,14 @@ export const ReportContentPage = () => {
             setError('Confirm the statements above to send the report.');
             return;
         }
-        if (isTurnstileEnabled() && !captchaToken) {
-            setError('Finish the “I’m human” check, then send.');
-            return;
-        }
         setError(null);
         setSubmitting(true);
+        const wait = await captcha.waitForToken();
+        if (!wait.ok) {
+            setError(wait.message);
+            setSubmitting(false);
+            return;
+        }
         try {
             const result = await submitContentReport(
                 {
@@ -165,14 +166,13 @@ export const ReportContentPage = () => {
                     perjuryStatement: copyright && perjury,
                     signature,
                 },
-                captchaToken,
+                wait.token,
             );
             setDone(result);
         } catch (err) {
             setError(err instanceof ReportError || err instanceof Error ? err.message : 'Could not send the report.');
             // A Turnstile token is single use: a retry needs a fresh challenge.
-            setCaptchaToken(null);
-            setCaptchaRound((round) => round + 1);
+            captcha.renew();
         } finally {
             setSubmitting(false);
         }
@@ -413,9 +413,10 @@ export const ReportContentPage = () => {
                     </p>
 
                     <TurnstileField
-                        key={captchaRound}
+                        key={captcha.round}
                         action="content-report"
-                        onToken={setCaptchaToken}
+                        onToken={captcha.onToken}
+                        onNeedsUser={captcha.onNeedsUser}
                         className="mt-5"
                     />
 

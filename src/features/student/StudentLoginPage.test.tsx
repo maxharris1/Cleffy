@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -297,9 +297,13 @@ describe('StudentLoginPage with Turnstile on', () => {
     });
 
     it('asks for the check last, after the fields, and sends nothing without it', async () => {
-        withTurnstile();
+        const rendered = withTurnstile();
         const user = userEvent.setup();
         renderLogin();
+        // Cloudflare decided this visitor gets a challenge, so there is one on
+        // screen to point at.
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        act(() => rendered[0]!['before-interactive-callback']!());
 
         // A child who left a field empty hears about the field first.
         await user.click(screen.getByRole('button', { name: 'Open my music' }));
@@ -309,7 +313,7 @@ describe('StudentLoginPage with Turnstile on', () => {
         await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
         await user.click(screen.getByRole('button', { name: 'Open my music' }));
 
-        expect(screen.getByRole('status')).toHaveTextContent('Finish the “I’m human” check');
+        expect(await screen.findByText(/Finish the “I’m human” check/)).toBeInTheDocument();
         expect(loginStudent).not.toHaveBeenCalled();
     });
 

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, renderHook, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +11,7 @@ import {
     turnstileSiteKey,
     type TurnstileRenderOptions,
 } from '../../src/features/auth/turnstile';
+import { TURNSTILE_NEEDS_USER, TURNSTILE_SLOW, useTurnstileToken } from '../../src/features/auth/useTurnstileToken';
 import { passAgeScreen } from '../../src/test/ageScreen';
 
 /**
@@ -25,7 +26,17 @@ import { passAgeScreen } from '../../src/test/ageScreen';
  * neither fetches nor refuses anything.
  */
 
+/** Cloudflare's always-passes test key: the invisible path. */
 const SITE_KEY = '1x00000000000000000000AA';
+/** Cloudflare's always-challenges test key: the widget has to show itself. */
+const CHALLENGE_KEY = '3x00000000000000000000FF';
+
+const signUpWithPassword = vi.hoisted(() => vi.fn());
+
+vi.mock('@/features/auth/session', async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    signUpWithPassword: (...args: unknown[]) => signUpWithPassword(...args),
+}));
 
 /** A fake `window.turnstile`, recording what it was asked to render. */
 const stubTurnstile = () => {
@@ -46,6 +57,7 @@ const stubTurnstile = () => {
 
 afterEach(() => {
     cleanup();
+    signUpWithPassword.mockReset();
     vi.unstubAllEnvs();
     resetTurnstileLoaderForTests();
     delete (window as { turnstile?: unknown }).turnstile;
@@ -91,7 +103,15 @@ describe('with no site key — every build today', () => {
         // No "finish the check" refusal: the form went through to signUp,
         // which is what "inert" has to mean for every existing test to stay
         // valid.
+        await waitFor(() => expect(signUpWithPassword).toHaveBeenCalledOnce());
+        expect(signUpWithPassword.mock.calls[0]![2]).toBeNull();
         expect(screen.queryByText(/I’m human/)).not.toBeInTheDocument();
+    });
+
+    it('hands submits no token, straight away', async () => {
+        const { result } = renderHook(() => useTurnstileToken());
+        expect(result.current.required).toBe(false);
+        await expect(result.current.waitForToken()).resolves.toEqual({ ok: true, token: null });
     });
 
     it('treats a blank or whitespace key as unset, not as a key', () => {
@@ -173,21 +193,133 @@ describe('with a site key set', () => {
         expect(document.getElementById('cf-turnstile-script')).toBeNull();
     });
 
-    it('refuses to submit the sign-up form until the check is finished', async () => {
+    it('renders interaction-only, leaving refresh-expired at Cloudflare’s default', async () => {
         vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+        const { rendered } = stubTurnstile();
+        render(<TurnstileField action="signup" onToken={vi.fn()} />);
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        expect(rendered[0]).toMatchObject({ appearance: 'interaction-only' });
+        expect(rendered[0]).not.toHaveProperty('refresh-expired');
+    });
+
+    it('takes no space while hidden, and its place in the form once a challenge shows', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', CHALLENGE_KEY);
+        const { rendered } = stubTurnstile();
+        const onNeedsUser = vi.fn();
+        render(<TurnstileField action="signup" onToken={vi.fn()} onNeedsUser={onNeedsUser} className="basis-full" />);
+        await waitFor(() => expect(rendered).toHaveLength(1));
+
+        const wrapper = screen.getByTestId('turnstile-field').parentElement!;
+        expect(wrapper.className).toBe('absolute');
+
+        act(() => rendered[0]!['before-interactive-callback']!());
+        expect(wrapper.className).toBe('mt-4 basis-full');
+        expect(onNeedsUser).toHaveBeenCalledOnce();
+    });
+
+    it('signs up a passing visitor with no visible check, waiting for a token that is still on its way', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+        signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: true });
         const { rendered } = stubTurnstile();
         const user = userEvent.setup();
         await renderRegister();
         await waitFor(() => expect(rendered).toHaveLength(1));
+        expect(screen.getByTestId('turnstile-field').parentElement!.className).toBe('absolute');
+
+        await user.type(screen.getByLabelText('Email'), 'teacher@example.com');
+        await user.type(screen.getByLabelText('Password'), 'letters4ever');
+        await user.type(screen.getByLabelText('Confirm password'), 'letters4ever');
+        // Submitted before Cloudflare answered: the form waits, it does not
+        // tell the visitor to finish a check they cannot see.
+        await user.click(screen.getByRole('button', { name: 'Create account' }));
+        expect(screen.queryByText(/I’m human/)).not.toBeInTheDocument();
+        expect(signUpWithPassword).not.toHaveBeenCalled();
+
+        act(() => rendered[0]!.callback('cf-token'));
+
+        await waitFor(() => expect(signUpWithPassword).toHaveBeenCalledOnce());
+        expect(signUpWithPassword.mock.calls[0]!.slice(0, 3)).toEqual([
+            'teacher@example.com',
+            'letters4ever',
+            'cf-token',
+        ]);
+        expect(screen.queryByText(/I’m human/)).not.toBeInTheDocument();
+    });
+
+    it('with the always-challenge key, points at the inline challenge, then completes once it is solved', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', CHALLENGE_KEY);
+        signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: true });
+        const { rendered } = stubTurnstile();
+        const user = userEvent.setup();
+        await renderRegister();
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        act(() => rendered[0]!['before-interactive-callback']!());
 
         await user.type(screen.getByLabelText('Email'), 'teacher@example.com');
         await user.type(screen.getByLabelText('Password'), 'letters4ever');
         await user.type(screen.getByLabelText('Confirm password'), 'letters4ever');
         await user.click(screen.getByRole('button', { name: 'Create account' }));
 
-        // Said last of the form's complaints: a form with a typo in it is not
-        // first told off about the robot check.
-        expect(await screen.findByText(/Finish the “I’m human” check/)).toBeInTheDocument();
+        expect(await screen.findByText(TURNSTILE_NEEDS_USER)).toBeInTheDocument();
+        expect(signUpWithPassword).not.toHaveBeenCalled();
+
+        act(() => rendered[0]!.callback('cf-solved'));
+        await user.click(screen.getByRole('button', { name: 'Create account' }));
+
+        await waitFor(() => expect(signUpWithPassword).toHaveBeenCalledOnce());
+        expect(signUpWithPassword.mock.calls[0]![2]).toBe('cf-solved');
+    });
+
+    it('says the check couldn’t load when the script is blocked, instead of waiting', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+        const { result } = renderHook(() => useTurnstileToken());
+        render(
+            <TurnstileField
+                action="signup"
+                onToken={result.current.onToken}
+                onNeedsUser={result.current.onNeedsUser}
+            />,
+        );
+        const script = await waitFor(() => {
+            const el = document.getElementById('cf-turnstile-script');
+            expect(el).not.toBeNull();
+            return el!;
+        });
+        script.dispatchEvent(new Event('error'));
+        await screen.findByText(/couldn’t load/i);
+
+        await expect(result.current.waitForToken()).resolves.toEqual({ ok: false, message: TURNSTILE_NEEDS_USER });
+    });
+
+    it('stops waiting at once when the challenge errors', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+        const { rendered } = stubTurnstile();
+        const { result } = renderHook(() => useTurnstileToken());
+        render(
+            <TurnstileField action="login" onToken={result.current.onToken} onNeedsUser={result.current.onNeedsUser} />,
+        );
+        await waitFor(() => expect(rendered).toHaveLength(1));
+
+        const waiting = result.current.waitForToken();
+        act(() => rendered[0]!['error-callback']!());
+        await expect(waiting).resolves.toEqual({ ok: false, message: TURNSTILE_NEEDS_USER });
+    });
+
+    it('gives up on a token that never comes without blaming the visitor', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+        const { result } = renderHook(() => useTurnstileToken());
+        await expect(result.current.waitForToken(5)).resolves.toEqual({ ok: false, message: TURNSTILE_SLOW });
+    });
+
+    it('forgets a spent token on renew', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+        const { result } = renderHook(() => useTurnstileToken());
+        act(() => result.current.onToken('cf-token'));
+        await expect(result.current.waitForToken()).resolves.toEqual({ ok: true, token: 'cf-token' });
+
+        act(() => result.current.renew());
+        expect(result.current.round).toBe(1);
+        await expect(result.current.waitForToken(5)).resolves.toEqual({ ok: false, message: TURNSTILE_SLOW });
     });
 
     it('tears the widget down when the field unmounts', async () => {

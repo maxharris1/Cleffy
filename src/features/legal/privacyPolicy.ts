@@ -214,6 +214,7 @@ export const PRIVACY_POLICY: LegalDocument = {
                         ? ['Google LLC (Google Cloud) — runs our music-recognition service for play-along.']
                         : []),
                     'Functional Software, Inc. (Sentry) — receives scrubbed error reports, when error monitoring is enabled.',
+                    'Cloudflare, Inc. (Turnstile) — checks that sign-up, sign-in and other account forms are used by people rather than bots, when bot protection is enabled. Cloudflare’s Turnstile privacy addendum is at https://www.cloudflare.com/turnstile-privacy-policy/.',
                 ),
                 p(
                     'We may also disclose information if the law requires it, to protect the rights and safety of our users or the public, or as part of a sale or reorganisation of our business, in which case this policy would continue to apply to it. When we act on a report about content, we tell the person who uploaded it why, without giving them the reporter’s contact details unless the law requires it (a copyright counter-notice process may).',

@@ -13,14 +13,20 @@ import {
 import { LEGAL_DOCUMENT_IDS, type LegalDocumentId } from '@/features/legal/legalVersions';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 
-const EMAIL = /([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/gi;
+/** An email address, or an https URL that does not swallow the full stop after it. */
+const LINKABLE = /(https:\/\/[^\s]*[^\s.,;:)]|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/gi;
 
-/** Plain text with any email address turned into a mailto link. */
-const withMailto = (text: string): ReactNode =>
-    text.split(EMAIL).map((part, index) =>
+/** Plain text with any email address or https URL turned into a link. */
+const withLinks = (text: string): ReactNode =>
+    text.split(LINKABLE).map((part, index) =>
         // split() with a capture group puts the matches at the odd indices.
         index % 2 === 1 ? (
-            <a key={index} href={`mailto:${part}`} className={linkClassName}>
+            <a
+                key={index}
+                href={part.startsWith('https://') ? part : `mailto:${part}`}
+                className={linkClassName}
+                {...(part.startsWith('https://') ? { target: '_blank', rel: 'noreferrer' } : {})}
+            >
                 {part}
             </a>
         ) : (
@@ -37,12 +43,12 @@ const Block = ({ block }: { block: LegalBlock }) => {
                 <h3 className="mt-5 text-sm font-medium uppercase tracking-[0.08em] text-stone-600">{block.text}</h3>
             );
         case 'p':
-            return <p className={`mt-3 ${BODY}`}>{withMailto(block.text)}</p>;
+            return <p className={`mt-3 ${BODY}`}>{withLinks(block.text)}</p>;
         case 'list':
             return (
                 <ul className={`mt-3 list-disc space-y-2 pl-5 ${BODY} marker:text-stone-400`}>
                     {block.items.map((item) => (
-                        <li key={item}>{withMailto(item)}</li>
+                        <li key={item}>{withLinks(item)}</li>
                     ))}
                 </ul>
             );
@@ -51,7 +57,7 @@ const Block = ({ block }: { block: LegalBlock }) => {
                 <div className={`mt-3 space-y-2 rounded-xl border border-stone-300 bg-white/70 px-4 py-3 ${BODY}`}>
                     {block.lines.map((line) => (
                         <p key={line} className="break-words">
-                            {withMailto(line)}
+                            {withLinks(line)}
                         </p>
                     ))}
                 </div>
