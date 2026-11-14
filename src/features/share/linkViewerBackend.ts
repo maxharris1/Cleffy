@@ -45,7 +45,7 @@ export interface LinkViewerBackend extends ViewerBackend {
  */
 export const createLinkViewerBackend = (client: TypedSupabaseClient): LinkViewerBackend => {
     const db = new ScribblerDb(`link-view-${crypto.randomUUID()}`, { indexedDB: new IDBFactory(), IDBKeyRange });
-    const channels = new Set<DocRealtimeChannel>();
+    const connections = new Set<{ channel: DocRealtimeChannel; sync: LinkViewSync }>();
     return {
         db,
         supabase: client,
@@ -71,22 +71,25 @@ export const createLinkViewerBackend = (client: TypedSupabaseClient): LinkViewer
                 onMembershipChanged: () => callbacks.onMembershipChanged?.(),
                 fetchTopicEpoch: async () => toEpoch(await readLinkAccess(client)),
             });
-            channels.add(channel);
+            const connection = { channel, sync };
+            connections.add(connection);
             void sync.pull();
             channel.start();
             return {
                 setPage: (page) => channel.setPage(page),
                 stop: () => {
-                    channels.delete(channel);
+                    connections.delete(connection);
+                    sync.stop();
                     channel.stop();
                 },
             };
         },
         async dispose() {
-            for (const channel of channels) {
+            for (const { channel, sync } of connections) {
+                sync.stop();
                 channel.stop();
             }
-            channels.clear();
+            connections.clear();
             await client.removeAllChannels();
             client.realtime.disconnect();
             db.close();

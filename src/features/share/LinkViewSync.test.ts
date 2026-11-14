@@ -87,4 +87,15 @@ describe('LinkViewSync', () => {
         await sync.pull();
         expect(store.getPage(0).has('a')).toBe(true);
     });
+
+    it('drops what is still in flight once stopped, even with the database closed', async () => {
+        let answer: (value: unknown) => void = () => undefined;
+        rpc.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+        const pulling = sync.pull();
+        sync.stop();
+        db.close();
+        answer(page([stroke('late', 1)], 1, false));
+        await expect(pulling).resolves.toBeUndefined();
+        await expect(sync.applyMark(stroke('later', 2))).resolves.toBeUndefined();
+    });
 });
