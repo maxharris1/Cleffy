@@ -350,6 +350,57 @@ describe('LinkViewerPage keeps nothing', () => {
         expect(channels.stopped).toBeGreaterThanOrEqual(1);
     });
 
+    const holdShareSession = () => {
+        const normalFetch = fetchMock.getMockImplementation() as typeof fetch;
+        const held: Array<(res: Response) => void> = [];
+        fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) =>
+            String(input).includes('/functions/v1/share-session')
+                ? new Promise<Response>((resolve) => held.push(resolve))
+                : normalFetch(input, init),
+        );
+        return held;
+    };
+
+    it.each([
+        ['the check at the deadline', 60_000],
+        ['a renewal already in flight at the deadline', 490_000],
+    ])('clears the score when %s never answers', async (_, untilDeadline) => {
+        const onDead = vi.fn();
+        const expiredAt = new Date(Date.now() + untilDeadline).toISOString();
+        render(
+            <MemoryRouter>
+                <LinkViewerPage token={TOKEN} first={{ ...first(), linkExpiresAt: expiredAt }} onDead={onDead} />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        holdShareSession();
+        await act(() => vi.advanceTimersByTimeAsync(untilDeadline + 30_000));
+        expect(onDead).toHaveBeenCalledTimes(1);
+        expect(onDead).toHaveBeenCalledWith({ kind: 'dead', state: 'expired', expiredAt });
+        expect(channels.stopped).toBeGreaterThanOrEqual(1);
+    });
+
+    it.each([
+        ['a later deadline', () => new Date(Date.now() + 86_400_000).toISOString()],
+        ['never', () => null],
+    ])('keeps the score open when a slow check at the deadline moves the expiry to %s', async (_, next) => {
+        const onDead = vi.fn();
+        const expiredAt = new Date(Date.now() + 60_000).toISOString();
+        render(
+            <MemoryRouter>
+                <LinkViewerPage token={TOKEN} first={{ ...first(), linkExpiresAt: expiredAt }} onDead={onDead} />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        const held = holdShareSession();
+        await act(() => vi.advanceTimersByTimeAsync(63_000));
+        expect(held).toHaveLength(1);
+        held[0]!(new Response(JSON.stringify(renewal({ link_expires_at: next() }))));
+        await act(() => vi.advanceTimersByTimeAsync(60_000));
+        expect(onDead).not.toHaveBeenCalled();
+        expect(screen.getByText('score on screen')).toBeTruthy();
+    });
+
     it('restarts the busy countdown on every busy renewal', async () => {
         vi.useFakeTimers({
             toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],

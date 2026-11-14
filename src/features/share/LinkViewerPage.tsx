@@ -19,6 +19,9 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
 /** How soon to check the deadline again when it passed during a renewal already in flight. */
 const EXPIRY_RECHECK_MS = 1000;
 
+/** How long past the deadline the server has to confirm a renewal before the score is cleared. */
+const EXPIRY_CONFIRM_MS = 10_000;
+
 const armAt = (at: number, fire: () => void): (() => void) => {
     let timer: ReturnType<typeof setTimeout>;
     const arm = () => {
@@ -43,7 +46,8 @@ interface LinkViewerPageProps {
  * when the link dies or the page closes. Each renewal re-arms the expiry
  * deadline from the server's answer and brings in a replaced PDF. At the
  * deadline share-session is asked once more, so an owner's renewal keeps the
- * score open; any answer short of a later expiry clears it. A `doc`
+ * score open; any answer short of a later expiry, or no answer within
+ * EXPIRY_CONFIRM_MS, clears it. A `doc`
  * event or a pull reporting a newer content_rev asks for that renewal early.
  */
 export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) => {
@@ -75,10 +79,18 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
             }
         };
         let stopExpiry: () => void = () => undefined;
+        let stopGiveUp: () => void = () => undefined;
         const armExpiry = (linkExpiresAt: string | null) => {
             stopExpiry();
+            stopGiveUp();
+            stopGiveUp = () => undefined;
             stopExpiry = linkExpiresAt
-                ? armAt(new Date(linkExpiresAt).getTime(), () => void confirmExpiry(linkExpiresAt))
+                ? armAt(new Date(linkExpiresAt).getTime(), () => {
+                      stopGiveUp = armAt(Date.now() + EXPIRY_CONFIRM_MS, () =>
+                          die({ kind: 'dead', state: 'expired', expiredAt: linkExpiresAt }),
+                      );
+                      void confirmExpiry(linkExpiresAt);
+                  })
                 : () => undefined;
         };
         const confirmExpiry = async (linkExpiresAt: string) => {
@@ -97,7 +109,10 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
                 die({ kind: 'dead', state: 'expired', expiredAt: linkExpiresAt });
             }
         };
-        cleanups.push(() => stopExpiry());
+        cleanups.push(
+            () => stopExpiry(),
+            () => stopGiveUp(),
+        );
         let shownRev = first.doc.content_rev;
         let wantedRev = shownRev;
         let pdfLoad = 0;
