@@ -26,6 +26,8 @@ export const ROUTE_PATTERNS = [
     '/doc/:documentId',
     '/try',
     '/join/:token',
+    '/s',
+    '/invite',
     '/auth/callback',
     '/privacy',
     '/children-privacy',
