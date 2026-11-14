@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 
 import { BusyCountdown } from '@/features/share/BusyCountdown';
 import { anonymousName } from '@/features/share/anonymousAnimals';
-import { LinkSession, type DeadAnswer, type ViewerAnswer } from '@/features/share/linkSession';
+import { LinkSession, pdfUrlOnProject, type DeadAnswer, type ViewerAnswer } from '@/features/share/linkSession';
 import { createLinkViewerBackend, readLinkAccess, type LinkViewerBackend } from '@/features/share/linkViewerBackend';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
@@ -98,7 +98,11 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
             );
         }
         session.start();
-        void fetch(first.pdfUrl, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' })
+        void fetch(pdfUrlOnProject(first.pdfUrl), {
+            cache: 'no-store',
+            credentials: 'omit',
+            referrerPolicy: 'no-referrer',
+        })
             .then((res) => (res.ok ? res.arrayBuffer() : Promise.reject(new Error(`pdf ${res.status}`))))
             .then((bytes) => {
                 if (live) {

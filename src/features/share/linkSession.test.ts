@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     LinkSession,
     parseShareSessionAnswer,
+    pdfUrlOnProject,
     renewDelayMs,
     requestShareSession,
     type LinkSessionEvents,
@@ -78,6 +79,14 @@ describe('requestShareSession', () => {
     it('is failed when the network is down', async () => {
         vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
         await expect(requestShareSession(TOKEN)).resolves.toEqual({ kind: 'failed' });
+    });
+});
+
+describe('pdfUrlOnProject', () => {
+    it('keeps the signed path and token, on the app’s own Supabase URL', () => {
+        expect(pdfUrlOnProject('http://kong:8000/storage/v1/object/sign/scores/d/original.pdf?token=t')).toBe(
+            'https://sb.test/storage/v1/object/sign/scores/d/original.pdf?token=t',
+        );
     });
 });
 

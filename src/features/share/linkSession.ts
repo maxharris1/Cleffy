@@ -87,6 +87,18 @@ export const requestShareSession = async (token: string, renewJwt?: string): Pro
     }
 };
 
+/**
+ * The signed PDF URL share-session returns, on this app's own Supabase URL.
+ * The function signs it with its SUPABASE_URL, which on the local stack is
+ * the in-Docker gateway (kong:8000) a browser cannot reach; the path and its
+ * token are the same either way.
+ */
+export const pdfUrlOnProject = (pdfUrl: string): string => {
+    const { url } = requireSupabaseConfig();
+    const signed = new URL(pdfUrl);
+    return `${url.replace(/\/$/, '')}${signed.pathname}${signed.search}`;
+};
+
 export const RENEW_FRACTION = 0.8;
 export const RENEW_ON_VISIBLE_UNDER_SEC = 120;
 const FAILED_RENEW_RETRY_MS = 15_000;
