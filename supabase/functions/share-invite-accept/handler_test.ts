@@ -182,6 +182,18 @@ Deno.test('signed out, an address that already has an account must sign in', asy
     assert(!h.calls.includes('create'));
 });
 
+Deno.test('signed out, the account check comes before the age gate, so a probe with no gate learns which step is next', async () => {
+    const existing = harness({ taken: true });
+    const probe = await handleShareInviteAccept(post(accept({ age_gate: undefined, password: undefined })), existing.deps);
+    assert(probe.status === 409 && (await probe.json()).error === 'sign_in_required');
+    assert(!existing.calls.includes('age'));
+
+    const fresh = harness();
+    const next = await handleShareInviteAccept(post(accept({ age_gate: undefined, password: undefined })), fresh.deps);
+    assert(next.status === 400 && (await next.json()).error === 'age_check_missing');
+    assert(!fresh.calls.includes('create'));
+});
+
 Deno.test('signed out, a missing or failing age gate creates nothing', async () => {
     const missing = harness();
     const noGate = await handleShareInviteAccept(post(accept({ age_gate: undefined })), missing.deps);
@@ -206,7 +218,10 @@ Deno.test('signed out, the account is created confirmed with the age gate, then 
     const h = harness();
     const response = await handleShareInviteAccept(post(accept()), h.deps);
     assert(response.status === 200);
-    assert(JSON.stringify(await response.json()) === JSON.stringify({ ok: true, document_id: DOC }));
+    assert(
+        JSON.stringify(await response.json()) ===
+            JSON.stringify({ ok: true, document_id: DOC, email: 'jane@example.com' }),
+    );
     assert(
         JSON.stringify(h.created) ===
             JSON.stringify([{ email: 'jane@example.com', password: 'Correct1horse', ageGate: GATE }]),

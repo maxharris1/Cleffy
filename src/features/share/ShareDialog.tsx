@@ -269,7 +269,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                         aria-label="Link expires after"
                         value={expiry}
                         onChange={(e) => setExpiry(e.target.value as LinkExpiry)}
-                        className={fieldClassName('sm', 'w-auto py-1.5')}
+                        className={fieldClassName('sm', 'shrink-0 py-1.5', { width: 'auto' })}
                     >
                         {LINK_EXPIRY_CHOICES.map((choice) => (
                             <option key={choice.value} value={choice.value}>
@@ -395,7 +395,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                                 value={member.role}
                                                 disabled={busy}
                                                 onChange={(e) => void changeRole(member, e.target.value as ShareRole)}
-                                                className={fieldClassName('sm', 'w-auto py-1.5')}
+                                                className={fieldClassName('sm', 'shrink-0 py-1.5', { width: 'auto' })}
                                             >
                                                 <option value="editor">{ROLE_LABEL.editor}</option>
                                                 <option value="viewer">{ROLE_LABEL.viewer}</option>

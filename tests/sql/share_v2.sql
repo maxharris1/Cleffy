@@ -1,6 +1,7 @@
 -- Behaviour proof for Share v2's four migrations (#104):
 -- 20261113120000_share_v2_links, 20261113120100_share_v2_viewer_auth,
--- 20261113120200_share_v2_invites and 20261113120300_share_v2_link_guests.
+-- 20261113120200_share_v2_invites and 20261113120300_share_v2_link_guests,
+-- plus #105's 20261114120000_share_v2_resolve_expiry.
 --
 --   * D15 link expiry: 7 days by default, 1 hour to 365 days or never.
 --   * The owner RPCs refuse non-owners, guests, roster students and dead
@@ -740,6 +741,10 @@ select pg_temp.chk('172 a dead general link: its state and id, nothing else', $q
     select r = jsonb_build_object('state', 'revoked', 'link_id', pg_temp.link_id('d3_revoked'))
        and (select s = jsonb_build_object('state', 'unavailable', 'link_id', pg_temp.link_id('d4')) from public.share_session_resolve(pg_temp.link_token('d4')) s)
     from public.share_session_resolve(pg_temp.link_token('d3_revoked')) r$q$);
+select pg_temp.chk('172b an expired general link: its state, id and the date it stopped', $q$
+    select r = jsonb_build_object('state', 'expired', 'link_id', pg_temp.link_id('d2_expired'), 'link_expires_at', l.expires_at)
+    from public.share_links l, public.share_session_resolve(pg_temp.link_token('d2_expired')) r
+    where l.id = pg_temp.link_id('d2_expired')$q$);
 select pg_temp.chk('173 an older link, an unknown token and a malformed one: invalid', $q$
     select public.share_session_resolve(pg_temp.link_token('legacy_d1_viewer')) = '{"state":"invalid"}'
        and public.share_session_resolve('AAAAAAAAAAAAAAAAAAAAAA') = '{"state":"invalid"}'
