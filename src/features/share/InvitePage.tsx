@@ -235,15 +235,9 @@ export const InvitePage = () => {
 
     return (
         <BrandShell title={headline}>
-            {registered ? (
-                <Button className="w-full" disabled={busy} onClick={() => void accept()}>
-                    {busy ? 'Accepting…' : 'Accept and open'}
-                </Button>
-            ) : (
-                <Button className="w-full" disabled={busy} onClick={() => void accept()}>
-                    {busy ? 'Checking…' : 'Continue'}
-                </Button>
-            )}
+            <Button className="w-full" disabled={busy} onClick={() => void accept()}>
+                {registered ? (busy ? 'Accepting…' : 'Accept and open') : busy ? 'Checking…' : 'Continue'}
+            </Button>
             {error ? <ErrorText className="mt-3 text-center">{error}</ErrorText> : null}
         </BrandShell>
     );
