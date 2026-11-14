@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { useEffect, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -91,6 +91,7 @@ const doc = { id: 'd1', title: 'Für Elise', page_count: 1, content_rev: 0 };
 describe('LinkViewerPage keeps nothing', () => {
     let fetchMock: ReturnType<typeof vi.fn>;
     let renewReply: unknown;
+    let renewStatus: number;
     let snapshotDoc: typeof doc;
 
     beforeEach(() => {
@@ -104,6 +105,7 @@ describe('LinkViewerPage keeps nothing', () => {
         snapshotDoc = doc;
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
         renewReply = null;
+        renewStatus = 200;
         fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
             const url = String(input instanceof Request ? input.url : input);
             const json = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body)));
@@ -115,7 +117,7 @@ describe('LinkViewerPage keeps nothing', () => {
             }
             if (url.includes('/functions/v1/share-session')) {
                 expect(JSON.parse(String(init?.body))).toMatchObject({ token: TOKEN, renew: expect.any(String) });
-                return json(renewReply);
+                return Promise.resolve(new Response(JSON.stringify(renewReply), { status: renewStatus }));
             }
             if (url.includes('/rpc/link_view_snapshot')) {
                 return json({
@@ -301,6 +303,71 @@ describe('LinkViewerPage keeps nothing', () => {
         expect(onDead).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(120_000);
         expect(onDead).toHaveBeenCalledWith({ kind: 'dead', state: 'expired', expiredAt: sooner });
+    });
+
+    it.each([
+        ['a later deadline', () => new Date(Date.now() + 86_400_000).toISOString()],
+        ['never', () => null],
+    ])('keeps the score open when the owner moves the expiry to %s between renewals', async (_, next) => {
+        const onDead = vi.fn();
+        const oldDeadline = new Date(Date.now() + 60_000).toISOString();
+        renewReply = renewal({ link_expires_at: oldDeadline });
+        render(
+            <MemoryRouter>
+                <LinkViewerPage token={TOKEN} first={{ ...first(), linkExpiresAt: oldDeadline }} onDead={onDead} />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        await vi.advanceTimersByTimeAsync(30_000);
+        renewReply = renewal({ link_expires_at: next() });
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(onDead).not.toHaveBeenCalled();
+        expect(screen.getByText('score on screen')).toBeTruthy();
+    });
+
+    it.each([
+        ['the server reports it expired', () => [200, { state: 'expired', expired_at: 'server-deadline' }]],
+        [
+            'the server still names the passed deadline',
+            () => [200, renewal({ link_expires_at: new Date(Date.now() - 1).toISOString() })],
+        ],
+        ['the check fails', () => [200, null]],
+        ['the server is busy', () => [429, { retry_after: 30 }]],
+    ] as Array<[string, () => [number, unknown]]>)('clears the score at the deadline when %s', async (_, reply) => {
+        const onDead = vi.fn();
+        const expiredAt = new Date(Date.now() + 60_000).toISOString();
+        render(
+            <MemoryRouter>
+                <LinkViewerPage token={TOKEN} first={{ ...first(), linkExpiresAt: expiredAt }} onDead={onDead} />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        await vi.advanceTimersByTimeAsync(59_000);
+        [renewStatus, renewReply] = reply();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(onDead).toHaveBeenCalledTimes(1);
+        expect(onDead.mock.calls[0]?.[0]).toMatchObject({ kind: 'dead', state: 'expired' });
+        expect(channels.stopped).toBeGreaterThanOrEqual(1);
+    });
+
+    it('restarts the busy countdown on every busy renewal', async () => {
+        vi.useFakeTimers({
+            toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+            shouldAdvanceTime: true,
+        });
+        renewStatus = 429;
+        renewReply = { retry_after: 30 };
+        render(
+            <MemoryRouter>
+                <LinkViewerPage token={TOKEN} first={first()} onDead={vi.fn()} />
+            </MemoryRouter>,
+        );
+        await screen.findByText('score on screen');
+        await act(() => vi.advanceTimersByTimeAsync(480_000));
+        expect(screen.getByText(/Trying again in 30 s/)).toBeTruthy();
+        await act(() => vi.advanceTimersByTimeAsync(30_000));
+        await act(() => vi.advanceTimersByTimeAsync(1_000));
+        expect(screen.getByText(/Trying again in (29|30) s/)).toBeTruthy();
     });
 
     it('brings in the replaced PDF when the doc-view channel reports a new revision', async () => {

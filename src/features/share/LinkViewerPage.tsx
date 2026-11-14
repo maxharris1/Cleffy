@@ -16,6 +16,9 @@ import { LoadingText } from '@/ui/Loading';
 /** setTimeout's ceiling; a link expiring further out is re-armed in steps. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
+/** How soon to check the deadline again when it passed during a renewal already in flight. */
+const EXPIRY_RECHECK_MS = 1000;
+
 const armAt = (at: number, fire: () => void): (() => void) => {
     let timer: ReturnType<typeof setTimeout>;
     const arm = () => {
@@ -38,12 +41,14 @@ interface LinkViewerPageProps {
  * nothing asked and nothing kept. Marks live in an in-memory database, the
  * token in a LinkSession, the PDF in an ArrayBuffer; all of it is dropped
  * when the link dies or the page closes. Each renewal re-arms the expiry
- * deadline from the server's answer and brings in a replaced PDF; a `doc`
+ * deadline from the server's answer and brings in a replaced PDF. At the
+ * deadline share-session is asked once more, so an owner's renewal keeps the
+ * score open; any answer short of a later expiry clears it. A `doc`
  * event or a pull reporting a newer content_rev asks for that renewal early.
  */
 export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) => {
     const [open, setOpen] = useState<{ backend: LinkViewerBackend; bytes: ArrayBuffer } | null>(null);
-    const [busySec, setBusySec] = useState<number | null>(null);
+    const [busy, setBusy] = useState<{ sec: number; attempt: number } | null>(null);
     const onDeadRef = useRef(onDead);
     const membershipRef = useRef<() => void>(() => undefined);
     const renewRef = useRef<() => void>(() => undefined);
@@ -73,10 +78,24 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
         const armExpiry = (linkExpiresAt: string | null) => {
             stopExpiry();
             stopExpiry = linkExpiresAt
-                ? armAt(new Date(linkExpiresAt).getTime(), () =>
-                      die({ kind: 'dead', state: 'expired', expiredAt: linkExpiresAt }),
-                  )
+                ? armAt(new Date(linkExpiresAt).getTime(), () => void confirmExpiry(linkExpiresAt))
                 : () => undefined;
+        };
+        const confirmExpiry = async (linkExpiresAt: string) => {
+            const answer = await session.renew();
+            if (!live) {
+                return;
+            }
+            if (answer === null) {
+                stopExpiry = armAt(Date.now() + EXPIRY_RECHECK_MS, () => void confirmExpiry(linkExpiresAt));
+                return;
+            }
+            const stillLive =
+                answer.kind === 'viewer' &&
+                (answer.linkExpiresAt === null || new Date(answer.linkExpiresAt).getTime() > Date.now());
+            if (!stillLive && answer.kind !== 'dead') {
+                die({ kind: 'dead', state: 'expired', expiredAt: linkExpiresAt });
+            }
         };
         cleanups.push(() => stopExpiry());
         let shownRev = first.doc.content_rev;
@@ -106,14 +125,14 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
         const session = new LinkSession(token, first, {
             onRenewed: (answer) => {
                 void session.client.realtime.setAuth(answer.jwt);
-                setBusySec(null);
+                setBusy(null);
                 armExpiry(answer.linkExpiresAt);
                 if (answer.doc.content_rev > shownRev) {
                     loadPdf(answer);
                 }
             },
             onDead: die,
-            onBusy: setBusySec,
+            onBusy: (sec) => setBusy((was) => ({ sec, attempt: (was?.attempt ?? 0) + 1 })),
         });
         const backend = createLinkViewerBackend(session.client);
         cleanups.push(
@@ -170,9 +189,10 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
             <ViewerHeader backTo="/" backLabel="Cleffy home" title={first.doc.title}>
                 <Badge>View only</Badge>
             </ViewerHeader>
-            {busySec !== null ? (
+            {busy !== null ? (
                 <BusyCountdown
-                    retryAfterSec={busySec}
+                    key={busy.attempt}
+                    retryAfterSec={busy.sec}
                     onRetry={() => renewRef.current()}
                     className="bg-amber-50 px-3 py-1.5 text-sm text-stone-700"
                 />

@@ -159,13 +159,14 @@ export class LinkSession {
         this.jwt = null;
     }
 
-    async renew(): Promise<void> {
+    /** share-session's answer, or null when this call joined one in flight or the session is gone. */
+    async renew(): Promise<ShareSessionAnswer | null> {
         if (this.renewing) {
             this.renewAgain = true;
-            return;
+            return null;
         }
         if (this.disposed || !this.jwt) {
-            return;
+            return null;
         }
         this.renewing = true;
         this.clearTimer();
@@ -174,7 +175,7 @@ export class LinkSession {
         const again = this.renewAgain;
         this.renewAgain = false;
         if (this.disposed) {
-            return;
+            return null;
         }
         switch (answer.kind) {
             case 'viewer':
@@ -183,24 +184,25 @@ export class LinkSession {
                 this.on.onRenewed(answer);
                 if (again) {
                     void this.renew();
-                    return;
+                } else {
+                    this.schedule(renewDelayMs(answer.exp, nowSec()));
                 }
-                this.schedule(renewDelayMs(answer.exp, nowSec()));
-                return;
+                break;
             case 'dead':
                 this.on.onDead(answer);
-                return;
+                break;
             case 'editor':
                 this.on.onDead({ kind: 'dead', state: 'unavailable', expiredAt: null });
-                return;
+                break;
             case 'busy':
                 this.on.onBusy(answer.retryAfterSec);
                 this.schedule(answer.retryAfterSec * 1000);
-                return;
+                break;
             case 'failed':
                 this.schedule(FAILED_RENEW_RETRY_MS);
-                return;
+                break;
         }
+        return answer;
     }
 
     private schedule(ms: number): void {
