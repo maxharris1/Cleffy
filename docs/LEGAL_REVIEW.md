@@ -72,16 +72,16 @@ Section numbers here are referenced from code comments (`LEGAL_REVIEW.md §n`).
 
 The policy names these processors, because the code sends them personal data:
 
-| Processor                                                   | What it receives                                                                  | Confirm                              |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------ |
-| Supabase, Inc.                                              | everything stored: accounts, PDFs, markings, roster, billing status, support mail | DPA signed; region (§3)              |
-| Vercel, Inc.                                                | web requests (IP, user agent) for the static app                                  | DPA                                  |
-| Stripe, Inc. (and Stripe Payments Europe for EEA customers) | checkout and payment data                                                         | correct contracting entity; DPA      |
-| Resend (believed to be Plus Five Five, Inc.)                | outgoing auth/invite email; inbound support email                                 | **legal name**; DPA                  |
-| Anthropic, PBC                                              | page images + detected marks for Smart import (owner-initiated)                   | see §11                              |
-| Functional Software, Inc. (Sentry)                          | scrubbed error reports, only when `VITE_SENTRY_DSN` / `SENTRY_DSN` are set        | DPA; region; see §17                 |
-| Google LLC (Cloud Run)                                      | score PDFs for play-along OMR — **only if `VITE_FEATURE_PLAYALONG` is turned on** | DPA if enabled                       |
-| The mailbox behind `SUPPORT_FORWARD_TO`                     | full support emails are forwarded there by `resend-inbound`                       | **unknown provider — must be named** |
+| Processor                                                   | What it receives                                                                                        | Confirm                              |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Supabase, Inc.                                              | everything stored: accounts, PDFs, markings, roster, billing status, support mail                       | DPA signed; region (§3)              |
+| Vercel, Inc.                                                | web requests (IP, user agent) for the static app                                                        | DPA                                  |
+| Stripe, Inc. (and Stripe Payments Europe for EEA customers) | checkout and payment data                                                                               | correct contracting entity; DPA      |
+| Resend (believed to be Plus Five Five, Inc.)                | outgoing auth/invite email, including Share v2 invites to people with no account; inbound support email | **legal name**; DPA                  |
+| Anthropic, PBC                                              | page images + detected marks for Smart import (owner-initiated)                                         | see §11                              |
+| Functional Software, Inc. (Sentry)                          | scrubbed error reports, only when `VITE_SENTRY_DSN` / `SENTRY_DSN` are set                              | DPA; region; see §17                 |
+| Google LLC (Cloud Run)                                      | score PDFs for play-along OMR — **only if `VITE_FEATURE_PLAYALONG` is turned on**                       | DPA if enabled                       |
+| The mailbox behind `SUPPORT_FORWARD_TO`                     | full support emails are forwarded there by `resend-inbound`                                             | **unknown provider — must be named** |
 
 - The policy's "International transfers" section is generic. Confirm the
   transfer mechanism (EU SCCs / UK IDTA / EU-US Data Privacy Framework) per
@@ -143,6 +143,16 @@ renewal reminders for annual plans (Stripe can send these — enable if required
   where they live"; there is **no age gate** in sign-up. Decide the threshold
   (13 under COPPA; 13–16 under GDPR Art. 8 depending on country) and whether the
   sign-up form needs an age confirmation.
+- **Share v2 (`VITE_FEATURE_SHARE_V2`, off in production).** The age screen
+  applies to account creation only: self sign-up, invite acceptance and guest
+  upgrade. Link viewers and link guests do not see it. Max accepted the risk on
+  2026-11-13 on condition the documents are transparent (D8). **Counsel
+  question (D11, risk R7):** an under-13 can become a link guest and type a
+  name. Do the internal-operations exception and a "general audience with an
+  optional nickname" reading hold? Mitigations: the name is optional and the
+  notice suggests a first name or nickname; no email, contact, profile or
+  tracking; owner-chosen idle deletion (7–90 days, default 30); parental
+  deletion by email; a plain notice.
 
 ## 10. Student (minor) accounts provisioned by teachers
 
@@ -187,7 +197,16 @@ period"). Facts from the code, to decide whether to commit to numbers:
 - **Erased markings** are tombstoned and kept until the score is deleted
   (`compact_annotation_tombstones` exists but is not scheduled). The policy says
   so.
-- **Anonymous guest accounts** created via share links are never cleaned up.
+- **Anonymous guest accounts** are cleaned up by `retention-stale-guests`
+  (`20261021120300_retention_jobs.sql`): 90 days without use. With Share v2,
+  guests created through a share link follow the idle window each score owner
+  chooses (7–90 days, default 30; the longest window across their owners, never
+  over 90; `retention_guest_idle_window`), and other guests keep 90 days. The
+  server accepts 1–90 days; the UI offers 7, 14, 30, 60 and 90.
+- **Share links and invites (Share v2):** a link expires after a time the owner
+  chooses (1 hour to 1 year, default 7 days, or never); revoked or expired links
+  are deleted 30 days later. Invites expire after 14 days and are deleted 30
+  days after they are accepted, cancelled or expire.
 - **Backups and logs:** Supabase backup/PITR retention for the plan in use;
   Vercel and Supabase log retention; Sentry event retention. Confirm and
   optionally state.
@@ -220,6 +239,11 @@ preference keys, and the service-worker app cache. No analytics or advertising
 cookies, fonts are self-hosted. **Assumed:** this is all "strictly necessary"
 and needs no consent banner under ePrivacy/PECR. Confirm, including for Sentry
 when enabled (the browser SDK sets no cookies).
+
+**Share v2 (`VITE_FEATURE_SHARE_V2`, off in production).** A signed-out link
+viewer stores nothing on the device: the score is held in memory only, with no
+session, no service worker, and no attribution or web events. A link guest who
+edits gets the normal app storage (session, IndexedDB caches, service worker).
 
 **Sign-out — changed 2026-10-08.** An earlier draft of the Privacy Policy said
 markings and changes not yet synced are kept on the device at sign-out. That
@@ -311,15 +335,30 @@ What changed in the product copy:
 - Teachers see, under the age attestation and on an empty roster, that a
   student under the minimum age can't have an account but can be taught on the
   teacher's own screen.
-- View links (a read-only score link, no account) are behind
-  `VITE_FEATURE_VIEW_LINKS`, off. While it is off no public page mentions them.
+- Share v2 (`VITE_FEATURE_SHARE_V2`, off) replaced the planned view links.
+  While it is off no public page changes. With it on, the Privacy Policy and
+  the Children's Privacy Notice describe three paths:
+    - **Viewing by link:** no account, nothing asked, nothing stored about the
+      viewer, nothing on the device. Vercel (about 1 h) and Supabase (about 7
+      days) log the IP. Others see "Anonymous <animal>"; the owner sees a count.
+    - **Editing by link:** optional name (the notice suggests a first name or
+      nickname), no age screen. The guest profile is deleted after the
+      owner-chosen idle window (7–90 days, default 30); markings stay.
+    - **Invites:** email and invitation kept until accepted or expired (14 days),
+      deleted 30 days later. Accepting creates an account, with the age screen.
+    - Link expiry is the owner's choice (1 hour to 1 year, default 7 days, or
+      never); revoked or expired links are deleted 30 days later.
+- Risk R7: dropping the age screen from link guests means an under-13 can be
+  one. See §9 for the mitigations and the counsel question (D11).
 
 New placeholders for counsel:
 
 - Children's Privacy Notice: "DRAFT — awaiting legal review. Not in effect."
 - Children's Privacy Notice: "Phone number — Max to supply".
-- Children's Privacy Notice, view-links section (only shown with the flag on):
-  "Counsel: retention wording (Vercel runtime logs 1 h; …)".
+- Children's Privacy Notice, "Opening a shared score by link" (only shown with
+  Share v2 on): "Counsel: link guests skip the age check. Confirm the
+  internal-operations exception and a general-audience reading with an
+  optional nickname hold."
 - Children's Privacy Notice: "Counsel to confirm the internal-operations basis
   (16 CFR 312.5(c)(7)) and the notice contents (312.4(d))."
 - Privacy Policy, "Children and student accounts": "DRAFT — under-13 wording
@@ -337,3 +376,10 @@ Internal drafts for counsel (not published):
 Versions: the Children's Privacy Notice is `2026-11-12-draft`. The Privacy
 Policy and Terms text changed but their versions were left at
 `2026-10-20-draft` on purpose; Max decides when to bump them.
+
+Share v2 versions (D12): a build with `VITE_FEATURE_SHARE_V2` on shows the
+Privacy Policy and the Children's Privacy Notice as `2026-11-14-draft`
+(`SHARE_V2_LEGAL_VERSIONS` in `legalVersions.ts`, mirrored in
+`supabase/functions/_shared/legalVersions.ts`). Nothing asks anyone to agree
+again. The server records only the Terms and Refund Policy versions, which the
+flag does not change.
