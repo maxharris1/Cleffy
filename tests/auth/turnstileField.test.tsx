@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RegisterPage } from '../../src/features/auth/RegisterPage';
+import { UpgradeBanner } from '../../src/features/auth/UpgradeBanner';
 import { TurnstileField } from '../../src/features/auth/TurnstileField';
 import {
     isTurnstileEnabled,
@@ -32,10 +33,16 @@ const SITE_KEY = '1x00000000000000000000AA';
 const CHALLENGE_KEY = '3x00000000000000000000FF';
 
 const signUpWithPassword = vi.hoisted(() => vi.fn());
+const startGuestEmailUpgrade = vi.hoisted(() => vi.fn());
 
 vi.mock('@/features/auth/session', async (importOriginal) => ({
     ...(await importOriginal<object>()),
     signUpWithPassword: (...args: unknown[]) => signUpWithPassword(...args),
+}));
+
+vi.mock('@/features/auth/guestUpgrade', async (importOriginal) => ({
+    ...(await importOriginal<object>()),
+    startGuestEmailUpgrade: (...args: unknown[]) => startGuestEmailUpgrade(...args),
 }));
 
 /** A fake `window.turnstile`, recording what it was asked to render. */
@@ -58,6 +65,7 @@ const stubTurnstile = () => {
 afterEach(() => {
     cleanup();
     signUpWithPassword.mockReset();
+    startGuestEmailUpgrade.mockReset();
     vi.unstubAllEnvs();
     resetTurnstileLoaderForTests();
     delete (window as { turnstile?: unknown }).turnstile;
@@ -320,6 +328,51 @@ describe('with a site key set', () => {
         act(() => result.current.renew());
         expect(result.current.round).toBe(1);
         await expect(result.current.waitForToken(5)).resolves.toEqual({ ok: false, message: TURNSTILE_SLOW });
+    });
+
+    it('cancels a wait still pending on renew, so no later widget can resume it', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+        const { result } = renderHook(() => useTurnstileToken());
+        const settled = vi.fn();
+        const waiting = result.current.waitForToken().then((wait) => {
+            settled(wait);
+            return wait;
+        });
+
+        act(() => result.current.renew());
+        act(() => result.current.onToken('next-widget-token'));
+
+        await expect(waiting).resolves.toEqual({ ok: false, message: null });
+        expect(settled).toHaveBeenCalledOnce();
+        await expect(result.current.waitForToken()).resolves.toEqual({ ok: true, token: 'next-widget-token' });
+    });
+
+    it('never sends a guest email request the guest cancelled, when a later widget returns a token', async () => {
+        vi.stubEnv('VITE_TURNSTILE_SITE_KEY', SITE_KEY);
+        startGuestEmailUpgrade.mockResolvedValue(undefined);
+        const { rendered } = stubTurnstile();
+        const user = userEvent.setup();
+        render(
+            <MemoryRouter>
+                <UpgradeBanner isGuest />
+            </MemoryRouter>,
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Add your email to keep it' }));
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        await user.type(screen.getByRole('textbox', { name: 'Email' }), 'cancelled@example.com');
+        await user.type(screen.getByLabelText('Choose a password'), 'Correct1horse');
+        await user.click(screen.getByRole('button', { name: 'Email me a code' }));
+        await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+        await user.click(screen.getByRole('button', { name: 'Add your email to keep it' }));
+        await waitFor(() => expect(rendered).toHaveLength(2));
+        act(() => rendered[1]!.callback('new-widget-token'));
+
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Email me a code' })).toBeEnabled());
+        expect(startGuestEmailUpgrade).not.toHaveBeenCalled();
+        expect(screen.queryByRole('textbox', { name: 'Code from the email' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     });
 
     it('tears the widget down when the field unmounts', async () => {

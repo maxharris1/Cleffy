@@ -95,7 +95,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
         setError(null);
         const wait = await captcha.waitForToken();
         if (!wait.ok) {
-            setError({ message: wait.message, signIn: false });
+            setError(wait.message ? { message: wait.message, signIn: false } : null);
             setBusy(false);
             return;
         }

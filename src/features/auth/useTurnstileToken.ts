@@ -14,15 +14,18 @@ export const TURNSTILE_NEEDS_USER = 'Finish the “I’m human” check, then tr
 /** Shown when no challenge appeared but no token came back in time either. */
 export const TURNSTILE_SLOW = 'Still checking you’re human. Try again in a moment.';
 
-const wake = (waiters: { current: Array<() => void> }) => {
+type Waiter = (cancelled: boolean) => void;
+
+const wake = (waiters: { current: Waiter[] }, cancelled = false) => {
     const pending = waiters.current;
     waiters.current = [];
     for (const waiter of pending) {
-        waiter();
+        waiter(cancelled);
     }
 };
 
-export type TurnstileWait = { ok: true; token: string | null } | { ok: false; message: string };
+/** A `message` of null means `renew` cancelled the wait: drop the submit silently. */
+export type TurnstileWait = { ok: true; token: string | null } | { ok: false; message: string | null };
 
 /**
  * The token half of a form's Turnstile check, shared by every form that mounts
@@ -43,7 +46,7 @@ export const useTurnstileToken = () => {
     const [round, setRound] = useState(0);
     const tokenRef = useRef<string | null>(null);
     const needsUserRef = useRef(false);
-    const waitersRef = useRef<Array<() => void>>([]);
+    const waitersRef = useRef<Waiter[]>([]);
 
     const onToken = useCallback((token: string | null) => {
         tokenRef.current = token;
@@ -58,10 +61,11 @@ export const useTurnstileToken = () => {
         wake(waitersRef);
     }, []);
 
-    /** Forget a spent token and remount the widget. */
+    /** Forget a spent token, cancel any submit still waiting, and remount the widget. */
     const renew = useCallback(() => {
         tokenRef.current = null;
         needsUserRef.current = false;
+        wake(waitersRef, true);
         setRound((n) => n + 1);
     }, []);
 
@@ -78,12 +82,12 @@ export const useTurnstileToken = () => {
                 return Promise.resolve(outcome());
             }
             return new Promise((resolve) => {
-                const finish = () => {
+                const finish = (cancelled: boolean) => {
                     clearTimeout(timer);
                     waitersRef.current = waitersRef.current.filter((waiter) => waiter !== finish);
-                    resolve(outcome());
+                    resolve(cancelled ? { ok: false, message: null } : outcome());
                 };
-                const timer = setTimeout(finish, timeoutMs);
+                const timer = setTimeout(() => finish(false), timeoutMs);
                 waitersRef.current.push(finish);
             });
         },
