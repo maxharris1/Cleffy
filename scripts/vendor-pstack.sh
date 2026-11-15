@@ -31,7 +31,7 @@ VERBATIM=(poteto-help)          # copied unchanged, even where it names a skill 
 # fallback in its note, since the name alone doesn't match the skill's.
 PLAYBOOKS=(
   'session-pickup|poteto-mode|to resume one specific prior chat, read that chat'"'"'s transcript directly, or run `recall` scoped to that one chat'
-  'Opening a PR|poteto-mode|follow the PR rules in this repo'"'"'s `AGENTS.md`'
+  'Opening a PR|poteto-mode|follow the PR rules in this repo'"'"'s `factory.md`'
   'Perf issue|poteto-mode|work from `benchmark-checklist` and the matching `principle-*` skills, such as `principle-explain-the-number`'
   'Hillclimb|poteto-mode|vet and freeze the harness with `benchmark-checklist`, then keep or revert each change by its numbers'
 )
