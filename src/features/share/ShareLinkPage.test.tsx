@@ -1,10 +1,11 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useSyncExternalStore } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LINK_GUEST_GATE } from '@/features/auth/ageCheck';
+import { resetTurnstileLoaderForTests, type TurnstileRenderOptions } from '@/features/auth/turnstile';
 import { ShareLinkPage } from '@/features/share/ShareLinkPage';
 import { deadLinkMessage, tokenFromHash } from '@/features/share/shareLinkText';
 import type * as ShareServiceModule from '@/features/share/shareService';
@@ -89,6 +90,10 @@ beforeEach(() => {
 afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
+    resetTurnstileLoaderForTests();
+    delete (window as { turnstile?: unknown }).turnstile;
+    document.getElementById('cf-turnstile-script')?.remove();
 });
 
 describe('deadLinkMessage and tokenFromHash', () => {
@@ -213,5 +218,62 @@ describe('ShareLinkPage', () => {
         await act(async () => undefined);
         expect(replace.mock.calls[0]?.slice(1)).toEqual(['', `/s#${TOKEN}`]);
         replace.mockRestore();
+    });
+});
+
+const withTurnstile = () => {
+    vi.stubEnv('VITE_TURNSTILE_SITE_KEY', '1x00000000000000000000AA');
+    const rendered: TurnstileRenderOptions[] = [];
+    Object.assign(window, {
+        turnstile: {
+            render: (_host: HTMLElement, options: TurnstileRenderOptions) => {
+                rendered.push(options);
+                return `widget-${rendered.length}`;
+            },
+            remove: () => undefined,
+            reset: () => undefined,
+        },
+    });
+    return rendered;
+};
+
+describe('JoinCard with Turnstile on', () => {
+    beforeEach(() => {
+        requestShareSession.mockResolvedValue({ kind: 'editor', linkExpiresAt: null });
+    });
+
+    it.each([`/s#${TOKEN}`, `/join/${TOKEN}`])(
+        'at %s, an early Continue waits for the background token, then joins with it',
+        async (entry) => {
+            const rendered = withTurnstile();
+            renderAt(entry);
+            await userEvent.type(await screen.findByLabelText('Your name (optional)'), 'Sam');
+            await waitFor(() => expect(rendered).toHaveLength(1));
+
+            await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
+            expect(screen.queryByText(/I’m human/)).toBeNull();
+            expect(screen.getByTestId('turnstile-field')).toBeTruthy();
+            expect(signInAnonymouslyWithName).not.toHaveBeenCalled();
+
+            act(() => rendered[0]!.callback('cf-token'));
+
+            expect(await screen.findByText('member viewer')).toBeTruthy();
+            expect(signInAnonymouslyWithName).toHaveBeenCalledTimes(1);
+            expect(signInAnonymouslyWithName).toHaveBeenCalledWith('Sam', 'cf-token', LINK_GUEST_GATE);
+            expect(rendered).toHaveLength(1);
+        },
+    );
+
+    it('stops waiting and points at the check when Cloudflare puts up a challenge', async () => {
+        const rendered = withTurnstile();
+        renderAt(`/s#${TOKEN}`);
+        await userEvent.click(await screen.findByRole('button', { name: 'Continue without a name' }));
+        await waitFor(() => expect(rendered).toHaveLength(1));
+
+        act(() => rendered[0]!['before-interactive-callback']!());
+
+        expect(await screen.findByText(/Finish the “I’m human” check/)).toBeTruthy();
+        expect(signInAnonymouslyWithName).not.toHaveBeenCalled();
+        expect(screen.getByTestId('turnstile-field')).toBeTruthy();
     });
 });

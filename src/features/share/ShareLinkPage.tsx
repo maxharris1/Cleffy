@@ -5,7 +5,7 @@ import { forgetLocalSession, requestAccountDeletion } from '@/features/account/a
 import { LINK_GUEST_GATE } from '@/features/auth/ageCheck';
 import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/features/auth/session';
 import { TurnstileField } from '@/features/auth/TurnstileField';
-import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import { BusyCountdown } from '@/features/share/BusyCountdown';
 import { requestShareSession, type DeadAnswer, type ShareSessionAnswer } from '@/features/share/linkSession';
@@ -237,19 +237,22 @@ export const JoinCard = ({
     const [name, setName] = useState('');
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
-    const [captchaRound, setCaptchaRound] = useState(0);
-    const captchaRequired = isTurnstileEnabled();
+    const captcha = useTurnstileToken();
+    const [verifying, setVerifying] = useState(false);
 
     const join = async (withName: boolean) => {
-        if (submitting) {
-            return;
-        }
-        if (captchaRequired && !captchaToken) {
-            setError('Finish the “I’m human” check, then continue.');
+        if (submitting || verifying) {
             return;
         }
         setError(null);
+        setVerifying(true);
+        const wait = await captcha.waitForToken();
+        setVerifying(false);
+        if (!wait.ok) {
+            setError(wait.message);
+            return;
+        }
+        const captchaToken = wait.token;
         setSubmitting(true);
         // Again, right before the guest is made: the link may have died meanwhile.
         const peek = await peekShareLink(token);
@@ -265,9 +268,8 @@ export const JoinCard = ({
         } catch (err) {
             setSubmitting(false);
             setError(err instanceof Error ? err.message : 'Could not join.');
-            if (captchaRequired) {
-                setCaptchaToken(null);
-                setCaptchaRound((r) => r + 1);
+            if (captcha.required) {
+                captcha.renew();
             }
         }
     };
@@ -294,12 +296,22 @@ export const JoinCard = ({
                     <p className="mt-1 text-xs text-stone-600">
                         Shown to others on this score. Leave it blank to stay anonymous.
                     </p>
-                    <TurnstileField key={captchaRound} action="share-link-join" onToken={setCaptchaToken} />
+                    <TurnstileField
+                        key={captcha.round}
+                        action="share-link-join"
+                        onToken={captcha.onToken}
+                        onNeedsUser={captcha.onNeedsUser}
+                    />
                     {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
-                    <Button onClick={() => void join(true)} className="mt-4 w-full">
-                        Continue
+                    <Button onClick={() => void join(true)} disabled={verifying} className="mt-4 w-full">
+                        {verifying ? 'Verifying…' : 'Continue'}
                     </Button>
-                    <Button variant="ghost" onClick={() => void join(false)} className="mt-2 w-full">
+                    <Button
+                        variant="ghost"
+                        onClick={() => void join(false)}
+                        disabled={verifying}
+                        className="mt-2 w-full"
+                    >
                         Continue without a name
                     </Button>
                     <AgreementNote action="joining" className="mt-3" />
