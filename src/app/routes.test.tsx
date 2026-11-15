@@ -187,3 +187,16 @@ describe('AppRoutes /try demo, score unavailable', () => {
         expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
     });
 });
+
+describe('AppRoutes with Share v2 off', () => {
+    afterEach(cleanup);
+
+    it.each(['/s#abcdefghijklmnopqrstuv', '/invite#' + 'a'.repeat(43)])('says %s is not available', async (entry) => {
+        render(
+            <MemoryRouter initialEntries={[entry]}>
+                <AppRoutes />
+            </MemoryRouter>,
+        );
+        expect(await screen.findByText("This link isn't available.")).toBeInTheDocument();
+    });
+});

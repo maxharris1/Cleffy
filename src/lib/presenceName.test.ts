@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { presenceNameOf } from '@/features/auth/session';
-import { safePresenceName } from '@/lib/presenceName';
+import { anonymousName } from '@/features/share/anonymousAnimals';
+import { presenceLabel, safePresenceName } from '@/lib/presenceName';
+import type { PresencePeer } from '@/sync/wire';
+
+const flags = vi.hoisted(() => ({ shareV2: false }));
+vi.mock('@/lib/features', () => ({ features: flags }));
 
 const sessionWith = (meta: Record<string, unknown>, isAnonymous = false, email = 'teacher@example.com') =>
-    ({ user: { user_metadata: meta, is_anonymous: isAnonymous, email } }) as unknown as Parameters<
+    ({ user: { id: 'guest-1', user_metadata: meta, is_anonymous: isAnonymous, email } }) as unknown as Parameters<
         typeof presenceNameOf
     >[0];
 
@@ -30,5 +35,38 @@ describe('presence names never show an email', () => {
         expect(safePresenceName('parent@example.org', false)).toBe('Collaborator');
         expect(safePresenceName('kid@example.org', true)).toBe('Guest');
         expect(safePresenceName('Sharon', true)).toBe('Sharon');
+    });
+});
+
+describe('Share v2 presence names', () => {
+    afterEach(() => {
+        flags.shareV2 = false;
+    });
+
+    it('a link guest with no name is Anonymous <animal> with the flag on, Guest with it off', () => {
+        expect(presenceNameOf(sessionWith({}, true, ''))).toBe('Guest');
+        flags.shareV2 = true;
+        expect(presenceNameOf(sessionWith({}, true, ''))).toBe(anonymousName('guest-1'));
+        expect(presenceNameOf(sessionWith({ display_name: 'Sam' }, true, ''))).toBe('Sam');
+        expect(presenceNameOf(sessionWith({}))).toBe('Collaborator');
+    });
+
+    const peer = (userId: string, name: string, isAnonymous = false): PresencePeer => ({
+        userId,
+        name,
+        isAnonymous,
+        color: '#000',
+        page: 0,
+    });
+
+    it('relabels a non-member as Anonymous <animal> whatever name it claims (R4)', () => {
+        const members = new Set(['owner-1', 'editor-1']);
+        expect(presenceLabel(peer('stranger', 'Ms Rivera (teacher)'), members)).toBe(anonymousName('stranger'));
+        expect(presenceLabel(peer('editor-1', 'Leo'), members)).toBe('Leo');
+        expect(presenceLabel(peer('editor-1', 'leo@example.com'), members)).toBe('Collaborator');
+    });
+
+    it('with no member list the announced name stands', () => {
+        expect(presenceLabel(peer('stranger', 'Sam', true), null)).toBe('Sam');
     });
 });

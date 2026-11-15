@@ -73,7 +73,7 @@ export const AgeScreen = ({ purpose, onPass, footer }: AgeScreenProps) => {
                 {/* No age, number or year here, whichever purpose: the refusal must not hint at what would pass. */}
                 <p className="text-center text-sm leading-relaxed text-stone-600">
                     If your teacher uses Cleffy, ask them to show your score on their screen
-                    {features.viewLinks ? ' or send you a view link' : ''}.
+                    {features.shareV2 ? ' or send you a view link' : ''}.
                 </p>
                 <p className="mt-6 text-center">
                     <Link to="/" className={linkClassName}>

@@ -19,7 +19,9 @@ import {
     type LinkExpiry,
 } from '@/features/share/shareService';
 import type { DocumentMemberListing, MemberRole, ShareLinkRow, ShareRole } from '@/types/database';
+import { features } from '@/lib/features';
 import { middleEllipsis, useFlash } from '@/lib/useFlash';
+import { OwnerSharingV2 } from '@/features/share/owner/OwnerSharingV2';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -39,6 +41,8 @@ export interface ShareDialogProps {
     canLeave?: boolean;
     /** A share-link guest (anonymous account), who may also delete their guest profile here. */
     isGuest?: boolean;
+    /** Share v2: signed-out people watching through the view link right now (the owner's count). */
+    linkViewers?: number;
     onClose: () => void;
     /** The caller left the score; local caches are the parent's to purge once the viewer is down. */
     onLeft?: () => void;
@@ -64,13 +68,18 @@ export const ShareDialog = ({
     role,
     canLeave = true,
     isGuest = false,
+    linkViewers = 0,
     onClose,
     onLeft,
     onGuestDeleted = leaveForGuestDeletedPage,
 }: ShareDialogProps) => (
     <Dialog label={role === 'owner' ? 'Share this score' : 'Sharing'} onClose={onClose}>
         {role === 'owner' ? (
-            <OwnerSharing docId={docId} userId={userId} />
+            features.shareV2 ? (
+                <OwnerSharingV2 docId={docId} userId={userId} linkViewers={linkViewers} />
+            ) : (
+                <OwnerSharing docId={docId} userId={userId} />
+            )
         ) : (
             <MemberSharing
                 docId={docId}
@@ -269,7 +278,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                         aria-label="Link expires after"
                         value={expiry}
                         onChange={(e) => setExpiry(e.target.value as LinkExpiry)}
-                        className={fieldClassName('sm', 'w-auto py-1.5')}
+                        className={fieldClassName('sm', 'shrink-0 py-1.5', { width: 'auto' })}
                     >
                         {LINK_EXPIRY_CHOICES.map((choice) => (
                             <option key={choice.value} value={choice.value}>
@@ -395,7 +404,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                                 value={member.role}
                                                 disabled={busy}
                                                 onChange={(e) => void changeRole(member, e.target.value as ShareRole)}
-                                                className={fieldClassName('sm', 'w-auto py-1.5')}
+                                                className={fieldClassName('sm', 'shrink-0 py-1.5', { width: 'auto' })}
                                             >
                                                 <option value="editor">{ROLE_LABEL.editor}</option>
                                                 <option value="viewer">{ROLE_LABEL.viewer}</option>

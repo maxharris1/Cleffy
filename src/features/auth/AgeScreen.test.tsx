@@ -7,7 +7,7 @@ import { AgeScreen } from '@/features/auth/AgeScreen';
 import { passAgeScreen } from '@/test/ageScreen';
 
 /** Release flags (src/lib/features.ts), flipped per test; read at render. */
-const flags = vi.hoisted(() => ({ viewLinks: false }));
+const flags = vi.hoisted(() => ({ shareV2: false }));
 vi.mock('@/lib/features', () => ({ features: flags }));
 
 const REFUSAL_SUBTITLE = 'Cleffy accounts are for people who meet the minimum age where they live.';
@@ -33,7 +33,7 @@ const readableStrings = (): string[] => [
 afterEach(() => {
     cleanup();
     window.localStorage.clear();
-    flags.viewLinks = false;
+    flags.shareV2 = false;
 });
 
 describe('isCertainlyAtLeast', () => {
@@ -134,7 +134,7 @@ describe('AgeScreen', () => {
         ['register', true],
         ['join', true],
     ] as const)('puts no digit in the refusal for %s, view links on: %s', async (purpose, viewLinks) => {
-        flags.viewLinks = viewLinks;
+        flags.shareV2 = viewLinks;
         renderScreen(purpose);
         await passAgeScreen('US', String(new Date().getFullYear() - 5));
         expect(screen.getByRole('heading', { level: 1, name: 'Sorry' })).toBeInTheDocument();
@@ -148,7 +148,7 @@ describe('AgeScreen', () => {
     });
 
     it('offers a view link only when view links are switched on', async () => {
-        flags.viewLinks = true;
+        flags.shareV2 = true;
         renderScreen();
         await passAgeScreen('US', String(new Date().getFullYear() - 5));
         expect(

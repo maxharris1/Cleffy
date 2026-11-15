@@ -17,6 +17,16 @@ export const LEGAL_VERSIONS = {
     copyright: '2026-10-20-draft',
 } as const;
 
+/**
+ * The Privacy Policy and Children's Notice stamps a build with
+ * VITE_FEATURE_SHARE_V2 on publishes. The server records only terms and
+ * refunds, so LEGAL_VERSIONS above keeps the base stamps either way.
+ */
+export const SHARE_V2_LEGAL_VERSIONS = {
+    privacy: '2026-11-14-draft',
+    children: '2026-11-14-draft',
+} as const;
+
 export const LEGAL_OPERATOR = {
     name: 'Cleffy LLC',
     postalAddress: '245 East 37th Street, Apt 3E, New York, NY 10016, USA',

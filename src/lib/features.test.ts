@@ -12,10 +12,6 @@ describe('the Share v2 flag', () => {
         expect(features.shareV2).toBe(false);
     });
 
-    it('drives the deprecated viewLinks alias, so the two cannot disagree', () => {
-        expect(features.viewLinks).toBe(features.shareV2);
-    });
-
     it('leaves the published Children’s Notice and Terms exactly as on dev while off', () => {
         // sha256 of JSON.stringify([CHILDREN_NOTICE, TERMS_OF_SERVICE]) built
         // from dev at 25aaefc0, before the flag was renamed.

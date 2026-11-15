@@ -125,11 +125,13 @@ export const handleShareInviteAccept = async (req: Request, deps: ShareInviteAcc
         return json({ state: invite.state }, 410);
     }
 
-    const finish = (result: ConsumeResult | null): Response =>
+    // An account made here signs in with the password just set, so its own
+    // address comes back: the caller holds the token and chose the password.
+    const finish = (result: ConsumeResult | null, createdEmail?: string): Response =>
         !result
             ? json({ error: 'unavailable' }, 503)
             : result.ok
-              ? json({ ok: true, document_id: result.document_id })
+              ? json({ ok: true, document_id: result.document_id, ...(createdEmail ? { email: createdEmail } : {}) })
               : result.state === 'email_mismatch'
                 ? json({ error: 'email_mismatch' }, 409)
                 : result.state === 'roster_refused'
@@ -191,5 +193,5 @@ export const handleShareInviteAccept = async (req: Request, deps: ShareInviteAcc
     if (!consumed?.ok) {
         await deps.deleteUser(created.userId);
     }
-    return finish(consumed);
+    return finish(consumed, invite.email);
 };

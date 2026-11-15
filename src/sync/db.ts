@@ -1,4 +1,4 @@
-import Dexie, { type Table } from 'dexie';
+import Dexie, { type DexieOptions, type Table } from 'dexie';
 
 import type { RecognizedRegion } from '@/features/fingering/model';
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
@@ -230,8 +230,9 @@ export class ScribblerDb extends Dexie {
     rosterCache!: Table<CachedRoster, string>;
     assignmentsCache!: Table<CachedAssignments, string>;
 
-    constructor(name = 'scribbler') {
-        super(name);
+    /** `options` carries Dexie's IndexedDB factory: the link viewer's database lives in memory. */
+    constructor(name = 'scribbler', options?: Pick<DexieOptions, 'indexedDB' | 'IDBKeyRange'>) {
+        super(name, options);
         this.version(1).stores({
             annotations: 'id, docId, [docId+page], [docId+seq]',
             ops: '++opId, docId',

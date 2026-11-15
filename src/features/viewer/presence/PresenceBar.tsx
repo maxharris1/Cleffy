@@ -1,6 +1,7 @@
 import { Popover } from '@base-ui/react/popover';
 
 import { initialsOf } from '@/features/account/initials';
+import { linkViewerCount } from '@/lib/presenceName';
 import type { PresencePeer } from '@/sync/wire';
 
 const MAX_CHIPS = 5;
@@ -8,6 +9,8 @@ const MAX_CHIPS = 5;
 export interface PresenceBarProps {
     peers: PresencePeer[];
     selfUserId: string;
+    /** The name to show for a peer (presenceLabel); defaults to the name it announced. */
+    labelOf?: (peer: PresencePeer) => string;
 }
 
 const CHIP =
@@ -18,7 +21,7 @@ const CHIP =
  * popover with the name and the page they are on — on hover with a mouse, on
  * a tap on touch, where a title tooltip never appeared.
  */
-export const PresenceBar = ({ peers, selfUserId }: PresenceBarProps) => {
+export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }: PresenceBarProps) => {
     const others = peers.filter((p) => p.userId !== selfUserId);
     if (others.length === 0) {
         return null;
@@ -36,7 +39,8 @@ export const PresenceBar = ({ peers, selfUserId }: PresenceBarProps) => {
             aria-label={`${others.length} collaborators viewing`}
         >
             {shown.map((peer) => {
-                const who = `${peer.name}${peer.isAnonymous ? ' (guest)' : ''}`;
+                const name = labelOf(peer);
+                const who = `${name}${peer.isAnonymous && peer.via !== 'link' ? ' (guest)' : ''}`;
                 return (
                     <Popover.Root key={peer.userId}>
                         <Popover.Trigger
@@ -46,7 +50,7 @@ export const PresenceBar = ({ peers, selfUserId }: PresenceBarProps) => {
                             className={`${CHIP} relative cursor-default pointer-coarse:hit-44`}
                             style={{ backgroundColor: peer.color }}
                         >
-                            {initialsOf(peer.name)}
+                            {initialsOf(name)}
                         </Popover.Trigger>
                         <Popover.Portal>
                             <Popover.Positioner side="bottom" sideOffset={6} collisionPadding={8} className="z-50">
@@ -61,5 +65,25 @@ export const PresenceBar = ({ peers, selfUserId }: PresenceBarProps) => {
             })}
             {overflow > 0 ? <span className={`${CHIP} bg-stone-400`}>+{overflow}</span> : null}
         </div>
+    );
+};
+
+export interface LinkViewerCountProps {
+    peers: PresencePeer[];
+}
+
+export const LinkViewerCount = ({ peers }: LinkViewerCountProps) => {
+    const count = linkViewerCount(peers);
+    if (count === 0) {
+        return null;
+    }
+    return (
+        <span
+            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-accent-soft px-2.5 py-1 text-xs font-medium text-accent"
+            title="People watching through your view link"
+        >
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-accent" />
+            {count} viewing
+        </span>
     );
 };

@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type * as guestUpgradeModule from '@/features/auth/guestUpgrade';
 import { GuestUpgradeError } from '@/features/auth/guestUpgrade';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
+import { passAgeScreen } from '@/test/ageScreen';
 import { stubAnimate } from '@/test/animate';
+
+const flags = vi.hoisted(() => ({ shareV2: false }));
+vi.mock('@/lib/features', () => ({ features: flags }));
 
 const startGuestEmailUpgrade = vi.hoisted(() => vi.fn());
 const confirmGuestEmailUpgrade = vi.hoisted(() => vi.fn());
@@ -28,6 +32,8 @@ afterEach(() => {
     startGuestEmailUpgrade.mockReset();
     confirmGuestEmailUpgrade.mockReset();
     updateUser.mockReset();
+    flags.shareV2 = false;
+    window.localStorage.clear();
 });
 
 const renderBanner = (isGuest = true) =>
@@ -206,5 +212,56 @@ describe('UpgradeBanner', () => {
     it('renders nothing for a registered account', () => {
         renderBanner(false);
         expect(screen.queryByText(/annotating as a guest/)).not.toBeInTheDocument();
+    });
+});
+
+describe('UpgradeBanner under Share v2', () => {
+    const renderWithRole = (role: 'viewer' | 'editor') =>
+        render(
+            <MemoryRouter>
+                <UpgradeBanner isGuest role={role} />
+            </MemoryRouter>,
+        );
+
+    it('is hidden for a view-only guest, and shown to them with the flag off', () => {
+        flags.shareV2 = true;
+        const { unmount } = renderWithRole('viewer');
+        expect(screen.queryByText(/annotating as a guest/)).not.toBeInTheDocument();
+        unmount();
+        flags.shareV2 = false;
+        renderWithRole('viewer');
+        expect(screen.getByText(/annotating as a guest/)).toBeInTheDocument();
+    });
+
+    it('asks the age screen before the email, and sends its answer to confirm', async () => {
+        flags.shareV2 = true;
+        const user = userEvent.setup();
+        startGuestEmailUpgrade.mockResolvedValue(undefined);
+        confirmGuestEmailUpgrade.mockResolvedValue('signed_in');
+        renderWithRole('editor');
+        await user.click(screen.getByRole('button', { name: 'Add your email to keep it' }));
+        expect(screen.queryByRole('textbox', { name: 'Email' })).not.toBeInTheDocument();
+        await passAgeScreen('US', '1990');
+        await user.type(await screen.findByRole('textbox', { name: 'Email' }), 'sam@example.com');
+        await user.type(screen.getByLabelText('Choose a password'), 'Correct1horse');
+        await user.click(screen.getByRole('button', { name: 'Email me a code' }));
+        await user.type(await screen.findByRole('textbox', { name: 'Code from the email' }), '482913');
+        await user.click(screen.getByRole('button', { name: 'Save my work' }));
+        await waitFor(() => expect(confirmGuestEmailUpgrade).toHaveBeenCalledTimes(1));
+        expect(confirmGuestEmailUpgrade.mock.calls[0]![0]).toMatchObject({
+            email: 'sam@example.com',
+            ageGate: { country: 'US', source: 'self', v: 1 },
+        });
+    });
+
+    it('an age refusal asks for no email and sends nothing', async () => {
+        flags.shareV2 = true;
+        const user = userEvent.setup();
+        renderWithRole('editor');
+        await user.click(screen.getByRole('button', { name: 'Add your email to keep it' }));
+        await passAgeScreen('US', String(new Date().getFullYear() - 5));
+        expect(await screen.findByText(/minimum age where they live/)).toBeInTheDocument();
+        expect(screen.queryByRole('textbox', { name: 'Email' })).not.toBeInTheDocument();
+        expect(startGuestEmailUpgrade).not.toHaveBeenCalled();
     });
 });

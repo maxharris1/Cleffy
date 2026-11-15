@@ -199,6 +199,50 @@ export const presenceSchema = z.object({
     color: z.string(),
     page: z.number().int().nonnegative(),
     isAnonymous: z.boolean(),
+    /** 'link': a signed-out visitor on a view link (the owner's "N viewing now"). */
+    via: z.literal('link').optional(),
 });
 
 export type PresencePeer = z.infer<typeof presenceSchema>;
+
+/**
+ * One committed mark as a signed-out link viewer receives it on
+ * doc-view:{id} and from link_view_snapshot (link_view_mark,
+ * 20261113120100): only what the renderer draws. An erased mark is a bare
+ * tombstone.
+ */
+export const LINK_VIEW_MARK_EVENT = 'mark';
+
+const linkViewMarkSchema = z.union([
+    z.object({
+        id: z.string().min(1),
+        seq: z.number().int().nonnegative(),
+        deleted: z.literal(true),
+    }),
+    z.object({
+        id: z.string().min(1),
+        page: z.number().int().nonnegative(),
+        kind: z.enum(['stroke', 'highlight', 'text']),
+        color: z.string(),
+        payload: z.record(z.string(), z.unknown()),
+        seq: z.number().int().nonnegative(),
+        deleted: z.literal(false),
+    }),
+]);
+
+export type LinkViewMark = z.infer<typeof linkViewMarkSchema>;
+
+export const parseLinkViewMark = (payload: unknown): LinkViewMark | null => {
+    const parsed = linkViewMarkSchema.safeParse(payload);
+    return parsed.success ? parsed.data : null;
+};
+
+/** The score's PDF was replaced (broadcast_document_changes on doc-view:{id}, 20261113120100). */
+export const LINK_VIEW_DOC_EVENT = 'doc';
+
+const linkViewDocSchema = z.object({ content_rev: z.number().int().nonnegative() });
+
+export const parseLinkViewDoc = (payload: unknown): number | null => {
+    const parsed = linkViewDocSchema.safeParse(payload);
+    return parsed.success ? parsed.data.content_rev : null;
+};

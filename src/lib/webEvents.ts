@@ -38,8 +38,8 @@ export const MAX_BATCH = 20;
 /** Events held while the session is unknown or the network is down; the oldest go first. */
 const MAX_QUEUE = 100;
 
-/** Invite links, auth callbacks, short links and every student surface. */
-const EXCLUDED_PREFIXES = ['/join', '/auth', '/v', '/student', '/assignments'];
+/** Share and invite links, auth callbacks, short links and every student surface. */
+const EXCLUDED_PREFIXES = ['/join', '/s', '/invite', '/auth', '/v', '/student', '/assignments'];
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

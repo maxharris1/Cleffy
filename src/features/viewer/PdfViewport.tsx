@@ -39,7 +39,6 @@ import {
     type ObscuredEdges,
     type PageColumns,
 } from '@/features/viewer/geometry';
-import { installSnapshotRetry } from '@/features/viewer/history/snapshotService';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
@@ -64,20 +63,12 @@ import {
 } from '@/features/viewer/stand/standMode';
 import { StandOverlay } from '@/features/viewer/stand/StandOverlay';
 import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
+import { useViewerBackend, type ViewerSyncHandle } from '@/features/viewer/ViewerBackendContext';
 import { features } from '@/lib/features';
 import { prefersReducedMotion } from '@/lib/motion';
-import { getSupabase } from '@/lib/supabase';
 import { peerColor } from '@/lib/colors';
 import { AnnotationStore, settleEdit } from '@/sync/annotationStore';
-import { getDb } from '@/sync/db';
-import { DocRealtimeChannel, fetchRealtimeTopicEpoch } from '@/sync/realtimeChannel';
-import {
-    createSupabaseAnnotationsApi,
-    SyncEngine,
-    type SyncHold,
-    type SyncRejection,
-    type SyncStatus,
-} from '@/sync/syncEngine';
+import type { SyncHold, SyncRejection, SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { clampTextNote, isTextPayload, type ViewState } from '@/types/models';
@@ -216,6 +207,8 @@ export interface PdfViewportProps {
         userId: string;
         name: string;
         isAnonymous: boolean;
+        /** 'link': a signed-out view-link visitor (counted by the owner's dialog). */
+        via?: 'link';
         canWrite: boolean;
         /** Only the document owner may fire the metered text-note transcribe. */
         isOwner?: boolean;
@@ -248,6 +241,7 @@ export const PdfViewport = ({
     sync,
 }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
+    const backend = useViewerBackend();
     /**
      * React's copy of the view: settled, not live. Pan, pinch, wheel and the
      * follow glide write the store every frame; the subscription below puts
@@ -302,7 +296,7 @@ export const PdfViewport = ({
     // the first paint (see the setAuthor effect below).
     const author = authorId !== undefined ? authorId : (sync?.userId ?? null);
     const [annotationStore] = useState(() => {
-        const store = new AnnotationStore(getDb(), docId);
+        const store = new AnnotationStore(backend.db, docId);
         store.setAuthor(author);
         return store;
     });
@@ -545,6 +539,7 @@ export const PdfViewport = ({
     const syncUserId = sync?.userId;
     const syncName = sync?.name;
     const syncIsAnonymous = sync?.isAnonymous ?? false;
+    const syncVia = sync?.via;
     const syncCanWrite = sync?.canWrite ?? false;
     const syncOnStatus = sync?.onStatus;
     const syncOnRejected = sync?.onRejected;
@@ -553,7 +548,7 @@ export const PdfViewport = ({
     const syncOnDocReplaced = sync?.onDocReplaced;
     const syncOnScoreAnalysis = sync?.onScoreAnalysis;
     const syncOnMembershipChanged = sync?.onMembershipChanged;
-    const channelRef = useRef<DocRealtimeChannel | null>(null);
+    const channelRef = useRef<ViewerSyncHandle | null>(null);
 
     // Changes queued here are this account's: every engine uploads only those
     // (PendingOp.userId), and the store draws no other account's queued marks
@@ -1086,71 +1081,37 @@ export const PdfViewport = ({
 
         // Cloud documents additionally get the sync engine + realtime channel,
         // wired to the same store and ink controller (plan §realtime).
-        let engine: SyncEngine | null = null;
-        let channel: DocRealtimeChannel | null = null;
+        let connection: ViewerSyncHandle | null = null;
         if (syncUserId && syncName !== undefined) {
-            engine = new SyncEngine({
-                db: getDb(),
+            connection = backend.connect({
+                docId,
                 store: annotationStore,
-                api: createSupabaseAnnotationsApi(getSupabase()),
-                docId,
-                getUserId: () => syncUserId,
-                onStatus: syncOnStatus,
-                onRejected: syncOnRejected,
-                onHeld: syncOnHeld,
-            });
-            channel = new DocRealtimeChannel({
-                supabase: getSupabase(),
-                docId,
+                ink,
                 self: {
                     userId: syncUserId,
                     name: syncName,
                     color: peerColor(syncUserId),
                     page: 0,
                     isAnonymous: syncIsAnonymous,
+                    ...(syncVia ? { via: syncVia } : {}),
                 },
-                onRemoteInk: (msg) => ink.applyRemoteInk(msg),
-                onDbChange: (row) => {
-                    void engine?.applyServerRow(row);
-                    ink.remoteInkCommitted(row.id);
+                canWrite: syncCanWrite,
+                callbacks: {
+                    onStatus: syncOnStatus,
+                    onRejected: syncOnRejected,
+                    onHeld: syncOnHeld,
+                    onPeers: syncOnPeers,
+                    onDocReplaced: syncOnDocReplaced,
+                    onScoreAnalysis: syncOnScoreAnalysis,
+                    onMembershipChanged: syncOnMembershipChanged,
                 },
-                onPeers: (peers) => syncOnPeers?.(peers),
-                onReconnect: () => {
-                    ink.clearRemoteInk();
-                    // Committed rows may have gone unheard meanwhile (a drop, or
-                    // a takedown moving the score's topics): live rows must not
-                    // move the watermark past them before this pull lands.
-                    engine?.noteGap();
-                    void engine?.sync();
-                    installSnapshotRetry();
-                    // A role change made while the connection was down sent
-                    // its broadcast to nobody.
-                    syncOnMembershipChanged?.();
-                },
-                onResync: () => {
-                    engine?.noteGap();
-                    void engine?.sync();
-                },
-                onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
-                onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
-                onMembershipChanged: () => syncOnMembershipChanged?.(),
-                fetchTopicEpoch: () => fetchRealtimeTopicEpoch(getSupabase(), docId),
             });
-            if (syncCanWrite) {
-                ink.setLivePublisher(channel.publisher);
-            }
-            engine.start();
-            channel.start();
-            // Lesson-history snapshots whose upload failed earlier (offline,
-            // a closed tab) go up now, and again whenever the browser is back online.
-            installSnapshotRetry();
-            channelRef.current = channel;
+            channelRef.current = connection;
         }
 
         return () => {
             channelRef.current = null;
-            channel?.stop();
-            engine?.stop();
+            connection?.stop();
             gestureRef.current = null;
             controller.destroy();
             ink.destroy();
@@ -1167,7 +1128,9 @@ export const PdfViewport = ({
         syncUserId,
         syncName,
         syncIsAnonymous,
+        syncVia,
         syncCanWrite,
+        backend,
         syncOnStatus,
         syncOnRejected,
         syncOnHeld,

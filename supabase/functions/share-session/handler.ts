@@ -15,7 +15,8 @@ import { type ShareSigningKey, sha256Hex, signViewerJwt, verifyViewerJwt } from 
 
 export type ResolvedLink =
     | { state: 'invalid' }
-    | { state: 'revoked' | 'expired' | 'unavailable'; link_id: string }
+    | { state: 'revoked' | 'unavailable'; link_id: string }
+    | { state: 'expired'; link_id: string; link_expires_at?: string | null }
     | {
           state: 'live';
           role: 'viewer' | 'editor';
@@ -94,6 +95,10 @@ export const handleShareSession = async (req: Request, deps: ShareSessionDeps): 
     const mint = await deps.checkRateLimit(`share-mint:${linkKey}`, MINT_LIMIT.limit, MINT_LIMIT.windowMs);
     if (!mint.ok) {
         return json({ reason: 'rate_limited', retry_after: mint.retryAfterSec }, 429);
+    }
+    if (link.state === 'expired') {
+        // The date the visitor's link stopped, so the page can say when.
+        return json({ state: 'expired', expired_at: link.link_expires_at ?? null });
     }
     if (link.state !== 'live') {
         return json({ state: link.state });

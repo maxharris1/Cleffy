@@ -209,6 +209,23 @@ export type ShareLinkRow = {
     created_at: string;
     expires_at: string | null;
     revoked_at: string | null;
+    /** Share v2 (20261113120000): the row's id, and whether it is the score's General access link. */
+    id?: string;
+    general?: boolean;
+};
+
+/** An invite by email (Share v2, 20261113120200). The owner reads them; only the server writes them. */
+export type DocumentInviteRow = {
+    id: string;
+    document_id: string;
+    email: string;
+    role: ShareRole;
+    invited_by: string;
+    created_at: string;
+    expires_at: string;
+    accepted_at: string | null;
+    accepted_by: string | null;
+    revoked_at: string | null;
 };
 
 /**
@@ -661,6 +678,12 @@ export type Database = {
                 Row: DocumentImportRow;
                 Insert: DocumentImportInsert;
                 Update: DocumentImportUpdate;
+                Relationships: [];
+            };
+            document_invites: {
+                Row: DocumentInviteRow;
+                Insert: never;
+                Update: never;
                 Relationships: [];
             };
             share_links: {

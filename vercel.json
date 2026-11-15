@@ -19,6 +19,7 @@
                     "value": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), midi=(), magnetometer=(), gyroscope=(), accelerometer=(), browsing-topics=()"
                 }
             ]
-        }
+        },
+        { "source": "/(s|invite)", "headers": [{ "key": "Referrer-Policy", "value": "no-referrer" }] }
     ]
 }

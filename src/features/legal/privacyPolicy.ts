@@ -1,6 +1,7 @@
 import { aiFeatures, sendsToAnthropic } from '@/features/legal/aiFeatures';
 import { h, list, p, placeholder, type LegalDocument } from '@/features/legal/legalDocument';
 import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
+import { features } from '@/lib/features';
 
 /**
  * The Privacy Policy, as data.
@@ -14,6 +15,8 @@ import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
  * Features switched off in this build (src/lib/features.ts, aiFeatures.ts) are
  * omitted rather than described: the policy covers what this release does.
  * In particular, Anthropic is named only while a feature that calls it is on.
+ * Share v2 (features.shareV2) swaps the share-link text for what each sharing
+ * path collects; with it off the policy reads as before.
  */
 
 const { brand, name, legalForm, postalAddress, emails, website, dataRegion } = LEGAL_ENTITY;
@@ -42,6 +45,22 @@ if (aiFeatures.playalong) {
         'Play-along (when you ask Cleffy to play a score): the score’s PDF is processed by our own music-recognition service, which runs on Google Cloud. No third-party AI provider receives it.',
     );
 }
+
+/**
+ * What each Share v2 path collects. Bounds and defaults follow the server:
+ * link expiry share_link_expiry() (20261113120000_share_v2_links.sql), idle
+ * deletion share_owner_settings.link_guest_idle_days and
+ * retention_guest_idle_window (20261113120300_share_v2_link_guests.sql),
+ * invites and purges in 20261113120200_share_v2_invites.sql.
+ */
+const shareV2Collection = [
+    // ShareLinkPage viewer path: no session; presence key and "Anonymous <animal>" (anonymousAnimals.ts) in Realtime memory.
+    'Viewing by link: you do not need an account, nothing is asked and nothing about you is stored. Vercel and Supabase process your IP address to deliver the page and keep it secure, and their logs keep it briefly (about 7 days at most). Others on the score see an anonymous viewer, such as “Anonymous Otter”, and the owner sees how many people are viewing, but not who.',
+    // join-share-link guest path: signInAnonymously, optional display_name.
+    'Editing by link: you can give a name or stay anonymous. A temporary guest profile holds that name (if any) and your markings. The profile is deleted after a period without use that the score’s owner chooses, between 7 and 90 days (30 days unless they change it). Your markings stay on the score.',
+    // document_invites: 14-day expiry, retention_purge_share_invites.
+    'Invites: when someone invites you by email, your email address and the invitation are stored until it is accepted or expires (after 14 days), then deleted 30 days later.',
+];
 
 const aiSection: LegalDocument['sections'] =
     aiProcessing.length > 0
@@ -99,12 +118,21 @@ export const PRIVACY_POLICY: LegalDocument = {
                     // user_metadata.display_name (AccountPage).
                     'The display name you choose, if you set one.',
                     // Age screen on /register and /join (mh/launch-consent): compared, then discarded.
-                    'When you sign up or join as a guest, the country you choose and your confirmation that you meet the minimum age there. If you give a birth month and year to confirm it, we use it only for that check and do not keep it.',
+                    features.shareV2
+                        ? 'When you sign up, the country you choose and your confirmation that you meet the minimum age there. If you give a birth month and year to confirm it, we use it only for that check and do not keep it.'
+                        : 'When you sign up or join as a guest, the country you choose and your confirmation that you meet the minimum age there. If you give a birth month and year to confirm it, we use it only for that check and do not keep it.',
                     // auth.users / auth sessions keep IP and user agent.
                     'Technical information recorded when you sign in, such as the time, your IP address and your browser type, which our sign-in provider keeps for security.',
-                    // signInAnonymously in session.ts; JoinPage.
-                    'If you open a share link without an account, a temporary guest session is created with the name you type. You can later add an email address to keep it.',
+                    ...(features.shareV2
+                        ? []
+                        : [
+                              // signInAnonymously in session.ts; JoinPage.
+                              'If you open a share link without an account, a temporary guest session is created with the name you type. You can later add an email address to keep it.',
+                          ]),
                 ),
+                ...(features.shareV2
+                    ? [h('Shared scores you open by link or invite'), list(...shareV2Collection)]
+                    : []),
                 h('Your content'),
                 list(
                     'The PDF scores you upload or import, and the preview images we generate from them.',
@@ -184,10 +212,19 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'A score you upload is private to you until you share it.',
                     // One shared annotation layer per score; document_members roles.
                     'Each score has one shared set of markings. Everyone you share a score with can see all of its markings; editors can also add, change and erase them.',
-                    // share_links: anyone holding the link.
-                    'Anyone who has a share link can open the score with the access that link grants, until you revoke it. Treat share links like a key.',
-                    // presenceNameOf(): display name, else "Collaborator" / "Guest" (mh/launch-consent).
-                    'While a score is open, the people viewing it see each other’s display names. Someone who has not set one is shown as “Collaborator”, or “Guest” for a guest; email addresses are never shown.',
+                    ...(features.shareV2
+                        ? [
+                              // share_links: share_link_expiry(), renew_share_link, reset_share_link, retention_purge_share_links.
+                              'Anyone who has a share link can open the score with the access that link grants. A link expires after a time the owner chooses, from 1 hour to 1 year (7 days by default), or never if the owner chooses that. The owner can renew a link, or reset it so the old link stops working. Treat share links like a key. Revoked or expired links are deleted 30 days later.',
+                              // presenceNameOf(); anonymous viewers (anonymousAnimals.ts); viewer count shown to the owner.
+                              'While a score is open, the people editing it see each other’s display names. Someone who has not set one is shown as “Collaborator”, or “Guest” for a guest; email addresses are never shown. People viewing by link appear as an anonymous viewer, such as “Anonymous Otter”, and the owner sees a live count of how many are viewing.',
+                          ]
+                        : [
+                              // share_links: anyone holding the link.
+                              'Anyone who has a share link can open the score with the access that link grants, until you revoke it. Treat share links like a key.',
+                              // presenceNameOf(): display name, else "Collaborator" / "Guest" (mh/launch-consent).
+                              'While a score is open, the people viewing it see each other’s display names. Someone who has not set one is shown as “Collaborator”, or “Guest” for a guest; email addresses are never shown.',
+                          ]),
                     'If you are removed from a score, the markings you made on it stay there. If you delete your account, the markings you made on other people’s scores stay on those scores, no longer attributed to you.',
                     // practice_notes.shared.
                     'Teachers see their students’ work on the scores they assign. A teacher’s practice notes are private to the teacher unless they choose to share them with the student.',
@@ -259,7 +296,10 @@ export const PRIVACY_POLICY: LegalDocument = {
             heading: 'Children and student accounts',
             blocks: [
                 p(
-                    'Cleffy accounts are not available to children under 13. To create an account yourself, or to join a score as a guest, you must be at least 13, or older where your country sets a higher age for agreeing to the use of your information online (up to 16 in some European countries). We ask your country and confirm the age before an account is created.',
+                    features.shareV2
+                        ? // guest-email-confirm / UpgradeBanner ask the age question before a link guest keeps an account.
+                          'Cleffy accounts are not available to children under 13. To create an account, you must be at least 13, or older where your country sets a higher age for agreeing to the use of your information online (up to 16 in some European countries). We ask your country and confirm the age before an account is created. Opening or editing a shared score by link does not create an account; if you later want to keep your work in an account, we ask the age question then.'
+                        : 'Cleffy accounts are not available to children under 13. To create an account yourself, or to join a score as a guest, you must be at least 13, or older where your country sets a higher age for agreeing to the use of your information online (up to 16 in some European countries). We ask your country and confirm the age before an account is created.',
                 ),
                 list(
                     'A teacher who creates a student account confirms that the student meets the minimum age for the student’s country, and is responsible for having the authority to create it — for example the consent of the student’s parent or guardian, or of the school.',
@@ -284,7 +324,16 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'We keep your account and content for as long as your account exists.',
                     // Retention jobs (pg_cron, mh/launch-consent).
                     'Archived student accounts are deleted 12 months after they were archived, unless the teacher restores them first.',
-                    'Guest profiles created through a share link are deleted after 90 days without use, unless an email address has been added to keep them.',
+                    ...(features.shareV2
+                        ? [
+                              // retention_guest_idle_window(): longest owner window applies, capped at 90 days.
+                              'Guest profiles created by editing through a share link are deleted after a period without use that the score’s owner chooses, between 7 and 90 days (30 days by default; if you are a guest on several owners’ scores, the longest of their periods applies, never more than 90 days). Other guest profiles are deleted after 90 days without use. Either way, a profile is kept if an email address has been added to keep it.',
+                              'Shared links expire when the owner chose (7 days by default) and are deleted 30 days after they expire or are revoked.',
+                              'Email invitations expire after 14 days and are deleted 30 days after they are accepted, cancelled or expire.',
+                          ]
+                        : [
+                              'Guest profiles created through a share link are deleted after 90 days without use, unless an email address has been added to keep them.',
+                          ]),
                     'Erased markings remain in a score’s version history, so they can be restored, until the score itself is deleted or the history is compacted.',
                     'Deleting a score removes its file, its preview images, its markings and its history.',
                     `Emails you send us are kept for 24 months after we receive them; you can ask us to delete yours sooner at ${emails.privacy}.`,

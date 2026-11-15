@@ -18,6 +18,17 @@ export interface AgeGate {
     v: 1;
 }
 
+/**
+ * The gate an editor-link guest signs in with (Share v2): no age screen. The
+ * server accepts it for an anonymous user only (20261113120300_share_v2_link_guests).
+ */
+export interface LinkGuestGate {
+    source: 'link_guest';
+    v: 2;
+}
+
+export const LINK_GUEST_GATE: LinkGuestGate = { source: 'link_guest', v: 2 };
+
 export const ageGateFor = (country: string): AgeGate => {
     const code = country.toUpperCase();
     return { country: code, min_age: consentAgeFor(code), source: 'self', v: 1 };

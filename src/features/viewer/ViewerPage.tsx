@@ -32,7 +32,8 @@ import { type KnownScore, useEndedSignInInkPrompt } from '@/features/student/use
 import { signOutEndedStudent } from '@/features/student/endedSignIn';
 import { fetchAccountDeleted, fetchSignInStillValid } from '@/features/student/studentApi';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
-import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
+import { LinkViewerCount, PresenceBar } from '@/features/viewer/presence/PresenceBar';
+import { usePresenceMembers } from '@/features/viewer/presence/usePresenceMembers';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider, type PdfSource, type StreamedPdfSource } from '@/features/viewer/pdf/PdfProvider';
 import { warmPdfWorker } from '@/features/viewer/pdf/pdfWorker';
@@ -47,6 +48,7 @@ import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { features } from '@/lib/features';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
+import { linkViewerCount, presenceLabel } from '@/lib/presenceName';
 import { useDelayedFlag } from '@/lib/useDelayedFlag';
 import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import type { AnnotationStore } from '@/sync/annotationStore';
@@ -167,7 +169,9 @@ const firstOpenFailure = (err: unknown): string => {
 const accessChangedNotice = (role: MemberRole | null): string =>
     role === 'editor' || role === 'owner'
         ? 'Your access changed: you can now edit this score.'
-        : 'Your access changed: you can now only view this score.';
+        : features.shareV2
+          ? 'Your access changed to view only.'
+          : 'Your access changed: you can now only view this score.';
 
 /**
  * Shown when the server says this account can no longer see the score. Neutral
@@ -851,6 +855,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         [docId, userId],
     );
     const onPeers = useCallback((next: PresencePeer[]) => setPeers(next), []);
+    const presenceMembers = usePresenceMembers(docId, state?.role, peers, features.shareV2);
     // Referentially stable — the review panel's scan effect depends on it.
     const classify = useMemo(() => makeCloudClassifyFn(docId), [docId]);
 
@@ -946,7 +951,12 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 title={state.doc.title}
                 titleAction={<StandModeButton />}
             >
-                <PresenceBar peers={peers} selfUserId={resolvedUserId} />
+                <PresenceBar
+                    peers={peers}
+                    selfUserId={resolvedUserId}
+                    labelOf={(peer) => presenceLabel(peer, presenceMembers)}
+                />
+                {features.shareV2 && state.role === 'owner' ? <LinkViewerCount peers={peers} /> : null}
                 {/* No engine yet (no role to sync under): say whether that is the network, or the server not having answered. */}
                 <SyncDot status={syncing ? syncStatus : !online ? 'offline' : awaitingServer ? 'waiting' : 'syncing'} />
                 {archived ? (
@@ -1067,7 +1077,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     {/* Every notice floats over the score in one region, so one
                         coming or going never moves the music (ViewerNotice). */}
                     <ViewerNoticeRegion onInsetChange={setNoticeInset}>
-                        <UpgradeBanner isGuest={Boolean(session?.user.is_anonymous)} />
+                        <UpgradeBanner isGuest={Boolean(session?.user.is_anonymous)} role={state.role} />
                         {accessNotice ? (
                             <ViewerNotice>
                                 <p className="min-w-0 flex-1">{accessNotice}</p>
@@ -1162,6 +1172,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     role={state.role}
                     canLeave={canLeave}
                     isGuest={Boolean(session?.user.is_anonymous)}
+                    linkViewers={linkViewerCount(peers)}
                     onClose={() => setShareOpen(false)}
                     onLeft={() => {
                         setShareOpen(false);

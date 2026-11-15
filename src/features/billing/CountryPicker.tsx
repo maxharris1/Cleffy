@@ -20,7 +20,7 @@ export const CountryPicker = ({ value, onChange, className = '' }: CountryPicker
                 id={id}
                 value={value}
                 onChange={(event) => onChange(event.target.value)}
-                className={fieldClassName('sm', 'w-auto max-w-full py-1.5')}
+                className={fieldClassName('sm', 'max-w-full py-1.5', { width: 'auto' })}
             >
                 {options.map((option) => (
                     <option key={option.code} value={option.code}>

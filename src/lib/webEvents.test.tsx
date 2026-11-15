@@ -175,6 +175,8 @@ describe('track', () => {
 
     it.each([
         '/join/abc123',
+        '/s',
+        '/invite',
         '/auth/callback',
         '/v',
         '/v/abc',

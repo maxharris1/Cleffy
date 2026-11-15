@@ -1,5 +1,7 @@
+import { callEdgeFunction } from '@/features/billing/billingApi';
+import { features } from '@/lib/features';
 import { getSupabase } from '@/lib/supabase';
-import type { DocumentMemberListing, ShareLinkRow, ShareRole } from '@/types/database';
+import type { DocumentInviteRow, DocumentMemberListing, ShareLinkRow, ShareRole } from '@/types/database';
 
 /**
  * How long a new link keeps admitting people. Expiry only stops NEW joins —
@@ -228,6 +230,250 @@ export const peekShareLink = async (token: string): Promise<LinkPeek | null> => 
     }
 };
 
-export const shareUrlFor = (token: string): string => {
-    return `${window.location.origin}/join/${token}`;
+/**
+ * The address to hand out for a link. Share v2 puts the token in the fragment
+ * (/s#<token>, D14), which the browser never sends to a server; before it,
+ * /join/<token>, which still works.
+ */
+export const shareUrlFor = (token: string): string =>
+    features.shareV2 ? `${window.location.origin}/s#${token}` : `${window.location.origin}/join/${token}`;
+
+// ---------------------------------------------------------------------------
+// Share v2 (#105): General access, invites by email and the owner's settings.
+// The legacy exports above stay for the dialog the flag-off build shows.
+
+/** How long a General access link admits people (D15): the one list for create and Renew. */
+export type LinkExpiryChoice = '1d' | '7d' | '30d' | '90d' | '365d' | 'never';
+
+export const LINK_EXPIRY_CHOICES_V2: ReadonlyArray<{
+    value: LinkExpiryChoice;
+    label: string;
+    interval: string | null;
+}> = [
+    { value: '1d', label: '1 day', interval: '1 day' },
+    { value: '7d', label: '7 days', interval: '7 days' },
+    { value: '30d', label: '30 days', interval: '30 days' },
+    { value: '90d', label: '90 days', interval: '90 days' },
+    { value: '365d', label: '1 year', interval: '365 days' },
+    { value: 'never', label: 'Never', interval: null },
+];
+
+export const DEFAULT_LINK_EXPIRY_V2: LinkExpiryChoice = '7d';
+
+/** How long idle link guests on the owner's scores are kept (D8), in days. */
+export const LINK_GUEST_RETENTION_CHOICES = [7, 14, 30, 60, 90] as const;
+export const DEFAULT_LINK_GUEST_RETENTION = 30;
+
+const intervalFor = (expiry: LinkExpiryChoice): string | null => {
+    const choice = LINK_EXPIRY_CHOICES_V2.find((c) => c.value === expiry);
+    return choice ? choice.interval : '7 days';
+};
+
+export const linkDateText = (iso: string): string =>
+    new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(iso));
+
+/** "Expires 20 Nov 2026 (in 7 days)", "Expires 20 Nov 2026 (today)", "Expired on 20 Nov 2026", "Never expires". */
+export const linkExpiryText = (expiresAt: string | null, now: Date = new Date()): string => {
+    if (expiresAt === null) {
+        return 'Never expires';
+    }
+    const remaining = new Date(expiresAt).getTime() - now.getTime();
+    if (remaining <= 0) {
+        return `Expired on ${linkDateText(expiresAt)}`;
+    }
+    const days = Math.round(remaining / DAY_MS);
+    const when = days < 1 ? 'today' : days === 1 ? 'in 1 day' : `in ${days} days`;
+    return `Expires ${linkDateText(expiresAt)} (${when})`;
+};
+
+/** An owner action the server refused, by the code it gave; `message` is what to show. */
+export class ShareError extends Error {
+    constructor(
+        message: string,
+        readonly code: string,
+    ) {
+        super(message);
+        this.name = 'ShareError';
+    }
+}
+
+const RPC_MESSAGES: Record<string, string> = {
+    invalid_link_expiry: 'That expiry is outside what links allow (1 hour to 1 year, or never).',
+    invalid_retention_days: 'Choose between 1 and 90 days.',
+    no_general_link: 'This score has no link to reset.',
+    link_revoked: 'That link was turned off, so it cannot be renewed.',
+};
+
+const rpcFailure = (error: { message: string; details?: string | null }, fallback: string): ShareError => {
+    const code = detailCodeOf(error.details) ?? 'failed';
+    return new ShareError(RPC_MESSAGES[code] ?? `${fallback}: ${error.message}`, code);
+};
+
+export interface GeneralLink {
+    id: string;
+    token: string;
+    role: ShareRole;
+    expiresAt: string | null;
+}
+
+/** The score's live General access link, and the older (legacy) links still unrevoked. */
+export const loadOwnerSharing = async (
+    docId: string,
+): Promise<{ general: ShareLinkRow | null; older: ShareLinkRow[] }> => {
+    const links = await listShareLinks(docId);
+    return {
+        general: links.find((l) => l.general) ?? null,
+        older: links.filter((l) => !l.general),
+    };
+};
+
+/** Restricted revokes the link (and everyone it let in); Anyone creates it or changes its role and expiry. */
+export const setGeneralAccess = async (
+    docId: string,
+    mode: 'restricted' | 'anyone',
+    role: ShareRole,
+    expiry: LinkExpiryChoice,
+): Promise<GeneralLink | null> => {
+    const { data, error } = await getSupabase().rpc('set_general_access', {
+        p_document: docId,
+        p_mode: mode,
+        p_role: role,
+        p_expires_in: intervalFor(expiry),
+    });
+    if (error) {
+        throw rpcFailure(error, 'Could not change who can open the link');
+    }
+    const row = data?.[0];
+    return row ? { id: row.link_id, token: row.token, role: row.role, expiresAt: row.expires_at } : null;
+};
+
+/**
+ * View or Edit for the live link, keeping the expiry it has: set_general_access
+ * always sets one, so the time left goes back as the interval (never under the
+ * server's one-hour floor).
+ */
+export const changeGeneralLinkRole = async (
+    docId: string,
+    role: ShareRole,
+    expiresAt: string | null,
+    now: number = Date.now(),
+): Promise<void> => {
+    const remaining =
+        expiresAt === null
+            ? null
+            : `${Math.max(3600, Math.round((new Date(expiresAt).getTime() - now) / 1000))} seconds`;
+    const { error } = await getSupabase().rpc('set_general_access', {
+        p_document: docId,
+        p_mode: 'anyone',
+        p_role: role,
+        p_expires_in: remaining,
+    });
+    if (error) {
+        throw rpcFailure(error, 'Could not change what the link allows');
+    }
+};
+
+/** A new address for the General access link; the old one stops working. */
+export const resetGeneralLink = async (docId: string): Promise<GeneralLink> => {
+    const { data, error } = await getSupabase().rpc('reset_general_link', { p_document: docId });
+    const row = data?.[0];
+    if (error || !row) {
+        throw error
+            ? rpcFailure(error, 'Could not reset the link')
+            : new ShareError('Could not reset the link.', 'failed');
+    }
+    return { id: row.link_id, token: row.token, role: row.role, expiresAt: row.expires_at };
+};
+
+/** A new expiry for a link; an expired one comes back to life. Resolves to the new expiry. */
+export const renewLink = async (linkId: string, expiry: LinkExpiryChoice): Promise<string | null> => {
+    const { data, error } = await getSupabase().rpc('renew_share_link', {
+        p_link: linkId,
+        p_expires_in: intervalFor(expiry),
+    });
+    if (error) {
+        throw rpcFailure(error, 'Could not renew the link');
+    }
+    return data ?? null;
+};
+
+export interface PendingInvite {
+    id: string;
+    email: string;
+    role: ShareRole;
+    expiresAt: string;
+}
+
+/** Invites by email not yet accepted, cancelled or expired, oldest first. */
+export const listPendingInvites = async (docId: string, now: Date = new Date()): Promise<PendingInvite[]> => {
+    const { data, error } = await getSupabase()
+        .from('document_invites')
+        .select('id, email, role, expires_at, accepted_at, revoked_at')
+        .eq('document_id', docId)
+        .is('accepted_at', null)
+        .is('revoked_at', null)
+        .gt('expires_at', now.toISOString())
+        .order('created_at', { ascending: true });
+    if (error) {
+        throw new Error(`Could not load invites: ${error.message}`);
+    }
+    return (data as Pick<DocumentInviteRow, 'id' | 'email' | 'role' | 'expires_at'>[]).map((row) => ({
+        id: row.id,
+        email: row.email,
+        role: row.role,
+        expiresAt: row.expires_at,
+    }));
+};
+
+const INVITE_MESSAGES: Record<string, string> = {
+    cannot_invite: 'This address can’t be invited here. If they’re your student, use Assign.',
+    invalid_email: 'Enter a valid email address.',
+    not_owner: 'Only the score’s owner can invite people.',
+    not_pending: 'That invite has already been used, cancelled or has expired.',
+    send_failed: 'The invite email could not be sent. Try again.',
+};
+
+const callShareInvite = async (payload: Record<string, unknown>): Promise<void> => {
+    const response = await callEdgeFunction('share-invite', payload);
+    if (response.ok) {
+        return;
+    }
+    const body = (await response.json().catch(() => ({}))) as { error?: unknown; retry_after?: unknown };
+    const code = typeof body.error === 'string' ? body.error : 'failed';
+    if (code === 'rate_limited') {
+        const wait = typeof body.retry_after === 'number' ? Math.max(1, Math.ceil(body.retry_after / 60)) : null;
+        throw new ShareError(
+            wait
+                ? `Too many invites just now. Try again in ${wait} min.`
+                : 'Too many invites just now. Try again soon.',
+            code,
+        );
+    }
+    throw new ShareError(INVITE_MESSAGES[code] ?? 'Could not send the invite. Try again.', code);
+};
+
+/** Invite someone by email: an account gets the score now, a new address a pending invite (D5, D7). */
+export const inviteByEmail = (docId: string, email: string, role: ShareRole): Promise<void> =>
+    callShareInvite({ action: 'invite', document_id: docId, email: email.trim(), role });
+
+export const resendInvite = (docId: string, inviteId: string): Promise<void> =>
+    callShareInvite({ action: 'resend', document_id: docId, invite_id: inviteId });
+
+export const cancelInvite = (docId: string, inviteId: string): Promise<void> =>
+    callShareInvite({ action: 'cancel', document_id: docId, invite_id: inviteId });
+
+export const getLinkGuestRetention = async (): Promise<number> => {
+    const { data, error } = await getSupabase().rpc('my_share_settings');
+    if (error) {
+        throw new Error(`Could not load your sharing settings: ${error.message}`);
+    }
+    return data?.link_guest_idle_days ?? DEFAULT_LINK_GUEST_RETENTION;
+};
+
+export const setLinkGuestRetention = async (days: number): Promise<number> => {
+    const { data, error } = await getSupabase().rpc('set_link_guest_retention', { p_days: days });
+    if (error) {
+        throw rpcFailure(error, 'Could not save that setting');
+    }
+    return data ?? days;
 };

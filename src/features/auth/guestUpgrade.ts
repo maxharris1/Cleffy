@@ -1,3 +1,4 @@
+import type { AgeGate } from '@/features/auth/ageCheck';
 import { callEdgeFunction } from '@/features/billing/billingApi';
 import { getSupabase } from '@/lib/supabase';
 
@@ -85,9 +86,19 @@ export const confirmGuestEmailUpgrade = async (input: {
      * hand. Null on a build with no site key, and then nothing is sent.
      */
     captchaToken?: string | null;
+    /**
+     * The age screen's answer, for a guest who has none on their account (an
+     * editor-link guest, Share v2): guest-email-confirm asks for it then.
+     */
+    ageGate?: AgeGate | null;
 }): Promise<'signed_in' | 'sign_in_needed'> => {
     const typed = input.email.trim();
-    const body = (await post('guest-email-confirm', { email: typed, code: input.code, password: input.password })) as {
+    const body = (await post('guest-email-confirm', {
+        email: typed,
+        code: input.code,
+        password: input.password,
+        ...(input.ageGate ? { age_gate: input.ageGate } : {}),
+    })) as {
         email?: unknown;
     };
     // The address as the server stored it (normalised), else as typed.
