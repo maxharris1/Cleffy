@@ -130,6 +130,11 @@ const ClaimFlow = () => {
         setStep(2);
     };
 
+    const backToCode = () => {
+        captcha.renew();
+        setStep(1);
+    };
+
     const claim = async () => {
         if (!isValidUsername(normalizedUsername)) {
             setUsernameError(`Pick a username of ${USERNAME_HINT}.`);
@@ -347,7 +352,7 @@ const ClaimFlow = () => {
             </form>
             <p className="mt-6 text-center text-sm text-stone-600">
                 {step === 2 ? (
-                    <button type="button" onClick={() => setStep(1)} className={`cursor-pointer ${linkClassName}`}>
+                    <button type="button" onClick={backToCode} className={`cursor-pointer ${linkClassName}`}>
                         Back to the code
                     </button>
                 ) : (

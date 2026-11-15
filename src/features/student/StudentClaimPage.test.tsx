@@ -380,6 +380,27 @@ describe('StudentClaimPage with Turnstile on', () => {
         expect(claimStudentAccount).not.toHaveBeenCalled();
     });
 
+    it('does not resume an abandoned claim after Back, even when a later token arrives', async () => {
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        renderClaim();
+        await enterCode(user, 'ABCD-EFGH-JKMN');
+        await fillCredentials(user);
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+        await user.click(screen.getByRole('button', { name: 'Back to the code' }));
+        await user.clear(screen.getByLabelText('Setup code'));
+        await enterCode(user, '2345-6789-ABCD');
+        await waitFor(() => expect(rendered).toHaveLength(2));
+        act(() => rendered[1]!.callback('new-widget-token'));
+        await act(async () => undefined);
+
+        expect(claimStudentAccount).not.toHaveBeenCalled();
+        expect(screen.getByRole('button', { name: 'Create my account' })).toBeEnabled();
+        expect(screen.queryByText('your pieces')).not.toBeInTheDocument();
+    });
+
     it('puts up a fresh challenge after a refusal, because the card is still live', async () => {
         // Every refusal the claim can answer with now leaves the code unspent —
         // student-claim signs the student in BEFORE it spends it — so every one
