@@ -3,7 +3,7 @@ import { Link, Navigate, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
 import { TurnstileField } from '@/features/auth/TurnstileField';
-import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import { StudentAuthError, claimStudentAccount } from '@/features/student/studentApi';
 import { refuseInput } from '@/lib/shake';
@@ -87,9 +87,7 @@ const ClaimFlow = () => {
      * browser, and a challenge in front of a child typing a code off paper
      * would be a gate on nothing.
      */
-    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
-    const [captchaRound, setCaptchaRound] = useState(0);
-    const captchaRequired = isTurnstileEnabled();
+    const captcha = useTurnstileToken();
     const usernameRef = useRef<HTMLInputElement | null>(null);
     /**
      * How many times the server has refused the code. Each refusal shakes the
@@ -132,6 +130,11 @@ const ClaimFlow = () => {
         setStep(2);
     };
 
+    const backToCode = () => {
+        captcha.renew();
+        setStep(1);
+    };
+
     const claim = async () => {
         if (!isValidUsername(normalizedUsername)) {
             setUsernameError(`Pick a username of ${USERNAME_HINT}.`);
@@ -151,15 +154,18 @@ const ClaimFlow = () => {
             setError('Passwords do not match.');
             return;
         }
-        // Last of the form checks, so a mistyped password is not answered with
-        // a complaint about the robot check. Never reached without a site key.
-        if (captchaRequired && !captchaToken) {
-            setError('Finish the “I’m human” check, then try again.');
-            return;
-        }
         setError(null);
         setUsernameError(null);
         setBusy(true);
+        // After the form checks, so a mistyped password is not answered with a
+        // complaint about the robot check.
+        const wait = await captcha.waitForToken();
+        if (!wait.ok) {
+            setError(wait.message);
+            setBusy(false);
+            return;
+        }
+        const captchaToken = wait.token;
         try {
             // The code goes as typed — the function folds case and dashes itself.
             // The username goes normalized, because that spelling is the one the
@@ -168,14 +174,13 @@ const ClaimFlow = () => {
             navigate('/assignments', { replace: true });
         } catch (err) {
             setBusy(false);
-            if (captchaRequired) {
+            if (captcha.required) {
                 // Spent on redemption whatever else the request met, so the
                 // retry this failure invites needs a fresh challenge. Done for
                 // every failure, including the ones handled below: the code is
                 // still live in all of them (student-claim signs the student in
                 // BEFORE it spends it), so every one of them is retryable.
-                setCaptchaToken(null);
-                setCaptchaRound((round) => round + 1);
+                captcha.renew();
             }
             if (err instanceof StudentAuthError) {
                 // The code is the only thing step one owns, so a refusal of it
@@ -327,7 +332,12 @@ const ClaimFlow = () => {
                             autoComplete="new-password"
                             spaced
                         />
-                        <TurnstileField key={captchaRound} action="student-claim" onToken={setCaptchaToken} />
+                        <TurnstileField
+                            key={captcha.round}
+                            action="student-claim"
+                            onToken={captcha.onToken}
+                            onNeedsUser={captcha.onNeedsUser}
+                        />
                         <Button type="submit" disabled={busy} className="mt-4 w-full">
                             {busy ? 'Setting up…' : 'Create my account'}
                         </Button>
@@ -342,7 +352,7 @@ const ClaimFlow = () => {
             </form>
             <p className="mt-6 text-center text-sm text-stone-600">
                 {step === 2 ? (
-                    <button type="button" onClick={() => setStep(1)} className={`cursor-pointer ${linkClassName}`}>
+                    <button type="button" onClick={backToCode} className={`cursor-pointer ${linkClassName}`}>
                         Back to the code
                     </button>
                 ) : (

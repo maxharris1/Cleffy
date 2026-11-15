@@ -1,5 +1,5 @@
 import { AuthApiError } from '@supabase/supabase-js';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -273,6 +273,9 @@ describe('the resend with Turnstile on', () => {
         const rendered = withTurnstile();
         const user = userEvent.setup();
         const resend = await resendFrom(user, rendered);
+        await waitFor(() => expect(rendered).toHaveLength(2));
+        // Cloudflare put a challenge in front of this visitor and it is unsolved.
+        act(() => rendered[1]!['before-interactive-callback']!());
 
         await user.click(resend);
 

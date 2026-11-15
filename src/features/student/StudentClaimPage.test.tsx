@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -355,11 +355,15 @@ describe('StudentClaimPage with Turnstile on', () => {
     });
 
     it('asks for the check last, and spends no code without it', async () => {
-        withTurnstile();
+        const rendered = withTurnstile();
         const user = userEvent.setup();
         renderClaim();
         await enterCode(user);
         await fillCredentials(user, 'ada_lovelace', 'short', 'short');
+        // Cloudflare decided this visitor gets a challenge, so there is one on
+        // screen to point at.
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        act(() => rendered[0]!['before-interactive-callback']!());
 
         // The password rule first: a form with a typo in it is not first told
         // off about the robot check.
@@ -372,8 +376,29 @@ describe('StudentClaimPage with Turnstile on', () => {
         await user.type(screen.getByLabelText('Confirm password'), 'hunter2hunter2');
         await user.click(screen.getByRole('button', { name: 'Create my account' }));
 
-        expect(screen.getByRole('status')).toHaveTextContent('Finish the “I’m human” check');
+        expect(await screen.findByText(/Finish the “I’m human” check/)).toBeInTheDocument();
         expect(claimStudentAccount).not.toHaveBeenCalled();
+    });
+
+    it('does not resume an abandoned claim after Back, even when a later token arrives', async () => {
+        const rendered = withTurnstile();
+        const user = userEvent.setup();
+        renderClaim();
+        await enterCode(user, 'ABCD-EFGH-JKMN');
+        await fillCredentials(user);
+        await waitFor(() => expect(rendered).toHaveLength(1));
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+        await user.click(screen.getByRole('button', { name: 'Back to the code' }));
+        await user.clear(screen.getByLabelText('Setup code'));
+        await enterCode(user, '2345-6789-ABCD');
+        await waitFor(() => expect(rendered).toHaveLength(2));
+        act(() => rendered[1]!.callback('new-widget-token'));
+        await act(async () => undefined);
+
+        expect(claimStudentAccount).not.toHaveBeenCalled();
+        expect(screen.getByRole('button', { name: 'Create my account' })).toBeEnabled();
+        expect(screen.queryByText('your pieces')).not.toBeInTheDocument();
     });
 
     it('puts up a fresh challenge after a refusal, because the card is still live', async () => {

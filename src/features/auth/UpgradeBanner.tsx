@@ -6,7 +6,7 @@ import type { AgeGate } from '@/features/auth/ageCheck';
 import { AgeScreen } from '@/features/auth/AgeScreen';
 import { confirmGuestEmailUpgrade, GuestUpgradeError, startGuestEmailUpgrade } from '@/features/auth/guestUpgrade';
 import { TurnstileField } from '@/features/auth/TurnstileField';
-import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { ViewerNotice } from '@/features/viewer/ViewerNotice';
 import { features } from '@/lib/features';
 import { refuseInput } from '@/lib/shake';
@@ -70,9 +70,7 @@ export const UpgradeBanner = ({ isGuest, role }: { isGuest: boolean; role?: Memb
      * — which is every build today, so this banner is unchanged until the keys
      * are set.
      */
-    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
-    const [captchaRound, setCaptchaRound] = useState(0);
-    const captchaRequired = isTurnstileEnabled();
+    const captcha = useTurnstileToken();
     /**
      * Each time guest-email-confirm refuses the code as wrong: the code field
      * shakes and comes back focused with the code selected, ready to retype,
@@ -103,21 +101,22 @@ export const UpgradeBanner = ({ isGuest, role }: { isGuest: boolean; role?: Memb
     /** Move to another step with a clean slate: no spent token, a new challenge. */
     const goTo = (next: BannerState) => {
         setError(null);
-        setCaptchaToken(null);
-        setCaptchaRound((round) => round + 1);
+        captcha.renew();
         setState(next);
     };
 
-    const freshChallenge = () => {
-        setCaptchaToken(null);
-        setCaptchaRound((round) => round + 1);
-    };
-
-    const run = async (action: () => Promise<void>) => {
+    /** Waits for the check's token, then runs `action` with it. */
+    const run = async (action: (captchaToken: string | null) => Promise<void>) => {
         setBusy(true);
         setError(null);
+        const wait = await captcha.waitForToken();
+        if (!wait.ok) {
+            setError(wait.message ? { message: wait.message, signIn: false } : null);
+            setBusy(false);
+            return;
+        }
         try {
-            await action();
+            await action(wait.token);
         } catch (err) {
             setError({
                 message: err instanceof Error ? err.message : 'Something went wrong. Try again.',
@@ -127,16 +126,22 @@ export const UpgradeBanner = ({ isGuest, role }: { isGuest: boolean; role?: Memb
                 setCodeRefused(true);
                 setCodeRefusals((n) => n + 1);
             }
-            if (captchaRequired) {
-                freshChallenge();
+            if (captcha.required) {
+                captcha.renew();
             }
         } finally {
             setBusy(false);
         }
     };
 
-    const captchaField = captchaRequired ? (
-        <TurnstileField key={captchaRound} action="guest-email" onToken={setCaptchaToken} className="basis-full" />
+    const captchaField = captcha.required ? (
+        <TurnstileField
+            key={captcha.round}
+            action="guest-email"
+            onToken={captcha.onToken}
+            onNeedsUser={captcha.onNeedsUser}
+            className="basis-full"
+        />
     ) : null;
 
     const sendCode = () => {
@@ -149,11 +154,7 @@ export const UpgradeBanner = ({ isGuest, role }: { isGuest: boolean; role?: Memb
             setError({ message: passwordProblemMessage(problem), signIn: false });
             return;
         }
-        if (captchaRequired && !captchaToken) {
-            setError({ message: 'Finish the “I’m human” check, then try again.', signIn: false });
-            return;
-        }
-        void run(async () => {
+        void run(async (captchaToken) => {
             await startGuestEmailUpgrade(email, captchaToken);
             setCode('');
             setCodeRefused(false);
@@ -168,11 +169,7 @@ export const UpgradeBanner = ({ isGuest, role }: { isGuest: boolean; role?: Memb
             setError({ message: 'Enter the 6-digit code from the email.', signIn: false });
             return;
         }
-        if (captchaRequired && !captchaToken) {
-            setError({ message: 'Finish the “I’m human” check, then try again.', signIn: false });
-            return;
-        }
-        void run(async () => {
+        void run(async (captchaToken) => {
             const outcome = await confirmGuestEmailUpgrade({
                 email,
                 code,

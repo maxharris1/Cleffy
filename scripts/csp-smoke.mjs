@@ -29,8 +29,12 @@
 //      set to Cloudflare's always-passes test key 1x00000000000000000000AA:
 //      require the real challenge (api.js from challenges.cloudflare.com, then
 //      its iframe) to load on /login, /register and /student and hand back a
-//      token, with no violation (script-src, frame-src). This one talks to
-//      Cloudflare for real; the test key never challenges anyone.
+//      token, with no violation (script-src, frame-src), while the widget
+//      stays invisible (interaction-only) and takes no space. This one talks
+//      to Cloudflare for real; the test key never challenges anyone.
+//      CSP_SMOKE_TURNSTILE=challenge — the same, with the build's key set to
+//      the always-challenges test key 3x00000000000000000000FF: require the
+//      challenge to show inline, click it, and get the token back.
 //      CSP_SMOKE_SHOT_DIR (default: no screenshots),
 //      CHROMIUM_PATH (default: Playwright's own browser),
 //      CSP_SMOKE_OLD_BROWSER=1 — delete, in the page AND in the pdf.js worker,
@@ -49,7 +53,9 @@ const vercel = JSON.parse(fs.readFileSync('vercel.json', 'utf8'));
 
 const OLD_BROWSER = process.env.CSP_SMOKE_OLD_BROWSER === '1';
 const SENTRY = process.env.CSP_SMOKE_SENTRY === '1';
-const TURNSTILE = process.env.CSP_SMOKE_TURNSTILE === '1';
+const TURNSTILE_MODE = process.env.CSP_SMOKE_TURNSTILE ?? '';
+const TURNSTILE = TURNSTILE_MODE === '1' || TURNSTILE_MODE === 'challenge';
+const TURNSTILE_CHALLENGE = TURNSTILE_MODE === 'challenge';
 
 /**
  * Removes what an older Safari does not have. Kept in step with
@@ -413,6 +419,36 @@ const turnstileSolved = async (route) => {
     if (!TURNSTILE) {
         return;
     }
+    const host = page.getByTestId('turnstile-field');
+    const hostHeight = async () => (await host.boundingBox().catch(() => null))?.height ?? 0;
+    if (TURNSTILE_CHALLENGE) {
+        const shown = await page
+            .waitForFunction(
+                () =>
+                    (document.querySelector('[data-testid="turnstile-field"]')?.getBoundingClientRect().height ?? 0) >
+                    0,
+                null,
+                { timeout: 30_000 },
+            )
+            .then(() => true)
+            .catch(() => false);
+        check(`${route} Turnstile challenge shows inline (always-challenge key)`, shown);
+        // The checkbox sits at the left of Cloudflare's widget, and only takes
+        // a click once its frame is ready: click until a token comes back.
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            const box = await host.boundingBox();
+            if (box) {
+                await page.mouse.click(box.x + 30, box.y + box.height / 2);
+            }
+            const answered = await page
+                .waitForFunction(() => Boolean(window.turnstile?.getResponse()), null, { timeout: 2_000 })
+                .then(() => true)
+                .catch(() => false);
+            if (answered) {
+                break;
+            }
+        }
+    }
     const solved = await page
         .waitForFunction(() => Boolean(window.turnstile?.getResponse()), null, { timeout: 30_000 })
         .then(() => true)
@@ -423,6 +459,10 @@ const turnstileSolved = async (route) => {
         solved && Boolean(frame),
         frame ? 'challenge frame mounted' : 'no challenge frame',
     );
+    if (!TURNSTILE_CHALLENGE) {
+        const height = await hostHeight();
+        check(`${route} Turnstile widget invisible for a passing visitor`, height === 0, `height ${height}px`);
+    }
 };
 
 // Public pages first, signed out.
@@ -567,7 +607,7 @@ await browser.close();
 server.close();
 
 console.log(
-    `${OLD_BROWSER ? '(old-browser simulation)\n' : ''}${SENTRY ? '(Sentry build)\n' : ''}${TURNSTILE ? '(Turnstile test-key build)\n' : ''}${results.join('\n')}`,
+    `${OLD_BROWSER ? '(old-browser simulation)\n' : ''}${SENTRY ? '(Sentry build)\n' : ''}${TURNSTILE ? `(Turnstile ${TURNSTILE_CHALLENGE ? 'always-challenge' : 'test-key'} build)\n` : ''}${results.join('\n')}`,
 );
 if (consoleErrors.length) {
     console.log(`\n(non-CSP console errors, informational — Supabase is stubbed)\n  ${consoleErrors.join('\n  ')}`);

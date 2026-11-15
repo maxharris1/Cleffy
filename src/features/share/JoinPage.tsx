@@ -6,7 +6,7 @@ import type { AgeGate } from '@/features/auth/ageCheck';
 import { AgeScreen } from '@/features/auth/AgeScreen';
 import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/features/auth/session';
 import { TurnstileField } from '@/features/auth/TurnstileField';
-import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import { peekShareLink, redeemShareLink } from '@/features/share/shareService';
 import { BrandShell } from '@/ui/BrandShell';
@@ -61,9 +61,14 @@ export const JoinPage = () => {
      * the only page in the app that creates an auth user for a visitor with no
      * account, which makes it the cheapest user-creation endpoint we have.
      */
-    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
-    const [captchaRound, setCaptchaRound] = useState(0);
-    const captchaRequired = isTurnstileEnabled();
+    const captcha = useTurnstileToken();
+    /**
+     * Waiting for the background token. Kept apart from `submitting`, which
+     * swaps the form for a spinner and would unmount the widget mid-check.
+     */
+    const [verifying, setVerifying] = useState(false);
+    /** Shown under the button, not as `error`, which would hide the challenge it points at. */
+    const [captchaProblem, setCaptchaProblem] = useState<string | null>(null);
     /** True once a deleted guest's session is still in memory: leave by a full page load. */
     const [guestDiscarded, setGuestDiscarded] = useState(false);
     const redeemedRef = useRef(false);
@@ -122,13 +127,18 @@ export const JoinPage = () => {
             setError('Enter your name so collaborators know who you are.');
             return;
         }
-        if (!token || submitting || !ageGate) {
+        if (!token || submitting || verifying || !ageGate) {
             return;
         }
-        if (captchaRequired && !captchaToken) {
-            setError('Finish the “I’m human” check, then join.');
+        setCaptchaProblem(null);
+        setVerifying(true);
+        const wait = await captcha.waitForToken();
+        setVerifying(false);
+        if (!wait.ok) {
+            setCaptchaProblem(wait.message);
             return;
         }
+        const captchaToken = wait.token;
         setError(null);
         setSubmitting(true);
         // Again, right before the account is made: the link may have been
@@ -145,11 +155,10 @@ export const JoinPage = () => {
         } catch (err) {
             setSubmitting(false);
             setError(err instanceof Error ? err.message : 'Could not join.');
-            if (captchaRequired) {
+            if (captcha.required) {
                 // The token is spent whatever GoTrue made of the rest of the
                 // request: a retry needs a new challenge, not the old proof.
-                setCaptchaToken(null);
-                setCaptchaRound((round) => round + 1);
+                captcha.renew();
             }
         }
     };
@@ -207,10 +216,16 @@ export const JoinPage = () => {
                         }}
                         placeholder="e.g. Sharon"
                     />
-                    <TurnstileField key={captchaRound} action="share-link-join" onToken={setCaptchaToken} />
-                    <Button onClick={() => void joinAsGuest()} className="mt-4 w-full">
-                        Join
+                    <TurnstileField
+                        key={captcha.round}
+                        action="share-link-join"
+                        onToken={captcha.onToken}
+                        onNeedsUser={captcha.onNeedsUser}
+                    />
+                    <Button onClick={() => void joinAsGuest()} disabled={verifying} className="mt-4 w-full">
+                        {verifying ? 'Verifying…' : 'Join'}
                     </Button>
+                    {captchaProblem ? <ErrorText className="mt-2.5">{captchaProblem}</ErrorText> : null}
                     <p className="mt-3 text-xs text-stone-600">
                         No account needed — you can add an email later to keep your work across devices.
                     </p>

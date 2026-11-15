@@ -99,7 +99,7 @@ describe('legal content', () => {
 
     it('names every processor the code actually sends data to', () => {
         const text = legalText(PRIVACY_POLICY);
-        for (const processor of ['Supabase', 'Vercel', 'Stripe', 'Resend', 'Sentry']) {
+        for (const processor of ['Supabase', 'Vercel', 'Stripe', 'Resend', 'Sentry', 'Cloudflare']) {
             expect(text).toContain(processor);
         }
     });
@@ -313,6 +313,20 @@ describe('LegalPage', () => {
         const mailto = screen.getAllByRole('link', { name: LEGAL_ENTITY.emails.privacy });
         expect(mailto[0]).toHaveAttribute('href', `mailto:${LEGAL_ENTITY.emails.privacy}`);
         expect(screen.getAllByText(/Placeholder — awaiting legal review:/).length).toBeGreaterThan(0);
+    });
+
+    it('names Cloudflare Turnstile and links its privacy addendum', () => {
+        render(
+            <MemoryRouter>
+                <PrivacyPage />
+            </MemoryRouter>,
+        );
+        const addendum = screen.getByRole('link', { name: 'https://www.cloudflare.com/turnstile-privacy-policy/' });
+        expect(addendum).toHaveAttribute('href', 'https://www.cloudflare.com/turnstile-privacy-policy/');
+        // The full stop after the URL stays text, not part of the link.
+        expect(addendum.closest('li')).toHaveTextContent(
+            /Cloudflare, Inc\. \(Turnstile\).*turnstile-privacy-policy\/\.$/,
+        );
     });
 
     it.each([

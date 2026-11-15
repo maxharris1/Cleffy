@@ -18,7 +18,8 @@
  * password reset and anonymous join all begin refusing at once.
  *
  * Dev and CI use Cloudflare's published test keys (always-passes
- * `1x00000000000000000000AA`, always-fails `2x00000000000000000000AB`), because
+ * `1x00000000000000000000AA`, always-fails `2x00000000000000000000AB`,
+ * always-challenges `3x00000000000000000000FF`), because
  * a real site key is bound to real hostnames and would fail every challenge on
  * localhost or a preview URL. `.env.example` carries them.
  */
@@ -38,9 +39,12 @@ export interface TurnstileRenderOptions {
     callback: (token: string) => void;
     'error-callback'?: () => void;
     'expired-callback'?: () => void;
+    'before-interactive-callback'?: () => void;
     theme?: 'light' | 'dark' | 'auto';
     size?: 'normal' | 'flexible' | 'compact';
     action?: string;
+    appearance?: 'always' | 'execute' | 'interaction-only';
+    'refresh-expired'?: 'auto' | 'manual' | 'never';
 }
 
 /** The slice of `window.turnstile` we use. */

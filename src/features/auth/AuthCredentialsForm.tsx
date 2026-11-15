@@ -2,7 +2,7 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 
 import { mapAuthError } from '@/features/auth/authErrors';
 import { TurnstileField } from '@/features/auth/TurnstileField';
-import { isTurnstileEnabled } from '@/features/auth/turnstile';
+import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import {
     PASSWORD_HINT,
     passwordProblem,
@@ -77,9 +77,8 @@ export const AuthCredentialsForm = ({
     const [confirmValue, setConfirmValue] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
     /**
-     * Bumped after every failed submit, and used as the widget's React key.
+     * The widget is remounted (`captcha.renew`) after every failed submit.
      *
      * A Turnstile token is spent the moment the server redeems it, and GoTrue
      * redeems it before it decides whether the password was right — so after a
@@ -87,8 +86,8 @@ export const AuthCredentialsForm = ({
      * would fail the captcha rather than the credential. Remounting the widget
      * is how the user gets a fresh challenge without being told to reload.
      */
-    const [captchaRound, setCaptchaRound] = useState(0);
-    const captchaRequired = Boolean(captchaAction) && isTurnstileEnabled();
+    const captcha = useTurnstileToken();
+    const captchaRequired = Boolean(captchaAction) && captcha.required;
 
     // A password is being CHOSEN (sign-up, recovery, welcome) rather than typed
     // to sign in. Only then does the policy apply: an account made under the
@@ -114,11 +113,6 @@ export const AuthCredentialsForm = ({
         if (confirm && passwordValue !== confirmValue) {
             return 'Passwords do not match.';
         }
-        // Last, so a form with a typo in it is not first told off about the
-        // robot check. Only ever reached on a build that renders the widget.
-        if (captchaRequired && !captchaToken) {
-            return 'Finish the “I’m human” check, then try again.';
-        }
         return null;
     };
 
@@ -131,6 +125,18 @@ export const AuthCredentialsForm = ({
         }
         setError(null);
         setBusy(true);
+        // After validation, so a form with a typo in it is not first told off
+        // about the robot check.
+        let captchaToken: string | null = null;
+        if (captchaRequired) {
+            const wait = await captcha.waitForToken();
+            if (!wait.ok) {
+                setError(wait.message);
+                setBusy(false);
+                return;
+            }
+            captchaToken = wait.token;
+        }
         try {
             await onSubmit({ email: emailValue.trim(), password: passwordValue, captchaToken });
         } catch (err) {
@@ -138,8 +144,7 @@ export const AuthCredentialsForm = ({
             setBusy(false);
             if (captchaRequired) {
                 // The token is spent whether or not the request succeeded.
-                setCaptchaToken(null);
-                setCaptchaRound((round) => round + 1);
+                captcha.renew();
             }
         }
     };
@@ -183,7 +188,12 @@ export const AuthCredentialsForm = ({
                     />
                 ) : null}
                 {captchaAction ? (
-                    <TurnstileField key={captchaRound} action={captchaAction} onToken={setCaptchaToken} />
+                    <TurnstileField
+                        key={captcha.round}
+                        action={captchaAction}
+                        onToken={captcha.onToken}
+                        onNeedsUser={captcha.onNeedsUser}
+                    />
                 ) : null}
                 <Button type="submit" disabled={busy} className="mt-4 w-full">
                     <SwapLabel labels={{ idle: submitLabel, busy: busyLabel }} active={busy ? 'busy' : 'idle'} />
