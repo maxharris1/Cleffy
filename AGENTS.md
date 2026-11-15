@@ -1,6 +1,7 @@
 # Cleffy: agent notes
 
-Coding rules, commands and how to run the app are in `CLAUDE.md`. Factory settings are in `factory.md`. This file holds the pstack router.
+Coding rules, commands and how to run the app are in `CLAUDE.md`. Factory settings and the PR, review and ship rules are in `factory.md`. This file holds the pstack router.
+SQL proofs run in CI on a local Supabase stack only, never on a hosted project. The note above the `supabase-local` job in `.github/workflows/ci.yml` says what they cover.
 
 ### pstack (vendored, MIT — see .claude/vendor/pstack/)
 
@@ -16,5 +17,5 @@ pstack skills are vendored in `.claude/skills/` (shared by Cursor and Claude Cod
 | Competing candidates / parallel work       | `arena`, `swarm` (Cursor or Claude Code only)                                                                                           |
 | Design principles                          | `principle-*`                                                                                                                           |
 
-Harness adapters: Claude Code reads `.claude/docs/harness/claude-code.md`; Codex reads `.claude/docs/harness/codex.md`. Rules in this file, including `factory.md`, win over pstack.
+Harness adapters: Claude Code reads `.claude/docs/harness/claude-code.md`; Codex reads `.claude/docs/harness/codex.md`. Rules in this file and the files it points to win over pstack.
 Update: rerun `scripts/vendor-pstack.sh . <cursor/plugins SHA>`; never hand-edit files that contain `.pstack-vendored`.
