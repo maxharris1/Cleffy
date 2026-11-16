@@ -241,7 +241,7 @@ describe.skipIf(!REQUIRED && (!URL || !ANON_KEY || !SERVICE_KEY))('Storage accou
         // 1 (never the published 0) and lands; its purge then removes 0.
         await expect(publishThumbnail(id, 2, jpeg())).resolves.toBe(true);
         expect(await thumbRev(id)).toBe(2);
-        await expect.poll(() => covers(id), { timeout: 10_000, interval: 100 }).toEqual(['2.jpg']);
+        await expect.poll(() => covers(id), { timeout: 4_000, interval: 100 }).toEqual(['2.jpg']);
 
         // A claimed cover cannot be published: claim 3 (about to write 4), then
         // a late thumb_rev update for 3 is refused.
