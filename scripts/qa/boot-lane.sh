@@ -79,7 +79,7 @@ write_functions_env() {
     for name in $(settings); do
         [ -n "${!name:-}" ] && printf '%s=%s\n' "$name" "${!name}" >>"$env_file"
     done
-    printf 'OMR_QUEUE_MODE=push\nAPP_URL=%s\n' "$APP_URL" >>"$env_file"
+    printf 'APP_URL=%s\n' "$APP_URL" >>"$env_file"
     for name in NODE_EXTRA_CA_CERTS SSL_CERT_FILE; do
         if [ -n "${!name:-}" ] && [ -f "${!name}" ]; then cert="${!name}"; break; fi
     done

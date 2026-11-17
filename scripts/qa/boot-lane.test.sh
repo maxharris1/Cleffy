@@ -73,4 +73,11 @@ await_lines "$tmp/record" 2 || fail "start_vite reused the Vite started against 
 kill -0 "$first_vite" 2>/dev/null && fail "first Vite ($first_vite) still running"
 kill -0 "$first_child" 2>/dev/null && fail "first Vite's child ($first_child) still running"
 kill -0 "$second_vite" 2>/dev/null || fail "second Vite ($second_vite) is not running"
+mkdir -p "$CLEFFY_QA_LANE_DIR/supabase/functions"
+env_file="$CLEFFY_QA_LANE_DIR/supabase/functions/.env"
+ANTHROPIC_API_KEY=fixture OMR_SERVICE_URL=https://omr.example OMR_SERVICE_SECRET=fixture OMR_QUEUE_MODE=push \
+    write_functions_env >/dev/null
+grep -qx 'ANTHROPIC_API_KEY=fixture' "$env_file" || fail "functions env lacks ANTHROPIC_API_KEY"
+grep -qx "APP_URL=$APP_URL" "$env_file" || fail "functions env lacks APP_URL"
+grep -q '^OMR_' "$env_file" && fail "functions env passes score-scanning settings: $(grep '^OMR_' "$env_file" | cut -d= -f1 | tr '\n' ' ')"
 echo "PASS boot-lane.test.sh"

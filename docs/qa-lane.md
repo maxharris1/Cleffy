@@ -31,8 +31,8 @@ answered `404 Function not found` for every function on a Linux lane (see
 - listens on a free port on `127.0.0.1` and writes its address to `functions.url`.
 
 The functions get `SUPABASE_URL`, `SUPABASE_ANON_KEY` and
-`SUPABASE_SERVICE_ROLE_KEY` from `start.json`, plus the settings below,
-`OMR_QUEUE_MODE=push` and `APP_URL`. Vite gets the server's address as
+`SUPABASE_SERVICE_ROLE_KEY` from `start.json`, plus the settings below and
+`APP_URL`. Vite gets the server's address as
 `VITE_SUPABASE_URL`, so the app reaches the API and the functions through one URL.
 The server does not verify JWTs, the same as `functions serve --no-verify-jwt`.
 When `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE` names a file, Deno gets it as
@@ -53,13 +53,19 @@ scripts read this block, so adding a name here needs no script change.
 
 ```qa-lane-settings
 ANTHROPIC_API_KEY
-OMR_SERVICE_URL
-OMR_SERVICE_SECRET
 ```
 
-`OMR_SERVICE_URL` and `OMR_SERVICE_SECRET` point the lane at the deployed dev copy
-of the score-scanning service. Stripe, Resend and Turnstile are left out, so a
-lane never charges a card or sends mail.
+Stripe, Resend and Turnstile are left out, so a lane never charges a card or
+sends mail.
+
+## Score scanning
+
+Scan requests do not complete in a lane. The lane runs no score-scanning service
+and passes no `OMR_*` setting to the edge functions, so `score-analyze` answers
+`502 service_unreachable` and marks the analysis failed. The deployed dev service
+cannot serve a lane: it accepts only PDF URLs from its own Supabase project, and
+it cannot reach a lane's loopback API or write into the lane's database. QA
+score-scan changes on `dev.cleffy.io`.
 
 ## The config copy
 
@@ -113,7 +119,7 @@ around both and does not wait on a fix.
 
 ```bash
 bash scripts/qa/cloud-setup.sh
-export ANTHROPIC_API_KEY=... OMR_SERVICE_URL=... OMR_SERVICE_SECRET=...
+export ANTHROPIC_API_KEY=...
 npm run qa:boot
 npm run qa:doctor
 ```
