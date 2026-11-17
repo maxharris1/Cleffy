@@ -9,6 +9,9 @@ LANE_USER="${CLEFFY_QA_USER:-cleffy-qa}"
 APP_URL="http://127.0.0.1:5173"
 SETTINGS_DOC="${CLEFFY_QA_SETTINGS_DOC:-$REPO_ROOT/docs/qa-lane.md}"
 
+LANG="$(locale -a 2>/dev/null | awk 'tolower($0) ~ /^(c|en_us)\.utf-?8$/ && !found { found = $0 } END { print found ? found : "C.UTF-8" }')"
+export LANG LC_ALL="$LANG"
+
 settings() { awk '/^```qa-lane-settings$/ {on=1; next} on && /^```/ {exit} on && NF {print $1}' "$SETTINGS_DOC"; }
 
 run_step() {
@@ -81,10 +84,29 @@ write_functions_env() {
     echo "wrote $(wc -l <"$env_file") names to $env_file"
 }
 
+detach() {
+    if command -v setsid >/dev/null; then exec setsid nohup "$@"; else exec nohup "$@"; fi
+}
+
+start_functions() {
+    [ -s "$LANE_DIR/functions.pid" ] && kill "$(cat "$LANE_DIR/functions.pid")" 2>/dev/null || true
+    rm -f "$LANE_DIR/functions.url"
+    (SUPABASE_URL="$(start_json API_URL)" SUPABASE_ANON_KEY="$(start_json ANON_KEY)" \
+        SUPABASE_SERVICE_ROLE_KEY="$(start_json SERVICE_ROLE_KEY)" \
+        detach deno run -A --env-file="$LANE_DIR/supabase/functions/.env" \
+        --config "$LANE_DIR/supabase/functions/deno.json" "$REPO_ROOT/scripts/qa/functions-server.ts" \
+        "$LANE_DIR/supabase/functions" "$(start_json API_URL)" "$LANE_DIR/functions.url" \
+        >"$LANE_DIR/logs/functions-server.log" 2>&1 </dev/null &
+        echo $! >"$LANE_DIR/functions.pid")
+    for _ in $(seq 1 30); do [ -s "$LANE_DIR/functions.url" ] && cat "$LANE_DIR/functions.url" && return 0; sleep 1; done
+    cat "$LANE_DIR/logs/functions-server.log"
+    return 1
+}
+
 start_vite() {
     [ -s "$LANE_DIR/vite.pid" ] && kill -0 "$(cat "$LANE_DIR/vite.pid")" 2>/dev/null && return 0
-    (cd "$REPO_ROOT" && VITE_SUPABASE_URL="$(start_json API_URL)" VITE_SUPABASE_ANON_KEY="$(start_json ANON_KEY)" \
-        setsid nohup npx vite --host 127.0.0.1 --port 5173 --strictPort >"$LANE_DIR/logs/vite-server.log" 2>&1 </dev/null &
+    (cd "$REPO_ROOT" && VITE_SUPABASE_URL="$(cat "$LANE_DIR/functions.url")" VITE_SUPABASE_ANON_KEY="$(start_json ANON_KEY)" \
+        detach npx vite --host 127.0.0.1 --port 5173 --strictPort >"$LANE_DIR/logs/vite-server.log" 2>&1 </dev/null &
         echo $! >"$LANE_DIR/vite.pid")
 }
 
@@ -102,7 +124,8 @@ fi
 run_step config write_config
 run_step supabase start_supabase
 run_step env write_functions_env
-run_step functions wait_for "$(start_json FUNCTIONS_URL)/imslp-search" OPTIONS '^(2..|3..|4[0-35-9].|5..)$'
+run_step functions-start start_functions
+run_step functions wait_for "$(cat "$LANE_DIR/functions.url")/functions/v1/imslp-search" OPTIONS '^(2..|3..|4[0-35-9].|5..)$'
 run_step vite-start start_vite
 run_step vite wait_for "$APP_URL/" GET '^200$'
 echo "READY $APP_URL $(start_json API_URL)"

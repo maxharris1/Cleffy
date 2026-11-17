@@ -22,7 +22,7 @@ if [ -s "$LANE_DIR/start.json" ]; then
     api_url="$(start_json API_URL)"
     code="$(http_code -H "apikey: $(start_json ANON_KEY)" "$api_url/rest/v1/")"
     [ "$code" = 200 ] && report api ok || report api "GET $api_url/rest/v1/ returned $code"
-    functions_url="$(start_json FUNCTIONS_URL)"
+    functions_url="$(cat "$LANE_DIR/functions.url" 2>/dev/null)/functions/v1"
     code="$(http_code -X OPTIONS "$functions_url/imslp-search")"
     case "$code" in
         000 | 404) report function "OPTIONS $functions_url/imslp-search returned $code" ;;

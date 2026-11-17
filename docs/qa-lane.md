@@ -6,16 +6,37 @@ process: no Docker. Supabase runs on the CLI's native runtime.
 
 ## Scripts
 
-| Script                      | npm          | What it does                                                                                                 |
-| --------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------ |
-| `scripts/qa/cloud-setup.sh` |              | Runs once when the lane image is built: `npm ci`, Playwright's Chromium, Supabase CLI 3.2.0. Starts nothing. |
-| `scripts/qa/boot-lane.sh`   | `qa:boot`    | Boots Supabase, the edge functions and Vite. Prints `READY <app url> <api url>`.                             |
-| `scripts/qa/doctor.sh`      | `qa:doctor`  | One `OK` or `FAIL` line per check. Exits 0 only if every check passes.                                       |
-| `scripts/qa/recover.sh`     | `qa:recover` | Stops what `boot-lane.sh` started and boots again.                                                           |
+| Script                      | npm          | What it does                                                                                                              |
+| --------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `scripts/qa/cloud-setup.sh` |              | Runs once when the lane image is built: `npm ci`, Playwright's Chromium, Supabase CLI 3.2.0, Deno 2.7.14. Starts nothing. |
+| `scripts/qa/boot-lane.sh`   | `qa:boot`    | Boots Supabase, the edge functions and Vite. Prints `READY <app url> <api url>`.                                          |
+| `scripts/qa/doctor.sh`      | `qa:doctor`  | One `OK` or `FAIL` line per check. Exits 0 only if every check passes.                                                    |
+| `scripts/qa/recover.sh`     | `qa:recover` | Stops what `boot-lane.sh` started and boots again.                                                                        |
 
 The lane's state lives outside the worktree in `${CLEFFY_QA_LANE_DIR:-/tmp/cleffy-qa-lane}`:
-the Supabase config copy, `start.json` (the start output), `vite.pid` and one log
-per step under `logs/`.
+the Supabase config copy, `start.json` (the start output), `functions.url`,
+`functions.pid`, `vite.pid` and one log per step under `logs/`.
+
+## Edge functions
+
+The lane does not use the CLI's functions service. On CLI 3.2.0's native stack it
+answered `404 Function not found` for every function on a Linux lane (see
+[Upstream notes](#upstream-notes)). Instead `boot-lane.sh` starts
+`scripts/qa/functions-server.ts` under Deno. It:
+
+- serves `supabase/functions/<name>/index.ts` at `/functions/v1/<name>`, loading
+  each function on its first request and capturing the handler it passes to
+  `Deno.serve`;
+- proxies every other path, websockets included, to the stack's `API_URL`;
+- listens on a free port on `127.0.0.1` and writes its address to `functions.url`.
+
+The functions get `SUPABASE_URL`, `SUPABASE_ANON_KEY` and
+`SUPABASE_SERVICE_ROLE_KEY` from `start.json`, plus the settings below,
+`OMR_QUEUE_MODE=push` and `APP_URL`. Vite gets the server's address as
+`VITE_SUPABASE_URL`, so the app reaches the API and the functions through one URL.
+The server does not verify JWTs, the same as `functions serve --no-verify-jwt`.
+When `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE` names a file, Deno gets it as
+`DENO_CERT`.
 
 ## Outside-service settings
 
@@ -47,11 +68,39 @@ lane never charges a card or sends mail.
 The native start writes `supabase/supabase.lock` into its workdir, which is the
 other reason it runs from the copy.
 
+Postgres's `initdb` refuses a locale the machine lacks, such as `C.UTF-8` on
+macOS. Both scripts set `LANG` and `LC_ALL` to an installed UTF-8 locale before
+any `supabase` command. This matters for every command, not only `start`: the
+CLI's stack host is a long-lived process that keeps the environment of the
+command that first started it.
+
+The stack keeps its database in `~/.supabase/stacks/<id>`. A second boot on the
+same machine reuses it and applies no migrations; a fresh lane machine applies
+all of them.
+
 ## Running as root
 
 The native runtime refuses root. When `boot-lane.sh` starts as root it creates a
 `cleffy-qa` user, gives it the worktree and the lane dir, and re-runs itself as
 that user with only `PATH`, `HOME`, the settings above and the proxy variables.
+
+## Upstream notes
+
+Two problems in Supabase CLI 3.2.0's experimental native stack. The lane works
+around both and does not wait on a fix.
+
+- **Function routing 404.** With `supabase start --runtime native` and
+  `supabase functions serve`, every `/functions/v1/<name>` request returned
+  `404 Function not found`, including a one-line `Deno.serve` function, on a
+  Linux machine. The 404 comes from `resolveFunctionConfig` in the CLI's bundled
+  main service. On macOS the same route answered, so the lane's own server
+  avoids the difference.
+- **Second-start database timeout.** On the same Linux machine, after one
+  successful start and `supabase stop`, every later start in a fresh workdir
+  failed after about 2m50s with `Database readiness timed out` and wrote no
+  database log. On macOS stop-then-start worked. If a lane hits it,
+  `recover.sh` will fail the same way; deleting `~/.supabase/stacks/<id>` and
+  booting again is the next thing to try (untested on Linux).
 
 ## Running a lane by hand
 
