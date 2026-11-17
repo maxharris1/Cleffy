@@ -22,11 +22,15 @@ if [ -s "$LANE_DIR/start.json" ]; then
     code="$(http_code -H "apikey: $(start_json ANON_KEY)" "$api_url/rest/v1/")"
     [ "$code" = 200 ] && report api ok || report api "GET $api_url/rest/v1/ returned $code"
     functions_url="$(cat "$LANE_DIR/functions.url" 2>/dev/null)/functions/v1"
-    code="$(http_code -X OPTIONS "$functions_url/imslp-search")"
-    case "$code" in
-        000 | 404) report function "OPTIONS $functions_url/imslp-search returned $code" ;;
-        *) report function ok ;;
-    esac
+    out="$(curl -s -m 10 -X OPTIONS -w '\n%{http_code}' "$functions_url/imslp-search" || true)"
+    code="${out##*$'\n'}"
+    body="${out%$'\n'*}"
+    body="${body//[$'\r\n']/ }"
+    if [[ "$code" == 2[0-9][0-9] ]]; then
+        report function ok
+    else
+        report function "OPTIONS $functions_url/imslp-search returned $code${body:+ ${body:0:300}}"
+    fi
 else
     report api "no $LANE_DIR/start.json"
     report function "no $LANE_DIR/start.json"

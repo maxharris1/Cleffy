@@ -24,13 +24,18 @@ run_step() {
 }
 
 wait_for() {
-    local url="$1" method="$2" accept="$3" code
+    local url="$1" method="$2" out code body
     for _ in $(seq 1 90); do
-        code="$(curl -s -o /dev/null -m 5 -X "$method" -w '%{http_code}' "$url" || true)"
-        if [[ "$code" =~ $accept ]]; then echo "$url answered $code"; return 0; fi
+        out="$(curl -s -m 5 -X "$method" -w '\n%{http_code}' "$url" || true)"
+        code="${out##*$'\n'}"
+        [ "$code" != 000 ] && break
         sleep 1
     done
-    echo "$url did not answer (last code: ${code:-none})"
+    if [ "$code" = 000 ]; then echo "$url did not answer"; return 1; fi
+    if [[ "$code" == 2[0-9][0-9] ]]; then echo "$url answered $code"; return 0; fi
+    body="${out%$'\n'*}"
+    echo "$url answered $code"
+    printf '%s\n' "${body:0:2000}"
     return 1
 }
 
@@ -86,8 +91,20 @@ detach() {
     if command -v setsid >/dev/null; then exec setsid nohup "$@"; else exec nohup "$@"; fi
 }
 
+stop_pidfile() {
+    local file="$1" pid
+    [ -s "$file" ] || return 0
+    pid="$(cat "$file")"
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        kill -0 -- "-$pid" 2>/dev/null || kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2
+    done
+    rm -f "$file"
+}
+
 start_functions() {
-    [ -s "$LANE_DIR/functions.pid" ] && kill "$(cat "$LANE_DIR/functions.pid")" 2>/dev/null || true
+    stop_pidfile "$LANE_DIR/functions.pid"
     rm -f "$LANE_DIR/functions.url"
     (SUPABASE_URL="$(start_json API_URL)" SUPABASE_ANON_KEY="$(start_json ANON_KEY)" \
         SUPABASE_SERVICE_ROLE_KEY="$(start_json SERVICE_ROLE_KEY)" \
@@ -102,28 +119,34 @@ start_functions() {
 }
 
 start_vite() {
-    [ -s "$LANE_DIR/vite.pid" ] && kill -0 "$(cat "$LANE_DIR/vite.pid")" 2>/dev/null && return 0
+    stop_pidfile "$LANE_DIR/vite.pid"
     (cd "$REPO_ROOT" && VITE_SUPABASE_URL="$(cat "$LANE_DIR/functions.url")" VITE_SUPABASE_ANON_KEY="$(start_json ANON_KEY)" \
         detach npx vite --host 127.0.0.1 --port 5173 --strictPort >"$LANE_DIR/logs/vite-server.log" 2>&1 </dev/null &
         echo $! >"$LANE_DIR/vite.pid")
 }
 
-if [ "$(id -u)" = 0 ]; then
-    reexec_as_lane_user
-fi
+main() {
+    if [ "$(id -u)" = 0 ]; then
+        reexec_as_lane_user
+    fi
 
-mkdir -p "$LANE_DIR/logs"
+    mkdir -p "$LANE_DIR/logs"
 
-if [ -s "$LANE_DIR/start.json" ] && bash "$REPO_ROOT/scripts/qa/doctor.sh" >/dev/null 2>&1; then
+    if [ -s "$LANE_DIR/start.json" ] && bash "$REPO_ROOT/scripts/qa/doctor.sh" >/dev/null 2>&1; then
+        echo "READY $APP_URL $(start_json API_URL)"
+        exit 0
+    fi
+
+    run_step config write_config
+    run_step supabase start_supabase
+    run_step env write_functions_env
+    run_step functions-start start_functions
+    run_step functions wait_for "$(cat "$LANE_DIR/functions.url")/functions/v1/imslp-search" OPTIONS
+    run_step vite-start start_vite
+    run_step vite wait_for "$APP_URL/" GET
     echo "READY $APP_URL $(start_json API_URL)"
-    exit 0
-fi
+}
 
-run_step config write_config
-run_step supabase start_supabase
-run_step env write_functions_env
-run_step functions-start start_functions
-run_step functions wait_for "$(cat "$LANE_DIR/functions.url")/functions/v1/imslp-search" OPTIONS '^(2..|3..|4[0-35-9].|5..)$'
-run_step vite-start start_vite
-run_step vite wait_for "$APP_URL/" GET '^200$'
-echo "READY $APP_URL $(start_json API_URL)"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main
+fi

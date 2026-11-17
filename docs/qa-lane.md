@@ -38,6 +38,13 @@ The server does not verify JWTs, the same as `functions serve --no-verify-jwt`.
 When `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE` names a file, Deno gets it as
 `DENO_CERT`.
 
+`boot-lane.sh` and `doctor.sh` pass the functions check only when
+`OPTIONS /functions/v1/imslp-search` answers 2xx; any other answer, such as
+`500 BOOT_ERROR` from a function that fails to import, fails with the status and
+response body. When the doctor check fails, a boot stops the previous functions
+server and Vite before starting new ones, so Vite always gets the current
+`functions.url`.
+
 ## Outside-service settings
 
 A lane reads these names from the machine's environment and passes them to the
