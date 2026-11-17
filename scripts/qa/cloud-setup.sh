@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Run once when a QA lane image is built. Installs only; starts nothing.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

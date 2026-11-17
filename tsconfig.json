@@ -22,5 +22,6 @@
         "allowImportingTsExtensions": false,
         "verbatimModuleSyntax": true
     },
-    "include": ["src", "tests", "vite.config.ts", "eslint.config.js", "scripts"]
+    "include": ["src", "tests", "vite.config.ts", "eslint.config.js", "scripts"],
+    "exclude": ["scripts/qa/functions-server.ts"]
 }

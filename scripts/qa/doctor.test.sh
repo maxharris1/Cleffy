@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# ac-3: with one outside-service setting unset, doctor.sh exits non-zero and names it.
 set -euo pipefail
 
 DOCTOR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/doctor.sh"

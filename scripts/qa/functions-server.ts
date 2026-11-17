@@ -1,7 +1,3 @@
-// Serves supabase/functions/<name>/index.ts at /functions/v1/<name> and proxies every
-// other path to the native stack's API_URL, so the app needs one Supabase URL.
-// See docs/qa-lane.md for why the lane does not use `supabase functions serve`.
-
 const [functionsDir, apiUrl, urlFile] = Deno.args;
 if (!functionsDir || !apiUrl || !urlFile) {
     console.error('usage: functions-server.ts <functions dir> <api url> <url file>');
@@ -81,9 +77,8 @@ const server = listen(
     },
     async (req) => {
         const url = new URL(req.url);
-        const match = url.pathname.match(/^\/functions\/v1\/([^/]+)/);
-        if (!match) return proxy(req, url);
-        const name = match[1];
+        const name = url.pathname.match(/^\/functions\/v1\/([^/]+)/)?.[1];
+        if (!name) return proxy(req, url);
         if (!(await functionExists(name))) {
             return Response.json({ code: 'NOT_FOUND', message: 'Function not found' }, { status: 404 });
         }

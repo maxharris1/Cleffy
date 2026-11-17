@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Stop what boot-lane.sh started, then boot again. See docs/qa-lane.md.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Boot Cleffy without Docker for a QA lane. Prints `READY <app url> <api url>`.
-# See docs/qa-lane.md.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
