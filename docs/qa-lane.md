@@ -17,6 +17,31 @@ The lane's state lives outside the worktree in `${CLEFFY_QA_LANE_DIR:-/tmp/cleff
 the Supabase config copy, `start.json` (the start output), `functions.url`,
 `functions.pid`, `vite.pid` and one log per step under `logs/`.
 
+## Seeded states
+
+`supabase/seed.sql` creates these accounts on every local start or reset. A
+scenario names its starting state by the account's email and signs in through
+the app's login form with the shared local-only password `cleffy-local-test`.
+The `cleffy.test` domain is reserved for testing, so no address is a real
+person's. The rows exist only in the local database: the subscriptions are
+seeded rows in Stripe's `test` mode with made-up ids, and nothing calls Stripe.
+
+| Account                     | State                                                                                                     | Use it for                                    |
+| --------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `qa-new@cleffy.test`        | Free plan. No scores, no subscription.                                                                    | First-run flows: empty library, first upload. |
+| `qa-one-score@cleffy.test`  | Free plan. One score, "Satie — Gymnopédie No. 1 (seed)", 3 pages, active (not archived). No subscription. | Library and score flows on a known score.     |
+| `qa-subscribed@cleffy.test` | Personal plan from an active subscription that runs to 2099. No scores.                                   | Paid-plan limits and the billing page.        |
+| `qa-lapsed@cleffy.test`     | Free plan. Its Personal subscription was canceled and ended on 2026-02-01. No scores.                     | Lapsed-plan prompts and resubscribe flows.    |
+
+A seeded score has a database row but no PDF in Storage, because SQL cannot
+write Storage objects. A scenario that needs the PDF itself uploads one.
+
+Seeding is idempotent: a second run inserts and rewrites no row.
+`tests/sql/qa_seed_states.sql` proves each state and the reseed,
+`tests/qa/qaSeedStatesLocal.test.ts` signs in as each account through the API,
+and `tests/qa/qaSeedStatesLogin.test.ts` signs in as each through the login form
+in a browser and checks the library and the plan it lands on.
+
 ## Edge functions
 
 The lane does not use the CLI's functions service. On CLI 3.2.0's native stack it

@@ -33,8 +33,9 @@ jobs:
     #
     # LOCAL stack only: `supabase start` on this runner, the migrations it
     # applies, and the demo keys it prints. No repository secrets, no hosted
-    # project, no link. Every SQL proof runs here (decision 37 / SF-16). No
-    # browser is installed or run.
+    # project, no link. Every SQL proof runs here (decision 37 / SF-16). One
+    # browser test runs last: the seeded QA accounts signing in through the
+    # login form, against Vite on this runner.
     supabase-local:
         runs-on: ubuntu-latest
         timeout-minutes: 25
@@ -140,6 +141,13 @@ jobs:
                   CLEFFY_LOCAL_ANON_KEY="$ANON_KEY" \
                   CLEFFY_LOCAL_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
                       npx vitest run tests/analytics/webEventsLocal.test.ts
+            - name: QA seeded states sign in (qaSeedStatesLocal.test.ts)
+              run: |
+                  eval "$(supabase status -o env | grep -E '^(API_URL|ANON_KEY)=')"
+                  CLEFFY_REQUIRE_LOCAL_DB=1 \
+                  CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
+                  CLEFFY_LOCAL_ANON_KEY="$ANON_KEY" \
+                      npx vitest run tests/qa/qaSeedStatesLocal.test.ts
             # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
             # sharing proof beside the migrations. A new proof runs by being
             # added -- this file changes only to skip one, which needs a reason.
@@ -170,6 +178,16 @@ jobs:
                       echo "::error::SQL proofs failed:${failed}"
                       exit 1
                   fi
+            - name: Install Chromium for the login-form test
+              run: npx playwright install --with-deps chromium
+            - name: QA seeded states sign in through the login form (qaSeedStatesLogin.test.ts)
+              run: |
+                  eval "$(supabase status -o env | grep -E '^(API_URL|ANON_KEY)=')"
+                  VITE_SUPABASE_URL="$API_URL" VITE_SUPABASE_ANON_KEY="$ANON_KEY" \
+                      npx vite --host 127.0.0.1 --port 5173 --strictPort >/tmp/vite.log 2>&1 &
+                  for _ in $(seq 60); do curl -sf http://127.0.0.1:5173/ >/dev/null && break; sleep 1; done
+                  CLEFFY_REQUIRE_LOCAL_DB=1 CLEFFY_E2E_BASE=http://127.0.0.1:5173 \
+                      npx vitest run tests/qa/qaSeedStatesLogin.test.ts || { cat /tmp/vite.log; exit 1; }
 
     omr-service:
         runs-on: ubuntu-latest

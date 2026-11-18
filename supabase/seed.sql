@@ -3,11 +3,16 @@
 -- when [db.seed] is enabled in config.toml.
 --
 -- LOCAL DEVELOPMENT ONLY — never run against hosted Supabase.
--- No billing / plans / subscriptions tables (those are not on current `dev`).
+-- Idempotent: a second run inserts and updates nothing.
 --
 -- Test accounts (password for all: cleffy-local-test):
 --   teacher@cleffy.local  — owns the sample library documents
 --   student@cleffy.local  — second account for share / RLS checks
+-- QA accounts (docs/qa-lane.md, "Seeded states"; same password):
+--   qa-new@cleffy.test        — nothing uploaded, free plan
+--   qa-one-score@cleffy.test  — one processed public-domain score, free plan
+--   qa-subscribed@cleffy.test — active Personal subscription
+--   qa-lapsed@cleffy.test     — canceled subscription that has ended, free plan
 
 -- ---------------------------------------------------------------------------
 -- Storage: private scores bucket (also declared in config.toml, keep in sync)
@@ -23,7 +28,9 @@ values (
 on conflict (id) do update set
     public = excluded.public,
     file_size_limit = excluded.file_size_limit,
-    allowed_mime_types = excluded.allowed_mime_types;
+    allowed_mime_types = excluded.allowed_mime_types
+where (storage.buckets.public, storage.buckets.file_size_limit, storage.buckets.allowed_mime_types)
+    is distinct from (excluded.public, excluded.file_size_limit, excluded.allowed_mime_types);
 
 -- ---------------------------------------------------------------------------
 -- Auth users + identities (email/password sign-in)
@@ -92,7 +99,88 @@ with new_users as (
             '{"full_name":"Cleffy Student"}'::jsonb,
             now(),
             now()
+        ),
+        (
+            '00000000-0000-0000-0000-000000000000',
+            'a0000000-0000-4000-8000-000000000011',
+            'authenticated',
+            'authenticated',
+            'qa-new@cleffy.test',
+            extensions.crypt('cleffy-local-test', extensions.gen_salt('bf')),
+            now(),
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '{"provider":"email","providers":["email"]}'::jsonb,
+            '{"full_name":"QA New"}'::jsonb,
+            now(),
+            now()
+        ),
+        (
+            '00000000-0000-0000-0000-000000000000',
+            'a0000000-0000-4000-8000-000000000012',
+            'authenticated',
+            'authenticated',
+            'qa-one-score@cleffy.test',
+            extensions.crypt('cleffy-local-test', extensions.gen_salt('bf')),
+            now(),
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '{"provider":"email","providers":["email"]}'::jsonb,
+            '{"full_name":"QA One Score"}'::jsonb,
+            now(),
+            now()
+        ),
+        (
+            '00000000-0000-0000-0000-000000000000',
+            'a0000000-0000-4000-8000-000000000013',
+            'authenticated',
+            'authenticated',
+            'qa-subscribed@cleffy.test',
+            extensions.crypt('cleffy-local-test', extensions.gen_salt('bf')),
+            now(),
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '{"provider":"email","providers":["email"]}'::jsonb,
+            '{"full_name":"QA Subscribed"}'::jsonb,
+            now(),
+            now()
+        ),
+        (
+            '00000000-0000-0000-0000-000000000000',
+            'a0000000-0000-4000-8000-000000000014',
+            'authenticated',
+            'authenticated',
+            'qa-lapsed@cleffy.test',
+            extensions.crypt('cleffy-local-test', extensions.gen_salt('bf')),
+            now(),
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '{"provider":"email","providers":["email"]}'::jsonb,
+            '{"full_name":"QA Lapsed"}'::jsonb,
+            now(),
+            now()
         )
+    on conflict do nothing
     returning id, email
 )
 insert into auth.identities (
@@ -145,13 +233,75 @@ values
         'b0000000-0000-4000-8000-000000000003/original.pdf',
         1,
         0
-    );
+    )
+on conflict (id) do nothing;
 
 insert into public.document_favorites (document_id, user_id)
 values (
     'b0000000-0000-4000-8000-000000000001',
     'a0000000-0000-4000-8000-000000000001'
-);
+)
+on conflict do nothing;
+
+-- ---------------------------------------------------------------------------
+-- QA states (docs/qa-lane.md, "Seeded states"). Local rows only: the Stripe
+-- ids are made up and mode 'test' marks them sandbox.
+-- ---------------------------------------------------------------------------
+insert into public.documents (id, owner_id, title, storage_path, page_count, content_rev)
+values (
+    'b0000000-0000-4000-8000-000000000011',
+    'a0000000-0000-4000-8000-000000000012',
+    'Satie — Gymnopédie No. 1 (seed)',
+    'b0000000-0000-4000-8000-000000000011/original.pdf',
+    3,
+    0
+)
+on conflict (id) do nothing;
+
+insert into public.billing_customers (user_id, stripe_customer_id)
+values
+    ('a0000000-0000-4000-8000-000000000013', 'cus_qa_subscribed'),
+    ('a0000000-0000-4000-8000-000000000014', 'cus_qa_lapsed')
+on conflict do nothing;
+
+insert into public.subscriptions (
+    stripe_subscription_id,
+    user_id,
+    mode,
+    tier,
+    status,
+    price_id,
+    current_period_end,
+    ended_at,
+    created_at,
+    updated_at
+)
+values
+    (
+        'sub_qa_subscribed',
+        'a0000000-0000-4000-8000-000000000013',
+        'test',
+        'personal',
+        'active',
+        'price_qa_personal_monthly',
+        '2099-01-01T00:00:00Z',
+        null,
+        '2026-01-01T00:00:00Z',
+        '2026-01-01T00:00:00Z'
+    ),
+    (
+        'sub_qa_lapsed',
+        'a0000000-0000-4000-8000-000000000014',
+        'test',
+        'personal',
+        'canceled',
+        'price_qa_personal_monthly',
+        '2026-02-01T00:00:00Z',
+        '2026-02-01T00:00:00Z',
+        '2026-01-01T00:00:00Z',
+        '2026-02-01T00:00:00Z'
+    )
+on conflict do nothing;
 
 -- ---------------------------------------------------------------------------
 -- Vault: the copyright strike pepper (20261022130100_content_strikes_survive_deletion.sql)
