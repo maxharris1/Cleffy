@@ -1,13 +1,14 @@
 // @vitest-environment node
-import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-const SKILL_DIR = '.claude/skills/verify-cleffy';
-const SKILL_HEADINGS = ['Launch', 'Doctor', 'Drive', 'Evidence', 'Cleanup', 'Feature map', 'What cannot be driven'];
+import { featureMapRows, readRepoFile as read, SKILL_DIR } from './featureMapRows';
 
-const read = (path: string): string => readFileSync(resolve(process.cwd(), path), 'utf8');
+const SKILL_HEADINGS = ['Launch', 'Doctor', 'Drive', 'Evidence', 'Cleanup', 'Feature map', 'What cannot be driven'];
 
 const subdirectories = (dir: string): string[] =>
     readdirSync(resolve(process.cwd(), dir), { withFileTypes: true })
@@ -20,20 +21,7 @@ const areasOnDisk = [
     ...subdirectories('supabase/functions').filter((area) => area !== 'supabase/functions/_shared'),
 ].sort();
 
-const rows = read(`${SKILL_DIR}/feature-map.md`)
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('|'))
-    .map((line) =>
-        line
-            .replace(/^\||\|$/g, '')
-            .split('|')
-            .map((cell) => cell.trim()),
-    )
-    .flatMap(([area = '', journey = '', smokeCheck = '']) => {
-        const path = /^`([^`]+)`$/.exec(area)?.[1];
-        return path ? [{ area: path, journey, smokeCheck }] : [];
-    });
+const rows = featureMapRows();
 
 const skillHeadings = [...read(`${SKILL_DIR}/SKILL.md`).matchAll(/^## (.+)$/gm)]
     .map(([, heading = '']) => heading.trim())
@@ -59,4 +47,42 @@ describe('verify-cleffy SKILL.md', () => {
     it('has its sections in order', () => {
         expect(skillHeadings).toEqual(SKILL_HEADINGS);
     });
+});
+
+describe('verify-cleffy scenario copies', () => {
+    const copyCommands = [
+        ...read(`${SKILL_DIR}/SKILL.md`).matchAll(/^cp scripts\/qa\/drive-example\.mjs (\S+)$/gm),
+    ].map(([, destination = '']) => destination);
+
+    it('documents one copy command, into a folder git ignores', () => {
+        expect(copyCommands).toHaveLength(1);
+        const ignored = spawnSync('git', ['check-ignore', '-q', copyCommands[0]!.replace('<scenario>', 'probe')]);
+        expect(ignored.status).toBe(0);
+    });
+
+    it('runs a copy made the documented way with the repo installed packages', () => {
+        const copy = copyCommands[0]!.replace('<scenario>', `feature-map-test-${process.pid}`);
+        const evidence = mkdtempSync(join(tmpdir(), 'verify-cleffy-copy-'));
+        try {
+            const shell = spawnSync('bash', [
+                '-c',
+                `mkdir -p "$(dirname "$1")" && cp scripts/qa/drive-example.mjs "$1"`,
+                '_',
+                copy,
+            ]);
+            expect(shell.status).toBe(0);
+            const run = spawnSync('node', [copy], {
+                encoding: 'utf8',
+                timeout: 60_000,
+                env: { ...process.env, CLEFFY_QA_APP_URL: 'http://127.0.0.1:9', CLEFFY_QA_EVIDENCE_DIR: evidence },
+            });
+            const output = `${run.stdout}${run.stderr}`;
+            expect(output).not.toContain('ERR_MODULE_NOT_FOUND');
+            expect(output).toContain('[drive-example]');
+            expect(readdirSync(evidence)).toContain('result.json');
+        } finally {
+            rmSync(copy, { force: true });
+            rmSync(evidence, { recursive: true, force: true });
+        }
+    }, 90_000);
 });

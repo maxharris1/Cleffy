@@ -63,7 +63,15 @@ Drive headless Chromium with Playwright, from Node, at the app URL `READY` print
 CLEFFY_QA_EVIDENCE_DIR=<evidence folder>/sign-in-new-user node scripts/qa/drive-example.mjs
 ```
 
-It exits 0 and prints the paths it wrote. Copy it to a scratch file outside the repo for a new scenario, and change the steps after sign-in. It reads:
+It exits 0 and prints the paths it wrote. For a new scenario, copy it into `scripts/qa/scratch/`, change the steps after sign-in, and run the copy from the repo root:
+
+```bash
+mkdir -p scripts/qa/scratch
+cp scripts/qa/drive-example.mjs scripts/qa/scratch/<scenario>.mjs
+CLEFFY_QA_EVIDENCE_DIR=<evidence folder>/<scenario> node scripts/qa/scratch/<scenario>.mjs
+```
+
+Git ignores `scripts/qa/scratch/`, so a copy there is never committed. Keep copies inside the repo. Node finds `playwright` by looking for `node_modules` above the script's own file, so a copy in `/tmp` fails with `ERR_MODULE_NOT_FOUND` wherever you run it from. The script reads:
 
 - `CLEFFY_QA_APP_URL`, the app URL. The default is `http://127.0.0.1:5173`.
 - `CLEFFY_QA_EVIDENCE_DIR`, the folder for this scenario's evidence. The default is `/tmp/cleffy-qa-evidence/drive-example`.
@@ -157,5 +165,6 @@ A lane reaches no outside service that moves money, sends mail or signs people i
 - **Real email.** Resend is not configured, so no mail is sent: sign-up confirmation, password reset, guest email confirmation, share invites, billing and moderation notices.
 - **Real payment.** Stripe is not configured: checkout, the customer portal, cancellation through Stripe, and plan changes that Stripe's webhook reports. The seeded plans are rows in the local database, so plan badges and limits can be driven.
 - **Outside sign-in.** Any OAuth or third-party sign-in, and Turnstile's bot check.
-- **Score scanning.** The lane runs no OMR service. A scan request answers `502 service_unreachable` and the app shows the scan as failed. Fingering suggestions and playback that read scanned notes need a human check on `dev.cleffy.io`.
+- **Score scanning.** The lane runs no OMR service, and its build leaves play-along, fingering and smart import off, so the app offers no scan. Scanning, and the fingering suggestions and playback that read scanned notes, need a human check on `dev.cleffy.io`.
+- **Share v2.** The lane leaves Share v2 off (`VITE_FEATURE_SHARE_V2`, `SHARE_V2_ENABLED`). Share links use `/join/<token>`, and invites by email, `/s` links and `/invite` need a human check on a build with Share v2 on.
 - **Admin pages.** No seeded account is an admin, so `/admin/reports` needs a human check.
