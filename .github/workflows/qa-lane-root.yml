@@ -1,0 +1,26 @@
+name: QA lane root boot
+
+on:
+    pull_request:
+        paths:
+            - 'scripts/qa/**'
+            - 'supabase/config.toml'
+            - '.github/workflows/qa-lane-root.yml'
+    workflow_dispatch:
+
+jobs:
+    root-boot:
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+            - run: sudo env "PATH=$PATH" bash scripts/qa/cloud-setup.sh
+            - run: sudo env "PATH=$PATH" bash scripts/qa/prove-root-boot.sh
+            - if: always()
+              run: sudo chown -R "$(id -u)" "$GITHUB_WORKSPACE"
+            - run: bash scripts/qa/boot-lane.test.sh
