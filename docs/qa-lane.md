@@ -97,6 +97,20 @@ all of them.
 The native runtime refuses root. When `boot-lane.sh` starts as root it creates a
 `cleffy-qa` user, gives it the worktree and the lane dir, and re-runs itself as
 that user with only `PATH`, `HOME`, the settings above and the proxy variables.
+The worktree's parent folders stay as they are, so a folder that other users
+cannot enter, such as `/root` or a `0750` home, would block that user. The boot
+adds the others-execute bit to each such folder and prints
+`[boot-lane] let cleffy-qa enter <folder>`. That bit lets a user pass through
+the folder. It does not let a user list it.
+
+`scripts/qa/prove-root-boot.sh` proves the drop. It must run as root. It sets a
+placeholder value for each unset setting, then requires a `READY` line from
+the boot and exit 0 from `doctor.sh`. Then it prints every Postgres, PostgREST,
+Auth, Supabase, Deno and Vite process from `ps`. It fails unless a Postgres
+process is running and every listed process runs as `cleffy-qa`. The
+`QA lane root boot` workflow (`.github/workflows/qa-lane-root.yml`) runs it
+under `sudo` on a fresh GitHub runner for each pull request that changes
+`scripts/qa/` or `supabase/config.toml`.
 
 ## Upstream notes
 

@@ -41,10 +41,23 @@ wait_for() {
 
 start_json() { node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).env[process.argv[2]] ?? "")' "$LANE_DIR/start.json" "$1"; }
 
+blocked_parents() {
+    local dir; dir="$(dirname "$1")"
+    while [ "$dir" != / ] && [ "$dir" != . ]; do
+        [ -n "$(find "$dir" -maxdepth 0 -perm -0001)" ] || printf '%s\n' "$dir"
+        dir="$(dirname "$dir")"
+    done
+}
+
 reexec_as_lane_user() {
     id -u "$LANE_USER" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash "$LANE_USER"
     mkdir -p "$LANE_DIR"
     chown -R "$LANE_USER" "$LANE_DIR" "$REPO_ROOT"
+    local dir
+    while IFS= read -r dir; do
+        chmod o+x "$dir"
+        echo "[boot-lane] let $LANE_USER enter $dir"
+    done < <(blocked_parents "$REPO_ROOT"; blocked_parents "$LANE_DIR")
     local home; home="$(getent passwd "$LANE_USER" | cut -d: -f6)"
     local -a keep=("PATH=$PATH" "HOME=$home" "USER=$LANE_USER" "CLEFFY_QA_LANE_DIR=$LANE_DIR")
     local name

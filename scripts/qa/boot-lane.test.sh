@@ -30,6 +30,14 @@ mkdir -p "$CLEFFY_QA_LANE_DIR/logs"
 # shellcheck source=boot-lane.sh
 source "$HERE/boot-lane.sh"
 
+mkdir -p "$tmp/open/shut/repo"
+chmod 711 "$tmp/open"
+chmod 700 "$tmp/open/shut"
+blocked="$(blocked_parents "$tmp/open/shut/repo")"
+chmod 755 "$tmp/open/shut"
+grep -qx "$tmp/open/shut" <<<"$blocked" || fail "blocked_parents missed $tmp/open/shut (mode 700): $blocked"
+grep -qx "$tmp/open" <<<"$blocked" && fail "blocked_parents listed $tmp/open (mode 711)"
+
 broken="$(serve 500 '{"code":"BOOT_ERROR","message":"Error: fixture import failure"}')"
 SECONDS=0
 status=0
