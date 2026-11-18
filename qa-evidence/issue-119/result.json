@@ -1,0 +1,7 @@
+{
+  "scenario": "sign-in-new-user",
+  "url": "http://127.0.0.1:5173/library",
+  "emptyLibraryText": "No scores yet",
+  "accountMenuLabel": "Account menu (qa-new@cleffy.test)",
+  "pass": true
+}
