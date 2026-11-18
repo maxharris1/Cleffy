@@ -37,8 +37,10 @@ A seeded score has a database row but no PDF in Storage, because SQL cannot
 write Storage objects. A scenario that needs the PDF itself uploads one.
 
 Seeding is idempotent: a second run inserts and rewrites no row.
-`tests/sql/qa_seed_states.sql` proves each state and the reseed, and
-`tests/qa/qaSeedStatesLocal.test.ts` signs in as each account.
+`tests/sql/qa_seed_states.sql` proves each state and the reseed,
+`tests/qa/qaSeedStatesLocal.test.ts` signs in as each account through the API,
+and `tests/qa/qaSeedStatesLogin.test.ts` signs in as each through the login form
+in a browser and checks the library and the plan it lands on.
 
 ## Edge functions
 
