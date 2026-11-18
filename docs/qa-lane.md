@@ -61,7 +61,8 @@ sends mail.
 ## Score scanning
 
 Scan requests do not complete in a lane. The lane runs no score-scanning service
-and passes no `OMR_*` setting to the edge functions, so `score-analyze` answers
+and keeps every `OMR_*` setting out of the edge functions, both the generated
+`.env` and the inherited environment, so `score-analyze` answers
 `502 service_unreachable` and marks the analysis failed. The deployed dev service
 cannot serve a lane: it accepts only PDF URLs from its own Supabase project, and
 it cannot reach a lane's loopback API or write into the lane's database. QA

@@ -80,4 +80,27 @@ ANTHROPIC_API_KEY=fixture OMR_SERVICE_URL=https://omr.example OMR_SERVICE_SECRET
 grep -qx 'ANTHROPIC_API_KEY=fixture' "$env_file" || fail "functions env lacks ANTHROPIC_API_KEY"
 grep -qx "APP_URL=$APP_URL" "$env_file" || fail "functions env lacks APP_URL"
 grep -q '^OMR_' "$env_file" && fail "functions env passes score-scanning settings: $(grep '^OMR_' "$env_file" | cut -d= -f1 | tr '\n' ' ')"
+export OMR_SERVICE_URL=https://omr.example OMR_SERVICE_SECRET=fixture OMR_QUEUE_MODE=push
+
+cat >"$tmp/bin/supabase" <<'EOF'
+#!/usr/bin/env bash
+env | grep '^OMR_' >"$FAKE_SUPABASE_ENV" || true
+echo '{}'
+EOF
+chmod +x "$tmp/bin/supabase"
+export FAKE_SUPABASE_ENV="$tmp/supabase-env"
+start_supabase
+[ -n "${OMR_SERVICE_URL:-}" ] || fail "start_supabase unset OMR_SERVICE_URL in the caller's shell"
+[ -s "$FAKE_SUPABASE_ENV" ] && fail "supabase start inherits score-scanning settings: $(cut -d= -f1 "$FAKE_SUPABASE_ENV" | tr '\n' ' ')"
+
+mkdir -p "$CLEFFY_QA_LANE_DIR/supabase/functions/omr-probe"
+printf '{}\n' >"$CLEFFY_QA_LANE_DIR/supabase/functions/deno.json"
+cat >"$CLEFFY_QA_LANE_DIR/supabase/functions/omr-probe/index.ts" <<'EOF'
+Deno.serve(() => Response.json(['OMR_SERVICE_URL', 'OMR_SERVICE_SECRET', 'OMR_QUEUE_MODE'].filter((name) => Deno.env.get(name) !== undefined)));
+EOF
+printf '{"env":{"API_URL":"http://127.0.0.1:9","ANON_KEY":"fixture-anon-key","SERVICE_ROLE_KEY":"fixture"}}\n' >"$CLEFFY_QA_LANE_DIR/start.json"
+start_functions >/dev/null || fail "start_functions did not start the functions server"
+cat "$CLEFFY_QA_LANE_DIR/functions.pid" >>"$tmp/vite-pids"
+seen="$(curl -s -m 30 "$(cat "$CLEFFY_QA_LANE_DIR/functions.url")/functions/v1/omr-probe")"
+[ "$seen" = "[]" ] || fail "edge functions see score-scanning settings: $seen"
 echo "PASS boot-lane.test.sh"

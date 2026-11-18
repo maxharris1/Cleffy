@@ -68,9 +68,17 @@ write_config() {
     diff "$REPO_ROOT/supabase/config.toml" "$LANE_DIR/supabase/config.toml" || true
 }
 
-start_supabase() {
-    SUPABASE_EXPERIMENTAL_STACK=1 supabase start --runtime native --output-format json --workdir "$LANE_DIR" >"$LANE_DIR/start.json"
+drop_omr_settings() {
+    local name
+    for name in $(compgen -e); do
+        case "$name" in OMR_*) unset "$name" ;; esac
+    done
 }
+
+start_supabase() (
+    drop_omr_settings
+    SUPABASE_EXPERIMENTAL_STACK=1 supabase start --runtime native --output-format json --workdir "$LANE_DIR" >"$LANE_DIR/start.json"
+)
 
 write_functions_env() {
     local env_file="$LANE_DIR/supabase/functions/.env" name cert=""
@@ -106,7 +114,8 @@ stop_pidfile() {
 start_functions() {
     stop_pidfile "$LANE_DIR/functions.pid"
     rm -f "$LANE_DIR/functions.url"
-    (SUPABASE_URL="$(start_json API_URL)" SUPABASE_ANON_KEY="$(start_json ANON_KEY)" \
+    (drop_omr_settings
+        SUPABASE_URL="$(start_json API_URL)" SUPABASE_ANON_KEY="$(start_json ANON_KEY)" \
         SUPABASE_SERVICE_ROLE_KEY="$(start_json SERVICE_ROLE_KEY)" \
         detach deno run -A --env-file="$LANE_DIR/supabase/functions/.env" \
         --config "$LANE_DIR/supabase/functions/deno.json" "$REPO_ROOT/scripts/qa/functions-server.ts" \
