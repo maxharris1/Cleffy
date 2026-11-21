@@ -2,12 +2,18 @@ name: CI
 
 on:
     push:
-        branches: ['**']
+        branches: [dev, main]
     pull_request:
+    workflow_dispatch:
+
+concurrency:
+    group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
     checks:
         runs-on: ubuntu-latest
+        timeout-minutes: 15
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
@@ -38,7 +44,7 @@ jobs:
     # login form, against Vite on this runner.
     supabase-local:
         runs-on: ubuntu-latest
-        timeout-minutes: 25
+        timeout-minutes: 10
         steps:
             - uses: actions/checkout@v4
             # Before anything else opens connections, so no outbound socket
@@ -191,6 +197,7 @@ jobs:
 
     omr-service:
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         defaults:
             run:
                 working-directory: services/omr-service
@@ -225,6 +232,7 @@ jobs:
     # that.
     supabase-drift:
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         # Fork PRs get no secrets, so the check could only ever fail there for a
         # reason that is not about the code.
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -258,6 +266,7 @@ jobs:
     # (P3 fix round 3).
     edge-functions-deno:
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         steps:
             - uses: actions/checkout@v4
             - uses: denoland/setup-deno@v2
