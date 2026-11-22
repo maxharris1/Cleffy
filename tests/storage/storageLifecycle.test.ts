@@ -27,7 +27,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
  *     (20261022101000).
  *
  * Needs the local stack (`npm run cloud:up`), so the root `npm run test` skips
- * it unless the three settings are there. CI's stack-tests job runs it with
+ * it unless the three settings are there. CI runs it with
  * CLEFFY_REQUIRE_LOCAL_DB=1, which turns a missing setting into a failure:
  *
  *     CLEFFY_LOCAL_SUPABASE_URL=http://127.0.0.1:54421 \
@@ -42,7 +42,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 const URL = process.env.CLEFFY_LOCAL_SUPABASE_URL ?? '';
 const ANON_KEY = process.env.CLEFFY_LOCAL_ANON_KEY ?? '';
 const SERVICE_KEY = process.env.CLEFFY_LOCAL_SERVICE_ROLE_KEY ?? '';
-/** Set by CI's stack-tests job: there, a stack that is not configured fails the run. */
+/** Set in CI: there, a stack that is not configured fails the run. */
 const REQUIRED = process.env.CLEFFY_REQUIRE_LOCAL_DB === '1';
 
 const state = vi.hoisted(() => ({ client: null as SupabaseClient | null }));

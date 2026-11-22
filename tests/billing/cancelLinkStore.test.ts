@@ -23,7 +23,7 @@ import { FakeResend } from './fakeResend';
  * store; this is what holds that store to it.
  *
  * Needs the local stack (`npm run cloud:up`), so the root `npm run test` skips
- * it unless both are set. CI's stack-tests job boots that stack and runs it
+ * it unless both are set. CI boots that stack and runs it
  * with CLEFFY_REQUIRE_LOCAL_DB=1, which turns a missing setting into a failure
  * rather than a silent skip:
  *
@@ -36,7 +36,7 @@ import { FakeResend } from './fakeResend';
 
 const URL = process.env.CLEFFY_LOCAL_SUPABASE_URL ?? '';
 const SERVICE_KEY = process.env.CLEFFY_LOCAL_SERVICE_ROLE_KEY ?? '';
-/** Set by CI's stack-tests job: there, a stack that is not configured fails the run. */
+/** Set in CI: there, a stack that is not configured fails the run. */
 const REQUIRED = process.env.CLEFFY_REQUIRE_LOCAL_DB === '1';
 const HOUR = 60 * 60_000;
 

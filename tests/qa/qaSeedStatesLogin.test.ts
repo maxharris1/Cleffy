@@ -7,8 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
  * the app's own login form in a real browser, then checked on the page they
  * land on: the library's scores and the plan in the account menu.
  *
- * Needs the app served against a freshly reset and seeded local stack. CI's
- * stack-tests job runs it with CLEFFY_REQUIRE_LOCAL_DB=1; by hand, after
+ * Needs the app served against a freshly reset and seeded local stack. CI
+ * runs it with CLEFFY_REQUIRE_LOCAL_DB=1; by hand, after
  * `npm run qa:boot` and `supabase db reset --local`:
  *
  *     CLEFFY_E2E_BASE=http://127.0.0.1:5173 npx vitest run tests/qa/qaSeedStatesLogin.test.ts

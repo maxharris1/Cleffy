@@ -120,8 +120,6 @@ jobs:
             # broadcast checks read, as on a developer's stack) and Storage
             # (its own migrations bring storage.objects to the schema the
             # storage checks write, as on every hosted project).
-            # In the background so the stack boots while later steps run. The
-            # .rc file carries its exit status to the wait step.
             - &start-stack-bg
               name: Start the local Supabase stack in the background
               run: |
