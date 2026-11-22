@@ -903,8 +903,8 @@ schema and `realtime.send` exist without it, but the day's `realtime.messages`
 partition the checks write to is created by Realtime. With that partition
 detached (inside a rolled-back transaction, Realtime stopped),
 `realtime_revocation_rotation.sql` fails 49 of its 88 checks. So they belong
-in a CI job that starts Realtime and checks that the partition exists (P1's
-every-proof `supabase-local` job does both), not in one that excludes it.
+in a CI job that starts Realtime and checks that the partition exists (the
+every-proof `db-proofs` job does both), not in one that excludes it.
 
 ## Launchfix P5: district retention and content strikes
 
@@ -1225,7 +1225,7 @@ check 45b failed.
 
 ## In CI
 
-The `supabase-local` job runs every `tests/sql/*.sql` and
+The `db-proofs` job runs every `tests/sql/*.sql` and
 `supabase/sql-tests/sharing_access_control.sql` through
 `scripts/ci/sql-proof.sh`, which reads both result shapes above and holds the
 summary to the rows: a `failures | total` proof must print exactly `total`

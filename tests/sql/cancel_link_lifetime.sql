@@ -21,7 +21,7 @@
 -- Sections 1-4 run inside one transaction and ROLL BACK. Section 5 needs two
 -- real sessions, so it opens them with dblink, commits its own rows there and
 -- deletes them again at the end. Run it against the LOCAL stack (CI does, in
--- the supabase-local job: scripts/ci/sql-proof.sh):
+-- the db-proofs job: scripts/ci/sql-proof.sh):
 --
 --     psql "$DATABASE_URL" -q -t -A -F ' | ' -f tests/sql/cancel_link_lifetime.sql
 --

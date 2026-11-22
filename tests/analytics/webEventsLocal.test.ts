@@ -11,7 +11,7 @@ import { afterAll, describe, expect, it } from 'vitest';
  * is_anonymous and app_metadata.user_type the way record_web_events reads
  * them, and that a real sign-up's user_metadata reaches the trigger.
  *
- * Needs the local stack; CI's supabase-local job runs it with
+ * Needs the local stack; CI's stack-tests job runs it with
  * CLEFFY_REQUIRE_LOCAL_DB=1. Every account it makes is deleted at the end.
  *
  *     eval "$(npx supabase status -o env | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY)=')"

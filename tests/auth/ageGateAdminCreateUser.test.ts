@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 /**
  * The admin API's createUser skips before_user_created. The INSERT trigger
  * on auth.users (20261111170000, age_gate_problem 20261111180000) is the
- * backstop. Needs the local stack; CI's supabase-local job runs it with
+ * backstop. Needs the local stack; CI's stack-tests job runs it with
  * CLEFFY_REQUIRE_LOCAL_DB=1.
  *
  * GoTrue maps the trigger RAISE to HTTP 500, error_code unexpected_failure,

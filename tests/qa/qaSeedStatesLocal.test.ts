@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
  * user under RLS. tests/sql/qa_seed_states.sql proves the rows and the reseed; this proves
  * GoTrue accepts each account and the app sees the state the doc names.
  *
- * Needs a seeded local stack; CI's supabase-local job runs it with
+ * Needs a seeded local stack; CI's stack-tests job runs it with
  * CLEFFY_REQUIRE_LOCAL_DB=1.
  *
  *     eval "$(npx supabase status -o env | grep -E '^(API_URL|ANON_KEY)=')"
