@@ -1,4 +1,3 @@
-// @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 
 import * as throttle from '../../supabase/functions/_shared/loginThrottle';

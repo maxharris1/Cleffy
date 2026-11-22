@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';

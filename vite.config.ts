@@ -369,8 +369,24 @@ export default defineConfig({
         allowedHosts: TUNNEL_HOSTS,
     },
     test: {
-        environment: 'jsdom',
         setupFiles: ['./src/test/setup.ts'],
-        include: ['src/**/*.test.{ts,tsx}', 'tests/**/*.test.{ts,tsx}'],
+        projects: [
+            {
+                extends: true,
+                test: {
+                    name: 'node',
+                    environment: 'node',
+                    include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
+                },
+            },
+            {
+                extends: true,
+                test: {
+                    name: 'jsdom',
+                    environment: 'jsdom',
+                    include: ['src/**/*.test.tsx', 'tests/**/*.test.tsx'],
+                },
+            },
+        ],
     },
 });

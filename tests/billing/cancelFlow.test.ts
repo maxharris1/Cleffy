@@ -1,4 +1,3 @@
-// @vitest-environment node
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';

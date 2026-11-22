@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GestureController, type GestureCallbacks, type InkDelegate } from '@/features/viewer/ink/GestureController';

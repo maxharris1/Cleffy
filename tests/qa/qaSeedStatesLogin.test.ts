@@ -1,4 +1,3 @@
-// @vitest-environment node
 import { chromium, type Browser } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
