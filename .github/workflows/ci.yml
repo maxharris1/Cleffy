@@ -11,16 +11,33 @@ concurrency:
     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-    checks:
+    lint:
         runs-on: ubuntu-latest
-        timeout-minutes: 15
+        timeout-minutes: 5
         steps:
-            - uses: actions/checkout@v4
-            - uses: actions/setup-node@v4
+            - &checkout
+              uses: actions/checkout@v4
+            - &setup-node
+              uses: actions/setup-node@v4
+              id: node
               with:
                   node-version: 22
-                  cache: npm
-            - run: npm ci
+            - &restore-node-modules
+              uses: actions/cache/restore@v4
+              id: node-modules
+              with:
+                  path: node_modules
+                  key: node-modules-${{ runner.os }}-node${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json') }}
+            - &npm-ci
+              name: npm ci
+              if: steps.node-modules.outputs.cache-hit != 'true'
+              run: npm ci
+            - &save-pristine-node-modules
+              if: steps.node-modules.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: node_modules
+                  key: ${{ steps.node-modules.outputs.cache-primary-key }}
             # Runtime dependencies only, high and critical: everything in
             # `dependencies` ships to the browser (pdf.js parses every untrusted
             # score), so a known hole there blocks the build. Dev tooling never
@@ -28,9 +45,45 @@ jobs:
             - name: Audit production dependencies
               run: npm audit --omit=dev --audit-level=high
             - run: npm run lint:check
+
+    typecheck:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - *checkout
+            - *setup-node
+            - *restore-node-modules
+            - *npm-ci
+            - *save-pristine-node-modules
             - run: npm run typecheck
-            - run: npm run test
-            - run: npm run build
+
+    build:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - *checkout
+            - *setup-node
+            - *restore-node-modules
+            - *npm-ci
+            - *save-pristine-node-modules
+            - name: Vite build and bundle check
+              run: npx vite build && node scripts/ci/check-bundle.mjs
+
+    test:
+        name: test (${{ matrix.shard }}/3)
+        runs-on: ubuntu-latest
+        timeout-minutes: 6
+        strategy:
+            fail-fast: false
+            matrix:
+                shard: [1, 2, 3]
+        steps:
+            - *checkout
+            - *setup-node
+            - *restore-node-modules
+            - *npm-ci
+            - *save-pristine-node-modules
+            - run: npx vitest run --shard=${{ matrix.shard }}/3
 
     # The checkout and cancel-link proofs that need a real database (decision
     # 30 on #62): the store test runs billingCancelStore.ts against PostgREST,
@@ -53,11 +106,10 @@ jobs:
               run: |
                   bash scripts/ci/reserve-supabase-ports.test.sh
                   sudo bash scripts/ci/reserve-supabase-ports.sh supabase/config.toml
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: 22
-                  cache: npm
-            - run: npm ci
+            - *setup-node
+            - *restore-node-modules
+            - *npm-ci
+            - *save-pristine-node-modules
             - uses: supabase/setup-cli@v1
               with:
                   version: 2.121.0
@@ -209,11 +261,24 @@ jobs:
               with:
                   fetch-depth: 0
             - uses: actions/setup-node@v4
+              id: node
               with:
                   node-version: 22
-                  cache: npm
-                  cache-dependency-path: services/omr-service/package-lock.json
-            - run: npm ci
+            # Cache paths resolve from the workspace root, not the run
+            # working-directory.
+            - uses: actions/cache/restore@v4
+              id: node-modules
+              with:
+                  path: services/omr-service/node_modules
+                  key: omr-node-modules-${{ runner.os }}-node${{ steps.node.outputs.node-version }}-${{ hashFiles('services/omr-service/package-lock.json') }}
+            - name: npm ci
+              if: steps.node-modules.outputs.cache-hit != 'true'
+              run: npm ci
+            - if: steps.node-modules.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: services/omr-service/node_modules
+                  key: ${{ steps.node-modules.outputs.cache-primary-key }}
             - run: npm run check:engine-version
             - run: npm run typecheck
             - run: npm run test
@@ -283,3 +348,34 @@ jobs:
                   supabase/functions/share-session/handler_test.ts
                   supabase/functions/share-invite/handler_test.ts
                   supabase/functions/share-invite-accept/handler_test.ts
+
+    ci-ok:
+        runs-on: ubuntu-latest
+        timeout-minutes: 2
+        if: always()
+        needs: [lint, typecheck, build, test, supabase-local, omr-service, supabase-drift, edge-functions-deno]
+        steps:
+            - name: Every required job succeeded (supabase-drift may skip on a fork PR)
+              env:
+                  NEEDS: ${{ toJSON(needs) }}
+                  FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+              run: |
+                  echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+                  failed="$(echo "$NEEDS" | jq -r --arg fork "$FORK_PR" 'to_entries[] | select(.value.result != "success") | select(($fork == "true" and .key == "supabase-drift" and .value.result == "skipped") | not) | .key')"
+                  if [ -n "$failed" ]; then
+                      echo "::error::required jobs did not succeed: $(echo $failed)"
+                      exit 1
+                  fi
+
+    # Alias of ci-ok: protect-main and the factory still require the `checks`
+    # context. `if: always()` because a skipped required check counts as passing.
+    checks:
+        runs-on: ubuntu-latest
+        timeout-minutes: 2
+        if: always()
+        needs: [ci-ok]
+        steps:
+            - name: ci-ok succeeded
+              env:
+                  CI_OK: ${{ needs.ci-ok.result }}
+              run: test "$CI_OK" = success
