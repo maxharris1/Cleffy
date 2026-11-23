@@ -19,3 +19,13 @@ pstack skills are vendored in `.claude/skills/` (shared by Cursor and Claude Cod
 
 Harness adapters: Claude Code reads `.claude/docs/harness/claude-code.md`; Codex reads `.claude/docs/harness/codex.md`. Rules in this file and the files it points to win over pstack.
 Update: rerun `scripts/vendor-pstack.sh . <cursor/plugins SHA>`; never hand-edit files that contain `.pstack-vendored`.
+
+### Tests run without isolation
+
+Vitest runs with `isolate: false` and shuffled file order (`sequence.shuffle.files` in `vite.config.ts`): test files share a worker and its module cache, in a random order. Tests inside a file still run in source order. `src/test/setup.ts` resets the worker after every file: it restores mocks, stubbed globals and env, and real timers. It also resets the module registry, swaps in a fresh IndexedDB, clears local and session storage, empties the DOM and sets the URL back to `/`. Rules for new tests:
+
+- Stub globals with `vi.stubGlobal` and env with `vi.stubEnv`, never by assigning to `window` or `process.env`, so the reset can undo them.
+- Fake timers are per file. Call `vi.useRealTimers()` in `afterEach` when a test turns them on.
+- Never rely on IndexedDB rows, storage keys, DOM or URL left by another file. Seed what the test reads in its own `beforeEach`.
+- Module-level state (a `let`, `Map` or singleton) needs a reset the test calls, or the test must own the instance.
+- Never fix an order leak with a skip, a retry or a longer timeout. Every new test must pass `npx vitest run --no-isolate <file> <a file that runs before it>`, and the full suite with a few `--sequence.seed` values.
