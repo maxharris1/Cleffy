@@ -13,7 +13,7 @@
 # Nor is the summary's count taken on trust: a `failures | total` proof must
 # print exactly `total` check rows (and `failures` of them failing), and the
 # harness, which prints only its failing rows, exactly `k` of them.
-# CI's supabase-local job runs this against the LOCAL stack only.
+# CI's db-proofs job runs this against the LOCAL stack only.
 set -euo pipefail
 
 db="$1"

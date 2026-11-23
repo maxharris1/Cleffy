@@ -1,7 +1,7 @@
 # Cleffy: agent notes
 
 Coding rules, commands and how to run the app are in `CLAUDE.md`. Factory settings and the PR, review and ship rules are in `factory.md`. This file holds the pstack router.
-SQL proofs run in CI on a local Supabase stack only, never on a hosted project. The note above the `supabase-local` job in `.github/workflows/ci.yml` says what they cover.
+SQL proofs run in CI on a local Supabase stack only, never on a hosted project. The note above the `db-proofs` job in `.github/workflows/ci.yml` says what they cover.
 
 ### pstack (vendored, MIT — see .claude/vendor/pstack/)
 

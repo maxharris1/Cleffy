@@ -85,32 +85,33 @@ jobs:
             - *save-pristine-node-modules
             - run: npx vitest run --shard=${{ matrix.shard }}/3
 
-    # The checkout and cancel-link proofs that need a real database (decision
-    # 30 on #62): the store test runs billingCancelStore.ts against PostgREST,
-    # and the SQL proofs exercise the triggers, grants, row locks and the
-    # database clock that the mocked unit tests cannot.
+    # The checks that need a real database (decision 30 on #62), in two
+    # parallel jobs that each start their own stack. db-proofs runs the SQL
+    # proofs, which exercise the triggers, grants, row locks and the database
+    # clock that the mocked unit tests cannot. stack-tests runs the Vitest
+    # files that talk to the stack (the store test runs billingCancelStore.ts
+    # against PostgREST), then one browser test: the seeded QA accounts
+    # signing in through the login form, against Vite on the runner.
     #
-    # LOCAL stack only: `supabase start` on this runner, the migrations it
+    # LOCAL stack only: `supabase start` on the runner, the migrations it
     # applies, and the demo keys it prints. No repository secrets, no hosted
-    # project, no link. Every SQL proof runs here (decision 37 / SF-16). One
-    # browser test runs last: the seeded QA accounts signing in through the
-    # login form, against Vite on this runner.
-    supabase-local:
+    # project, no link. Every SQL proof runs in db-proofs (decision 37 / SF-16).
+    db-proofs:
         runs-on: ubuntu-latest
-        timeout-minutes: 10
+        timeout-minutes: 6
+        env:
+            SUPABASE_INTERNAL_IMAGE_REGISTRY: ghcr.io
         steps:
-            - uses: actions/checkout@v4
+            - *checkout
             # Before anything else opens connections, so no outbound socket
             # holds one of the stack's ports when `supabase start` publishes it.
-            - name: Reserve the stack's ports from the ephemeral range
+            - &reserve-ports
+              name: Reserve the stack's ports from the ephemeral range
               run: |
                   bash scripts/ci/reserve-supabase-ports.test.sh
                   sudo bash scripts/ci/reserve-supabase-ports.sh supabase/config.toml
-            - *setup-node
-            - *restore-node-modules
-            - *npm-ci
-            - *save-pristine-node-modules
-            - uses: supabase/setup-cli@v1
+            - &setup-cli
+              uses: supabase/setup-cli@v1
               with:
                   version: 2.121.0
             # Only what the proofs touch: Postgres, Auth (the store test
@@ -119,15 +120,28 @@ jobs:
             # broadcast checks read, as on a developer's stack) and Storage
             # (its own migrations bring storage.objects to the schema the
             # storage checks write, as on every hosted project).
-            - name: Start the local Supabase stack and apply every migration
-              run: supabase start -x studio,imgproxy,mailpit,edge-runtime,logflare,vector,supavisor,postgres-meta
+            - &start-stack-bg
+              name: Start the local Supabase stack in the background
+              run: |
+                  (
+                      rc=0
+                      supabase start -x studio,imgproxy,mailpit,edge-runtime,logflare,vector,supavisor,postgres-meta >/tmp/supabase-start.log 2>&1 || rc=$?
+                      echo "$rc" >/tmp/supabase-start.rc
+                  ) </dev/null >/dev/null 2>&1 &
+            - &wait-stack
+              name: Wait for the stack to start and apply every migration
+              run: |
+                  while [ ! -s /tmp/supabase-start.rc ]; do sleep 1; done
+                  cat /tmp/supabase-start.log
+                  exit "$(cat /tmp/supabase-start.rc)"
             # The proofs need Realtime running, not only its schema: it creates
             # the day's realtime.messages partition the broadcast checks write
             # (sharing_access_control, district_read_only_seats, and launchfix
             # P4's realtime_revocation_rotation and content_moderation). Fail
             # here, by name, if it ever stops starting -- rather than as a
             # proof that silently finds no partition.
-            - name: Realtime is running and has created today's messages partition
+            - &realtime-probe
+              name: Realtime is running and has created today's messages partition
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
                   docker ps --format '{{.Names}}' | grep -E '^supabase_realtime_' || { echo "::error::the Realtime container is not running"; exit 1; }
@@ -147,7 +161,8 @@ jobs:
             # follow-ups. Replaying through the newest leaves the latest
             # definition of every function a later migration redefines, so the
             # proofs below run against the schema a recovery ends on.
-            - name: Re-apply the cancel-link migrations and every migration from launchfix P1 on
+            - &replay-migrations
+              name: Re-apply the cancel-link migrations and every migration from launchfix P1 on
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
                   for migration in 20261020160300_cancel_link_token_lifetime 20261020160400_cancel_link_tombstones_db_clock 20261020160500_cancel_link_save_replayable 20261020160600_cancel_link_serialized_history 20261020160700_cancel_link_consume_db_clock; do
@@ -160,6 +175,58 @@ jobs:
                       echo "re-applying ${file}"
                       psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$file"
                   done
+            # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
+            # sharing proof beside the migrations. A new proof runs by being
+            # added -- this file changes only to skip one, which needs a reason.
+            # Every proof runs even after one fails, and the step fails at the
+            # end, so one red run shows them all. Any failing check fails the
+            # job: there is no list of tolerated failures.
+            - name: SQL proofs (tests/sql/*.sql and supabase/sql-tests/sharing_access_control.sql)
+              run: |
+                  DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
+
+                  # Whole proofs not run here: name -> reason. None today.
+                  declare -A SKIP=()
+
+                  failed=""
+                  for proof in tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql; do
+                      name="$(basename "$proof" .sql)"
+                      if [ -n "${SKIP[$name]+x}" ]; then
+                          echo "::notice file=${proof}::skipped: ${SKIP[$name]}"
+                          continue
+                      fi
+                      echo "::group::${proof}"
+                      if ! bash scripts/ci/sql-proof.sh "$DB_URL" "$proof"; then
+                          failed="${failed} ${proof}"
+                      fi
+                      echo "::endgroup::"
+                  done
+                  if [ -n "$failed" ]; then
+                      echo "::error::SQL proofs failed:${failed}"
+                      exit 1
+                  fi
+
+    stack-tests:
+        runs-on: ubuntu-latest
+        timeout-minutes: 6
+        env:
+            SUPABASE_INTERNAL_IMAGE_REGISTRY: ghcr.io
+            CLEFFY_UI_CHROMIUM: /usr/bin/google-chrome
+        steps:
+            - *checkout
+            - *reserve-ports
+            - *setup-cli
+            - *start-stack-bg
+            - *setup-node
+            - *restore-node-modules
+            - *npm-ci
+            - *save-pristine-node-modules
+            - *wait-stack
+            - *realtime-probe
+            - *replay-migrations
+            - name: The runner's Chrome is installed
+              run: |
+                  "$CLEFFY_UI_CHROMIUM" --version || { echo "::error::${CLEFFY_UI_CHROMIUM} is missing or does not run; this job uses the runner's Chrome and never downloads one"; exit 1; }
             - name: Cancel-link store test (billingCancelStore.ts against the local stack)
               run: |
                   eval "$(supabase status -o env | grep -E '^(API_URL|SERVICE_ROLE_KEY)=')"
@@ -206,38 +273,6 @@ jobs:
                   CLEFFY_LOCAL_SUPABASE_URL="$API_URL" \
                   CLEFFY_LOCAL_ANON_KEY="$ANON_KEY" \
                       npx vitest run tests/qa/qaSeedStatesLocal.test.ts
-            # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
-            # sharing proof beside the migrations. A new proof runs by being
-            # added -- this file changes only to skip one, which needs a reason.
-            # Every proof runs even after one fails, and the step fails at the
-            # end, so one red run shows them all. Any failing check fails the
-            # job: there is no list of tolerated failures.
-            - name: SQL proofs (tests/sql/*.sql and supabase/sql-tests/sharing_access_control.sql)
-              run: |
-                  DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-
-                  # Whole proofs not run here: name -> reason. None today.
-                  declare -A SKIP=()
-
-                  failed=""
-                  for proof in tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql; do
-                      name="$(basename "$proof" .sql)"
-                      if [ -n "${SKIP[$name]+x}" ]; then
-                          echo "::notice file=${proof}::skipped: ${SKIP[$name]}"
-                          continue
-                      fi
-                      echo "::group::${proof}"
-                      if ! bash scripts/ci/sql-proof.sh "$DB_URL" "$proof"; then
-                          failed="${failed} ${proof}"
-                      fi
-                      echo "::endgroup::"
-                  done
-                  if [ -n "$failed" ]; then
-                      echo "::error::SQL proofs failed:${failed}"
-                      exit 1
-                  fi
-            - name: Install Chromium for the login-form test
-              run: npx playwright install --with-deps chromium
             - name: QA seeded states sign in through the login form (qaSeedStatesLogin.test.ts)
               run: |
                   eval "$(supabase status -o env | grep -E '^(API_URL|ANON_KEY)=')"
@@ -353,7 +388,7 @@ jobs:
         runs-on: ubuntu-latest
         timeout-minutes: 2
         if: always()
-        needs: [lint, typecheck, build, test, supabase-local, omr-service, supabase-drift, edge-functions-deno]
+        needs: [lint, typecheck, build, test, db-proofs, stack-tests, omr-service, supabase-drift, edge-functions-deno]
         steps:
             - name: Every required job succeeded (supabase-drift may skip on a fork PR)
               env:

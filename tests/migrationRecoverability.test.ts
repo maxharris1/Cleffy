@@ -523,10 +523,10 @@ describe('20261020160500_cancel_link_save_replayable — replays cleanly, and le
  * cancel-link history: advisory locks taken by every delete and every insert
  * of a token, a unique outbox-id tombstone, and the tick taking its locks
  * before it deletes. It replaces functions 20261020160400 and 20261020160500
- * made, adds one trigger and one index, and must apply twice cleanly -- CI's
- * supabase-local job replays it after the three before it -- and sort before
- * #61's first migration. Reconciled by hand at merge time, like the blocks
- * above: the generator does not write it.
+ * made, adds one trigger and one index, and must apply twice cleanly -- CI
+ * replays it after the three before it -- and sort before #61's first
+ * migration. Reconciled by hand at merge time, like the blocks above: the
+ * generator does not write it.
  */
 describe('20261020160600_cancel_link_serialized_history — replays cleanly', () => {
     const NAME = '20261020160600_cancel_link_serialized_history.sql';
@@ -568,9 +568,9 @@ describe('20261020160600_cancel_link_serialized_history — replays cleanly', ()
  * RPC, consume_cancel_link_token, and the token guard (20261020160400's
  * billing_cancel_tokens_lifetime) refusing an update that spends an expired
  * link. It only replaces functions -- the guard's trigger is 20261020160300's
- * -- and must apply twice cleanly -- CI's supabase-local job replays it after
- * the four before it -- and sort before #61's first migration. Reconciled by
- * hand at merge time, like the blocks above: the generator does not write it.
+ * -- and must apply twice cleanly -- CI replays it after the four before it --
+ * and sort before #61's first migration. Reconciled by hand at merge time,
+ * like the blocks above: the generator does not write it.
  */
 describe('20261020160700_cancel_link_consume_db_clock — replays cleanly', () => {
     const NAME = '20261020160700_cancel_link_consume_db_clock.sql';
