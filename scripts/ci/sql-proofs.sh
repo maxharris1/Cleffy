@@ -28,47 +28,59 @@ for proof in "$@"; do
         echo "::notice file=${proof}::skipped: ${SKIP_REASON[$name]}"
         continue
     fi
-    proofs+=("$proof")
     lane=1
     if [ "$lanes" = 2 ] && [ -n "${LANE2[$name]+x}" ]; then
         lane=2
     fi
-    echo "$proof" >>"$work/lane$lane"
+    echo "${#proofs[@]} $proof" >>"$work/lane$lane"
+    proofs+=("$proof")
 done
 
 run_lane() {
-    local lane="$1" proof name start rc
-    while read -r proof; do
-        name="$(basename "$proof" .sql)"
-        echo "lane ${lane}: ${name}"
+    local lane="$1" i proof start rc
+    while read -r i proof; do
+        echo "lane ${lane}: $(basename "$proof" .sql)"
         start="$(date +%s.%N)"
         rc=0
-        bash "$here/sql-proof.sh" "$db" "$proof" >"$work/$name.log" 2>&1 || rc=$?
-        echo "$rc $(echo "$(date +%s.%N) - $start" | bc)" >"$work/$name.result"
+        bash "$here/sql-proof.sh" "$db" "$proof" >"$work/$i.log" 2>&1 || rc=$?
+        echo "$rc $(echo "$(date +%s.%N) - $start" | bc)" >"$work/$i.result"
     done <"$work/lane$lane"
 }
 
+failed=""
 started="$(date +%s.%N)"
+workers=()
 for lane in 1 2; do
-    [ -s "$work/lane$lane" ] && run_lane "$lane" &
+    if [ -s "$work/lane$lane" ]; then
+        run_lane "$lane" &
+        workers+=("$lane:$!")
+    fi
 done
-wait
+for worker in "${workers[@]}"; do
+    status=0
+    wait "${worker#*:}" || status=$?
+    if [ "$status" != 0 ]; then
+        echo "::error::lane ${worker%%:*} worker exited ${status}"
+        failed="${failed} lane${worker%%:*}"
+    fi
+done
 elapsed="$(echo "$(date +%s.%N) - $started" | bc)"
 
-failed=""
-for proof in "${proofs[@]}"; do
-    name="$(basename "$proof" .sql)"
-    echo "::group::${proof}"
-    cat "$work/$name.log"
+for i in "${!proofs[@]}"; do
+    echo "::group::${proofs[$i]}"
+    cat "$work/$i.log" 2>/dev/null || echo "(no output: the proof never ran)"
     echo "::endgroup::"
 done
-for proof in "${proofs[@]}"; do
-    name="$(basename "$proof" .sql)"
-    read -r rc seconds <"$work/$name.result"
-    if [ "$rc" = 0 ]; then
-        printf 'PASS %s %.2fs\n' "$name" "$seconds"
+for i in "${!proofs[@]}"; do
+    name="$(basename "${proofs[$i]}" .sql)"
+    result="$(cat "$work/$i.result" 2>/dev/null || true)"
+    if [[ "$result" =~ ^0\ ([0-9.]+)$ ]]; then
+        printf 'PASS %s %.2fs\n' "$name" "${BASH_REMATCH[1]}"
+    elif [[ "$result" =~ ^[0-9]+\ ([0-9.]+)$ ]]; then
+        printf 'FAIL %s %.2fs\n' "$name" "${BASH_REMATCH[1]}"
+        failed="${failed} ${name}"
     else
-        printf 'FAIL %s %.2fs\n' "$name" "$seconds"
+        printf 'FAIL %s (no result)\n' "$name"
         failed="${failed} ${name}"
     fi
 done
