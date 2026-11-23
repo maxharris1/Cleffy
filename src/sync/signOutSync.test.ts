@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
@@ -199,10 +199,14 @@ describe('drainCloudOutboxes', () => {
 
     it('gives up at the timeout instead of holding sign-out hostage', async () => {
         await queue(DOC_A, 'a1');
+        let release!: () => void;
+        const hang = new Promise<{ error: null }>((resolve) => (release = () => resolve({ error: null })));
+        // The drain still holds DOC_A's outbox lock, which outlives this test's database.
+        onTestFinished(() => release());
         const hanging: AnnotationsApi = {
             ...makeApi({ value: true }),
-            insertMany: () => new Promise(() => undefined),
-            insertIgnoreDuplicates: () => new Promise(() => undefined),
+            insertMany: () => hang,
+            insertIgnoreDuplicates: () => hang,
         };
         const started = Date.now();
         const result = await drainCloudOutboxes({ db, api: hanging, getUserId: () => 'user-1', timeoutMs: 50 });

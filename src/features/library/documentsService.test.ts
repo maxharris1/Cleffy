@@ -447,7 +447,7 @@ const makeStub = (options: StubOptions = {}) => {
 };
 
 beforeEach(async () => {
-    vi.mocked(uploadPdfToStorage).mockClear();
+    vi.mocked(uploadPdfToStorage).mockReset();
     libraryListClear.mockClear();
     cacheFailure.put = null;
     cacheFailure.get = null;

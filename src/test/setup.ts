@@ -1,6 +1,8 @@
 import '@testing-library/jest-dom/vitest';
 import 'fake-indexeddb/auto';
-import { beforeAll, vi } from 'vitest';
+import Dexie from 'dexie';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import { afterAll, afterEach, beforeAll, vi } from 'vitest';
 
 // Idle prefetches import whole route chunks (pdf.js among them) on a timer,
 // which in jsdom would land after the test that scheduled them has finished.
@@ -15,3 +17,32 @@ beforeAll(async () => {
     if (typeof document === 'undefined') return;
     await Promise.all([import('@/ui/DialogPanel'), import('@/ui/MenuBase')]);
 });
+
+afterEach(async () => {
+    if (typeof document === 'undefined') return;
+    const { cleanup } = await import('@testing-library/react');
+    cleanup();
+});
+
+function resetWorkerToFreshState() {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.resetModules();
+
+    const indexedDB = new IDBFactory();
+    globalThis.indexedDB = indexedDB;
+    Dexie.dependencies.indexedDB = indexedDB;
+    Dexie.dependencies.IDBKeyRange = IDBKeyRange;
+
+    if (typeof document === 'undefined') return;
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    document.head.innerHTML = '';
+    document.body.innerHTML = '';
+    window.history.replaceState(null, '', '/');
+}
+
+afterAll(resetWorkerToFreshState);

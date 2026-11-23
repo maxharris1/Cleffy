@@ -191,6 +191,7 @@ describe('LinkSession', () => {
         expect(events.onDead).toHaveBeenCalledWith({ kind: 'dead', state: 'revoked', expiredAt: null });
         await vi.advanceTimersByTimeAsync(3_600_000);
         expect(fetchMock).toHaveBeenCalledTimes(1);
+        session.dispose();
     });
 
     it('renews again when asked while a renewal is already on its way', async () => {

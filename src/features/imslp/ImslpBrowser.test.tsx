@@ -480,6 +480,7 @@ describe('search facets', () => {
 
 describe('ImslpBrowser', () => {
     beforeEach(() => {
+        window.localStorage.clear();
         vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
         vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'test-anon-key');
     });
@@ -1814,10 +1815,6 @@ describe('ImslpBrowser', () => {
     });
 
     describe('card view', () => {
-        beforeEach(() => {
-            window.localStorage.removeItem('cleffy:imslp-view');
-        });
-
         it('defaults to rows, with the view toggle in the sticky header', async () => {
             const { screen } = await import('@testing-library/react');
 

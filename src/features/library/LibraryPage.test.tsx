@@ -238,6 +238,7 @@ beforeEach(() => {
 
 afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
 });
 
 describe('LibraryPage', () => {
@@ -645,7 +646,7 @@ describe('LibraryPage', () => {
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await openScoreMenu(user, 0);
         await user.click(await screen.findByRole('menuitem', { name: 'Rename' }));
-        await user.click(screen.getByRole('button', { name: 'Save changes' }));
+        await user.click(await screen.findByRole('button', { name: 'Save changes' }));
 
         const saving = await screen.findByRole('button', { name: 'Saving…' });
         expect(saving).toBeDisabled();

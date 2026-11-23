@@ -160,10 +160,11 @@ describe.skipIf(!REQUIRED && (!URL || !ANON_KEY || !SERVICE_KEY))('Storage accou
     });
 
     it('keeps a deleted score’s bytes on the owner’s quota until its files are gone', async () => {
+        const before = await usage();
         const id = await createScore();
         expect((await user.storage.from('scores').upload(`${id}/original.pdf`, pdf(700))).error).toBeNull();
         expect((await user.from('documents').delete().eq('id', id)).error).toBeNull();
-        expect(await usage()).toBe(700);
+        expect(await usage()).toBe(before + 700);
 
         const refused = await user.from('document_storage_cleanup').delete().eq('document_id', id);
         expect(refused.error?.code).toBe('42501');
@@ -172,23 +173,24 @@ describe.skipIf(!REQUIRED && (!URL || !ANON_KEY || !SERVICE_KEY))('Storage accou
             .select('document_id')
             .eq('document_id', id);
         expect(marker).toHaveLength(1);
-        expect(await usage()).toBe(700);
+        expect(await usage()).toBe(before + 700);
 
         const early = await user.rpc('finish_document_storage_cleanup', { p_document_id: id });
         expect(early).toMatchObject({ data: false, error: null });
-        expect(await usage()).toBe(700);
+        expect(await usage()).toBe(before + 700);
 
         const removed = await user.storage.from('scores').remove([`${id}/original.pdf`]);
         expect(removed.error).toBeNull();
         expect(removed.data).toHaveLength(1);
         const done = await user.rpc('finish_document_storage_cleanup', { p_document_id: id });
         expect(done).toMatchObject({ data: true, error: null });
-        expect(await usage()).toBe(0);
+        expect(await usage()).toBe(before);
         const { data: after } = await user.from('document_storage_cleanup').select('document_id').eq('document_id', id);
         expect(after).toHaveLength(0);
     });
 
     it('lets an over-quota owner shrink a file through the upload API, and refuses growing it', async () => {
+        const before = await usage();
         const id = await createScore();
         const path = `${id}/original.pdf`;
         expect((await user.storage.from('scores').upload(path, pdf(3000))).error).toBeNull();
@@ -200,12 +202,12 @@ describe.skipIf(!REQUIRED && (!URL || !ANON_KEY || !SERVICE_KEY))('Storage accou
             expect(shrunk.error).toBeNull();
             const updated = await user.storage.from('scores').update(path, pdf(1500));
             expect(updated.error).toBeNull();
-            expect(await usage()).toBe(2500);
+            expect(await usage()).toBe(before + 2500);
 
             const grown = await user.storage.from('scores').upload(path, pdf(1600), { upsert: true });
             expect(grown.error?.message).toMatch(/storage_quota_exceeded/);
             expect(String((grown.error as { statusCode?: string } | null)?.statusCode)).toBe('403');
-            expect(await usage()).toBe(2500);
+            expect(await usage()).toBe(before + 2500);
         } finally {
             await setFreeQuota(1_000_000);
         }

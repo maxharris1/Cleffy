@@ -1,9 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { Dialog } from '@/ui/Dialog';
+import { dialogPanelModule } from '@/ui/lazyPrimitives';
+
+// Load the panel before any vi.resetModules(), so it shares Dialog's dialogStack.
+beforeAll(() => dialogPanelModule.load());
 
 afterEach(() => {
     cleanup();

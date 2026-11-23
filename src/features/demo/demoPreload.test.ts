@@ -8,14 +8,6 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('@/features/demo/loadDemoScore', () => ({ loadDemoScore: h.loadDemoScore }));
-vi.mock('@/features/demo/DemoViewer', () => {
-    h.viewerImported();
-    return { DemoViewer: () => null };
-});
-vi.mock('@/features/demo/DemoPage', () => {
-    h.pageImported();
-    return { DemoPage: () => null };
-});
 
 const setSaveData = (saveData: boolean | undefined) => {
     Object.defineProperty(navigator, 'connection', {
@@ -29,6 +21,14 @@ beforeEach(() => {
     h.loadDemoScore.mockReset();
     h.viewerImported.mockReset();
     h.pageImported.mockReset();
+    vi.doMock('@/features/demo/DemoViewer', () => {
+        h.viewerImported();
+        return { DemoViewer: () => null };
+    });
+    vi.doMock('@/features/demo/DemoPage', () => {
+        h.pageImported();
+        return { DemoPage: () => null };
+    });
     window.sessionStorage.clear();
 });
 

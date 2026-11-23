@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { computeDocumentLayout, focusedPageIndex, pageFitView } from '@/features/viewer/geometry';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
@@ -252,7 +252,10 @@ describe('stand mode', () => {
     it('holds a screen wake lock while on and lets it go on leaving', async () => {
         const release = vi.fn(() => Promise.resolve());
         const request = vi.fn(() => Promise.resolve({ released: false, release }));
-        vi.stubGlobal('navigator', Object.assign(Object.create(navigator), { wakeLock: { request } }));
+        Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: { request } });
+        onTestFinished(() => {
+            delete (navigator as { wakeLock?: unknown }).wakeLock;
+        });
         await renderViewer();
         enter();
         expect(request).toHaveBeenCalledWith('screen');
