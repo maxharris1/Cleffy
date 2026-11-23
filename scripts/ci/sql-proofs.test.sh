@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# sql-proofs.sh runs every proof once in serial and in two lanes, gives both
-# the same verdicts, and fails at the end when one proof fails.
-#
-#   bash scripts/ci/sql-proofs.test.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

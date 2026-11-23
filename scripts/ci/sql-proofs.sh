@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
-# Run SQL proofs with scripts/ci/sql-proof.sh in 1 or 2 lanes. Every proof
-# runs even after one fails, and the run fails at the end. No retries.
-#
-#   bash scripts/ci/sql-proofs.sh "$DB_URL" 2 tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql
-#
-# Two lanes split the list on a fixed partition: the proofs named in LANE2
-# (about half of the measured wall time), and every other proof, new ones
-# included, in lane 1.
+# LANE2 holds about half of the proofs' measured wall time (most of it the
+# cancel-link proofs' waits on the database clock), so the lanes end together.
 set -uo pipefail
 
 db="$1"
 lanes="$2"
 shift 2
 
-declare -A SKIP=()
+declare -A SKIP_REASON=()
 
 declare -A LANE2=(
     [cancel_link_save_after_insert]=1 [cancel_link_tombstone_race]=1
@@ -30,8 +24,8 @@ trap 'rm -rf "$work"' EXIT
 proofs=()
 for proof in "$@"; do
     name="$(basename "$proof" .sql)"
-    if [ -n "${SKIP[$name]+x}" ]; then
-        echo "::notice file=${proof}::skipped: ${SKIP[$name]}"
+    if [ -n "${SKIP_REASON[$name]+x}" ]; then
+        echo "::notice file=${proof}::skipped: ${SKIP_REASON[$name]}"
         continue
     fi
     proofs+=("$proof")
