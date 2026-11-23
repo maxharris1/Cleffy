@@ -92,13 +92,17 @@ describe('PdfViewport with an injected backend', () => {
     it('connects nothing for a score with no sync', async () => {
         const db = new ScribblerDb(`backend-test-${crypto.randomUUID()}`);
         const { backend, connect } = fakeBackend(db);
-        render(
+        const storeReady = vi.fn<(store: AnnotationStore) => void>();
+        const { unmount } = render(
             <ViewerBackendProvider value={backend}>
-                <PdfViewport docId="doc-2" />
+                <PdfViewport docId="doc-2" onStoreReady={storeReady} />
             </ViewerBackendProvider>,
         );
         await new Promise((r) => setTimeout(r, 20));
         expect(connect).not.toHaveBeenCalled();
+        await waitFor(() => expect(storeReady).toHaveBeenCalled());
+        await storeReady.mock.calls[0]![0].load();
+        unmount();
         db.close();
     });
 });
