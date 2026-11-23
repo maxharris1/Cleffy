@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, renderHook } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { computeDocumentLayout } from '@/features/viewer/geometry';
 import {
@@ -219,8 +219,12 @@ describe('useStandSession', () => {
         vi.unstubAllGlobals();
     });
 
-    const stubWakeLock = (request: () => Promise<unknown>) =>
-        vi.stubGlobal('navigator', Object.assign(Object.create(navigator), { wakeLock: { request: vi.fn(request) } }));
+    const stubWakeLock = (request: () => Promise<unknown>) => {
+        Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: { request: vi.fn(request) } });
+        onTestFinished(() => {
+            delete (navigator as { wakeLock?: unknown }).wakeLock;
+        });
+    };
 
     it('holds a screen wake lock while active and releases it after', async () => {
         const release = vi.fn(() => Promise.resolve());
