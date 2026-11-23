@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import type { Session } from '@supabase/supabase-js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as EntitlementsServiceModule from '@/features/billing/entitlementsService';

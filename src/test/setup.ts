@@ -12,5 +12,6 @@ vi.mock('@/lib/idlePrefetch', () => ({ prefetchWhenIdle: vi.fn() }));
 // the lazy path and mount a tick after render, as a prefetched chunk does in
 // the app, rather than after a cold transform that can outlast findBy's timeout.
 beforeAll(async () => {
+    if (typeof document === 'undefined') return;
     await Promise.all([import('@/ui/DialogPanel'), import('@/ui/MenuBase')]);
 });

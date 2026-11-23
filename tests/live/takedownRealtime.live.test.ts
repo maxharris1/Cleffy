@@ -1,4 +1,3 @@
-// @vitest-environment node
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 

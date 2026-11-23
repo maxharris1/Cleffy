@@ -1,4 +1,3 @@
-// @vitest-environment node
 /**
  * ProgressiveDownload driving real pdf.js (the legacy build, run in-thread),
  * wired as PdfProvider wires them: what it hands over must be what pdf.js

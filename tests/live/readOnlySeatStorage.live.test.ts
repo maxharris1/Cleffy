@@ -1,4 +1,3 @@
-// @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createLiveDistrict, LIVE_LOCAL, type LiveDistrict } from './districtFixture';

@@ -1,4 +1,3 @@
-// @vitest-environment node
 import { createHash, randomUUID } from 'node:crypto';
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
