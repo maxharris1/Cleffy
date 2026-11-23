@@ -18,15 +18,13 @@ beforeAll(async () => {
     await Promise.all([import('@/ui/DialogPanel'), import('@/ui/MenuBase')]);
 });
 
-// Test files share one worker without isolation (AGENTS.md, "Tests run
-// without isolation"). Each file starts from what a fresh worker would give it.
 afterEach(async () => {
     if (typeof document === 'undefined') return;
     const { cleanup } = await import('@testing-library/react');
     cleanup();
 });
 
-afterAll(() => {
+function resetWorkerToFreshState() {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -45,4 +43,6 @@ afterAll(() => {
     document.head.innerHTML = '';
     document.body.innerHTML = '';
     window.history.replaceState(null, '', '/');
-});
+}
+
+afterAll(resetWorkerToFreshState);
