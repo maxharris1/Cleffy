@@ -177,34 +177,17 @@ jobs:
                   done
             # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
             # sharing proof beside the migrations. A new proof runs by being
-            # added -- this file changes only to skip one, which needs a reason.
-            # Every proof runs even after one fails, and the step fails at the
-            # end, so one red run shows them all. Any failing check fails the
-            # job: there is no list of tolerated failures.
+            # added -- scripts/ci/sql-proofs.sh changes only to skip one, which
+            # needs a reason. Every proof runs even after one fails, and the
+            # step fails at the end, so one red run shows them all. Any failing
+            # check fails the job: there is no list of tolerated failures.
             - name: SQL proofs (tests/sql/*.sql and supabase/sql-tests/sharing_access_control.sql)
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
-
-                  # Whole proofs not run here: name -> reason. None today.
-                  declare -A SKIP=()
-
-                  failed=""
-                  for proof in tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql; do
-                      name="$(basename "$proof" .sql)"
-                      if [ -n "${SKIP[$name]+x}" ]; then
-                          echo "::notice file=${proof}::skipped: ${SKIP[$name]}"
-                          continue
-                      fi
-                      echo "::group::${proof}"
-                      if ! bash scripts/ci/sql-proof.sh "$DB_URL" "$proof"; then
-                          failed="${failed} ${proof}"
-                      fi
-                      echo "::endgroup::"
-                  done
-                  if [ -n "$failed" ]; then
-                      echo "::error::SQL proofs failed:${failed}"
-                      exit 1
-                  fi
+                  bash scripts/ci/sql-proofs.test.sh
+                  # One lane: in two lanes cancel_link_db_clock and cancel_link_tombstone_race
+                  # block each other until the job times out (PR #140).
+                  bash scripts/ci/sql-proofs.sh "$DB_URL" 1 tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql
 
     stack-tests:
         runs-on: ubuntu-latest
