@@ -370,6 +370,7 @@ export default defineConfig({
     },
     test: {
         setupFiles: ['./src/test/setup.ts'],
+        sequence: { shuffle: { files: true, tests: false } },
         projects: [
             {
                 extends: true,
