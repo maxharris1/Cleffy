@@ -114,25 +114,27 @@ const seedAnnotationData = async () => {
     await db.entitlements.put({ userId: 'user-1', entitlements: {} as never, cachedAt: 'x' });
 };
 
-describe('signOut', () => {
-    beforeEach(async () => {
-        signOutAuth.mockClear();
-        const db = getDb();
-        await Promise.all([
-            db.pdfCache.clear(),
-            db.thumbnails.clear(),
-            db.scoreCache.clear(),
-            db.libraryList.clear(),
-            db.rosterCache.clear(),
-            db.assignmentsCache.clear(),
-            db.annotations.clear(),
-            db.ops.clear(),
-            db.syncState.clear(),
-            db.annotationSnapshots.clear(),
-            db.entitlements.clear(),
-        ]);
-    });
+beforeEach(async () => {
+    signOutAuth.mockClear();
+    getSession.mockReset();
+    resetInkRecoveryForTests();
+    const db = getDb();
+    await Promise.all([
+        db.pdfCache.clear(),
+        db.thumbnails.clear(),
+        db.scoreCache.clear(),
+        db.libraryList.clear(),
+        db.rosterCache.clear(),
+        db.assignmentsCache.clear(),
+        db.annotations.clear(),
+        db.ops.clear(),
+        db.syncState.clear(),
+        db.annotationSnapshots.clear(),
+        db.entitlements.clear(),
+    ]);
+});
 
+describe('signOut', () => {
     it('signs out THIS device only, leaving the account signed in elsewhere', async () => {
         await signOut();
 
@@ -222,12 +224,6 @@ describe('signOut', () => {
 });
 
 describe('syncBeforeSignOut', () => {
-    beforeEach(async () => {
-        const db = getDb();
-        await Promise.all([db.annotations.clear(), db.ops.clear(), db.annotationSnapshots.clear()]);
-        getSession.mockClear();
-    });
-
     it('reports nothing to lose when the outbox is empty (local scores do not count)', async () => {
         const db = getDb();
         await db.ops.add({

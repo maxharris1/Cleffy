@@ -915,10 +915,13 @@ const scribble = (rt: DocRealtimeChannel, strokeId = 's1'): void => {
 };
 
 describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
+    // A channel left running keeps its window wake listeners into later tests.
+    const started: DocRealtimeChannel[] = [];
     beforeEach(() => {
         vi.useFakeTimers();
     });
     afterEach(() => {
+        started.splice(0).forEach((rt) => rt.stop());
         vi.restoreAllMocks();
         vi.useRealTimers();
     });
@@ -958,6 +961,7 @@ describe('DocRealtimeChannel takedown topics (20261020150100)', () => {
             ...overrides,
         };
         const rt = new DocRealtimeChannel(opts);
+        started.push(rt);
         rt.start();
         await vi.advanceTimersByTimeAsync(0);
         const latest = (topic: string): FakeChannel | undefined => channels.filter((c) => c.topic === topic).at(-1);

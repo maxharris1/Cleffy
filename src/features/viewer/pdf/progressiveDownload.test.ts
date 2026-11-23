@@ -1,12 +1,19 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     MIN_RANGE_FETCH,
     PDF_RANGE_CHUNK,
-    ProgressiveDownload,
     TAIL_FETCH,
     type DownloadSink,
+    type ProgressiveDownload as ProgressiveDownloadClass,
 } from '@/features/viewer/pdf/progressiveDownload';
+
+// Fresh module per test: its once-per-session warnings are module state.
+let ProgressiveDownload: typeof ProgressiveDownloadClass;
+beforeEach(async () => {
+    vi.resetModules();
+    ({ ProgressiveDownload } = await import('@/features/viewer/pdf/progressiveDownload'));
+});
 
 const FILE = Uint8Array.from({ length: 300_000 }, (_, i) => (i * 7) % 251);
 
