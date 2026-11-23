@@ -177,18 +177,15 @@ jobs:
                   done
             # Every proof (decision 37 / SF-16): each tests/sql/*.sql, and the
             # sharing proof beside the migrations. A new proof runs by being
-            # added -- this file changes only to skip one, which needs a reason.
-            # Every proof runs even after one fails, and the step fails at the
-            # end, so one red run shows them all. Any failing check fails the
-            # job: there is no list of tolerated failures.
-            - name: SQL proofs (tests/sql/*.sql and supabase/sql-tests/sharing_access_control.sql), serial then two lanes
+            # added -- scripts/ci/sql-proofs.sh changes only to skip one, which
+            # needs a reason. Every proof runs even after one fails, and the
+            # step fails at the end, so one red run shows them all. Any failing
+            # check fails the job: there is no list of tolerated failures.
+            - name: SQL proofs (tests/sql/*.sql and supabase/sql-tests/sharing_access_control.sql) in two lanes
               run: |
                   DB_URL="$(supabase status -o env | sed -n 's/^DB_URL="\(.*\)"$/\1/p')"
                   bash scripts/ci/sql-proofs.test.sh
-                  rc=0
-                  bash scripts/ci/sql-proofs.sh "$DB_URL" 1 tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql || rc=1
-                  bash scripts/ci/sql-proofs.sh "$DB_URL" 2 tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql || rc=1
-                  exit "$rc"
+                  bash scripts/ci/sql-proofs.sh "$DB_URL" 2 tests/sql/*.sql supabase/sql-tests/sharing_access_control.sql
 
     stack-tests:
         runs-on: ubuntu-latest
