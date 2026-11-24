@@ -21,10 +21,13 @@ import {
     SUBSCRIPTION_MISSING,
     subscriptionRowFrom,
     type CancellationNotice,
+    type ChargeSubscription,
     type ClaimOutcome,
     type DuplicateUndo,
     type DuplicateUndoState,
+    type ImmediateCancel,
     type PurchaseNotice,
+    type StripeChargeLike,
     type StripeEventLike,
     type StripeSubscriptionLike,
     type SubscriptionUpsert,
@@ -344,6 +347,20 @@ class FakeStore implements WebhookStore {
         if (!this.cancellations.some((queued) => cancellationMailKey(queued) === cancellationMailKey(notice))) {
             this.cancellations.push(notice);
         }
+    };
+    chargeSubscriptions = new Map<string, ChargeSubscription>();
+    subscriptionForCharge = async (charge: StripeChargeLike): Promise<ChargeSubscription> =>
+        this.chargeSubscriptions.get(charge.id) ?? { kind: 'no_invoice' };
+    refundedByDuplicateLedger = async (subscriptionId: string) => this.ledger.has(subscriptionId);
+    cancelledNow: string[] = [];
+    cancelNowAnswer: ImmediateCancel = 'cancelled';
+    cancelSubscriptionNow = async (subscriptionId: string): Promise<ImmediateCancel> => {
+        this.cancelledNow.push(subscriptionId);
+        const remote = this.remote.get(subscriptionId);
+        if (this.cancelNowAnswer === 'cancelled' && remote) {
+            this.remote.set(subscriptionId, { ...remote, status: 'canceled' });
+        }
+        return this.cancelNowAnswer;
     };
     log = (message: string) => {
         this.logs.push(message);
@@ -2593,5 +2610,182 @@ describe('checkout guard', () => {
         });
         expect(order).toEqual([...order].sort((a, b) => a - b));
         expect(source).toMatch(/code: 'already_subscribed'/);
+    });
+});
+
+const refundEvent = (
+    id: string,
+    charge: Partial<StripeChargeLike> = {},
+    livemode: boolean | undefined = undefined,
+): StripeEventLike => ({
+    id,
+    type: 'charge.refunded',
+    created: EVENT_CREATED,
+    ...(livemode === undefined ? {} : { livemode }),
+    data: {
+        object: { id: 'ch_1', amount: 1200, amount_refunded: 1200, refunded: true, ...charge },
+    },
+});
+
+describe('charge.refunded', () => {
+    let store: FakeStore;
+
+    beforeEach(() => {
+        store = new FakeStore();
+        store.remote.set(
+            'sub_1',
+            subscriptionEvent('seed', 'customer.subscription.updated').data.object as StripeSubscriptionLike,
+        );
+        store.chargeSubscriptions.set('ch_1', { kind: 'subscription', subscriptionId: 'sub_1' });
+    });
+
+    const refund = (event: StripeEventLike) => handleStripeEvent(event, store, PRICE_TIERS);
+
+    it('cancels the subscription now when its invoice charge is refunded in full', async () => {
+        const result = await refund(refundEvent('evt_refund'));
+
+        expect(result).toEqual({ status: 200, body: { received: true, applied: 'subscription_cancelled' } });
+        expect(store.cancelledNow).toEqual(['sub_1']);
+        expect(store.events.get('evt_refund')?.status).toBe('done');
+        expect(store.logs).toHaveLength(1);
+        expect(store.logs[0]).toContain('evt_refund');
+    });
+
+    it('writes no subscription row and archives nothing: customer.subscription.deleted does that', async () => {
+        await refund(refundEvent('evt_refund'));
+
+        expect(store.writes).toEqual([]);
+        expect(store.archived).toEqual([]);
+        expect(store.cancellations).toEqual([]);
+    });
+
+    it('counts a charge whose refunded amount reaches its amount as a full refund', async () => {
+        const result = await refund(refundEvent('evt_refund', { refunded: false, amount_refunded: 1200 }));
+
+        expect(result.body).toMatchObject({ applied: 'subscription_cancelled' });
+        expect(store.cancelledNow).toEqual(['sub_1']);
+    });
+
+    it('cancels a past-due subscription too: anything not already ended can still bill', async () => {
+        store.remote.set('sub_1', { ...store.remote.get('sub_1')!, status: 'past_due' });
+
+        await refund(refundEvent('evt_refund'));
+
+        expect(store.cancelledNow).toEqual(['sub_1']);
+    });
+
+    describe('cancels nothing and logs one line', () => {
+        const ignored = async (event: StripeEventLike, reason: string) => {
+            const result = await refund(event);
+            expect(result).toEqual({ status: 200, body: { received: true, ignored: reason } });
+            expect(store.cancelledNow).toEqual([]);
+            expect(store.logs).toHaveLength(1);
+            expect(store.logs[0]).toContain(event.id);
+            expect(store.events.get(event.id)?.status).toBe('done');
+        };
+
+        it('for a partial refund', async () => {
+            await ignored(refundEvent('evt_partial', { refunded: false, amount_refunded: 500 }), 'partial_refund');
+        });
+
+        it('for a charge with no invoice', async () => {
+            store.chargeSubscriptions.delete('ch_1');
+            await ignored(refundEvent('evt_one_off'), 'no_invoice');
+        });
+
+        it('for an invoice that belongs to no subscription', async () => {
+            store.chargeSubscriptions.set('ch_1', { kind: 'no_subscription' });
+            await ignored(refundEvent('evt_invoice_only'), 'no_subscription');
+        });
+
+        it.each(['canceled', 'incomplete_expired'])('for a subscription already %s', async (status) => {
+            store.remote.set('sub_1', { ...store.remote.get('sub_1')!, status });
+            await ignored(refundEvent('evt_ended'), 'already_canceled');
+        });
+
+        it('for a refund the duplicate-undo ledger made', async () => {
+            store.ledger.set('sub_1', { userId: 'teacher-1', state: 'resolved', attempts: 1, detail: 'refunded re_1' });
+            await ignored(refundEvent('evt_dup'), 'duplicate_ledger_refund');
+        });
+    });
+
+    it('releases the claim and asks for a retry when Stripe cannot say which invoice the charge paid', async () => {
+        store.chargeSubscriptions.set('ch_1', { kind: 'unavailable' });
+
+        const result = await refund(refundEvent('evt_refund'));
+
+        expect(result.status).toBe(500);
+        expect(store.released).toEqual(['evt_refund']);
+        expect(store.cancelledNow).toEqual([]);
+    });
+
+    it('releases the claim and the lock when the cancel fails, and the retry cancels', async () => {
+        store.cancelNowAnswer = 'failed';
+        const failed = await refund(refundEvent('evt_refund'));
+        expect(failed.status).toBe(500);
+        expect(store.released).toEqual(['evt_refund']);
+        expect(store.locks.size).toBe(0);
+
+        store.cancelNowAnswer = 'cancelled';
+        const retried = await refund(refundEvent('evt_refund'));
+        expect(retried.body).toMatchObject({ applied: 'subscription_cancelled' });
+    });
+
+    it('acknowledges a cancel Stripe answers as already ended', async () => {
+        store.cancelNowAnswer = 'already_ended';
+
+        const result = await refund(refundEvent('evt_refund'));
+
+        expect(result).toEqual({ status: 200, body: { received: true, applied: 'subscription_cancelled' } });
+    });
+
+    it('asks for a retry while another delivery holds the subscription', async () => {
+        store.locks.set('sub_1', { holder: 'other', claimedAt: store.clock });
+
+        const result = await refund(refundEvent('evt_refund'));
+
+        expect(result.status).toBe(503);
+        expect(store.cancelledNow).toEqual([]);
+    });
+
+    it('acknowledges a subscription Stripe says does not exist', async () => {
+        store.missing.add('sub_1');
+
+        const result = await refund(refundEvent('evt_refund'));
+
+        expect(result.body).toMatchObject({ ignored: 'subscription_missing' });
+        expect(store.cancelledNow).toEqual([]);
+    });
+
+    it('routes each mode to its own store, so a test refund cancels nothing live and a live one nothing in test', async () => {
+        const stores = { test: new FakeStore(), live: new FakeStore() };
+        for (const [mode, modeStore] of Object.entries(stores)) {
+            modeStore.remote.set(`sub_${mode}`, {
+                ...(subscriptionEvent('seed', 'customer.subscription.updated').data.object as StripeSubscriptionLike),
+                id: `sub_${mode}`,
+            });
+            modeStore.chargeSubscriptions.set(`ch_${mode}`, { kind: 'subscription', subscriptionId: `sub_${mode}` });
+        }
+        const route = (event: StripeEventLike) =>
+            handleStripeEvent(event, event.livemode ? stores.live : stores.test, PRICE_TIERS);
+
+        await route(refundEvent('evt_test', { id: 'ch_test' }, false));
+        await route(refundEvent('evt_live', { id: 'ch_live' }, true));
+
+        expect(stores.test.cancelledNow).toEqual(['sub_test']);
+        expect(stores.live.cancelledNow).toEqual(['sub_live']);
+    });
+
+    it('is wired to the verified mode only: the Stripe client and the ledger read are both that mode', () => {
+        const source = readFileSync(resolve(process.cwd(), 'supabase/functions/stripe-webhook/index.ts'), 'utf8');
+        expect(source).toContain('const stripe = stripeClient(mode);');
+        expect(source).toContain('subscriptionForCharge: (charge) => subscriptionForCharge(stripe, charge)');
+        expect(source).toContain(
+            'cancelSubscriptionNow: (subscriptionId) => cancelSubscriptionNow(stripe, subscriptionId)',
+        );
+        const ledger = source.slice(source.indexOf('refundedByDuplicateLedger:'));
+        expect(ledger.slice(0, ledger.indexOf('},'))).toMatch(
+            /from\('duplicate_refunds'\)[\s\S]*\.eq\('stripe_subscription_id', subscriptionId\)[\s\S]*\.eq\('mode', mode\)/,
+        );
     });
 });

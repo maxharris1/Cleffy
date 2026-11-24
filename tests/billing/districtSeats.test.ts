@@ -179,6 +179,9 @@ const storeFor = (remote: StripeSubscriptionLike, customers = new Map<string, st
         recordPurchaseNotice: async () => {},
         recordCancellationNotice: async () => {},
         accountDeletionPending: async () => 'clear',
+        subscriptionForCharge: async () => ({ kind: 'no_invoice' }),
+        refundedByDuplicateLedger: async () => false,
+        cancelSubscriptionNow: async () => 'failed',
         log: (message) => {
             logs.push(message);
         },

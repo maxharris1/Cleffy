@@ -102,6 +102,9 @@ class BillingBackedStore implements WebhookStore {
     recordCancellationNotice = async () => undefined;
     /** No account here is ever being deleted; webhook.test.ts covers one that is. */
     accountDeletionPending = async () => 'clear' as const;
+    subscriptionForCharge = async () => ({ kind: 'no_invoice' }) as const;
+    refundedByDuplicateLedger = async () => false;
+    cancelSubscriptionNow = async () => 'failed' as const;
     log = () => undefined;
 }
 
