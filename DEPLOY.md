@@ -228,9 +228,9 @@ It is turned back on in step 19, after the smoke tests pass.
   billing period" (that is what `/cancel` does too).
 - **Stripe webhook events, both endpoints.** Subscribe `we_1U9V8T4eZ6RX0W0glk3BZIOi`
   (live) and `we_1U9fnx9EqxUjgZtnXnAvtJH3` (sandbox) to all nine events in
-  _Stripe webhook events_ below. The status table records five (unverified
-  since 2026-11-11). The code handles all nine; subscribing them is a Stripe
-  dashboard step for Max.
+  _Stripe webhook events_ below, and to `charge.refunded`. The status table
+  records five (unverified since 2026-11-11). The code handles all of them;
+  subscribing them is a Stripe dashboard step for Max.
 - **DNS for cleffy.io mail.** Check SPF, DKIM and DMARC for the sending domains
   (`cleffy.io` for `noreply@`, and `send.cleffy.io` for support forwards). Look
   them up with `dig TXT`. In Resend, every domain must show **Verified**. Never
@@ -932,8 +932,8 @@ recovery_ lists each part's rollback.
         is disabled. Step 18 lists them and records them as cancelled here.
         It does **not** resend them, because the new production has no
         account for these customers. A refund also sends `charge.refunded`.
-        The webhook does not handle that type, so step 18's lists leave it
-        out.
+        Step 18's lists leave it out: the subscription it would cancel is
+        already cancelled here.
 
     **The reconciliation table.** It is kept in Max's private ops log, outside
     the repository. Every Stripe object that this step or step 18 lists gets
@@ -1982,8 +1982,9 @@ proves nothing, so stop and run it again.
    **`ENABLE_UNIX`**. Stripe delivers events created from then on by itself.
    The replay window is `FREEZE_AT` to `ENABLE_AT`. Record both in the
    reconciliation table.
-2. **List every event the window holds**, of the nine types in _Stripe
-   webhook events_. Add every event from the three days before `FREEZE_AT`
+2. **List every event the window holds**, of the nine subscription and
+   invoice types in _Stripe webhook events_ (not `charge.refunded`, as step
+   6.7 says). Add every event from the three days before `FREEZE_AT`
    whose delivery had not succeeded. Stripe retries a delivery for up to
    three days, and stopped when it found the endpoint disabled.
 
@@ -2614,9 +2615,10 @@ unless a duplicate in the team inbox is acceptable.
 
 ### Stripe webhook events
 
-`stripe-webhook` handles nine event types
-(`dispatchStripeEvent` in `supabase/functions/_shared/stripeEvents.ts`).
-**Subscribe both endpoints to all nine**, the live one
+`stripe-webhook` handles nine subscription and invoice event types, plus
+`charge.refunded` (`dispatchStripeEvent` in
+`supabase/functions/_shared/stripeEvents.ts`). **Subscribe both endpoints to
+all nine and to `charge.refunded`**, the live one
 (`we_1U9V8T4eZ6RX0W0glk3BZIOi`, production) and the sandbox one
 (`we_1U9fnx9EqxUjgZtnXnAvtJH3`, `dev` branch):
 
@@ -2629,6 +2631,7 @@ unless a duplicate in the team inbox is acceptable.
 - `invoice.paid`
 - `invoice.payment_succeeded`
 - `invoice.payment_failed`
+- `charge.refunded`
 
 Each missing event has a cost:
 
@@ -2636,9 +2639,10 @@ Each missing event has a cost:
 - Without `invoice.paid` / `invoice.payment_succeeded`, a renewal leaves the
   old period end in place. The teacher then drops to free limits until some
   other event arrives (QA round 4, D6).
+- Without `charge.refunded`, a refund leaves the subscription active,
+  entitled and renewing, so it has to be cancelled by hand (_Refunds_).
 
-Anything else is acknowledged and ignored. There is **no `charge.refunded`
-handler**, so a refund changes nothing in Cleffy (_Refunds_).
+Anything else is acknowledged and ignored.
 
 ### Refunds — a manual step
 
@@ -2648,9 +2652,33 @@ After the refund, the subscription is cancelled and the account returns to free.
 Requests arrive at support@. The `/cancel` page's "request my 14-day refund"
 emails support@ with Reply-To set to the buyer.
 
-Nothing in Cleffy reacts to a refund, because no `charge.refunded` handler
-exists. A refund alone leaves the subscription **active, entitled and renewing**.
-So every refund is two Stripe actions plus a log line:
+The refund is the one manual step. Cancellation follows by itself: a full
+refund sends `charge.refunded`, and `stripe-webhook` cancels the subscription
+the refunded charge paid for, immediately and in the same mode (live or
+sandbox) as the event. Stripe then sends `customer.subscription.deleted`,
+which sets the row `canceled`, and the account drops to free limits. Its
+scores past those limits become read-only; nothing is deleted.
+
+**This needs `charge.refunded` on both endpoints**, the live one
+(`we_1U9V8T4eZ6RX0W0glk3BZIOi`) and the sandbox one
+(`we_1U9fnx9EqxUjgZtnXnAvtJH3`). Subscribing them is a Stripe dashboard step
+for Max: Developers → Webhooks → the endpoint → edit its events → add
+`charge.refunded`. **Until both are subscribed, also cancel by hand** (step 3).
+
+The webhook acts only on a **full** refund of a charge that paid a
+subscription's invoice, while that subscription has not ended (any status
+but `canceled` or `incomplete_expired`). It cancels on any such invoice, not
+only the first one, so a goodwill full refund of a later month also ends the
+subscription. To
+compensate a customer without cancelling, refund part of the charge. It
+logs one line and cancels nothing for a partial refund, a charge that paid
+no invoice or no subscription's invoice, a subscription already ended
+(Stripe's "cancel and refund" dialog lands here), and a refund that the
+duplicate-subscription undo issued itself (`duplicate_refunds`). A
+redelivered or second refund event for the same subscription cancels at most
+once.
+
+Every refund is one Stripe action, a check and a log line:
 
 1. **Check eligibility.** It must be the customer's first paid subscription,
    and the request must come within 14 days of it. Check the subscription's
@@ -2659,16 +2687,18 @@ So every refund is two Stripe actions plus a log line:
    days, and Academy (placeholder in the policy).
 2. **Refund the full amount**, tax included. Stripe → Payments → the charge →
    Refund → full amount.
-3. **Cancel the subscription immediately**, not at period end. Stripe →
-   Subscriptions → Cancel → Immediately. Stripe's cancel dialog can also refund
-   the last payment. Either order works, as long as both are done.
-   `customer.subscription.deleted` then sets the row `canceled`, and the
-   account drops to free limits. Its scores past those limits become read-only;
-   nothing is deleted.
+3. **Only if an endpoint is not yet subscribed to `charge.refunded`**, cancel
+   the subscription immediately, not at period end. Stripe → Subscriptions →
+   Cancel → Immediately. Once both endpoints are subscribed, skip this step:
+   the webhook does it.
 4. **Verify.** In Stripe the charge shows Refunded and the subscription shows
    Canceled. In the database:
    `select status from public.subscriptions where stripe_subscription_id = '<sub_…>'`
-   returns `canceled`.
+   returns `canceled`. If the subscription is still active a minute after the
+   refund, read the `charge.refunded` delivery's response body (Webhooks →
+   the endpoint → the delivery). `applied: subscription_cancelled` means it
+   worked; any `ignored: …` names why it did nothing. Then cancel by hand as
+   in step 3.
 5. **Log it.** Write a line in the refunds log:
     - date;
     - customer email;
