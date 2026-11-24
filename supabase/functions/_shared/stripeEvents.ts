@@ -154,6 +154,29 @@ export interface StripeInvoiceLike {
     parent?: { subscription_details?: { subscription?: string | { id?: string } | null } | null } | null;
 }
 
+export interface StripeChargeLike {
+    id: string;
+    amount?: number | null;
+    amount_refunded?: number | null;
+    refunded?: boolean | null;
+    /** Sent only to endpoints pinned before API version basil, which dropped it from Charge. */
+    invoice?: string | { id?: string } | null;
+    payment_intent?: string | { id?: string } | null;
+}
+
+export type ChargeSubscription =
+    | { kind: 'subscription'; subscriptionId: string }
+    | { kind: 'no_invoice' }
+    | { kind: 'no_subscription' }
+    | { kind: 'unavailable' };
+
+/** `already_ended` is Stripe having no such subscription to cancel; `failed` may heal on a retry. */
+export type ImmediateCancel = 'cancelled' | 'already_ended' | 'failed';
+
+export const isFullRefund = (charge: StripeChargeLike): boolean =>
+    charge.refunded === true ||
+    (typeof charge.amount === 'number' && charge.amount > 0 && (charge.amount_refunded ?? 0) >= charge.amount);
+
 export interface StripeEventLike {
     id: string;
     type: string;
@@ -422,6 +445,10 @@ export interface WebhookStore {
      * decision 70(1)). `unknown` is a check that could not be answered.
      */
     accountDeletionPending: (userId: string) => Promise<'clear' | 'pending' | 'unknown'>;
+    subscriptionForCharge: (charge: StripeChargeLike) => Promise<ChargeSubscription>;
+    /** True for any `duplicate_refunds` row, settled or not: the duplicate undo issued that refund. */
+    refundedByDuplicateLedger: (subscriptionId: string) => Promise<boolean>;
+    cancelSubscriptionNow: (subscriptionId: string) => Promise<ImmediateCancel>;
     log: (message: string) => void;
 }
 
@@ -1396,6 +1423,57 @@ const dispatchStripeEvent = async (
                 }
                 store.log(`${event.type} for ${userId}: subscription now ${sub.status}`);
                 return { status: 200, body: { received: true, applied: 'invoice_recorded' } };
+            });
+        }
+
+        // Nothing is written here: the customer.subscription.deleted event
+        // Stripe sends after the cancel records it.
+        case 'charge.refunded': {
+            const charge = event.data.object as StripeChargeLike;
+            const ignored = (reason: string, detail: string): WebhookResult => {
+                store.log(`charge.refunded ${event.id}: ${detail}; nothing cancelled`);
+                return { status: 200, body: { received: true, ignored: reason } };
+            };
+            if (!isFullRefund(charge)) {
+                return ignored('partial_refund', `${charge.id} is only partly refunded`);
+            }
+            const paid = await store.subscriptionForCharge(charge);
+            if (paid.kind === 'unavailable') {
+                store.log(`charge.refunded ${event.id}: could not read the invoice behind ${charge.id}`);
+                return retryLater(store, event, 'invoice_unavailable');
+            }
+            if (paid.kind === 'no_invoice') {
+                return ignored('no_invoice', `${charge.id} paid no invoice`);
+            }
+            if (paid.kind === 'no_subscription') {
+                return ignored('no_subscription', `the invoice ${charge.id} paid belongs to no subscription`);
+            }
+            const subscriptionId = paid.subscriptionId;
+            if (await store.refundedByDuplicateLedger(subscriptionId)) {
+                return ignored('duplicate_ledger_refund', `${subscriptionId} was refunded as a duplicate`);
+            }
+
+            return await withSubscriptionLock(store, event, subscriptionId, async () => {
+                const sub = await store.fetchSubscription(subscriptionId);
+                if (sub === SUBSCRIPTION_MISSING) {
+                    return subscriptionMissing(store, event, subscriptionId);
+                }
+                if (!sub) {
+                    store.log(`charge.refunded ${event.id}: subscription ${subscriptionId} not retrievable`);
+                    return retryLater(store, event, 'subscription_unavailable');
+                }
+                if (isTerminalStatus(sub.status)) {
+                    return ignored('already_canceled', `${subscriptionId} is already ${sub.status}`);
+                }
+                const cancelled = await store.cancelSubscriptionNow(subscriptionId);
+                if (cancelled === 'failed') {
+                    store.log(`charge.refunded ${event.id}: could not cancel ${subscriptionId}`);
+                    return retryLater(store, event, 'cancel_failed');
+                }
+                store.log(
+                    `charge.refunded ${event.id}: ${charge.id} refunded in full; ${subscriptionId} cancelled now`,
+                );
+                return { status: 200, body: { received: true, applied: 'subscription_cancelled' } };
             });
         }
 

@@ -11,6 +11,7 @@ import { accountDeletionPending } from '../_shared/deletionPending.ts';
 import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 import { PAYLOAD_TOO_LARGE, readCappedText, WEBHOOK_BODY_MAX_BYTES } from '../_shared/readCappedJson.ts';
+import { cancelSubscriptionNow, subscriptionForCharge } from '../_shared/refundCancel.ts';
 import {
     cancelAndRefundDuplicate,
     priceTiers,
@@ -525,6 +526,20 @@ Deno.serve(async (req) => {
             }
             return pending.pending ? 'pending' : 'clear';
         },
+        subscriptionForCharge: (charge) => subscriptionForCharge(stripe, charge),
+        refundedByDuplicateLedger: async (subscriptionId) => {
+            const { data, error } = await admin
+                .from('duplicate_refunds')
+                .select('stripe_subscription_id')
+                .eq('stripe_subscription_id', subscriptionId)
+                .eq('mode', mode)
+                .maybeSingle();
+            if (error) {
+                throw new Error(`could not read the duplicate-refund ledger for ${subscriptionId}: ${error.message}`);
+            }
+            return data !== null;
+        },
+        cancelSubscriptionNow: (subscriptionId) => cancelSubscriptionNow(stripe, subscriptionId),
         log: (message) => console.log(message),
     };
 
