@@ -103,13 +103,20 @@ const REQUIRED_HEADERS = [
 ];
 
 const TURNSTILE = 'https://challenges.cloudflare.com';
-const SENTRY_INGEST =
-    /^https:\/\/(\*\.|[a-z0-9-]+\.)([a-z0-9-]+\.)*ingest\.([a-z0-9-]+\.)?sentry\.io(:(\d+|\*))?(\/[^\s,;?#]*)?$/i;
+const HOST_SOURCE =
+    /^https:\/\/((?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::(\d+|\*))?((?:\/(?:[\w.~!$&'()*+=:@-]|%[0-9a-f]{2})*)*)$/i;
+const SENTRY_INGEST_HOST = /^(\*|[a-z0-9-]+)\.([a-z0-9-]+\.)*ingest\.([a-z0-9-]+\.)?sentry\.io$/;
+const isTurnstile = ({ host, port, path }) => host === 'challenges.cloudflare.com' && port === '443' && path === '/';
 const REQUIRED_CSP_SOURCES = [
-    [['script-src', 'default-src'], TURNSTILE, (source) => source === TURNSTILE],
-    [['frame-src', 'child-src', 'default-src'], TURNSTILE, (source) => source === TURNSTILE],
-    [['connect-src', 'default-src'], 'a Sentry ingest host', (source) => SENTRY_INGEST.test(source)],
+    [['script-src', 'default-src'], TURNSTILE, isTurnstile],
+    [['frame-src', 'child-src', 'default-src'], TURNSTILE, isTurnstile],
+    [['connect-src', 'default-src'], 'a Sentry ingest host', ({ host }) => SENTRY_INGEST_HOST.test(host)],
 ];
+
+function parseSource(source) {
+    const match = HOST_SOURCE.exec(source);
+    return match && { host: match[1].toLowerCase(), port: match[2] ?? '443', path: match[3] || '/' };
+}
 
 function parseCsp(csp) {
     return csp
@@ -119,16 +126,26 @@ function parseCsp(csp) {
             for (const part of policy.split(';')) {
                 const [name, ...sources] = part.trim().split(/\s+/);
                 const key = name.toLowerCase();
-                if (name && !directives.has(key)) directives.set(key, sources);
+                if (name && !directives.has(key)) directives.set(key, sources.map(parseSource).filter(Boolean));
             }
             return directives;
         })
         .filter((directives) => directives.size > 0);
 }
 
-function allows(policy, chain, matches) {
+function covers(allowed, candidate) {
+    const hostOk =
+        allowed.host === candidate.host ||
+        (allowed.host.startsWith('*.') && candidate.host.endsWith(allowed.host.slice(1)));
+    const portOk = allowed.port === '*' || allowed.port === candidate.port;
+    const pathOk =
+        allowed.path === candidate.path || (allowed.path.endsWith('/') && candidate.path.startsWith(allowed.path));
+    return hostOk && portOk && pathOk;
+}
+
+function allows(policy, chain, candidate) {
     const effective = chain.find((name) => policy.has(name));
-    return effective === undefined || policy.get(effective).some(matches);
+    return effective === undefined || policy.get(effective).some((source) => covers(source, candidate));
 }
 
 function headerProblems(headers) {
@@ -143,11 +160,10 @@ function headerProblems(headers) {
 
 function cspProblems(csp) {
     const policies = parseCsp(csp);
-    return REQUIRED_CSP_SOURCES.filter(
-        ([chain, , matches]) =>
-            !policies.some((policy) => (policy.get(chain[0]) ?? []).some(matches)) ||
-            !policies.every((policy) => allows(policy, chain, matches)),
-    ).map(([[directive], wanted]) => `CSP ${directive} lacks ${wanted}`);
+    return REQUIRED_CSP_SOURCES.filter(([chain, , isCandidate]) => {
+        const candidates = policies.flatMap((policy) => policy.get(chain[0]) ?? []).filter(isCandidate);
+        return !candidates.some((candidate) => policies.every((policy) => allows(policy, chain, candidate)));
+    }).map(([[directive], wanted]) => `CSP ${directive} lacks ${wanted}`);
 }
 
 export function checkHeaders(visit) {

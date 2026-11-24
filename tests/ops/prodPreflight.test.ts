@@ -27,6 +27,7 @@ const CSP = {
     'frame-src': 'https://challenges.cloudflare.com',
     'frame-ancestors': "'none'",
 };
+const TURNSTILE_SOURCES = 'https://challenges.cloudflare.com';
 const cspOf = (directives: Record<string, string>) =>
     Object.entries(directives)
         .map(([name, sources]) => `${name} ${sources}`)
@@ -283,6 +284,10 @@ describe('prod preflight', () => {
         'https://o1.ingest.sentry.io:abc',
         'https://*.*.ingest.sentry.io',
         'https://o1.ingest.sentry.io/api?x',
+        'https://o1.ingest.sentry.io/[]',
+        'https://o1.ingest.sentry.io/%zz',
+        'https://o1.ingest.sentry.io/a|b',
+        'https://o1.ingest.sentry.io/a^b',
     ])('fails security-headers when connect-src only has the invalid Sentry source %s', async (source) => {
         const { line, exitCode } = await run(withCsp(cspOf({ ...CSP, 'connect-src': `'self' ${source}` })));
         expect(line('security-headers')?.status).toBe('FAIL');
@@ -298,6 +303,49 @@ describe('prod preflight', () => {
     ])('accepts the valid Sentry host-source %s', async (source) => {
         const { line } = await run(withCsp(cspOf({ ...CSP, 'connect-src': `'self' ${source}` })));
         expect(line('security-headers')?.status).toBe('OK');
+    });
+
+    const withConnect = (first: string, second: string) =>
+        withCsp(`${cspOf({ ...CSP, 'connect-src': `'self' ${first}` })}, ${second}`);
+
+    it.each([
+        ['https://o1.ingest.sentry.io', 'connect-src https://o2.ingest.sentry.io'],
+        ['https://o1.ingest.sentry.io', `default-src https://o2.ingest.sentry.io ${TURNSTILE_SOURCES}`],
+        ['https://*.ingest.us.sentry.io', 'connect-src https://*.ingest.sentry.io'],
+        ['https://o1.ingest.sentry.io:8443', 'connect-src https://o1.ingest.sentry.io'],
+        ['https://o1.ingest.sentry.io/api/', 'connect-src https://o1.ingest.sentry.io/other/'],
+    ])('fails security-headers when no Sentry source in %s is allowed by every policy (%s)', async (first, second) => {
+        const { line, exitCode } = await run(withConnect(first, second));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toBe('CSP connect-src lacks a Sentry ingest host');
+        expect(exitCode).toBe(1);
+    });
+
+    it.each([
+        ['https://o1.ingest.sentry.io', 'connect-src https://o1.ingest.sentry.io'],
+        ['https://o1.ingest.sentry.io', `default-src https://o1.ingest.sentry.io ${TURNSTILE_SOURCES}`],
+        ['https://o1.ingest.sentry.io', 'connect-src https://*.ingest.sentry.io'],
+        ['https://O1.Ingest.Sentry.IO:443', 'connect-src https://o1.ingest.sentry.io/'],
+        ['https://o1.ingest.sentry.io/api/', 'connect-src https://o1.ingest.sentry.io'],
+        ['https://o1.ingest.sentry.io', 'connect-src https://o1.ingest.sentry.io/api/'],
+        ['https://o1.ingest.sentry.io', 'connect-src https://o2.ingest.sentry.io https://*.sentry.io'],
+    ])(
+        'passes security-headers when one Sentry source in %s is allowed by every policy (%s)',
+        async (first, second) => {
+            const { line, exitCode } = await run(withConnect(first, second));
+            expect(line('security-headers')?.status).toBe('OK');
+            expect(exitCode).toBe(0);
+        },
+    );
+
+    it.each([
+        ['script-src https://challenges.cloudflare.com/', 'OK'],
+        ['script-src https://*.cloudflare.com', 'OK'],
+        ['script-src https://challenges.cloudflare.com/turnstile/', 'FAIL'],
+        ['script-src https://challenges.cloudflare.com:8443', 'FAIL'],
+    ])('checks Turnstile across policies: a second policy "%s" gives %s', async (second, status) => {
+        const { line } = await run(withCsp(`${cspOf(CSP)}, ${second}`));
+        expect(line('security-headers')?.status).toBe(status);
     });
 
     it('reads security headers from the final response, not the redirect', async () => {
