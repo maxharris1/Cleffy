@@ -4,17 +4,20 @@ import { pathToFileURL } from 'node:url';
 
 export const PAGES = ['/', '/try', '/privacy', '/terms', '/refunds', '/copyright'];
 export const UTM = { utm_source: 'preflight', utm_medium: 'check', utm_campaign: 'preflight' };
-export const LIMITS = { timeoutMs: 10_000, maxRedirects: 5 };
+export const LIMITS = { timeoutMs: 10_000, maxRedirects: 5, maxJsFiles: 200 };
 
-const USAGE = 'usage: npm run ops:preflight -- <base-url>';
+const USAGE = 'usage: npm run ops:preflight -- <base-url> [--require captcha,sentry]';
+const REQUIREMENTS = ['captcha', 'sentry'];
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
 export function makeVisit(fetchImpl, limits) {
-    return async (url) => {
+    return async (url, refuse = () => null) => {
         const hops = [];
         let current = url;
         try {
             for (;;) {
+                const refusal = refuse(current);
+                if (refusal) return { hops, error: refusal };
                 const res = await fetchImpl(current, {
                     method: 'GET',
                     redirect: 'manual',
@@ -90,25 +93,159 @@ export function checkCanonical(visit) {
     return { status: 'OK', check: 'canonical-host', detail: `final host ${host} matches og:url` };
 }
 
-export async function runPreflight({ baseUrl, fetchImpl = fetch, limits = LIMITS }) {
+const TAG = /<(script|link)\s[^>]*>/gi;
+const ATTR = /([\w-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+const ROOT_ASSET = /(?<=["'`]\/?)assets\/[\w.-]+\.js\b/g;
+const RELATIVE_JS = /["'`](\.\/[\w.-]+\.js)["'`]/g;
+const SITE_KEY = /["'`](0x4[A-Za-z0-9_-]{18,40})["'`]/;
+const DSN = /https:\/\/[0-9a-f]+@([a-z0-9.-]*ingest[a-z0-9.-]*\.sentry\.io)\/\d+/;
+
+function attributes(tag) {
+    const inner = tag.slice(1, -1).replace(/^\w+/, '');
+    return new Map(Array.from(inner.matchAll(ATTR), (m) => [m[1].toLowerCase(), m[2] ?? m[3] ?? m[4] ?? '']));
+}
+
+function entryScripts(html) {
+    return Array.from(html.matchAll(TAG)).flatMap(([tag, name]) => {
+        const attrs = attributes(tag);
+        if (name.toLowerCase() === 'script' && attrs.get('type') === 'module' && attrs.has('src'))
+            return [attrs.get('src')];
+        if (name.toLowerCase() === 'link' && attrs.get('rel') === 'modulepreload' && attrs.has('href')) {
+            return [attrs.get('href')];
+        }
+        return [];
+    });
+}
+
+function referencedScripts(js, jsUrl) {
+    const root = Array.from(js.matchAll(ROOT_ASSET), ([path]) => new URL(`/${path}`, jsUrl).href);
+    const relative = Array.from(js.matchAll(RELATIVE_JS), (m) => new URL(m[1], jsUrl).href);
+    return [...root, ...relative];
+}
+
+export async function scanBundle(page, visit, limits) {
+    const origin = new URL(page.url).origin;
+    const queue = [];
+    const seen = new Set();
+    const enqueue = (refs, base) => {
+        for (const ref of refs) {
+            let url;
+            try {
+                url = new URL(ref, base);
+            } catch {
+                continue;
+            }
+            if (url.origin !== origin || !url.pathname.endsWith('.js') || seen.has(url.href)) continue;
+            seen.add(url.href);
+            queue.push(url.href);
+        }
+    };
+    enqueue(entryScripts(page.body), page.url);
+    let scanned = 0;
+    let budgetHit = false;
+    const refuse = (url) => {
+        if (new URL(url).origin !== origin) return `${url}: cross-origin JS not fetched`;
+        if (scanned >= limits.maxJsFiles) {
+            budgetHit = true;
+            return `${url}: JS fetch budget spent`;
+        }
+        scanned += 1;
+        return null;
+    };
+    let next = 0;
+    let keyLength = null;
+    let ingestHost = null;
+    while (next < queue.length && scanned < limits.maxJsFiles && (keyLength === null || ingestHost === null)) {
+        const jsUrl = queue[next];
+        next += 1;
+        const result = await visit(jsUrl, refuse);
+        const final = finalHop(result);
+        if (result.error || final.status !== 200) continue;
+        keyLength ??= final.body.match(SITE_KEY)?.[1].length ?? null;
+        ingestHost ??= final.body.match(DSN)?.[1] ?? null;
+        enqueue(referencedScripts(final.body, jsUrl), jsUrl);
+    }
+    const capped = budgetHit || (scanned === limits.maxJsFiles && next < queue.length);
+    return { scanned, capped, keyLength, ingestHost };
+}
+
+function absent(check, scan, required, what) {
+    const status = required ? 'FAIL' : 'INFO';
+    if (scan === null) return { status, check, detail: 'not scanned: home page unreachable' };
+    const where = scan.capped
+        ? `the first ${scan.scanned} JS files (capped at ${scan.scanned})`
+        : `${scan.scanned} JS files`;
+    return { status, check, detail: `no ${what} in ${where}` };
+}
+
+export function checkCaptcha(scan, required) {
+    if (scan?.keyLength == null) return absent('captcha', scan, required, 'Turnstile site key');
+    const detail = `Turnstile site key compiled in (${scan.keyLength} chars); ${scan.scanned} JS files scanned`;
+    return { status: 'OK', check: 'captcha', detail };
+}
+
+export function checkSentry(scan, required) {
+    if (scan?.ingestHost == null) return absent('sentry', scan, required, 'Sentry DSN');
+    return { status: 'OK', check: 'sentry', detail: `Sentry DSN compiled in; ingest host ${scan.ingestHost}` };
+}
+
+export async function runPreflight({ baseUrl, require = [], fetchImpl = fetch, limits = LIMITS }) {
     const visit = makeVisit(fetchImpl, limits);
     const pageVisits = await Promise.all(PAGES.map(async (path) => [path, await visit(new URL(path, baseUrl).href)]));
     const utmUrl = new URL(`/?${new URLSearchParams(UTM)}`, baseUrl).href;
     const home = pageVisits[0][1];
-    const lines = [checkPages(pageVisits), checkUtmRedirect(utmUrl, await visit(utmUrl)), checkCanonical(home)];
+    const homeReached = !home.error && finalHop(home).status === 200;
+    const [utmVisit, scan] = await Promise.all([
+        visit(utmUrl),
+        homeReached ? scanBundle(finalHop(home), visit, limits) : null,
+    ]);
+    const lines = [
+        checkPages(pageVisits),
+        checkUtmRedirect(utmUrl, utmVisit),
+        checkCanonical(home),
+        checkCaptcha(scan, require.includes('captcha')),
+        checkSentry(scan, require.includes('sentry')),
+    ];
     return { lines, exitCode: lines.some((l) => l.status === 'FAIL') ? 1 : 0 };
 }
 
+function parseRequirements(list) {
+    const names = list.split(',');
+    const unknown = names.find((name) => !REQUIREMENTS.includes(name));
+    if (unknown !== undefined) throw new Error(`${USAGE}\nunknown requirement: ${unknown || '(empty)'}`);
+    return names;
+}
+
 export function parseArgs(argv) {
-    if (argv.length !== 1) throw new Error(USAGE);
+    const positional = [];
+    const require = [];
+    for (let i = 0; i < argv.length; i += 1) {
+        const arg = argv[i];
+        let list;
+        if (arg === '--require') {
+            i += 1;
+            list = argv[i];
+            if (list === undefined) throw new Error(`${USAGE}\n--require needs a value`);
+        } else if (arg.startsWith('--require=')) {
+            list = arg.slice('--require='.length);
+        } else if (arg.startsWith('-')) {
+            throw new Error(`${USAGE}\nunknown flag: ${arg}`);
+        } else {
+            positional.push(arg);
+            continue;
+        }
+        for (const name of parseRequirements(list)) if (!require.includes(name)) require.push(name);
+    }
+    if (positional.length !== 1) throw new Error(USAGE);
     let url;
     try {
-        url = new URL(argv[0]);
+        url = new URL(positional[0]);
     } catch {
-        throw new Error(`${USAGE}\nnot a URL: ${argv[0]}`);
+        throw new Error(`${USAGE}\nnot a URL: ${positional[0]}`);
     }
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error(`${USAGE}\nnot http(s): ${argv[0]}`);
-    return { baseUrl: url.origin };
+    if (url.protocol !== 'https:' && url.protocol !== 'http:')
+        throw new Error(`${USAGE}\nnot http(s): ${positional[0]}`);
+    return { baseUrl: url.origin, require };
 }
 
 async function main() {
