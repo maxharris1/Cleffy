@@ -601,6 +601,7 @@ const runTrials = async (seed: number, runs: number, budgetFor: TurnBudget): Pro
 
 describe('Reconcile under randomized interleavings (QA C1, integration review)', () => {
     afterEach(() => {
+        vi.useRealTimers();
         vi.restoreAllMocks();
     });
 
