@@ -68,9 +68,9 @@ const xorshift = (seed: number): Random => {
 
 /**
  * Each trial's two streams, drawn up front from the run seed: `choose` picks
- * the script, `timing` the yields. The number of requests a trial makes
- * depends on the clock, so keeping them apart lets the seed and trial alone
- * fix what A and B do, however earlier trials or this one interleaved.
+ * the script, `timing` the yields, the engine's backoff jitter and every
+ * UUID. Keeping them apart lets the seed and trial alone fix what A and B
+ * do, however earlier trials ran.
  */
 const trialStreams = (seed: number, runs: number): { choose: Random; timing: Random }[] => {
     const random = xorshift(seed);
@@ -83,14 +83,42 @@ const trialStreams = (seed: number, runs: number): { choose: Random; timing: Ran
 const BASE_TURNS = 120_000;
 const TURNS_PER_OP = 30_000;
 /**
- * Turns one settle may take before it counts as a livelock. Over 6000 trials
- * no settle took more than 12000 turns plus 3000 per queued op (the slowest,
- * 21206 turns with 3 ops queued); this allows ten times that. A livelock
- * never drains, so any finite budget trips it.
+ * Turns one settle may take before it counts as a livelock. Turns are counted
+ * on the seeded clock, so a loaded machine does not add any. Over 6000 trials
+ * no settle took more than 30 turns plus 10 per queued op (the slowest, 79
+ * turns with 6 ops queued); this allows far more. A livelock never drains, so
+ * any finite budget trips it.
  */
 const turnBudget = (queuedOps: number): number => BASE_TURNS + TURNS_PER_OP * queuedOps;
+type TurnBudget = typeof turnBudget;
 
-/** Up to `max` yields, each a microtask, a timer or an immediate (fake-indexeddb settles on the last two). */
+const uuid = (random: Random): string => {
+    const hex = Array.from({ length: 32 }, () => Math.floor(random() * 16).toString(16)).join('');
+    const variant = '89ab'[Math.floor(random() * 4)]!;
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20)}`;
+};
+
+/** Timers and Date follow event-loop turns, not the wall clock. setImmediate stays real: fake-indexeddb schedules on it. */
+const startClock = (): (() => void) => {
+    vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+        now: new Date('2026-09-10T00:00:00.000Z'),
+    });
+    let running = true;
+    const turn = () => {
+        if (running) {
+            vi.advanceTimersByTime(1);
+            setImmediate(turn);
+        }
+    };
+    setImmediate(turn);
+    return () => {
+        running = false;
+        vi.useRealTimers();
+    };
+};
+
+/** Up to `max` yields, each a microtask, a timer on the seeded clock or an immediate. */
 const pause = async (random: Random, max: number): Promise<void> => {
     const n = Math.floor(random() * (max + 1));
     for (let i = 0; i < n; i++) {
@@ -310,7 +338,7 @@ const expectedFor = (
     }
 };
 
-const trial = async (choose: Random, timing: Random): Promise<Trial> => {
+const trial = async (choose: Random, timing: Random, budgetFor: TurnBudget): Promise<Trial> => {
     const docId = crypto.randomUUID();
     const db = new ScribblerDb(`c1-interleave-${docId}`);
     const store = new AnnotationStore(db, docId);
@@ -351,7 +379,7 @@ const trial = async (choose: Random, timing: Random): Promise<Trial> => {
 
     /** Until nothing is in flight; the backoff timer is run early rather than waited for. */
     const settle = async (queuedOps: number): Promise<string | null> => {
-        const budget = turnBudget(queuedOps);
+        const budget = budgetFor(queuedOps);
         let idleWithQueue = 0;
         for (let i = 0; i < budget; i++) {
             await new Promise<void>((resolve) => setImmediate(resolve));
@@ -544,6 +572,33 @@ const trial = async (choose: Random, timing: Random): Promise<Trial> => {
     }
 };
 
+const replay = (seed: number) =>
+    `replay: C1_INTERLEAVE_SEED=${seed} npx vitest run src/sync/reconcileInterleaving.test.ts`;
+
+const runTrials = async (seed: number, runs: number, budgetFor: TurnBudget): Promise<Trial[]> => {
+    const streams = trialStreams(seed, runs);
+    let timing = streams[0]!.timing;
+    const snapshot = snapshotService.ensureDayStartingSnapshot;
+    vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
+        await pause(timing, 6);
+        return snapshot(...args);
+    });
+    vi.spyOn(Math, 'random').mockImplementation(() => timing());
+    vi.spyOn(crypto, 'randomUUID').mockImplementation(() => uuid(timing) as ReturnType<Crypto['randomUUID']>);
+    const stopClock = startClock();
+    try {
+        const results: Trial[] = [];
+        for (let run = 0; run < runs; run++) {
+            timing = streams[run]!.timing;
+            results.push(await trial(streams[run]!.choose, timing, budgetFor));
+        }
+        return results;
+    } finally {
+        stopClock();
+        vi.restoreAllMocks();
+    }
+};
+
 describe('Reconcile under randomized interleavings (QA C1, integration review)', () => {
     afterEach(() => {
         vi.restoreAllMocks();
@@ -552,28 +607,13 @@ describe('Reconcile under randomized interleavings (QA C1, integration review)',
     it('converges, and keeps every post-restore edit against a collaborator’s erase, in 150 random runs', async () => {
         const seed = Number(process.env['C1_INTERLEAVE_SEED'] ?? Math.floor(Math.random() * 2 ** 31));
         const runs = Number(process.env['C1_INTERLEAVE_RUNS'] ?? 150);
-        const streams = trialStreams(seed, runs);
-        let timing = streams[0]!.timing;
-        const snapshot = snapshotService.ensureDayStartingSnapshot;
-        vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
-            await pause(timing, 6);
-            return snapshot(...args);
-        });
+        const results = await runTrials(seed, runs, turnBudget);
 
-        const failures: string[] = [];
-        let c1Runs = 0;
-        let refusedEdits = 0;
-        for (let run = 0; run < runs; run++) {
-            timing = streams[run]!.timing;
-            const result = await trial(streams[run]!.choose, timing);
-            c1Runs += result.c1 ? 1 : 0;
-            refusedEdits += result.editRefused ? 1 : 0;
-            if (!result.ok) {
-                failures.push(
-                    `seed ${seed} trial ${run}: ${result.report}\n    replay: C1_INTERLEAVE_SEED=${seed} npx vitest run src/sync/reconcileInterleaving.test.ts`,
-                );
-            }
-        }
+        const failures = results.flatMap((result, run) =>
+            result.ok ? [] : [`seed ${seed} trial ${run}: ${result.report}\n    ${replay(seed)}`],
+        );
+        const c1Runs = results.filter((result) => result.c1).length;
+        const refusedEdits = results.filter((result) => result.editRefused).length;
         const summary = `seed ${seed}: ${runs} runs, ${c1Runs} decided by the C1 rule, ${refusedEdits} with an edit begun on a note that was gone by Done`;
         expect(failures, summary).toEqual([]);
         // Not vacuous: the C1 rule decided a fair share of runs, and edits
@@ -581,4 +621,12 @@ describe('Reconcile under randomized interleavings (QA C1, integration review)',
         expect(c1Runs, summary).toBeGreaterThanOrEqual(runs / 10);
         expect(refusedEdits, summary).toBeGreaterThan(0);
     }, 240_000);
+
+    it('replays every trial, failures included, from its seed', async () => {
+        const tight: TurnBudget = (queuedOps) => 10 + 5 * queuedOps;
+        const first = await runTrials(1285134439, 40, tight);
+        const again = await runTrials(1285134439, 40, tight);
+        expect(first.some((result) => !result.ok)).toBe(true);
+        expect(again).toEqual(first);
+    }, 120_000);
 });
