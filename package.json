@@ -27,7 +27,8 @@
         "test": "vitest run",
         "test:watch": "vitest",
         "supabase:drift": "node scripts/check-supabase-drift.mjs",
-        "migrations:mirror": "node scripts/build-apply-migrations.mjs"
+        "migrations:mirror": "node scripts/build-apply-migrations.mjs",
+        "ops:preflight": "node scripts/ops/prod-preflight.mjs"
     },
     "dependencies": {
         "@base-ui/react": "^1.9.0",
