@@ -11,11 +11,13 @@ const REQUIREMENTS = ['captcha', 'sentry'];
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
 export function makeVisit(fetchImpl, limits) {
-    return async (url) => {
+    return async (url, refuse = () => null) => {
         const hops = [];
         let current = url;
         try {
             for (;;) {
+                const refusal = refuse(current);
+                if (refusal) return { hops, error: refusal };
                 const res = await fetchImpl(current, {
                     method: 'GET',
                     redirect: 'manual',
@@ -140,19 +142,31 @@ export async function scanBundle(page, visit, limits) {
     };
     enqueue(entryScripts(page.body), page.url);
     let scanned = 0;
+    let budgetHit = false;
+    const refuse = (url) => {
+        if (new URL(url).origin !== origin) return `${url}: cross-origin JS not fetched`;
+        if (scanned >= limits.maxJsFiles) {
+            budgetHit = true;
+            return `${url}: JS fetch budget spent`;
+        }
+        scanned += 1;
+        return null;
+    };
+    let next = 0;
     let keyLength = null;
     let ingestHost = null;
-    while (scanned < queue.length && scanned < limits.maxJsFiles && (keyLength === null || ingestHost === null)) {
-        const jsUrl = queue[scanned];
-        const result = await visit(jsUrl);
-        scanned += 1;
+    while (next < queue.length && scanned < limits.maxJsFiles && (keyLength === null || ingestHost === null)) {
+        const jsUrl = queue[next];
+        next += 1;
+        const result = await visit(jsUrl, refuse);
         const final = finalHop(result);
         if (result.error || final.status !== 200) continue;
         keyLength ??= final.body.match(SITE_KEY)?.[1].length ?? null;
         ingestHost ??= final.body.match(DSN)?.[1] ?? null;
         enqueue(referencedScripts(final.body, jsUrl), jsUrl);
     }
-    return { scanned, capped: scanned === limits.maxJsFiles && scanned < queue.length, keyLength, ingestHost };
+    const capped = budgetHit || (scanned === limits.maxJsFiles && next < queue.length);
+    return { scanned, capped, keyLength, ingestHost };
 }
 
 function absent(check, scan, required, what) {

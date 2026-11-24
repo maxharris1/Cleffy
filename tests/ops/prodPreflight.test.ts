@@ -309,6 +309,30 @@ describe('prod preflight bundle scan', () => {
         expect(calls.map((c) => c.url)).not.toContain(`${WWW}/assets/far-F1.js`);
     });
 
+    it('does not follow a JS redirect to another origin', async () => {
+        const site = healthySite();
+        site[`${WWW}/assets/index-E1.js`] = moved('https://external.example.com/config.js');
+        site['https://external.example.com/config.js'] = js(`const sitekey="${KEY}";`);
+        const { calls, line } = await run(site);
+        const urls = calls.map((c) => c.url);
+        expect(urls).toContain(`${WWW}/assets/index-E1.js`);
+        expect(urls).not.toContain('https://external.example.com/config.js');
+        expect(line('captcha')?.status).toBe('INFO');
+    });
+
+    it('counts every JS redirect hop against maxJsFiles and reports scanned from the real fetch count', async () => {
+        const site = healthySite();
+        site[`${WWW}/assets/index-E1.js`] = moved('/assets/hop-1.js');
+        for (let i = 1; i < 6; i += 1) site[`${WWW}/assets/hop-${i}.js`] = moved(`/assets/hop-${i + 1}.js`);
+        site[`${WWW}/assets/hop-6.js`] = js(`const sitekey="${KEY}";`);
+        const limits = { ...LIMITS, maxJsFiles: 1 };
+        const { calls, line } = await run(site, limits, ['captcha']);
+        const jsCalls = calls.filter((c) => c.url.endsWith('.js'));
+        expect(jsCalls.length).toBe(1);
+        expect(line('captcha')?.status).toBe('FAIL');
+        expect(line('captcha')?.detail).toContain('the first 1 JS files (capped at 1)');
+    });
+
     it('sends the JS fetches as bare GETs too', async () => {
         const { calls } = await run(healthySite());
         const jsCalls = calls.filter((c) => c.url.endsWith('.js'));
