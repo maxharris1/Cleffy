@@ -35,7 +35,7 @@ function stubFetch(site: Site) {
         const url = String(input);
         calls.push({ url, init });
         const reply = site[url] ?? { status: 404, body: 'not found' };
-        return new Response(reply.status === 308 ? null : (reply.body ?? ''), {
+        return new Response(reply.body ?? null, {
             status: reply.status,
             headers: reply.headers,
         });
@@ -92,6 +92,28 @@ describe('prod preflight', () => {
         expect(line('utm-redirect')?.status).toBe('FAIL');
         expect(line('utm-redirect')?.detail).toContain('path / became /home');
         expect(exitCode).toBe(1);
+    });
+
+    it.each([300, 304, 305, 399])('treats a %i with Location as final and exits 1', async (status) => {
+        const site = healthySite();
+        for (const path of [...PAGES, `/?${UTM_QUERY}`])
+            site[`${BASE}${path}`] = { status, headers: { location: `${WWW}${path}` } };
+        const { line, exitCode, calls } = await run(site);
+        expect(calls.every((c) => c.url.startsWith(BASE))).toBe(true);
+        expect(line('pages')?.status).toBe('FAIL');
+        expect(line('pages')?.detail).toContain(`/ ${status}`);
+        expect(line('utm-redirect')?.status).toBe('FAIL');
+        expect(line('utm-redirect')?.detail).toContain(`landed on ${status}`);
+        expect(exitCode).toBe(1);
+    });
+
+    it.each([301, 302, 303, 307, 308])('follows a %i redirect', async (status) => {
+        const site = healthySite();
+        for (const path of [...PAGES, `/?${UTM_QUERY}`])
+            site[`${BASE}${path}`] = { status, headers: { location: `${WWW}${path}` } };
+        const { lines, exitCode } = await run(site);
+        expect(lines.map((l) => l.status)).toEqual(['OK', 'OK', 'OK']);
+        expect(exitCode).toBe(0);
     });
 
     it('reports INFO, not FAIL, when og:url names another host', async () => {

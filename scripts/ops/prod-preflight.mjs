@@ -7,6 +7,7 @@ export const UTM = { utm_source: 'preflight', utm_medium: 'check', utm_campaign:
 export const LIMITS = { timeoutMs: 10_000, maxRedirects: 5 };
 
 const USAGE = 'usage: npm run ops:preflight -- <base-url>';
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
 export function makeVisit(fetchImpl, limits) {
     return async (url) => {
@@ -21,7 +22,7 @@ export function makeVisit(fetchImpl, limits) {
                     signal: AbortSignal.timeout(limits.timeoutMs),
                 });
                 const location = res.headers.get('location');
-                const redirected = res.status >= 300 && res.status < 400 && location;
+                const redirected = REDIRECTS.has(res.status) && location;
                 const body = redirected ? '' : await res.text();
                 hops.push({ url: current, status: res.status, body });
                 if (!redirected) return { hops, error: null };
@@ -116,11 +117,12 @@ async function main() {
         args = parseArgs(process.argv.slice(2));
     } catch (err) {
         console.error(err instanceof Error ? err.message : String(err));
-        process.exit(2);
+        process.exitCode = 2;
+        return;
     }
     const { lines, exitCode } = await runPreflight(args);
     for (const { status, check, detail } of lines) console.log(`${status} ${check}: ${detail}`);
-    process.exit(exitCode);
+    process.exitCode = exitCode;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
