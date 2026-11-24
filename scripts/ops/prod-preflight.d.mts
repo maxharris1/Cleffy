@@ -7,6 +7,7 @@ export interface Line {
 export interface Hop {
     url: string;
     status: number;
+    headers: Headers;
     body: string;
 }
 export interface Visit {
@@ -32,6 +33,7 @@ export function makeVisit(fetchImpl: typeof fetch, limits: Limits): (url: string
 export function checkPages(visitsByPath: Array<[string, Visit]>): Line;
 export function checkUtmRedirect(requestUrl: string, visit: Visit): Line;
 export function checkCanonical(visit: Visit): Line;
+export function checkHeaders(visit: Visit): Line;
 export function scanBundle(page: Hop, visit: (url: string) => Promise<Visit>, limits: Limits): Promise<Scan>;
 export function checkCaptcha(scan: Scan | null, required: boolean): Line;
 export function checkSentry(scan: Scan | null, required: boolean): Line;

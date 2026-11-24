@@ -27,7 +27,7 @@ export function makeVisit(fetchImpl, limits) {
                 const location = res.headers.get('location');
                 const redirected = REDIRECTS.has(res.status) && location;
                 const body = redirected ? '' : await res.text();
-                hops.push({ url: current, status: res.status, body });
+                hops.push({ url: current, status: res.status, headers: res.headers, body });
                 if (!redirected) return { hops, error: null };
                 if (hops.length > limits.maxRedirects) {
                     return { hops, error: `more than ${limits.maxRedirects} redirects` };
@@ -91,6 +91,76 @@ export function checkCanonical(visit) {
         return { status: 'INFO', check: 'canonical-host', detail: `final host ${host}; og:url host ${ogHost}` };
     }
     return { status: 'OK', check: 'canonical-host', detail: `final host ${host} matches og:url` };
+}
+
+const REQUIRED_HEADERS = [
+    ['content-security-policy', null],
+    ['strict-transport-security', null],
+    ['x-content-type-options', 'nosniff'],
+    ['x-frame-options', 'DENY'],
+    ['cross-origin-opener-policy', null],
+    ['permissions-policy', null],
+];
+
+const TURNSTILE = 'https://challenges.cloudflare.com';
+const SENTRY_INGEST =
+    /^https:\/\/(\*\.|[a-z0-9-]+\.)([a-z0-9-]+\.)*ingest\.([a-z0-9-]+\.)?sentry\.io(:(\d+|\*))?(\/[^\s,;?#]*)?$/i;
+const REQUIRED_CSP_SOURCES = [
+    [['script-src', 'default-src'], TURNSTILE, (source) => source === TURNSTILE],
+    [['frame-src', 'child-src', 'default-src'], TURNSTILE, (source) => source === TURNSTILE],
+    [['connect-src', 'default-src'], 'a Sentry ingest host', (source) => SENTRY_INGEST.test(source)],
+];
+
+function parseCsp(csp) {
+    return csp
+        .split(',')
+        .map((policy) => {
+            const directives = new Map();
+            for (const part of policy.split(';')) {
+                const [name, ...sources] = part.trim().split(/\s+/);
+                const key = name.toLowerCase();
+                if (name && !directives.has(key)) directives.set(key, sources);
+            }
+            return directives;
+        })
+        .filter((directives) => directives.size > 0);
+}
+
+function allows(policy, chain, matches) {
+    const effective = chain.find((name) => policy.has(name));
+    return effective === undefined || policy.get(effective).some(matches);
+}
+
+function headerProblems(headers) {
+    return REQUIRED_HEADERS.flatMap(([name, expected]) => {
+        const actual = headers.get(name);
+        if (actual === null) return [`missing ${name}`];
+        if (expected !== null && actual.trim().toLowerCase() !== expected.toLowerCase())
+            return [`${name} is ${actual}`];
+        return [];
+    });
+}
+
+function cspProblems(csp) {
+    const policies = parseCsp(csp);
+    return REQUIRED_CSP_SOURCES.filter(
+        ([chain, , matches]) =>
+            !policies.some((policy) => (policy.get(chain[0]) ?? []).some(matches)) ||
+            !policies.every((policy) => allows(policy, chain, matches)),
+    ).map(([[directive], wanted]) => `CSP ${directive} lacks ${wanted}`);
+}
+
+export function checkHeaders(visit) {
+    if (visit.error) return { status: 'FAIL', check: 'security-headers', detail: visit.error };
+    const { headers } = finalHop(visit);
+    const csp = headers.get('content-security-policy');
+    const problems = [...headerProblems(headers), ...(csp === null ? [] : cspProblems(csp))];
+    if (problems.length > 0) return { status: 'FAIL', check: 'security-headers', detail: problems.join('; ') };
+    return {
+        status: 'OK',
+        check: 'security-headers',
+        detail: `${REQUIRED_HEADERS.length} headers present; CSP allows Turnstile and Sentry ingest`,
+    };
 }
 
 const TAG = /<(script|link)\s[^>]*>/gi;
@@ -203,6 +273,7 @@ export async function runPreflight({ baseUrl, require = [], fetchImpl = fetch, l
         checkPages(pageVisits),
         checkUtmRedirect(utmUrl, utmVisit),
         checkCanonical(home),
+        checkHeaders(home),
         checkCaptcha(scan, require.includes('captcha')),
         checkSentry(scan, require.includes('sentry')),
     ];

@@ -20,9 +20,29 @@ const HEAD_TAGS = [
     '<link crossorigin href="/assets/vendor-V1.js" rel="modulepreload">',
 ].join('');
 
-const page = (ogUrl = `${WWW}/`, head = HEAD_TAGS): Reply => ({
+const CSP = {
+    'default-src': "'self'",
+    'script-src': "'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com",
+    'connect-src': "'self' https://abc.supabase.co https://*.ingest.sentry.io https://*.ingest.us.sentry.io",
+    'frame-src': 'https://challenges.cloudflare.com',
+    'frame-ancestors': "'none'",
+};
+const cspOf = (directives: Record<string, string>) =>
+    Object.entries(directives)
+        .map(([name, sources]) => `${name} ${sources}`)
+        .join('; ');
+const SECURITY_HEADERS: Record<string, string> = {
+    'content-security-policy': cspOf(CSP),
+    'strict-transport-security': 'max-age=63072000; includeSubDomains',
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'cross-origin-opener-policy': 'same-origin',
+    'permissions-policy': 'camera=(), microphone=()',
+};
+
+const page = (ogUrl = `${WWW}/`, head = HEAD_TAGS, headers = SECURITY_HEADERS): Reply => ({
     status: 200,
-    headers: { 'content-type': 'text/html' },
+    headers: { 'content-type': 'text/html', ...headers },
     body: `<html><head><meta property="og:url" content="${ogUrl}">${head}</head><body></body></html>`,
 });
 const js = (body: string): Reply => ({ status: 200, headers: { 'content-type': 'text/javascript' }, body });
@@ -80,8 +100,15 @@ async function run(site: Site, limits = LIMITS, require: Array<'captcha' | 'sent
 describe('prod preflight', () => {
     it('passes a healthy site with one line per check and exit 0', async () => {
         const { lines, exitCode, line } = await run(healthySite());
-        expect(lines.map((l) => l.check)).toEqual(['pages', 'utm-redirect', 'canonical-host', 'captcha', 'sentry']);
-        expect(lines.map((l) => l.status)).toEqual(['OK', 'OK', 'OK', 'OK', 'OK']);
+        expect(lines.map((l) => l.check)).toEqual([
+            'pages',
+            'utm-redirect',
+            'canonical-host',
+            'security-headers',
+            'captcha',
+            'sentry',
+        ]);
+        expect(lines.map((l) => l.status)).toEqual(['OK', 'OK', 'OK', 'OK', 'OK', 'OK']);
         expect(line('utm-redirect')?.detail).toContain(`308 ${BASE}/?${UTM_QUERY} -> 200 ${WWW}/?${UTM_QUERY}`);
         expect(line('canonical-host')?.detail).toContain('www.cleffy.io');
         expect(exitCode).toBe(0);
@@ -91,7 +118,7 @@ describe('prod preflight', () => {
         const site = healthySite();
         site[`${WWW}/refunds`] = { status: 404, body: 'gone' };
         const { line, exitCode, lines } = await run(site);
-        expect(lines).toHaveLength(5);
+        expect(lines).toHaveLength(6);
         expect(line('pages')?.status).toBe('FAIL');
         expect(line('pages')?.detail).toContain('/refunds 404');
         expect(line('pages')?.detail).not.toContain('/terms');
@@ -139,7 +166,7 @@ describe('prod preflight', () => {
         for (const path of [...PAGES, `/?${UTM_QUERY}`])
             site[`${BASE}${path}`] = { status, headers: { location: `${WWW}${path}` } };
         const { lines, exitCode } = await run(site);
-        expect(lines.map((l) => l.status)).toEqual(['OK', 'OK', 'OK', 'OK', 'OK']);
+        expect(lines.map((l) => l.status)).toEqual(['OK', 'OK', 'OK', 'OK', 'OK', 'OK']);
         expect(exitCode).toBe(0);
     });
 
@@ -160,6 +187,125 @@ describe('prod preflight', () => {
         const { line, exitCode } = await run(site);
         expect(line('canonical-host')?.status).toBe('FAIL');
         expect(line('canonical-host')?.detail).toContain('redirects');
+        expect(exitCode).toBe(1);
+    });
+
+    const withHome = (headers: Record<string, string>) => {
+        const site = healthySite();
+        site[`${WWW}/`] = page(`${WWW}/`, HEAD_TAGS, headers);
+        return site;
+    };
+    const without = (name: string) => Object.fromEntries(Object.entries(SECURITY_HEADERS).filter(([k]) => k !== name));
+
+    it.each(Object.keys(SECURITY_HEADERS))('fails security-headers when %s is missing', async (name) => {
+        const { line, exitCode } = await run(withHome(without(name)));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain(`missing ${name}`);
+        expect(exitCode).toBe(1);
+    });
+
+    it.each([
+        ['x-content-type-options', 'sniff'],
+        ['x-frame-options', 'SAMEORIGIN'],
+    ])('fails security-headers when %s is %s', async (name, value) => {
+        const { line, exitCode } = await run(withHome({ ...SECURITY_HEADERS, [name]: value }));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain(`${name} is ${value}`);
+        expect(exitCode).toBe(1);
+    });
+
+    it.each([
+        ['script-src', "'self'", 'https://challenges.cloudflare.com'],
+        ['frame-src', "'self'", 'https://challenges.cloudflare.com'],
+        ['connect-src', "'self' https://abc.supabase.co https://sentry.io", 'a Sentry ingest host'],
+    ])('fails security-headers when CSP %s lacks its source', async (directive, sources, wanted) => {
+        const csp = cspOf({ ...CSP, [directive]: sources });
+        const { line, exitCode } = await run(withHome({ ...SECURITY_HEADERS, 'content-security-policy': csp }));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain(`CSP ${directive} lacks ${wanted}`);
+        expect(exitCode).toBe(1);
+    });
+
+    it('fails security-headers when a CSP directive is absent, even if default-src names the source', async () => {
+        const { 'frame-src': _dropped, ...rest } = CSP;
+        const csp = cspOf({ ...rest, 'default-src': "'self' https://challenges.cloudflare.com" });
+        const { line } = await run(withHome({ ...SECURITY_HEADERS, 'content-security-policy': csp }));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain('CSP frame-src lacks https://challenges.cloudflare.com');
+    });
+
+    const withCsp = (csp: string) => withHome({ ...SECURITY_HEADERS, 'content-security-policy': csp });
+
+    it.each([
+        ['script-src', "script-src 'none'; " + cspOf(CSP)],
+        ['frame-src', "frame-src 'none'; " + cspOf(CSP)],
+        ['connect-src', "connect-src 'none'; " + cspOf(CSP)],
+        ['script-src', "SCRIPT-SRC 'none'; " + cspOf(CSP)],
+    ])('fails security-headers when an earlier duplicate %s blocks the source', async (directive, csp) => {
+        const { line, exitCode } = await run(withCsp(csp));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain(`CSP ${directive} lacks`);
+        expect(exitCode).toBe(1);
+    });
+
+    it('ignores a later duplicate directive, as browsers do', async () => {
+        const { line } = await run(withCsp(`${cspOf(CSP)}; script-src 'none'; connect-src 'none'`));
+        expect(line('security-headers')?.status).toBe('OK');
+    });
+
+    it.each([
+        ["default-src 'none'", ['script-src', 'frame-src', 'connect-src']],
+        ["script-src 'self'", ['script-src']],
+        ["child-src 'self'", ['frame-src']],
+        ['connect-src https://bad.example', ['connect-src']],
+    ])('fails security-headers when a second policy "%s" blocks a source', async (second, blocked) => {
+        const { line, exitCode } = await run(withCsp(`${cspOf(CSP)}, ${second}`));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        for (const directive of blocked) expect(line('security-headers')?.detail).toContain(`CSP ${directive} lacks`);
+        expect(exitCode).toBe(1);
+    });
+
+    it('passes security-headers when a second policy leaves the sources unrestricted', async () => {
+        const { line, exitCode } = await run(withCsp(`${cspOf(CSP)}, frame-ancestors 'none'; img-src 'self'`));
+        expect(line('security-headers')?.status).toBe('OK');
+        expect(exitCode).toBe(0);
+    });
+
+    it.each([
+        'https://bad?.ingest.sentry.io',
+        'https://bad_host.ingest.sentry.io',
+        'https://.ingest.sentry.io',
+        'https://a..ingest.sentry.io',
+        'https://ingest.sentry.io',
+        'https://evil.com/.ingest.sentry.io',
+        'https://o1.ingest.sentry.io.evil.com',
+        'http://o1.ingest.sentry.io',
+        'https://o1.ingest.sentry.io:abc',
+        'https://*.*.ingest.sentry.io',
+        'https://o1.ingest.sentry.io/api?x',
+    ])('fails security-headers when connect-src only has the invalid Sentry source %s', async (source) => {
+        const { line, exitCode } = await run(withCsp(cspOf({ ...CSP, 'connect-src': `'self' ${source}` })));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain('CSP connect-src lacks a Sentry ingest host');
+        expect(exitCode).toBe(1);
+    });
+
+    it.each([
+        'https://o123.ingest.sentry.io',
+        'https://o123.ingest.us.sentry.io/',
+        'https://*.ingest.de.sentry.io',
+        'https://o123.ingest.sentry.io:443/api/',
+    ])('accepts the valid Sentry host-source %s', async (source) => {
+        const { line } = await run(withCsp(cspOf({ ...CSP, 'connect-src': `'self' ${source}` })));
+        expect(line('security-headers')?.status).toBe('OK');
+    });
+
+    it('reads security headers from the final response, not the redirect', async () => {
+        const site = withHome({});
+        site[`${BASE}/`] = { status: 308, headers: { location: `${WWW}/`, ...SECURITY_HEADERS } };
+        const { line, exitCode } = await run(site);
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain('missing content-security-policy');
         expect(exitCode).toBe(1);
     });
 
@@ -186,7 +332,7 @@ describe('prod preflight', () => {
             fetchImpl: hanging,
             limits: { ...LIMITS, timeoutMs: 20 },
         });
-        expect(result.lines.map((l) => l.status)).toEqual(['FAIL', 'FAIL', 'FAIL', 'FAIL', 'FAIL']);
+        expect(result.lines.map((l) => l.status)).toEqual(['FAIL', 'FAIL', 'FAIL', 'FAIL', 'FAIL', 'FAIL']);
         expect(result.exitCode).toBe(1);
     });
 
