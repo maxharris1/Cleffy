@@ -2769,6 +2769,44 @@ describe('charge.refunded', () => {
         expect(store.cancelledNow).toEqual([]);
     });
 
+    describe('is idempotent', () => {
+        it('answers a redelivery of the same event as a duplicate and cancels once', async () => {
+            const first = await refund(refundEvent('evt_refund'));
+            const again = await refund(refundEvent('evt_refund'));
+
+            expect(first.body, 'the first delivery cancels').toMatchObject({ applied: 'subscription_cancelled' });
+            expect(again).toEqual({ status: 200, body: { received: true, duplicate: true } });
+            expect(store.cancelledNow, 'one cancel across both deliveries').toEqual(['sub_1']);
+        });
+
+        it('cancels once when the redelivery comes after the cancel landed but before the claim was finished', async () => {
+            const markDone = store.markEventDone;
+            store.markEventDone = async () => {
+                throw new Error('connection reset');
+            };
+            await expect(refund(refundEvent('evt_refund'))).rejects.toThrow('connection reset');
+            await store.releaseEvent('evt_refund');
+            store.markEventDone = markDone;
+
+            const again = await refund(refundEvent('evt_refund'));
+
+            expect(again).toEqual({ status: 200, body: { received: true, ignored: 'already_canceled' } });
+            expect(store.cancelledNow, 'the redelivery reads the cancel and does not repeat it').toEqual(['sub_1']);
+            expect(store.events.get('evt_refund')?.status, 'the redelivery finishes the claim').toBe('done');
+        });
+
+        it('cancels once for two refunds of different charges on the same subscription', async () => {
+            store.chargeSubscriptions.set('ch_2', { kind: 'subscription', subscriptionId: 'sub_1' });
+
+            const first = await refund(refundEvent('evt_refund_1'));
+            const second = await refund(refundEvent('evt_refund_2', { id: 'ch_2' }));
+
+            expect(first.body, 'the first refund cancels').toMatchObject({ applied: 'subscription_cancelled' });
+            expect(second).toEqual({ status: 200, body: { received: true, ignored: 'already_canceled' } });
+            expect(store.cancelledNow, 'one cancel across both refunds').toEqual(['sub_1']);
+        });
+    });
+
     it('routes each mode to its own store, so a test refund cancels nothing live and a live one nothing in test', async () => {
         const stores = { test: new FakeStore(), live: new FakeStore() };
         for (const [mode, modeStore] of Object.entries(stores)) {

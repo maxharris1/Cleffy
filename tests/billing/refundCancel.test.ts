@@ -115,6 +115,18 @@ describe('cancelSubscriptionNow', () => {
         expect(calls).toEqual([['subscriptions.cancel', 'sub_1', {}, { idempotencyKey: 'refund-cancel:sub_1' }]]);
     });
 
+    it('sends the same key for every cancel of one subscription, so Stripe applies at most one', async () => {
+        const { client, calls } = fakeStripe();
+        await cancelSubscriptionNow(client, 'sub_1');
+        await cancelSubscriptionNow(client, 'sub_1');
+        await cancelSubscriptionNow(client, 'sub_2');
+        expect(calls.map((call) => call[3])).toEqual([
+            { idempotencyKey: 'refund-cancel:sub_1' },
+            { idempotencyKey: 'refund-cancel:sub_1' },
+            { idempotencyKey: 'refund-cancel:sub_2' },
+        ]);
+    });
+
     it('answers already_ended for a subscription Stripe no longer has', async () => {
         const { client } = fakeStripe({}, {}, { cancel: stripeError('resource_missing') });
         expect(await cancelSubscriptionNow(client, 'sub_1')).toBe('already_ended');
