@@ -103,8 +103,11 @@ const REQUIRED_HEADERS = [
 ];
 
 const TURNSTILE = 'https://challenges.cloudflare.com';
-const HOST_SOURCE =
-    /^https:\/\/((?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::(\d+|\*))?((?:\/(?:[\w.~!$&'()*+=:@-]|%[0-9a-f]{2})*)*)$/i;
+const PCHAR = String.raw`(?:[\w.~!$&'()*+=:@-]|%[0-9a-f]{2})`;
+const HOST_SOURCE = new RegExp(
+    String.raw`^https:\/\/((?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::(\d+|\*))?((?:\/(?:${PCHAR}+(?:\/${PCHAR}*)*)?)?)$`,
+    'i',
+);
 const SENTRY_INGEST_HOST = /^(\*|[a-z0-9-]+)\.([a-z0-9-]+\.)*ingest\.([a-z0-9-]+\.)?sentry\.io$/;
 const isTurnstile = ({ host, port, path }) => host === 'challenges.cloudflare.com' && port === '443' && path === '/';
 const REQUIRED_CSP_SOURCES = [
@@ -115,6 +118,7 @@ const REQUIRED_CSP_SOURCES = [
 
 function parseSource(source) {
     const match = HOST_SOURCE.exec(source);
+    if (Number(match?.[2]) > 65535) return null;
     return match && { host: match[1].toLowerCase(), port: match[2] ?? '443', path: match[3] || '/' };
 }
 
@@ -124,7 +128,7 @@ function parseCsp(csp) {
         .map((policy) => {
             const directives = new Map();
             for (const part of policy.split(';')) {
-                const [name, ...sources] = part.trim().split(/\s+/);
+                const [name, ...sources] = part.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').split(/[\t\n\f\r ]+/);
                 const key = name.toLowerCase();
                 if (name && !directives.has(key)) directives.set(key, sources.map(parseSource).filter(Boolean));
             }
@@ -159,6 +163,7 @@ function headerProblems(headers) {
 }
 
 function cspProblems(csp) {
+    if (/[\u0080-\uffff]/.test(csp)) return ['CSP has non-ASCII characters'];
     const policies = parseCsp(csp);
     return REQUIRED_CSP_SOURCES.filter(([chain, , isCandidate]) => {
         const candidates = policies.flatMap((policy) => policy.get(chain[0]) ?? []).filter(isCandidate);

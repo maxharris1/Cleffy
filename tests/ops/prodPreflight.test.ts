@@ -288,6 +288,9 @@ describe('prod preflight', () => {
         'https://o1.ingest.sentry.io/%zz',
         'https://o1.ingest.sentry.io/a|b',
         'https://o1.ingest.sentry.io/a^b',
+        'https://o1.ingest.sentry.io//api/envelope/',
+        'https://o1.ingest.sentry.io:99999',
+        'https://o1.ingest.sentry.io:65536',
     ])('fails security-headers when connect-src only has the invalid Sentry source %s', async (source) => {
         const { line, exitCode } = await run(withCsp(cspOf({ ...CSP, 'connect-src': `'self' ${source}` })));
         expect(line('security-headers')?.status).toBe('FAIL');
@@ -300,9 +303,32 @@ describe('prod preflight', () => {
         'https://o123.ingest.us.sentry.io/',
         'https://*.ingest.de.sentry.io',
         'https://o123.ingest.sentry.io:443/api/',
+        'https://o123.ingest.sentry.io/api//envelope/',
+        'https://o123.ingest.sentry.io:8443',
+        'https://o123.ingest.sentry.io:65535',
     ])('accepts the valid Sentry host-source %s', async (source) => {
         const { line } = await run(withCsp(cspOf({ ...CSP, 'connect-src': `'self' ${source}` })));
         expect(line('security-headers')?.status).toBe('OK');
+    });
+
+    const turnstileOnly = `script-src ${TURNSTILE_SOURCES}; frame-src ${TURNSTILE_SOURCES}`;
+    it.each([
+        [
+            'U+00A0 between sources',
+            `default-src 'none'; ${turnstileOnly}; connect-src https://o1.ingest.sentry.io\u00a0https://a.b`,
+        ],
+        [
+            'U+00A0 after a directive name',
+            `default-src 'none'; ${turnstileOnly}; connect-src\u00a0https://o1.ingest.sentry.io`,
+        ],
+        [
+            'U+000B after a directive name',
+            `default-src 'none'; ${turnstileOnly}; connect-src\u000bhttps://o1.ingest.sentry.io`,
+        ],
+    ])('fails security-headers when %s, which CSP does not treat as whitespace, separates tokens', async (_, csp) => {
+        const { line, exitCode } = await run(withCsp(csp));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(exitCode).toBe(1);
     });
 
     const withConnect = (first: string, second: string) =>
