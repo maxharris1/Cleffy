@@ -66,6 +66,30 @@ const xorshift = (seed: number): Random => {
     };
 };
 
+/**
+ * Each trial's two streams, drawn up front from the run seed: `choose` picks
+ * the script, `timing` the yields. The number of requests a trial makes
+ * depends on the clock, so keeping them apart lets the seed and trial alone
+ * fix what A and B do, however earlier trials or this one interleaved.
+ */
+const trialStreams = (seed: number, runs: number): { choose: Random; timing: Random }[] => {
+    const random = xorshift(seed);
+    return Array.from({ length: runs }, () => ({
+        choose: xorshift(Math.floor(random() * 4294967296)),
+        timing: xorshift(Math.floor(random() * 4294967296)),
+    }));
+};
+
+const BASE_TURNS = 120_000;
+const TURNS_PER_OP = 30_000;
+/**
+ * Turns one settle may take before it counts as a livelock. Over 6000 trials
+ * no settle took more than 12000 turns plus 3000 per queued op (the slowest,
+ * 21206 turns with 3 ops queued); this allows ten times that. A livelock
+ * never drains, so any finite budget trips it.
+ */
+const turnBudget = (queuedOps: number): number => BASE_TURNS + TURNS_PER_OP * queuedOps;
+
 /** Up to `max` yields, each a microtask, a timer or an immediate (fake-indexeddb settles on the last two). */
 const pause = async (random: Random, max: number): Promise<void> => {
     const n = Math.floor(random() * (max + 1));
@@ -286,12 +310,12 @@ const expectedFor = (
     }
 };
 
-const trial = async (random: Random): Promise<Trial> => {
+const trial = async (choose: Random, timing: Random): Promise<Trial> => {
     const docId = crypto.randomUUID();
     const db = new ScribblerDb(`c1-interleave-${docId}`);
     const store = new AnnotationStore(db, docId);
     store.setAuthor(USER);
-    const server = new FlakyServer(random);
+    const server = new FlakyServer(timing);
     const refused: SyncRejection[] = [];
     const engine = new SyncEngine({
         db,
@@ -308,7 +332,7 @@ const trial = async (random: Random): Promise<Trial> => {
     const write = writes.writeMany.bind(store);
     writes.writeMany = async (...args) => {
         await write(...args);
-        await pause(random, 4);
+        await pause(timing, 4);
     };
 
     const log: Queued[] = [];
@@ -326,9 +350,10 @@ const trial = async (random: Random): Promise<Trial> => {
     });
 
     /** Until nothing is in flight; the backoff timer is run early rather than waited for. */
-    const settle = async (): Promise<string | null> => {
+    const settle = async (queuedOps: number): Promise<string | null> => {
+        const budget = turnBudget(queuedOps);
         let idleWithQueue = 0;
-        for (let i = 0; i < 20_000; i++) {
+        for (let i = 0; i < budget; i++) {
             await new Promise<void>((resolve) => setImmediate(resolve));
             if (internals.flushing || internals.pulling || server.inFlight > 0) {
                 idleWithQueue = 0;
@@ -348,21 +373,21 @@ const trial = async (random: Random): Promise<Trial> => {
                 return `stranded: ${await db.ops.count()} op(s) queued with no flush or retry pending`;
             }
         }
-        return 'stuck: still busy after 20000 turns';
+        return `stuck: still busy after ${budget} turns (${queuedOps} ops queued)`;
     };
 
     const plan = Object.fromEntries(
         MARKS.map((id) => {
-            const pick = random();
+            const pick = choose();
             return [id, (pick < 0.6 ? 'erase' : pick < 0.8 ? 'edit' : 'none') as Collaborator];
         }),
     ) as Record<MarkId, Collaborator>;
-    const steps = 2 + Math.floor(random() * 7);
-    const reconnectAt = Math.floor(random() * (steps + 1));
-    const collaboratorAt = Math.floor(random() * (reconnectAt + 1));
+    const steps = 2 + Math.floor(choose() * 7);
+    const reconnectAt = Math.floor(choose() * (steps + 1));
+    const collaboratorAt = Math.floor(choose() * (reconnectAt + 1));
     // QA's C1 script, in most runs: A erases a note, Undoes, edits it — and
     // B has erased that note.
-    const c1Mark = random() < 0.6 ? MARKS[Math.floor(random() * MARKS.length)]! : null;
+    const c1Mark = choose() < 0.6 ? MARKS[Math.floor(choose() * MARKS.length)]! : null;
     if (c1Mark) {
         plan[c1Mark] = 'erase';
     }
@@ -404,8 +429,10 @@ const trial = async (random: Random): Promise<Trial> => {
      * is built from the mark as it is when the action starts.
      */
     const act = (kind: string, id: string): Promise<unknown> => {
+        // Drawn whether or not it is used, so the script does not depend on what the interleaving hid.
+        const fallback = choose() < 0.5 ? 'undo' : 'redo';
         if ((kind === 'erase' || kind === 'edit') && !visible(id)) {
-            kind = random() < 0.5 ? 'undo' : 'redo';
+            kind = fallback;
         }
         script.push(kind === 'undo' || kind === 'redo' ? kind : `${kind} ${id}`);
         let action: Promise<unknown>;
@@ -422,7 +449,7 @@ const trial = async (random: Random): Promise<Trial> => {
             default: {
                 const text = `A edit ${++edits}`;
                 action = (async () => {
-                    await pause(random, 15); // the note's editor is open; Done is pressed after
+                    await pause(timing, 15); // the note's editor is open; Done is pressed after
                     const current = store.get(id);
                     const before = log.length;
                     await store.update(id, {
@@ -443,7 +470,7 @@ const trial = async (random: Random): Promise<Trial> => {
         for (const id of MARKS) {
             await store.create(note(docId, id));
         }
-        const setup = await settle();
+        const setup = await settle(MARKS.length);
         if (setup) {
             return { ok: false, report: `setup ${setup}`, c1: false, editRefused: false };
         }
@@ -460,17 +487,17 @@ const trial = async (random: Random): Promise<Trial> => {
             if (c1Mark && step < 3) {
                 await act(['erase', 'undo', 'edit'][step]!, c1Mark);
             } else {
-                const pick = random();
-                const id = MARKS[Math.floor(random() * MARKS.length)]!;
+                const pick = choose();
+                const id = MARKS[Math.floor(choose() * MARKS.length)]!;
                 await act(pick < 0.3 ? 'erase' : pick < 0.55 ? 'undo' : pick < 0.7 ? 'redo' : 'edit', id);
             }
-            await pause(random, 10);
+            await pause(timing, 10);
         }
         if (!reconnected) {
             reconnect();
         }
         await Promise.all(pending);
-        const quiet = await settle();
+        const quiet = await settle(log.length);
         recording = false;
         // What a later pull would bring: A must then show the server's rows.
         await engine.sync();
@@ -525,10 +552,11 @@ describe('Reconcile under randomized interleavings (QA C1, integration review)',
     it('converges, and keeps every post-restore edit against a collaborator’s erase, in 150 random runs', async () => {
         const seed = Number(process.env['C1_INTERLEAVE_SEED'] ?? Math.floor(Math.random() * 2 ** 31));
         const runs = Number(process.env['C1_INTERLEAVE_RUNS'] ?? 150);
-        const random = xorshift(seed);
+        const streams = trialStreams(seed, runs);
+        let timing = streams[0]!.timing;
         const snapshot = snapshotService.ensureDayStartingSnapshot;
         vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
-            await pause(random, 6);
+            await pause(timing, 6);
             return snapshot(...args);
         });
 
@@ -536,11 +564,14 @@ describe('Reconcile under randomized interleavings (QA C1, integration review)',
         let c1Runs = 0;
         let refusedEdits = 0;
         for (let run = 0; run < runs; run++) {
-            const result = await trial(random);
+            timing = streams[run]!.timing;
+            const result = await trial(streams[run]!.choose, timing);
             c1Runs += result.c1 ? 1 : 0;
             refusedEdits += result.editRefused ? 1 : 0;
             if (!result.ok) {
-                failures.push(`run ${run}: ${result.report}`);
+                failures.push(
+                    `seed ${seed} trial ${run}: ${result.report}\n    replay: C1_INTERLEAVE_SEED=${seed} npx vitest run src/sync/reconcileInterleaving.test.ts`,
+                );
             }
         }
         const summary = `seed ${seed}: ${runs} runs, ${c1Runs} decided by the C1 rule, ${refusedEdits} with an edit begun on a note that was gone by Done`;
