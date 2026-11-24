@@ -24,7 +24,7 @@ export function makeVisit(fetchImpl, limits) {
                 const location = res.headers.get('location');
                 const redirected = REDIRECTS.has(res.status) && location;
                 const body = redirected ? '' : await res.text();
-                hops.push({ url: current, status: res.status, body });
+                hops.push({ url: current, status: res.status, headers: res.headers, body });
                 if (!redirected) return { hops, error: null };
                 if (hops.length > limits.maxRedirects) {
                     return { hops, error: `more than ${limits.maxRedirects} redirects` };
@@ -90,12 +90,73 @@ export function checkCanonical(visit) {
     return { status: 'OK', check: 'canonical-host', detail: `final host ${host} matches og:url` };
 }
 
+const REQUIRED_HEADERS = [
+    ['content-security-policy', null],
+    ['strict-transport-security', null],
+    ['x-content-type-options', 'nosniff'],
+    ['x-frame-options', 'DENY'],
+    ['cross-origin-opener-policy', null],
+    ['permissions-policy', null],
+];
+
+const TURNSTILE = 'https://challenges.cloudflare.com';
+const SENTRY_INGEST = /^https:\/\/[^/]+\.ingest\.([a-z]+\.)?sentry\.io\/?$/i;
+const REQUIRED_CSP_SOURCES = [
+    ['script-src', TURNSTILE, (source) => source === TURNSTILE],
+    ['frame-src', TURNSTILE, (source) => source === TURNSTILE],
+    ['connect-src', 'a Sentry ingest host', (source) => SENTRY_INGEST.test(source)],
+];
+
+function parseCsp(csp) {
+    const directives = new Map();
+    for (const part of csp.split(';')) {
+        const [name, ...sources] = part.trim().split(/\s+/);
+        if (name) directives.set(name.toLowerCase(), sources);
+    }
+    return directives;
+}
+
+function headerProblems(headers) {
+    return REQUIRED_HEADERS.flatMap(([name, expected]) => {
+        const actual = headers.get(name);
+        if (actual === null) return [`missing ${name}`];
+        if (expected !== null && actual.trim().toLowerCase() !== expected.toLowerCase())
+            return [`${name} is ${actual}`];
+        return [];
+    });
+}
+
+function cspProblems(csp) {
+    const directives = parseCsp(csp);
+    return REQUIRED_CSP_SOURCES.filter(
+        ([directive, , matches]) => !(directives.get(directive) ?? []).some(matches),
+    ).map(([directive, wanted]) => `CSP ${directive} lacks ${wanted}`);
+}
+
+export function checkHeaders(visit) {
+    if (visit.error) return { status: 'FAIL', check: 'security-headers', detail: visit.error };
+    const { headers } = finalHop(visit);
+    const csp = headers.get('content-security-policy');
+    const problems = [...headerProblems(headers), ...(csp === null ? [] : cspProblems(csp))];
+    if (problems.length > 0) return { status: 'FAIL', check: 'security-headers', detail: problems.join('; ') };
+    return {
+        status: 'OK',
+        check: 'security-headers',
+        detail: `${REQUIRED_HEADERS.length} headers present; CSP allows Turnstile and Sentry ingest`,
+    };
+}
+
 export async function runPreflight({ baseUrl, fetchImpl = fetch, limits = LIMITS }) {
     const visit = makeVisit(fetchImpl, limits);
     const pageVisits = await Promise.all(PAGES.map(async (path) => [path, await visit(new URL(path, baseUrl).href)]));
     const utmUrl = new URL(`/?${new URLSearchParams(UTM)}`, baseUrl).href;
     const home = pageVisits[0][1];
-    const lines = [checkPages(pageVisits), checkUtmRedirect(utmUrl, await visit(utmUrl)), checkCanonical(home)];
+    const lines = [
+        checkPages(pageVisits),
+        checkUtmRedirect(utmUrl, await visit(utmUrl)),
+        checkCanonical(home),
+        checkHeaders(home),
+    ];
     return { lines, exitCode: lines.some((l) => l.status === 'FAIL') ? 1 : 0 };
 }
 

@@ -7,6 +7,7 @@ export interface Line {
 export interface Hop {
     url: string;
     status: number;
+    headers: Headers;
     body: string;
 }
 export interface Visit {
@@ -24,6 +25,7 @@ export function makeVisit(fetchImpl: typeof fetch, limits: Limits): (url: string
 export function checkPages(visitsByPath: Array<[string, Visit]>): Line;
 export function checkUtmRedirect(requestUrl: string, visit: Visit): Line;
 export function checkCanonical(visit: Visit): Line;
+export function checkHeaders(visit: Visit): Line;
 export function runPreflight(options: {
     baseUrl: string;
     fetchImpl?: typeof fetch;

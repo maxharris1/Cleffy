@@ -9,6 +9,7 @@ It is read-only. Every request is a plain `GET` with `redirect: 'manual'`, `cred
 - `pages`: `/`, `/try`, `/privacy`, `/terms`, `/refunds` and `/copyright` each answer 200 after redirects. The line names every path that does not.
 - `utm-redirect`: `<base>/?utm_source=preflight&utm_medium=check&utm_campaign=preflight` lands on a 200 with the same path and all three `utm_` tags. The line prints the redirect chain, for example `308 https://cleffy.io/?… -> 200 https://www.cleffy.io/?…`.
 - `canonical-host`: the host `/` lands on. It is `INFO`, not `FAIL`, when the page's `og:url` names a different host or has none. It fails only when `/` cannot be reached.
+- `security-headers`: the response `/` lands on sends `Content-Security-Policy`, `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy` and `Permissions-Policy`. The CSP's own `script-src` and `frame-src` list `https://challenges.cloudflare.com` for Turnstile, and its `connect-src` lists a Sentry ingest host such as `https://*.ingest.sentry.io`. A source in `default-src` does not count. The line names every missing header, wrong value and missing source.
 
 ## Before the canonical-domain switch
 
