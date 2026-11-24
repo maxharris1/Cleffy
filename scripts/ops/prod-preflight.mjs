@@ -100,20 +100,32 @@ const REQUIRED_HEADERS = [
 ];
 
 const TURNSTILE = 'https://challenges.cloudflare.com';
-const SENTRY_INGEST = /^https:\/\/[^/]+\.ingest\.([a-z]+\.)?sentry\.io\/?$/i;
+const SENTRY_INGEST =
+    /^https:\/\/(\*\.|[a-z0-9-]+\.)([a-z0-9-]+\.)*ingest\.([a-z0-9-]+\.)?sentry\.io(:(\d+|\*))?(\/[^\s,;?#]*)?$/i;
 const REQUIRED_CSP_SOURCES = [
-    ['script-src', TURNSTILE, (source) => source === TURNSTILE],
-    ['frame-src', TURNSTILE, (source) => source === TURNSTILE],
-    ['connect-src', 'a Sentry ingest host', (source) => SENTRY_INGEST.test(source)],
+    [['script-src', 'default-src'], TURNSTILE, (source) => source === TURNSTILE],
+    [['frame-src', 'child-src', 'default-src'], TURNSTILE, (source) => source === TURNSTILE],
+    [['connect-src', 'default-src'], 'a Sentry ingest host', (source) => SENTRY_INGEST.test(source)],
 ];
 
 function parseCsp(csp) {
-    const directives = new Map();
-    for (const part of csp.split(';')) {
-        const [name, ...sources] = part.trim().split(/\s+/);
-        if (name) directives.set(name.toLowerCase(), sources);
-    }
-    return directives;
+    return csp
+        .split(',')
+        .map((policy) => {
+            const directives = new Map();
+            for (const part of policy.split(';')) {
+                const [name, ...sources] = part.trim().split(/\s+/);
+                const key = name.toLowerCase();
+                if (name && !directives.has(key)) directives.set(key, sources);
+            }
+            return directives;
+        })
+        .filter((directives) => directives.size > 0);
+}
+
+function allows(policy, chain, matches) {
+    const effective = chain.find((name) => policy.has(name));
+    return effective === undefined || policy.get(effective).some(matches);
 }
 
 function headerProblems(headers) {
@@ -127,10 +139,12 @@ function headerProblems(headers) {
 }
 
 function cspProblems(csp) {
-    const directives = parseCsp(csp);
+    const policies = parseCsp(csp);
     return REQUIRED_CSP_SOURCES.filter(
-        ([directive, , matches]) => !(directives.get(directive) ?? []).some(matches),
-    ).map(([directive, wanted]) => `CSP ${directive} lacks ${wanted}`);
+        ([chain, , matches]) =>
+            !policies.some((policy) => (policy.get(chain[0]) ?? []).some(matches)) ||
+            !policies.every((policy) => allows(policy, chain, matches)),
+    ).map(([[directive], wanted]) => `CSP ${directive} lacks ${wanted}`);
 }
 
 export function checkHeaders(visit) {

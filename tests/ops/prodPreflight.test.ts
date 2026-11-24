@@ -200,6 +200,72 @@ describe('prod preflight', () => {
         expect(line('security-headers')?.detail).toContain('CSP frame-src lacks https://challenges.cloudflare.com');
     });
 
+    const withCsp = (csp: string) => withHome({ ...SECURITY_HEADERS, 'content-security-policy': csp });
+
+    it.each([
+        ['script-src', "script-src 'none'; " + cspOf(CSP)],
+        ['frame-src', "frame-src 'none'; " + cspOf(CSP)],
+        ['connect-src', "connect-src 'none'; " + cspOf(CSP)],
+        ['script-src', "SCRIPT-SRC 'none'; " + cspOf(CSP)],
+    ])('fails security-headers when an earlier duplicate %s blocks the source', async (directive, csp) => {
+        const { line, exitCode } = await run(withCsp(csp));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain(`CSP ${directive} lacks`);
+        expect(exitCode).toBe(1);
+    });
+
+    it('ignores a later duplicate directive, as browsers do', async () => {
+        const { line } = await run(withCsp(`${cspOf(CSP)}; script-src 'none'; connect-src 'none'`));
+        expect(line('security-headers')?.status).toBe('OK');
+    });
+
+    it.each([
+        ["default-src 'none'", ['script-src', 'frame-src', 'connect-src']],
+        ["script-src 'self'", ['script-src']],
+        ["child-src 'self'", ['frame-src']],
+        ['connect-src https://bad.example', ['connect-src']],
+    ])('fails security-headers when a second policy "%s" blocks a source', async (second, blocked) => {
+        const { line, exitCode } = await run(withCsp(`${cspOf(CSP)}, ${second}`));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        for (const directive of blocked) expect(line('security-headers')?.detail).toContain(`CSP ${directive} lacks`);
+        expect(exitCode).toBe(1);
+    });
+
+    it('passes security-headers when a second policy leaves the sources unrestricted', async () => {
+        const { line, exitCode } = await run(withCsp(`${cspOf(CSP)}, frame-ancestors 'none'; img-src 'self'`));
+        expect(line('security-headers')?.status).toBe('OK');
+        expect(exitCode).toBe(0);
+    });
+
+    it.each([
+        'https://bad?.ingest.sentry.io',
+        'https://bad_host.ingest.sentry.io',
+        'https://.ingest.sentry.io',
+        'https://a..ingest.sentry.io',
+        'https://ingest.sentry.io',
+        'https://evil.com/.ingest.sentry.io',
+        'https://o1.ingest.sentry.io.evil.com',
+        'http://o1.ingest.sentry.io',
+        'https://o1.ingest.sentry.io:abc',
+        'https://*.*.ingest.sentry.io',
+        'https://o1.ingest.sentry.io/api?x',
+    ])('fails security-headers when connect-src only has the invalid Sentry source %s', async (source) => {
+        const { line, exitCode } = await run(withCsp(cspOf({ ...CSP, 'connect-src': `'self' ${source}` })));
+        expect(line('security-headers')?.status).toBe('FAIL');
+        expect(line('security-headers')?.detail).toContain('CSP connect-src lacks a Sentry ingest host');
+        expect(exitCode).toBe(1);
+    });
+
+    it.each([
+        'https://o123.ingest.sentry.io',
+        'https://o123.ingest.us.sentry.io/',
+        'https://*.ingest.de.sentry.io',
+        'https://o123.ingest.sentry.io:443/api/',
+    ])('accepts the valid Sentry host-source %s', async (source) => {
+        const { line } = await run(withCsp(cspOf({ ...CSP, 'connect-src': `'self' ${source}` })));
+        expect(line('security-headers')?.status).toBe('OK');
+    });
+
     it('reads security headers from the final response, not the redirect', async () => {
         const site = withHome({});
         site[`${BASE}/`] = { status: 308, headers: { location: `${WWW}/`, ...SECURITY_HEADERS } };
