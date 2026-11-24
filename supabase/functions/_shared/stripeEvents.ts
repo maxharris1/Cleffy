@@ -1449,11 +1449,11 @@ const dispatchStripeEvent = async (
                 return ignored('no_subscription', `the invoice ${charge.id} paid belongs to no subscription`);
             }
             const subscriptionId = paid.subscriptionId;
+            if (await store.refundedByDuplicateLedger(subscriptionId)) {
+                return ignored('duplicate_ledger_refund', `${subscriptionId} was refunded as a duplicate`);
+            }
 
             return await withSubscriptionLock(store, event, subscriptionId, async () => {
-                if (await store.refundedByDuplicateLedger(subscriptionId)) {
-                    return ignored('duplicate_ledger_refund', `${subscriptionId} was refunded as a duplicate`);
-                }
                 const sub = await store.fetchSubscription(subscriptionId);
                 if (sub === SUBSCRIPTION_MISSING) {
                     return subscriptionMissing(store, event, subscriptionId);

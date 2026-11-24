@@ -2679,6 +2679,8 @@ describe('charge.refunded', () => {
             const result = await refund(event);
             expect(result).toEqual({ status: 200, body: { received: true, ignored: reason } });
             expect(store.cancelledNow).toEqual([]);
+            expect(store.canceledInStripe).toEqual([]);
+            expect(store.refundedInStripe).toEqual([]);
             expect(store.logs).toHaveLength(1);
             expect(store.logs[0]).toContain(event.id);
             expect(store.events.get(event.id)?.status).toBe('done');
@@ -2703,8 +2705,18 @@ describe('charge.refunded', () => {
             await ignored(refundEvent('evt_ended'), 'already_canceled');
         });
 
-        it('for a refund the duplicate-undo ledger made', async () => {
-            store.ledger.set('sub_1', { userId: 'teacher-1', state: 'resolved', attempts: 1, detail: 'refunded re_1' });
+        it.each(['resolved', 'pending', 'needs_human'] as const)(
+            'for a refund the duplicate-undo ledger made, its row %s',
+            async (state) => {
+                store.ledger.set('sub_1', { userId: 'teacher-1', state, attempts: 1, detail: 'refunded re_1' });
+                await ignored(refundEvent('evt_dup'), 'duplicate_ledger_refund');
+                expect(store.ledger.get('sub_1')).toMatchObject({ state, attempts: 1 });
+            },
+        );
+
+        it('for a duplicate-ledger refund whose pending undo could not cancel', async () => {
+            store.ledger.set('sub_1', { userId: 'teacher-1', state: 'pending', attempts: 1, detail: 'refunded re_1' });
+            store.cancelFails = true;
             await ignored(refundEvent('evt_dup'), 'duplicate_ledger_refund');
         });
     });
