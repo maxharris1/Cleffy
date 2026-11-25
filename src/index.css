@@ -34,7 +34,6 @@
     --color-accent-soft: rgb(67 56 202 / 0.1);
     --color-scrim: rgb(28 25 23 / 0.45);
 
-    /* The front-end overhaul's chrome tones. */
     --color-ink-soft: #44403c;
     --color-hairline: #e3dfd3;
     --color-panel-line: #d9d4c6;
@@ -229,7 +228,6 @@ body {
     -webkit-touch-callout: none;
 }
 
-/* The marketing landing page's background: paper wash + engraved staves. */
 .landing-page {
     background-color: var(--color-paper);
     background-image:
@@ -260,7 +258,6 @@ body {
         );
 }
 
-/* Flat page ground for every surface except the marketing landing page. */
 .paper-page {
     background-color: var(--color-paper);
 }
