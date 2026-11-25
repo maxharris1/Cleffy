@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cleffy overhaul reference: Assign to students</title>
+<!-- Reference only. Values here are the spec; the app self-hosts its fonts and must not load Google Fonts. -->
+<link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&amp;family=Caveat:wght@500;700&amp;family=Instrument+Sans:wght@400..700&amp;display=swap" rel="stylesheet">
+<style>body{margin:0} a{color:#4338ca}</style>
+</head>
+<body>
+<div style="min-height:1205px;box-sizing:border-box;overflow:hidden;position:relative;font-family:'Instrument Sans',system-ui,sans-serif;font-variation-settings:'opsz' 10;color:#1c1917;background-color:#f7f5ef">
+<div style="position: relative; min-height: 1205px; overflow: hidden">
+<div style="background-color: #f7f5ef; min-height: 1205px">
+<header style="background: #1c1917; color: #f7f5ef">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 0 40px; max-width: 1360px; margin: 0 auto; padding: 0 40px; box-sizing: border-box">
+<a href="Flow-Library.html" aria-label="Cleffy, your library" style="text-decoration: none; display: inline-flex">
+<span style="display: inline-flex; align-items: center; gap: 10px">
+<span style="font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 28px; letter-spacing: -0.01em; color: #f7f5ef">Cleffy</span>
+<span aria-hidden="true" style="width: 27px; height: 2px; margin-top: 5px; background: #818cf8">
+</span>
+</span>
+</a>
+<nav aria-label="Main" style="display: flex; flex-wrap: wrap; gap: 0 28px; flex: 1">
+<a href="Flow-Library.html" aria-current="page" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid #facc15; font-size: 15px; font-weight: 600; color: #f7f5ef; text-decoration: none">Library</a>
+<a href="Flow-Students.html" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 500; color: #d6d3d1; text-decoration: none">Students</a>
+<a href="Flow-Find.html" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 500; color: #d6d3d1; text-decoration: none">Find a score</a>
+</nav>
+<div style="display: flex; align-items: center; gap: 14px; padding: 10px 0">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: #4f46e5; color: #ffffff; border: 1.5px solid #4f46e5; box-shadow: inset 0 1px 0 rgba(255,255,255,0.16), 0 10px 22px -12px rgba(79,70,229,0.95); ">
+<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 15V4 M8 8l4-4 4 4 M5 14v5h14v-5">
+</path>
+</svg>Upload score</a>
+<a href="Flow-Account.html" aria-label="Account menu, Ms. Davis" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; color: #a8a29e; text-decoration: none">
+<span style="flex: none; width: 36px; height: 36px; border-radius: 50%; background: #dc2626; color: #ffffff; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #1c1917">MD</span>
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M6 9l6 6 6-6">
+</path>
+</svg>
+</a>
+</div>
+</div>
+</header>
+<div style="max-width: 1360px; margin: 0 auto; padding: 0 40px; box-sizing: border-box">
+<div style="padding: 48px 0 32px; border-bottom: 1px solid #e3dfd3">
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 18px 32px">
+<div style="min-width: 0; max-width: 760px">
+<p style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e; margin-bottom: 12px">Ms. Davis · 7 scores</p>
+<h1 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 60px; line-height: 1.02; letter-spacing: -0.02em; text-wrap: balance; ">Library</h1>
+<p style="margin: 14px 0 0; font-size: 17px; line-height: 1.5; color: #57534e; text-wrap: pretty">Upload, organize, and share the scores you teach from. <a href="#" style="color: #4338ca; font-weight: 500; text-underline-offset: 3px; color: #57534e">Open locally without uploading</a>
+</p>
+</div>
+</div>
+</div>
+</div>
+<main style="max-width: 1360px; margin: 0 auto; padding: 0 40px 72px; box-sizing: border-box">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 20px; margin-top: 32px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; flex: 1 1 520px; min-width: 0">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px">
+<div role="group" aria-label="Whose copies" style="display: inline-flex; padding: 3px; border-radius: 11px; background: #e4dfd2">
+<a href="Flow-Library.html" aria-current="true" style="display: inline-flex; align-items: center; min-height: 40px; padding: 0 15px; border-radius: 8px; background: #ffffff; color: #1c1917; box-shadow: 0 1px 2px rgba(28,25,23,0.22), 0 0 0 1px rgba(28,25,23,0.05); font-size: 14px; font-weight: 600; text-decoration: none">My scores</a>
+<a href="Flow-Library-Leo.html" style="display: inline-flex; align-items: center; min-height: 40px; padding: 0 15px; border-radius: 8px; background: transparent; color: #57534e; box-shadow: none; font-size: 14px; font-weight: 500; text-decoration: none">Student copies</a>
+</div>
+</div>
+<label style="position: relative; display: block; flex: 0 1 300px; min-width: 0">
+<span style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M20 20l-4-4">
+</path>
+</svg>
+</span>
+<input type="search" aria-label="Search by title…" placeholder="Search by title…" style="box-sizing: border-box; width: 100%; height: 46px; padding: 0 14px 0 42px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</label>
+</div>
+<div style="display: flex; align-items: center; gap: 14px">
+<span style="font-size: 14px; color: #57534e; font-variant-numeric: tabular-nums">7 scores</span>
+<div role="group" aria-label="View" style="display: inline-flex; padding: 3px; border-radius: 11px; background: #e4dfd2">
+<button type="button" aria-label="Grid view" aria-pressed="true" style="width: 40px; height: 40px; border: none; border-radius: 8px; background: #ffffff; color: #1c1917; box-shadow: 0 1px 2px rgba(28,25,23,0.22), 0 0 0 1px rgba(28,25,23,0.05); display: inline-flex; align-items: center; justify-content: center; cursor: pointer">
+<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M13 13h7v7h-7z">
+</path>
+</svg>
+</button>
+<button type="button" aria-label="List view" aria-pressed="false" style="width: 40px; height: 40px; border: none; border-radius: 8px; background: transparent; color: #57534e; box-shadow: none; display: inline-flex; align-items: center; justify-content: center; cursor: pointer">
+<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M4 6h16 M4 12h16 M4 18h16">
+</path>
+</svg>
+</button>
+</div>
+</div>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 16px">
+<div role="group" style="display: inline-flex; padding: 3px; border-radius: 11px; background: #e4dfd2">
+<button type="button" aria-pressed="true" style="min-height: 32px; padding: 0 11px; border: none; border-radius: 8px; background: #ffffff; color: #1c1917; box-shadow: 0 1px 2px rgba(28,25,23,0.22), 0 0 0 1px rgba(28,25,23,0.05); font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer">Recent</button>
+<button type="button" aria-pressed="false" style="min-height: 32px; padding: 0 11px; border: none; border-radius: 8px; background: transparent; color: #57534e; box-shadow: none; font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer">A–Z</button>
+</div>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Group by composer</span>
+<span aria-hidden="true" style="width: 1px; height: 22px; background: #e3dfd3; margin: 0 4px">
+</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">
+<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.9 6.8 19.6l1-5.8L3.5 9.7l5.9-.8z">
+</path>
+</svg>Favorites</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">
+<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M4 4h7l9 9-7 7-9-9z M8 8h.01">
+</path>
+</svg>Lesson</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">
+<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M4 4h7l9 9-7 7-9-9z M8 8h.01">
+</path>
+</svg>Recital</span>
+<a href="#" style="font-size: 13px; font-weight: 500; color: #57534e; padding: 12px 4px">Add a tag…</a>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 36px 28px; margin-top: 30px">
+<div style="min-width: 0">
+<a href="Flow-Viewer-Original.html" aria-label="Open Beethoven — Für Elise" style="position: relative; display: block">
+<div style="position: relative; aspect-ratio: 1275 / 1650; overflow: hidden; background: #ffffff; border-radius: 4px; box-shadow: 0 0 0 1px rgba(28,25,23,0.1), 0 16px 30px -20px rgba(28,25,23,0.5)">
+<img src="../assets/fur-elise-page1.png" alt="" style="display: block; width: 100%; height: 100%; object-fit: cover">
+</div>
+<span aria-label="Favorite" role="img" style="position: absolute; right: 8px; top: 8px; display: inline-flex; padding: 4px; border-radius: 999px; background: rgba(255,255,255,0.92)">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="#f59e0b" stroke="#b45309" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.9 6.8 19.6l1-5.8L3.5 9.7l5.9-.8z">
+</path>
+</svg>
+</span>
+</a>
+<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-top: 12px">
+<div style="min-width: 0">
+<p style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3">Beethoven — Für Elise</p>
+<p style="margin: 3px 0 0; font-size: 13px; color: #57534e">3 pages · Today</p>
+<a href="Flow-Viewer.html" aria-label="2 student copies of Beethoven — Für Elise" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; margin: -6px 0 -10px; font-size: 13px; color: #57534e; text-decoration: none">
+<span style="display: inline-flex">
+<span style="margin-left: 0px; display: inline-flex">
+<span style="flex: none; width: 22px; height: 22px; border-radius: 50%; background: #2563eb; color: #ffffff; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f7f5ef">L</span>
+</span>
+<span style="margin-left: -6px; display: inline-flex">
+<span style="flex: none; width: 22px; height: 22px; border-radius: 50%; background: #c2410c; color: #ffffff; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f7f5ef">CP</span>
+</span>
+</span>2 copies</a>
+</div>
+<a href="Flow-Assign.html" aria-label="Score actions for Beethoven — Für Elise" style="flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -10px -12px 0 0; border-radius: 10px; color: #57534e">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 6h.01 M12 12h.01 M12 18h.01">
+</path>
+</svg>
+</a>
+</div>
+</div>
+<div style="min-width: 0">
+<a href="#" aria-label="Open Bach — Minuet in G" style="position: relative; display: block">
+<div style="position: relative; aspect-ratio: 1275 / 1650; overflow: hidden; background: #ffffff; border-radius: 4px; box-shadow: 0 0 0 1px rgba(28,25,23,0.1), 0 16px 30px -20px rgba(28,25,23,0.5)">
+<img src="../assets/fur-elise-page2.png" alt="" style="display: block; width: 100%; height: 100%; object-fit: cover">
+</div>
+</a>
+<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-top: 12px">
+<div style="min-width: 0">
+<p style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3">Bach — Minuet in G</p>
+<p style="margin: 3px 0 0; font-size: 13px; color: #57534e">2 pages · Today</p>
+<a href="#" aria-label="2 student copies of Bach — Minuet in G" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; margin: -6px 0 -10px; font-size: 13px; color: #57534e; text-decoration: none">
+<span style="display: inline-flex">
+<span style="margin-left: 0px; display: inline-flex">
+<span style="flex: none; width: 22px; height: 22px; border-radius: 50%; background: #2563eb; color: #ffffff; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f7f5ef">L</span>
+</span>
+<span style="margin-left: -6px; display: inline-flex">
+<span style="flex: none; width: 22px; height: 22px; border-radius: 50%; background: #c2410c; color: #ffffff; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f7f5ef">CP</span>
+</span>
+</span>2 copies</a>
+</div>
+<a href="#" aria-label="Score actions for Bach — Minuet in G" style="flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -10px -12px 0 0; border-radius: 10px; color: #57534e">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 6h.01 M12 12h.01 M12 18h.01">
+</path>
+</svg>
+</a>
+</div>
+</div>
+<div style="min-width: 0">
+<a href="#" aria-label="Open Schumann — Träumerei" style="position: relative; display: block">
+<div style="position: relative; aspect-ratio: 1275 / 1650; overflow: hidden; background: #ffffff; border-radius: 4px; box-shadow: 0 0 0 1px rgba(28,25,23,0.1), 0 16px 30px -20px rgba(28,25,23,0.5)">
+<img src="../assets/fur-elise-page3.png" alt="" style="display: block; width: 100%; height: 100%; object-fit: cover">
+</div>
+</a>
+<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-top: 12px">
+<div style="min-width: 0">
+<p style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3">Schumann — Träumerei</p>
+<p style="margin: 3px 0 0; font-size: 13px; color: #57534e">1 page · Yesterday</p>
+<a href="#" aria-label="1 student copy of Schumann — Träumerei" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; margin: -6px 0 -10px; font-size: 13px; color: #57534e; text-decoration: none">
+<span style="display: inline-flex">
+<span style="margin-left: 0px; display: inline-flex">
+<span style="flex: none; width: 22px; height: 22px; border-radius: 50%; background: #2563eb; color: #ffffff; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f7f5ef">L</span>
+</span>
+</span>1 copy</a>
+</div>
+<a href="#" aria-label="Score actions for Schumann — Träumerei" style="flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -10px -12px 0 0; border-radius: 10px; color: #57534e">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 6h.01 M12 12h.01 M12 18h.01">
+</path>
+</svg>
+</a>
+</div>
+</div>
+<div style="min-width: 0">
+<a href="#" aria-label="Open Satie — Gymnopédie No. 1" style="position: relative; display: block">
+<div style="position: relative; aspect-ratio: 1275 / 1650; overflow: hidden; background: #ffffff; border-radius: 4px; box-shadow: 0 0 0 1px rgba(28,25,23,0.1), 0 16px 30px -20px rgba(28,25,23,0.5)">
+<img src="../assets/fur-elise-page2.png" alt="" style="display: block; width: 100%; height: 100%; object-fit: cover">
+</div>
+<span aria-label="Favorite" role="img" style="position: absolute; right: 8px; top: 8px; display: inline-flex; padding: 4px; border-radius: 999px; background: rgba(255,255,255,0.92)">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="#f59e0b" stroke="#b45309" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.9 6.8 19.6l1-5.8L3.5 9.7l5.9-.8z">
+</path>
+</svg>
+</span>
+</a>
+<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-top: 12px">
+<div style="min-width: 0">
+<p style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3">Satie — Gymnopédie No. 1</p>
+<p style="margin: 3px 0 0; font-size: 13px; color: #57534e">2 pages · Thursday</p>
+</div>
+<a href="#" aria-label="Score actions for Satie — Gymnopédie No. 1" style="flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -10px -12px 0 0; border-radius: 10px; color: #57534e">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 6h.01 M12 12h.01 M12 18h.01">
+</path>
+</svg>
+</a>
+</div>
+</div>
+<div style="min-width: 0">
+<a href="#" aria-label="Open Debussy — Clair de lune" style="position: relative; display: block">
+<div style="position: relative; aspect-ratio: 1275 / 1650; overflow: hidden; background: #ffffff; border-radius: 4px; box-shadow: 0 0 0 1px rgba(28,25,23,0.1), 0 16px 30px -20px rgba(28,25,23,0.5)">
+<img src="../assets/fur-elise-page3.png" alt="" style="display: block; width: 100%; height: 100%; object-fit: cover">
+</div>
+</a>
+<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-top: 12px">
+<div style="min-width: 0">
+<p style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3">Debussy — Clair de lune</p>
+<p style="margin: 3px 0 0; font-size: 13px; color: #57534e">6 pages · Nov 14</p>
+<a href="#" aria-label="2 student copies of Debussy — Clair de lune" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; margin: -6px 0 -10px; font-size: 13px; color: #57534e; text-decoration: none">
+<span style="display: inline-flex">
+<span style="margin-left: 0px; display: inline-flex">
+<span style="flex: none; width: 22px; height: 22px; border-radius: 50%; background: #0f766e; color: #ffffff; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f7f5ef">AR</span>
+</span>
+<span style="margin-left: -6px; display: inline-flex">
+<span style="flex: none; width: 22px; height: 22px; border-radius: 50%; background: #2563eb; color: #ffffff; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f7f5ef">L</span>
+</span>
+</span>2 copies</a>
+</div>
+<a href="#" aria-label="Score actions for Debussy — Clair de lune" style="flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -10px -12px 0 0; border-radius: 10px; color: #57534e">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 6h.01 M12 12h.01 M12 18h.01">
+</path>
+</svg>
+</a>
+</div>
+</div>
+<div style="min-width: 0">
+<a href="#" aria-label="Open Chopin — Nocturne, Op. 9 No. 2" style="position: relative; display: block">
+<div style="position: relative; aspect-ratio: 1275 / 1650; overflow: hidden; background: #ffffff; border-radius: 4px; box-shadow: 0 0 0 1px rgba(28,25,23,0.1), 0 16px 30px -20px rgba(28,25,23,0.5)">
+<img src="../assets/fur-elise-page1.png" alt="" style="display: block; width: 100%; height: 100%; object-fit: cover">
+</div>
+</a>
+<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-top: 12px">
+<div style="min-width: 0">
+<p style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3">Chopin — Nocturne, Op. 9 No. 2</p>
+<p style="margin: 3px 0 0; font-size: 13px; color: #57534e">4 pages · Nov 9</p>
+</div>
+<a href="#" aria-label="Score actions for Chopin — Nocturne, Op. 9 No. 2" style="flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -10px -12px 0 0; border-radius: 10px; color: #57534e">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 6h.01 M12 12h.01 M12 18h.01">
+</path>
+</svg>
+</a>
+</div>
+</div>
+<div style="min-width: 0">
+<a href="#" aria-label="Open Mozart — Sonata in C, K. 545" style="position: relative; display: block">
+<div style="position: relative; aspect-ratio: 1275 / 1650; overflow: hidden; background: #ffffff; border-radius: 4px; box-shadow: 0 0 0 1px rgba(28,25,23,0.1), 0 16px 30px -20px rgba(28,25,23,0.5)">
+<img src="../assets/fur-elise-page2.png" alt="" style="display: block; width: 100%; height: 100%; object-fit: cover">
+</div>
+</a>
+<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-top: 12px">
+<div style="min-width: 0">
+<p style="margin: 0; font-size: 15px; font-weight: 600; line-height: 1.3">Mozart — Sonata in C, K. 545</p>
+<p style="margin: 3px 0 0; font-size: 13px; color: #57534e">9 pages · Nov 2</p>
+</div>
+<a href="#" aria-label="Score actions for Mozart — Sonata in C, K. 545" style="flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -10px -12px 0 0; border-radius: 10px; color: #57534e">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 6h.01 M12 12h.01 M12 18h.01">
+</path>
+</svg>
+</a>
+</div>
+</div>
+<div>
+<a href="#" style="aspect-ratio: 1275 / 1650; border: 1.5px dashed #b8b2a4; border-radius: 6px; color: #57534e; font-size: 14px; font-weight: 500; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-decoration: none">
+<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 5v14 M5 12h14">
+</path>
+</svg>Add a score</a>
+</div>
+</div>
+</main>
+</div>
+<div style="position: absolute; inset: 0; z-index: 10; background: rgba(28,25,23,0.38); display: flex; align-items: flex-start; justify-content: center; padding: 60px 20px 40px; box-sizing: border-box">
+<div role="dialog" aria-label="Assign to students" style="position: relative; width: min(520px, 100%); box-sizing: border-box; padding: 28px; border-radius: 22px; background: #f7f5ef; color: #1c1917; box-shadow: 0 40px 90px -30px rgba(28,25,23,0.6), 0 0 0 1px rgba(28,25,23,0.08)">
+<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 28px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Assign to students</h2>
+<a href="Flow-Library.html" aria-label="Close" style="flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -10px -10px 0 0; border-radius: 12px; color: #57534e">
+<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M6 6l12 12 M18 6L6 18">
+</path>
+</svg>
+</a>
+</div>
+<p style="margin: 0; font-size: 15px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 10px">Give “Beethoven — Für Elise” to students on your roster. They will find it waiting the next time they sign in.</p>
+<div style="margin-top: 14px; display: flex; flex-direction: column; gap: 2px">
+<label style="display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 10px; border-radius: 10px; background: transparent; font-size: 15px; font-weight: 400; cursor: pointer">
+<input type="checkbox" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+</span>Ana Ruiz</label>
+<label style="display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 10px; border-radius: 10px; background: transparent; font-size: 15px; font-weight: 400; cursor: pointer">
+<input type="checkbox" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+</span>Ben Carter</label>
+<label style="display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 10px; border-radius: 10px; background: rgba(67,56,202,0.07); font-size: 15px; font-weight: 600; cursor: pointer">
+<input type="checkbox" checked="checked" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid #4338ca; background: #4338ca; color: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+</span>Chloe Park</label>
+<label style="display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 10px; border-radius: 10px; background: transparent; font-size: 15px; font-weight: 400; cursor: pointer">
+<input type="checkbox" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+</span>Dev Shah</label>
+<label style="display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 10px; border-radius: 10px; background: rgba(67,56,202,0.07); font-size: 15px; font-weight: 600; cursor: pointer">
+<input type="checkbox" checked="checked" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; border-radius: 6px; border: 1.5px solid #4338ca; background: #4338ca; color: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+</span>Leo Martin</label>
+</div>
+<div style="margin-top: 18px">
+<p style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e; margin-bottom: 8px">What do they get?</p>
+<div style="display: flex; flex-wrap: wrap; gap: 10px">
+<label style="flex: 1 1 180px; display: flex; gap: 12px; padding: 14px; border-radius: 14px; border: 1.5px solid #4338ca; background: #f6f5fe; cursor: pointer">
+<input type="radio" name="method" checked="checked" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; margin-top: 2px; border-radius: 50%; border: 1.5px solid #4338ca; background: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+<span style="width: 10px; height: 10px; border-radius: 50%; background: #4338ca">
+</span>
+</span>
+<span>
+<span style="display: block; font-size: 15px; font-weight: 600">A copy each</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; line-height: 1.4; color: #57534e">Each student marks their own. Your original stays clean.</span>
+</span>
+</label>
+<label style="flex: 1 1 180px; display: flex; gap: 12px; padding: 14px; border-radius: 14px; border: 1.5px solid #cfc9bb; background: #ffffff; cursor: pointer">
+<input type="radio" name="method" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; margin-top: 2px; border-radius: 50%; border: 1.5px solid #cfc9bb; background: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+</span>
+<span>
+<span style="display: block; font-size: 15px; font-weight: 600">One shared copy</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; line-height: 1.4; color: #57534e">A group lesson: everyone marks the same page.</span>
+</span>
+</label>
+</div>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 18px">
+<p style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e; ">Access</p>
+<div role="group" style="display: inline-flex; padding: 3px; border-radius: 11px; background: #e4dfd2">
+<button type="button" aria-pressed="true" style="min-height: 40px; padding: 0 15px; border: none; border-radius: 8px; background: #ffffff; color: #1c1917; box-shadow: 0 1px 2px rgba(28,25,23,0.22), 0 0 0 1px rgba(28,25,23,0.05); font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer">Can edit</button>
+<button type="button" aria-pressed="false" style="min-height: 40px; padding: 0 15px; border: none; border-radius: 8px; background: transparent; color: #57534e; box-shadow: none; font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer">View only</button>
+</div>
+</div>
+<p style="margin: 0; font-size: 13px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 8px">Each of them can add, change and erase marks on their own copy, including yours.</p>
+<div style="margin-top: 18px">
+<div>
+<label for="assign-note" style="display: block; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e">Note (optional)</label>
+<input id="assign-note" type="text" value="Circle anything that trips you. We start at bar 9 on Thursday." style="box-sizing: border-box; width: 100%; height: 48px; padding: 0 14px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</div>
+</div>
+<div style="margin-top: 16px; max-width: 220px">
+<div>
+<label for="assign-due" style="display: block; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e">Due date (optional)</label>
+<input id="assign-due" type="date" value="2026-11-26" style="box-sizing: border-box; width: 100%; height: 48px; padding: 0 14px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</div>
+</div>
+<p style="margin: 20px 0 0; font-size: 13px; color: #57534e">Makes 2 copies: one for Chloe, one for Leo.</p>
+<div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px">
+<a href="Flow-Library.html" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #44403c; border: 1.5px solid transparent; ">Cancel</a>
+<a href="Flow-Students.html" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: #4338ca; color: #ffffff; border: 1.5px solid #4338ca; box-shadow: inset 0 1px 0 rgba(255,255,255,0.16), 0 10px 20px -12px rgba(67,56,202,0.75); ">Assign to 2 students</a>
+</div>
+</div>
+</div>
+</div>
+</div>
+</body>
+</html>

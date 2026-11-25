@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cleffy overhaul reference: Student sign in</title>
+<!-- Reference only. Values here are the spec; the app self-hosts its fonts and must not load Google Fonts. -->
+<link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&amp;family=Caveat:wght@500;700&amp;family=Instrument+Sans:wght@400..700&amp;display=swap" rel="stylesheet">
+<style>body{margin:0} a{color:#4338ca}</style>
+</head>
+<body>
+<div style="min-height:900px;box-sizing:border-box;overflow:hidden;position:relative;font-family:'Instrument Sans',system-ui,sans-serif;font-variation-settings:'opsz' 10;color:#1c1917;background-color:#f7f5ef">
+<div style="background-color: #f7f5ef; min-height: 900px; display: flex; flex-wrap: wrap">
+<section style="flex: 1 1 420px; min-width: 0; box-sizing: border-box; padding: 36px 56px 32px; display: flex; flex-direction: column">
+<div>
+<span style="display: inline-flex; align-items: center; gap: 11px">
+<span style="font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 30px; letter-spacing: -0.01em; color: #1c1917">Cleffy</span>
+<span aria-hidden="true" style="width: 28px; height: 2px; margin-top: 5px; background: #4338ca">
+</span>
+</span>
+</div>
+<div style="margin: auto 0; padding: 40px 0; max-width: 400px; width: 100%">
+<h1 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 60px; line-height: 1.02; letter-spacing: -0.02em; text-wrap: balance; ">Your music</h1>
+<p style="margin: 0; font-size: 17px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 14px">Sign in with the username or email you use for Cleffy.</p>
+<div style="display: flex; flex-direction: column; gap: 18px; margin-top: 30px">
+<div>
+<label for="student-identifier" style="display: block; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e">Username or email</label>
+<input id="student-identifier" type="text" value="leo_plays" style="box-sizing: border-box; width: 100%; height: 48px; padding: 0 14px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</div>
+<div>
+<label for="student-password" style="display: block; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e">Password</label>
+<input id="student-password" type="password" style="box-sizing: border-box; width: 100%; height: 48px; padding: 0 14px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</div>
+<a href="Flow-Pieces.html" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: #4338ca; color: #ffffff; border: 1.5px solid #4338ca; box-shadow: inset 0 1px 0 rgba(255,255,255,0.16), 0 10px 20px -12px rgba(67,56,202,0.75); min-height: 52px; font-size: 16px">Open my music</a>
+<p style="margin: 0; font-size: 15px">
+<a href="Flow-Claim.html" style="color: #4338ca; font-weight: 500; text-underline-offset: 3px; ">Have a setup code from your teacher?</a>
+</p>
+<p style="margin: -8px 0 0; font-size: 15px">
+<a href="#" style="color: #4338ca; font-weight: 500; text-underline-offset: 3px; ">Forgot your password?</a>
+<span style="display: block; margin-top: 4px; font-size: 13px; color: #57534e">Sign in with a username? Ask your teacher to reset your access.</span>
+</p>
+<p style="margin: 6px 0 0; padding-top: 18px; border-top: 1px solid #e3dfd3; font-size: 15px">
+<a href="Flow-Login.html" style="color: #4338ca; font-weight: 500; text-underline-offset: 3px; ">I am a teacher</a>
+</p>
+</div>
+</div>
+<p style="margin: 0; font-size: 13px; line-height: 1.9; color: #57534e">
+<a href="#" style="color: #57534e">Privacy</a> · <a href="#" style="color: #57534e">Children’s privacy</a> · <a href="#" style="color: #57534e">Terms</a> · <a href="#" style="color: #57534e">Refunds</a> · <a href="#" style="color: #57534e">Copyright</a> · <a href="#" style="color: #57534e">Report content</a>
+</p>
+</section>
+<section style="flex: 1.15 1 460px; min-width: 0; box-sizing: border-box; padding: 64px 56px; background: #1c1917; color: #f7f5ef; display: flex; flex-direction: column; align-items: center; justify-content: center">
+<div style="width: min(430px, 100%)">
+<div style="transform: rotate(-1.6deg); background: #ffffff; color: #1c1917; border-radius: 4px; padding: 12px; box-shadow: 0 0 0 1px rgba(28,25,23,0.1), 0 34px 60px -30px rgba(0,0,0,0.6)">
+<div style="border: 1px solid #1c1917; padding: 22px 22px 16px">
+<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
+<span style="display: inline-flex; align-items: center; gap: 8px">
+<span style="font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 22px; letter-spacing: -0.01em; color: #1c1917">Cleffy</span>
+<span aria-hidden="true" style="width: 21px; height: 2px; margin-top: 4px; background: #4338ca">
+</span>
+</span>
+<p style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e; ">Setup card</p>
+</div>
+<p style="margin: 20px 0 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 40px; line-height: 1.05; letter-spacing: -0.01em">Leo Martin</p>
+<p style="margin: 6px 0 0; font-size: 14px; color: #57534e">From Ms. Davis</p>
+<ol style="list-style: none; margin: 20px 0 0; padding: 0; display: flex; flex-direction: column; gap: 14px">
+<li style="display: flex; align-items: flex-start; gap: 14px">
+<span aria-hidden="true" style="flex: none; width: 30px; height: 30px; border: 1.5px solid #1c1917; display: inline-flex; align-items: center; justify-content: center; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 17px">A</span>
+<div style="min-width: 0; padding-top: 4px; font-size: 15px; line-height: 1.45">Go to <strong>cleffy.io/student/claim</strong>
+</div>
+</li>
+<li style="display: flex; align-items: flex-start; gap: 14px">
+<span aria-hidden="true" style="flex: none; width: 30px; height: 30px; border: 1.5px solid #1c1917; display: inline-flex; align-items: center; justify-content: center; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 17px">B</span>
+<div style="min-width: 0; padding-top: 4px; font-size: 15px; line-height: 1.45">Type this setup code<p style="margin: 10px 0 0; padding: 10px 14px; border: 1.5px dashed #8a8478; font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 22px; font-weight: 700; letter-spacing: 0.12em; white-space: nowrap">K7QM-2HXP-9RTD</p>
+</div>
+</li>
+<li style="display: flex; align-items: flex-start; gap: 14px">
+<span aria-hidden="true" style="flex: none; width: 30px; height: 30px; border: 1.5px solid #1c1917; display: inline-flex; align-items: center; justify-content: center; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 17px">C</span>
+<div style="min-width: 0; padding-top: 4px; font-size: 15px; line-height: 1.45">Choose a username and a password. That’s it.</div>
+</li>
+</ol>
+<p style="margin: 18px 0 0; padding-top: 12px; border-top: 1px solid #e3dfd3; font-size: 12px; line-height: 1.45; color: #57534e">Keep this card. The code works once and is never shown again.</p>
+</div>
+</div>
+<p style="margin: 30px 0 0; text-align: center">
+<span style="display: inline-block; font-family: Caveat, cursive; font-weight: 700; font-size: 30px; line-height: 1.1; color: #facc15; transform: rotate(-2deg); ">hand this over at the lesson</span>
+</p>
+</div>
+</section>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cleffy overhaul reference: Find a score</title>
+<!-- Reference only. Values here are the spec; the app self-hosts its fonts and must not load Google Fonts. -->
+<link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&amp;family=Caveat:wght@500;700&amp;family=Instrument+Sans:wght@400..700&amp;display=swap" rel="stylesheet">
+<style>body{margin:0} a{color:#4338ca}</style>
+</head>
+<body>
+<div style="min-height:1300px;box-sizing:border-box;overflow:hidden;position:relative;font-family:'Instrument Sans',system-ui,sans-serif;font-variation-settings:'opsz' 10;color:#1c1917;background-color:#f7f5ef">
+<div style="background-color: #f7f5ef; min-height: 1300px">
+<header style="background: #1c1917; color: #f7f5ef">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 0 40px; max-width: 1360px; margin: 0 auto; padding: 0 40px; box-sizing: border-box">
+<a href="Flow-Library.html" aria-label="Cleffy, your library" style="text-decoration: none; display: inline-flex">
+<span style="display: inline-flex; align-items: center; gap: 10px">
+<span style="font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 28px; letter-spacing: -0.01em; color: #f7f5ef">Cleffy</span>
+<span aria-hidden="true" style="width: 27px; height: 2px; margin-top: 5px; background: #818cf8">
+</span>
+</span>
+</a>
+<nav aria-label="Main" style="display: flex; flex-wrap: wrap; gap: 0 28px; flex: 1">
+<a href="Flow-Library.html" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 500; color: #d6d3d1; text-decoration: none">Library</a>
+<a href="Flow-Students.html" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 500; color: #d6d3d1; text-decoration: none">Students</a>
+<a href="Flow-Find.html" aria-current="page" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid #facc15; font-size: 15px; font-weight: 600; color: #f7f5ef; text-decoration: none">Find a score</a>
+</nav>
+<div style="display: flex; align-items: center; gap: 14px; padding: 10px 0">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: #4f46e5; color: #ffffff; border: 1.5px solid #4f46e5; box-shadow: inset 0 1px 0 rgba(255,255,255,0.16), 0 10px 22px -12px rgba(79,70,229,0.95); ">
+<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 15V4 M8 8l4-4 4 4 M5 14v5h14v-5">
+</path>
+</svg>Upload score</a>
+<a href="Flow-Account.html" aria-label="Account menu, Ms. Davis" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; color: #a8a29e; text-decoration: none">
+<span style="flex: none; width: 36px; height: 36px; border-radius: 50%; background: #dc2626; color: #ffffff; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #1c1917">MD</span>
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M6 9l6 6 6-6">
+</path>
+</svg>
+</a>
+</div>
+</div>
+</header>
+<div style="max-width: 1360px; margin: 0 auto; padding: 0 40px; box-sizing: border-box">
+<div style="padding: 48px 0 32px; border-bottom: 1px solid #e3dfd3">
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 18px 32px">
+<div style="min-width: 0; max-width: 760px">
+<p style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e; margin-bottom: 12px">Public domain · free to add</p>
+<h1 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 60px; line-height: 1.02; letter-spacing: -0.02em; text-wrap: balance; ">Find a score</h1>
+<p style="margin: 14px 0 0; font-size: 17px; line-height: 1.5; color: #57534e; text-wrap: pretty">Search thousands of public-domain scores.</p>
+</div>
+</div>
+</div>
+</div>
+<main style="max-width: 1360px; margin: 0 auto; padding: 0 40px 72px; box-sizing: border-box">
+<div style="margin-top: 30px; display: flex">
+<label style="position: relative; display: block; flex: 1 1 auto; min-width: 0">
+<span style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M20 20l-4-4">
+</path>
+</svg>
+</span>
+<input type="search" aria-label="Beethoven moonlight, bolero, Chopin nocturne…" placeholder="Beethoven moonlight, bolero, Chopin nocturne…" style="box-sizing: border-box; width: 100%; height: 52px; padding: 0 14px 0 42px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</label>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px">
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: #e9e8fb; color: #4338ca; border: 1px solid rgba(67,56,202,0.4); font-weight: 600">Composer</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Instrument</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Form</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Key</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Era</span>
+</div>
+<div style="display: flex; align-items: center; gap: 14px">
+<span style="font-size: 14px; color: #57534e">Piano · Popular · 70 scores</span>
+<div role="group" aria-label="View" style="display: inline-flex; padding: 3px; border-radius: 11px; background: #e4dfd2">
+<button type="button" aria-label="Grid view" aria-pressed="false" style="width: 40px; height: 40px; border: none; border-radius: 8px; background: transparent; color: #57534e; box-shadow: none; display: inline-flex; align-items: center; justify-content: center; cursor: pointer">
+<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M13 13h7v7h-7z">
+</path>
+</svg>
+</button>
+<button type="button" aria-label="List view" aria-pressed="true" style="width: 40px; height: 40px; border: none; border-radius: 8px; background: #ffffff; color: #1c1917; box-shadow: 0 1px 2px rgba(28,25,23,0.22), 0 0 0 1px rgba(28,25,23,0.05); display: inline-flex; align-items: center; justify-content: center; cursor: pointer">
+<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M4 6h16 M4 12h16 M4 18h16">
+</path>
+</svg>
+</button>
+</div>
+</div>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px">
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Beethoven</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Bach</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Mozart</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Chopin</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Schubert</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Tchaikovsky</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Debussy</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Brahms</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Liszt</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Schumann</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Vivaldi</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Handel</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Haydn</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Ravel</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Joplin</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Satie</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Rachmaninoff</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 999px; font-size: 13px; background: transparent; color: #44403c; border: 1px solid #d9d4c6; font-weight: 500">Mendelssohn</span>
+</div>
+<div style="margin-top: 36px">
+<p style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e; ">Popular</p>
+<div style="margin-top: 18px; columns: 2 420px; column-gap: 56px">
+<section style="break-inside: avoid; margin-bottom: 28px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Bach</h2>
+<ul style="list-style: none; margin: 12px 0 0; padding: 0; border-bottom: 1px solid #e3dfd3">
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Prelude in C major (WTC I)</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Bach · Keyboard · BWV 846</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Goldberg Variations</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Bach · Keyboard · BWV 988</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Invention No.1</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Bach · Keyboard · BWV 772</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+</ul>
+</section>
+<section style="break-inside: avoid; margin-bottom: 28px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Beethoven</h2>
+<ul style="list-style: none; margin: 12px 0 0; padding: 0; border-bottom: 1px solid #e3dfd3">
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Moonlight Sonata</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Beethoven · Piano · Op.27 No.2</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="Flow-Library.html" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Für Elise</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Beethoven · Piano · WoO 59</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Pathétique Sonata</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Beethoven · Piano · Op.13</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Waldstein Sonata</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Beethoven · Piano · Op.53</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+</ul>
+</section>
+<section style="break-inside: avoid; margin-bottom: 28px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Brahms</h2>
+<ul style="list-style: none; margin: 12px 0 0; padding: 0; border-bottom: 1px solid #e3dfd3">
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Hungarian Dance No.5</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Brahms · Piano · WoO 1</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Intermezzo Op.118 No.2</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Brahms · Piano · Op.118</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Waltz Op.39 No.15</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Brahms · Piano · Op.39</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+</ul>
+</section>
+<section style="break-inside: avoid; margin-bottom: 28px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Chopin</h2>
+<ul style="list-style: none; margin: 12px 0 0; padding: 0; border-bottom: 1px solid #e3dfd3">
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Nocturne Op.9 No.2</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Chopin · Piano · E-flat major</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Fantaisie-Impromptu</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Chopin · Piano · Op.66</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+<li style="border-top: 1px solid #e3dfd3">
+<a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 8px 4px; color: #1c1917; text-decoration: none">
+<span style="min-width: 0">
+<span style="display: block; font-size: 16px; font-weight: 600">Étude Op.10 No.3</span>
+<span style="display: block; margin-top: 2px; font-size: 13px; color: #57534e">Chopin · Piano · Op.10</span>
+</span>
+<span style="flex: none; color: #57534e; display: inline-flex">
+<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M10 6l6 6-6 6">
+</path>
+</svg>
+</span>
+</a>
+</li>
+</ul>
+</section>
+</div>
+</div>
+</main>
+</div>
+</div>
+</body>
+</html>

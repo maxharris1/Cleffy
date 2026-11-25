@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cleffy overhaul reference: Plans</title>
+<!-- Reference only. Values here are the spec; the app self-hosts its fonts and must not load Google Fonts. -->
+<link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&amp;family=Caveat:wght@500;700&amp;family=Instrument+Sans:wght@400..700&amp;display=swap" rel="stylesheet">
+<style>body{margin:0} a{color:#4338ca}</style>
+</head>
+<body>
+<div style="min-height:1816px;box-sizing:border-box;overflow:hidden;position:relative;font-family:'Instrument Sans',system-ui,sans-serif;font-variation-settings:'opsz' 10;color:#1c1917;background-color:#f7f5ef">
+<div style="position: relative; min-height: 1816px; overflow: hidden">
+<div style="background-color: #f7f5ef; min-height: 1816px">
+<header style="background: #1c1917; color: #f7f5ef">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 0 40px; max-width: 1360px; margin: 0 auto; padding: 0 40px; box-sizing: border-box">
+<a href="Flow-Library.html" aria-label="Cleffy, your library" style="text-decoration: none; display: inline-flex">
+<span style="display: inline-flex; align-items: center; gap: 10px">
+<span style="font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 28px; letter-spacing: -0.01em; color: #f7f5ef">Cleffy</span>
+<span aria-hidden="true" style="width: 27px; height: 2px; margin-top: 5px; background: #818cf8">
+</span>
+</span>
+</a>
+<nav aria-label="Main" style="display: flex; flex-wrap: wrap; gap: 0 28px; flex: 1">
+<a href="Flow-Library.html" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 500; color: #d6d3d1; text-decoration: none">Library</a>
+<a href="Flow-Students.html" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 500; color: #d6d3d1; text-decoration: none">Students</a>
+<a href="Flow-Find.html" style="display: inline-flex; align-items: center; min-height: 64px; box-sizing: border-box; padding: 0 2px; border-bottom: 2px solid transparent; font-size: 15px; font-weight: 500; color: #d6d3d1; text-decoration: none">Find a score</a>
+</nav>
+<div style="display: flex; align-items: center; gap: 14px; padding: 10px 0">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: #4f46e5; color: #ffffff; border: 1.5px solid #4f46e5; box-shadow: inset 0 1px 0 rgba(255,255,255,0.16), 0 10px 22px -12px rgba(79,70,229,0.95); ">
+<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M12 15V4 M8 8l4-4 4 4 M5 14v5h14v-5">
+</path>
+</svg>Upload score</a>
+<a href="Flow-Account.html" aria-label="Account menu, Ms. Davis" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; color: #a8a29e; text-decoration: none">
+<span style="flex: none; width: 36px; height: 36px; border-radius: 50%; background: #dc2626; color: #ffffff; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #1c1917">MD</span>
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M6 9l6 6 6-6">
+</path>
+</svg>
+</a>
+</div>
+</div>
+</header>
+<div style="max-width: 1180px; margin: 0 auto; padding: 0 40px; box-sizing: border-box">
+<div style="padding: 48px 0 32px; border-bottom: 1px solid #e3dfd3">
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 18px 32px">
+<div style="min-width: 0; max-width: 760px">
+<p style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e; margin-bottom: 12px">Ms. Davis · Teacher plan</p>
+<h1 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 60px; line-height: 1.02; letter-spacing: -0.02em; text-wrap: balance; ">Account</h1>
+<p style="margin: 14px 0 0; font-size: 17px; line-height: 1.5; color: #57534e; text-wrap: pretty">Your profile, plan, and what this device is holding.</p>
+</div>
+<a href="Flow-Login.html" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; ">Sign out</a>
+</div>
+</div>
+</div>
+<main style="max-width: 1180px; margin: 0 auto; padding: 0 40px 72px; box-sizing: border-box">
+<div style="margin-top: 36px">
+<section style="display: flex; flex-wrap: wrap; gap: 14px 40px; padding: 30px 0; border-top: 1px solid #e3dfd3">
+<div style="flex: 0 0 220px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Profile</h2>
+</div>
+<div style="flex: 999 1 420px; min-width: 0; max-width: 720px">
+<div style="display: flex; align-items: center; gap: 16px">
+<span style="flex: none; width: 60px; height: 60px; border-radius: 50%; background: #dc2626; color: #ffffff; font-size: 21px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f7f5ef">MD</span>
+<div>
+<p style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px">Ms. Davis</p>
+<p style="margin: 4px 0 0; font-size: 14px; color: #57534e">davis@example.com · Member since Nov 23, 2026</p>
+</div>
+</div>
+<p style="margin: 0; font-size: 13px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 12px">Your sign-in address can’t be changed here — write to us and we’ll move it for you.</p>
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 20px">
+<div style="flex: 1 1 260px; max-width: 360px">
+<div>
+<label for="acct-name" style="display: block; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e">Display name</label>
+<input id="acct-name" type="text" value="Ms. Davis" style="box-sizing: border-box; width: 100%; height: 48px; padding: 0 14px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</div>
+</div>
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; min-height: 48px">Save name</a>
+</div>
+<p style="margin: 0; font-size: 13px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 8px">Shown on shared scores and in a student’s session, in place of your email address.</p>
+<div style="margin-top: 26px; padding-top: 22px; border-top: 1px solid #e3dfd3">
+<p style="margin: 0; font-size: 16px; font-weight: 600">Change password</p>
+<p style="margin: 0; font-size: 13px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 4px">At least 8 characters, with a letter and a number. You stay signed in on this device.</p>
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 14px">
+<div style="flex: 1 1 200px">
+<div>
+<label for="acct-pw" style="display: block; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e">New password</label>
+<input id="acct-pw" type="password" style="box-sizing: border-box; width: 100%; height: 48px; padding: 0 14px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</div>
+</div>
+<div style="flex: 1 1 200px">
+<div>
+<label for="acct-pw2" style="display: block; margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e">Confirm new password</label>
+<input id="acct-pw2" type="password" style="box-sizing: border-box; width: 100%; height: 48px; padding: 0 14px; border-radius: 12px; border: 1.5px solid #cfc9bb; background: #ffffff; color: #1c1917; font-family: inherit; font-size: 16px">
+</div>
+</div>
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; min-height: 48px">Change password</a>
+</div>
+</div>
+</div>
+</section>
+<section style="display: flex; flex-wrap: wrap; gap: 14px 40px; padding: 30px 0; border-top: 1px solid #e3dfd3">
+<div style="flex: 0 0 220px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Plan &amp; billing</h2>
+</div>
+<div style="flex: 999 1 420px; min-width: 0; max-width: 720px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px">
+<div>
+<div style="display: flex; align-items: center; gap: 10px">
+<p style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 30px">Teacher</p>
+<span style="display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; background: rgba(67,56,202,0.1); color: #4338ca; white-space: nowrap">Current plan</span>
+</div>
+<p style="margin: 6px 0 0; font-size: 15px; color: #57534e">$19 per month + tax · Renews Dec 23, 2026</p>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 10px">
+<a href="Flow-Plans.html" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; ">Change plan</a>
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; ">Manage subscription</a>
+</div>
+</div>
+<div style="margin-top: 22px">
+<p style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #57534e; ">Usage this month</p>
+<ul style="list-style: none; margin: 10px 0 0; padding: 0; border-bottom: 1px solid #e3dfd3">
+<li style="display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid #e3dfd3; font-size: 15px">
+<span>Imports from Find a score</span>
+<span style="color: #57534e">unlimited</span>
+</li>
+<li style="display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid #e3dfd3; font-size: 15px">
+<span>PDF exports</span>
+<span style="color: #57534e">unlimited</span>
+</li>
+<li style="display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid #e3dfd3; font-size: 15px">
+<span>Active cloud scores</span>
+<span style="color: #57534e">unlimited</span>
+</li>
+<li style="display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid #e3dfd3; font-size: 15px">
+<span>Student seats</span>
+<span style="color: #57534e">unlimited</span>
+</li>
+</ul>
+<p style="margin: 0; font-size: 13px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 10px">Annotation is unlimited on every plan, including Free.</p>
+</div>
+</div>
+</section>
+<section style="display: flex; flex-wrap: wrap; gap: 14px 40px; padding: 30px 0; border-top: 1px solid #e3dfd3">
+<div style="flex: 0 0 220px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Preferences</h2>
+</div>
+<div style="flex: 999 1 420px; min-width: 0; max-width: 720px">
+<p style="margin: 0; font-size: 16px; font-weight: 600">Home screen</p>
+<p style="margin: 0; font-size: 14px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 4px">Put your library on your phone or tablet like an app — full screen, Cleffy icon on the Home Screen, no app store.</p>
+<div style="margin-top: 12px">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; ">Add to Home Screen</a>
+</div>
+<div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid #e3dfd3">
+<p style="margin: 0; font-size: 16px; font-weight: 600">Score layout</p>
+<p style="margin: 0; font-size: 14px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 4px">How scores open on a tablet or computer. A phone always shows one page at a time.</p>
+<div style="display: flex; flex-wrap: wrap; gap: 4px 28px; margin-top: 8px">
+<label style="display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-size: 15px; cursor: pointer">
+<input type="radio" name="layout" checked="checked" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #4338ca; background: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+<span style="width: 10px; height: 10px; border-radius: 50%; background: #4338ca">
+</span>
+</span>Single page</label>
+<label style="display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-size: 15px; cursor: pointer">
+<input type="radio" name="layout" style="position: absolute; opacity: 0; width: 1px; height: 1px">
+<span aria-hidden="true" style="flex: none; width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #cfc9bb; background: #ffffff; display: inline-flex; align-items: center; justify-content: center">
+</span>Two pages side by side</label>
+</div>
+</div>
+<div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e3dfd3">
+<p style="margin: 0; font-size: 16px; font-weight: 600">Offline storage</p>
+<p style="margin: 0; font-size: 14px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 4px">3 scores are downloaded to this device. Removing them frees the space and nothing else: your annotations are not affected.</p>
+<div style="margin-top: 12px">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; ">Remove downloaded scores</a>
+</div>
+</div>
+</div>
+</section>
+<section style="display: flex; flex-wrap: wrap; gap: 14px 40px; padding: 30px 0; border-top: 1px solid #e3dfd3">
+<div style="flex: 0 0 220px">
+<h2 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 24px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; ">Delete account</h2>
+</div>
+<div style="flex: 999 1 420px; min-width: 0; max-width: 720px">
+<p style="margin: 0; font-size: 14px; line-height: 1.5; color: #57534e; text-wrap: pretty; ">Deletes your account, your scores and every mark on them. Students you added lose their sign-ins.</p>
+<div style="margin-top: 12px">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #b91c1c; border: 1.5px solid transparent; border-color: #b91c1c">Delete account…</a>
+</div>
+</div>
+</section>
+</div>
+</main>
+</div>
+<div style="position: absolute; inset: 0; z-index: 10; background: rgba(28,25,23,0.38); display: flex; align-items: flex-start; justify-content: center; padding: 70px 20px 40px; box-sizing: border-box">
+<div role="dialog" aria-label="Plans" style="position: relative; width: min(1120px, 100%); box-sizing: border-box; padding: 32px; border-radius: 24px; background: #f7f5ef; color: #1c1917; box-shadow: 0 40px 90px -30px rgba(28,25,23,0.6), 0 0 0 1px rgba(28,25,23,0.08)">
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px; padding-right: 44px">
+<div>
+<h1 style="margin: 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 48px; line-height: 1.02; letter-spacing: -0.02em; text-wrap: balance; ">Free to start. <em>Students never pay.</em>
+</h1>
+<p style="margin: 0; font-size: 16px; line-height: 1.5; color: #57534e; text-wrap: pretty; margin-top: 12px">Personal is the practice tool. Teacher adds your students. Academy covers a team of teachers.</p>
+</div>
+<div role="group" style="display: inline-flex; padding: 3px; border-radius: 11px; background: #e4dfd2">
+<button type="button" aria-pressed="true" style="min-height: 40px; padding: 0 15px; border: none; border-radius: 8px; background: #ffffff; color: #1c1917; box-shadow: 0 1px 2px rgba(28,25,23,0.22), 0 0 0 1px rgba(28,25,23,0.05); font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer">Monthly</button>
+<button type="button" aria-pressed="false" style="min-height: 40px; padding: 0 15px; border: none; border-radius: 8px; background: transparent; color: #57534e; box-shadow: none; font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer">Annual · two months free</button>
+</div>
+</div>
+<a href="Flow-Account.html" aria-label="Close" style="position: absolute; right: 14px; top: 14px; width: 44px; height: 44px; border-radius: 12px; color: #57534e; display: inline-flex; align-items: center; justify-content: center">
+<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M6 6l12 12 M18 6L6 18">
+</path>
+</svg>
+</a>
+<div style="display: flex; flex-wrap: wrap; gap: 14px; margin-top: 26px; align-items: stretch">
+<section style="flex: 1 1 210px; min-width: 0; box-sizing: border-box; padding: 22px; border-radius: 16px; background: transparent; color: #1c1917; border: 1px solid #d9d4c6; display: flex; flex-direction: column">
+<h3 style="margin: 0; font-size: 16px; font-weight: 600">Free</h3>
+<p style="margin: 10px 0 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 44px; line-height: 1; font-variant-numeric: tabular-nums; color: #1c1917">Free</p>
+<p style="margin: 6px 0 0; font-size: 13px; color: #57534e">no card required</p>
+<p style="margin: 14px 0 0; font-size: 14px; line-height: 1.45; color: #57534e">A taste of Personal — the whole practice tool for one player, in small amounts.</p>
+<ul style="list-style: none; margin: 16px 0 20px; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>3 active cloud scores</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>2 imports from Find a score a month</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>1 PDF export a month</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Unlimited annotation</span>
+</li>
+</ul>
+<div style="margin-top: auto">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; width: 100%">Switch to Free</a>
+</div>
+</section>
+<section style="flex: 1 1 210px; min-width: 0; box-sizing: border-box; padding: 22px; border-radius: 16px; background: transparent; color: #1c1917; border: 1px solid #d9d4c6; display: flex; flex-direction: column">
+<h3 style="margin: 0; font-size: 16px; font-weight: 600">Personal</h3>
+<p style="margin: 10px 0 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 44px; line-height: 1; font-variant-numeric: tabular-nums; color: #1c1917">$7</p>
+<p style="margin: 6px 0 0; font-size: 13px; color: #57534e">per month + tax</p>
+<p style="margin: 14px 0 0; font-size: 14px; line-height: 1.45; color: #57534e">Your personal practice tool — the whole app for one player, with no student features.</p>
+<ul style="list-style: none; margin: 16px 0 20px; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Unlimited cloud scores</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Unlimited imports</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Unlimited PDF export</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>No roster — this plan is just for you</span>
+</li>
+</ul>
+<div style="margin-top: auto">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; width: 100%">Choose Personal</a>
+</div>
+</section>
+<section style="flex: 1 1 210px; min-width: 0; box-sizing: border-box; padding: 22px; border-radius: 16px; background: #1c1917; color: #f7f5ef; border: 1px solid #1c1917; box-shadow: 0 30px 50px -30px rgba(28,25,23,0.7); display: flex; flex-direction: column">
+<h3 style="margin: 0; font-size: 16px; font-weight: 600">Teacher</h3>
+<p style="margin: 10px 0 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 44px; line-height: 1; font-variant-numeric: tabular-nums; color: #f7f5ef">$19</p>
+<p style="margin: 6px 0 0; font-size: 13px; color: #d6d3d1">per month + tax</p>
+<p style="margin: 14px 0 0; font-size: 14px; line-height: 1.45; color: #d6d3d1">For a teaching studio: one price, however many students you teach.</p>
+<ul style="list-style: none; margin: 16px 0 20px; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#4ade80" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Unlimited students</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#4ade80" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Everything in Personal</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#4ade80" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>One roster for everyone you teach</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#4ade80" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Practice notes on every lesson</span>
+</li>
+</ul>
+<div style="margin-top: auto">
+<div style="display: flex; align-items: center; min-height: 44px">
+<span style="display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 999px; background: rgba(247,245,239,0.14); color: #f7f5ef; font-size: 12px; font-weight: 600">Current plan</span>
+</div>
+</div>
+</section>
+<section style="flex: 1 1 210px; min-width: 0; box-sizing: border-box; padding: 22px; border-radius: 16px; background: transparent; color: #1c1917; border: 1px solid #d9d4c6; display: flex; flex-direction: column">
+<h3 style="margin: 0; font-size: 16px; font-weight: 600">Academy</h3>
+<p style="margin: 10px 0 0; font-family: 'Bodoni Moda', Didot, serif; font-weight: 600; font-size: 44px; line-height: 1; font-variant-numeric: tabular-nums; color: #1c1917">$49</p>
+<p style="margin: 6px 0 0; font-size: 13px; color: #57534e">per month, up to 5 teachers + tax</p>
+<p style="margin: 14px 0 0; font-size: 14px; line-height: 1.45; color: #57534e">Teacher for every instructor on your team, up to five seats.</p>
+<ul style="list-style: none; margin: 16px 0 20px; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Everything in Teacher, for up to 5 teachers</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>One invoice for the whole academy</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Add and remove teacher seats by email</span>
+</li>
+<li style="display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4">
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#15803d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none">
+<path d="M5 12.5l4.5 4.5L19 7.5">
+</path>
+</svg>
+<span>Students always join free</span>
+</li>
+</ul>
+<div style="margin-top: auto">
+<a href="#" style="display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; min-height: 44px; padding: 0 18px; border-radius: 12px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; background: transparent; color: #1c1917; border: 1.5px solid #bdb6a6; width: 100%">Choose Academy</a>
+</div>
+</section>
+</div>
+<p style="margin: 20px 0 0; font-size: 14px; line-height: 1.5; color: #57534e">Students never pay. Changed your mind? You get a full refund if you ask within 14 days of your first purchase.</p>
+</div>
+</div>
+</div>
+</div>
+</body>
+</html>
