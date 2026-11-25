@@ -34,6 +34,18 @@
     --color-accent-soft: rgb(67 56 202 / 0.1);
     --color-scrim: rgb(28 25 23 / 0.45);
 
+    /* The front-end overhaul's chrome tones. */
+    --color-ink-soft: #44403c;
+    --color-hairline: #e3dfd3;
+    --color-panel-line: #d9d4c6;
+    --color-field-line: #cfc9bb;
+    --color-button-line: #bdb6a6;
+    --color-trough: #e4dfd2;
+    --color-accent-tint: #e9e8fb;
+    --color-on-ink-muted: #d6d3d1;
+    --color-on-ink-faint: #a8a29e;
+    --color-desk: #ebe8df;
+
     /* The landing page's ink bands (features/marketing/landing.css). The
        accent is too dark on ink, so the filled button there is indigo-600;
        handwriting on ink is yellow, on paper the danger red. */
