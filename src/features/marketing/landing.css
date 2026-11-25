@@ -2,8 +2,8 @@
  * The landing page's own styles ("Ink"). Imported by LandingPage.tsx, not by
  * index.css, so they and the handwriting face ship in the landing chunk and
  * nothing in the app shell's stylesheet grows for them. The colour tokens
- * live in @theme (index.css); `.landing-page`, which the auth, join and 404
- * screens share, is untouched.
+ * live in @theme (index.css); `.landing-page`, this page's background, stays
+ * in index.css.
  */
 
 /*

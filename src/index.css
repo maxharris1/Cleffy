@@ -229,11 +229,7 @@ body {
     -webkit-touch-callout: none;
 }
 
-/*
- * Paper wash + engraved five-line staves — for sparse surfaces only
- * (marketing, auth, join, 404). Dense app surfaces use .paper-page, where
- * the staves would fight the content.
- */
+/* The marketing landing page's background: paper wash + engraved staves. */
 .landing-page {
     background-color: var(--color-paper);
     background-image:
@@ -264,12 +260,9 @@ body {
         );
 }
 
-/* Quiet paper for dense app surfaces: the wash without the staves. */
+/* Flat page ground for every surface except the marketing landing page. */
 .paper-page {
     background-color: var(--color-paper);
-    background-image:
-        radial-gradient(ellipse 90% 55% at 50% -10%, rgb(255 255 255 / 0.75), transparent 60%),
-        linear-gradient(180deg, transparent 0%, var(--color-paper-deep) 100%);
 }
 
 .landing-hero {

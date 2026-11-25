@@ -108,7 +108,7 @@ export const DemoPage = () => {
 
     if (failure) {
         return (
-            <main className="landing-page flex min-h-full flex-col items-center justify-center p-8">
+            <main className="paper-page flex min-h-full flex-col items-center justify-center p-8">
                 <EmptyState title="Couldn’t load the demo score" body={failureCopy(failure)}>
                     <Button
                         onClick={() => {

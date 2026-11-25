@@ -12,7 +12,7 @@ interface BrandShellProps {
 const BRAND_CLASS = 'landing-brand font-display text-3xl font-semibold leading-none';
 
 const BrandFrame = ({ brand, title, subtitle, children }: BrandShellProps & { brand: ReactNode }) => (
-    <main className="landing-page safe-brand-shell flex min-h-full flex-col items-center justify-center">
+    <main className="paper-page safe-brand-shell flex min-h-full flex-col items-center justify-center">
         <div className="brand-enter w-full max-w-sm text-center">
             {brand}
             <div className="brand-rule mx-auto" aria-hidden="true" />
@@ -56,7 +56,7 @@ export const StaticBrandShell = (props: BrandShellProps) => (
 );
 
 export const BrandLoading = () => (
-    <main className="landing-page flex min-h-full items-center justify-center pt-[var(--safe-top)]">
+    <main className="paper-page flex min-h-full items-center justify-center pt-[var(--safe-top)]">
         <LoadingText>Loading…</LoadingText>
     </main>
 );
