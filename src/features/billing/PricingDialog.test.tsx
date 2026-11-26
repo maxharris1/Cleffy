@@ -245,7 +245,9 @@ describe('PricingDialog', () => {
 
     it('says students never pay', async () => {
         await renderPricing(<PricingDialog currentTier="free" onClose={vi.fn()} />);
-        expect(screen.getAllByText(/Students never pay/).length).toBeGreaterThan(0);
+        expect(
+            screen.getByText('Students never pay and never need an account — share links keep working on every plan.'),
+        ).toBeInTheDocument();
     });
 
     describe('layout', () => {
