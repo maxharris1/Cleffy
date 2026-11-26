@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
+import { useBottomDock } from '@/features/viewer/bottomDock';
 import {
     discardLostAccessInk,
     discardSignedOutInk,
@@ -73,6 +74,7 @@ export const SignedOutInkNotice = () => {
     const { accounts, lost } = useSyncExternalStore(subscribeInkRecovery, read);
     const [exporting, setExporting] = useState(false);
     const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+    const dockRef = useBottomDock();
 
     const first = accounts[0];
     if (!first && lost.length === 0) {
@@ -90,6 +92,7 @@ export const SignedOutInkNotice = () => {
     return (
         <>
             <div
+                ref={dockRef}
                 // Pinned to the window's bottom edge, but lifted above the viewer's
                 // phone toolbar when one is there (--toolbar-bottom-clearance,
                 // published by the Toolbar), so it never covers the pen.

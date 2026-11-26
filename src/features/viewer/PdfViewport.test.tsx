@@ -33,7 +33,6 @@ let viewport = { width: 800, height: 600 };
 /** Rendered heights (px) of one notice card and the gap between cards, phone size. */
 const NOTICE_PX = 52;
 const NOTICE_GAP_PX = 6;
-/** The region's top on phones (top-2): nothing else sits at the top of a phone's score. */
 const REGION_TOP_PX = 8;
 
 const resizeCallbacks = new Set<() => void>();
@@ -314,7 +313,6 @@ describe('PdfViewport follow under the notice stack', () => {
 
         const tick = { current: 0 };
         render(<ViewerWithNotices tick={tick} />);
-        // Three cards: the stack reaches 8 + 3×52 + 2×6 = 176px down a 664px phone.
         const stackBottom = REGION_TOP_PX + 3 * NOTICE_PX + 2 * NOTICE_GAP_PX;
         expect(screen.getAllByRole('status')).toHaveLength(3);
 
@@ -426,7 +424,6 @@ const manualFrames = () => {
     };
 };
 
-/** How far down the stack reaches with `cards` notices up (8 + cards×52 + gaps). */
 const stackBottomPx = (cards: number) => REGION_TOP_PX + cards * NOTICE_PX + (cards - 1) * NOTICE_GAP_PX;
 
 /** The pager and zoom row's strip (px) over the bottom of a phone viewport. */
@@ -510,7 +507,6 @@ describe('PdfViewport page turns under a tall notice stack', () => {
             act(() => useViewerStore.getState().setView({ ...view(), scrollY: phoneTopBound(3) }));
             expectPager(1, false, true);
 
-            // Page 1 -> 2 puts page 2's top at the foot of the stack (808 × 0.25 − 176 = 26).
             act(() => turn(1));
             expect(view().scrollY).toBeCloseTo(26);
             expectPager(2, true, true);
@@ -539,8 +535,6 @@ describe('PdfViewport page turns under a tall notice stack', () => {
     it.each(Object.entries(turners))(
         'pages through every page at fit width when the stack reaches past the viewport middle (%s)',
         async (_, turn) => {
-            // 176 px of notices over a 340 px viewport: the middle of the whole
-            // viewport is under the stack.
             viewport = { width: 390, height: 340 };
             await openUnderStack();
             expect(STACK).toBeGreaterThan(340 / 2);
@@ -972,5 +966,18 @@ describe('PdfViewport lesson starting point notice', () => {
         const notice = (await screen.findByText('Viewing day starting point')).parentElement!;
         expect(notice).toHaveClass('bg-paper');
         expect(notice.outerHTML).not.toMatch(/amber/);
+    });
+});
+
+describe('PdfViewport phone controls over a bottom dock', () => {
+    it('lifts the pager and zoom keys above --viewer-bottom-dock', async () => {
+        viewport = { width: 390, height: 664 };
+        render(<PdfViewport docId="doc-bottom-dock" readOnly />);
+        await waitFor(() => expect(view().scale).not.toBe(1));
+        for (const name of ['Next page', 'Zoom in']) {
+            expect(screen.getByRole('button', { name }).parentElement!.className).toContain(
+                'var(--viewer-bottom-dock,0px)',
+            );
+        }
     });
 });

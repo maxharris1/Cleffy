@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 
+import { useBottomDock } from '@/features/viewer/bottomDock';
 import { prefersReducedMotion } from '@/lib/motion';
 import { Button } from '@/ui/Button';
 import { CloseButton } from '@/ui/CloseButton';
@@ -119,6 +120,14 @@ export const DemoValueCard = ({
 }) => {
     const titleId = useId();
     const cardRef = useRef<HTMLElement>(null);
+    const dock = useBottomDock();
+    const dockCard = useCallback(
+        (card: HTMLElement | null) => {
+            cardRef.current = card;
+            return dock(card);
+        },
+        [dock],
+    );
     // Read once, as it appears: the stylesheet handles a later change.
     const [animate] = useState(() => !prefersReducedMotion());
 
@@ -140,7 +149,7 @@ export const DemoValueCard = ({
     return (
         <div className="demo-value-dock pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center">
             <section
-                ref={cardRef}
+                ref={dockCard}
                 role="dialog"
                 aria-modal="false"
                 aria-labelledby={titleId}

@@ -1571,7 +1571,7 @@ const Pager = ({
     return (
         <div
             data-ui-overlay
-            className="absolute bottom-[calc(var(--toolbar-bottom-clearance,var(--safe-bottom))+0.5rem)] left-[max(0.5rem,var(--safe-left))] z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:left-[max(1.25rem,var(--safe-left))] sm:gap-2"
+            className="absolute bottom-[calc(var(--toolbar-bottom-clearance,var(--safe-bottom))+var(--viewer-bottom-dock,0px)+0.5rem)] left-[max(0.5rem,var(--safe-left))] z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:left-[max(1.25rem,var(--safe-left))] sm:gap-2"
         >
             <button
                 type="button"
@@ -1625,7 +1625,7 @@ const ZoomControls = ({
             // bottom toolbar (PHONE_CONTROLS_STRIP). Larger screens: a column at the
             // bottom-right — a row again on short landscape screens, where the
             // column would climb under the toolbar.
-            className="absolute bottom-[calc(var(--toolbar-bottom-clearance,var(--safe-bottom))+0.5rem)] right-[max(0.5rem,var(--safe-right))] flex flex-row items-center gap-2 sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:right-[max(1.25rem,var(--safe-right))] sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
+            className="absolute bottom-[calc(var(--toolbar-bottom-clearance,var(--safe-bottom))+var(--viewer-bottom-dock,0px)+0.5rem)] right-[max(0.5rem,var(--safe-right))] flex flex-row items-center gap-2 sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:right-[max(1.25rem,var(--safe-right))] sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
         >
             {pageColumns !== null ? (
                 <PageLayoutMenu

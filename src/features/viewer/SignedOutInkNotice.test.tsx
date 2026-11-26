@@ -137,6 +137,31 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
     });
 });
 
+describe('SignedOutInkNotice over the viewer’s phone controls', () => {
+    it('publishes its height as --viewer-bottom-dock while shown, and clears it on discard', async () => {
+        const spy = vi
+            .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+            .mockReturnValue({ top: 0, bottom: 56, height: 56 } as DOMRect);
+        const dock = () => document.documentElement.style.getPropertyValue('--viewer-bottom-dock');
+        holdTwo();
+        render(<SignedOutInkGate />);
+        retireAccountInk(USER);
+
+        await screen.findByRole('status');
+        expect(dock()).toBe('56px');
+
+        await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
+        await userEvent.click(
+            within(await screen.findByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
+                name: 'Discard',
+            }),
+        );
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+        expect(dock()).toBe('');
+        spy.mockRestore();
+    });
+});
+
 describe('held ink of a score lost to this device (decision 65(1))', () => {
     it('access lost: the same notice, saying the marks are still on this device, with Export and Discard', async () => {
         holdTwo();

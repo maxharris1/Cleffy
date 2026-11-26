@@ -28,7 +28,6 @@ describe('PresenceBar', () => {
         const group = screen.getByLabelText('2 collaborators viewing');
         expect(group).toHaveClass('gap-x-1.5');
         expect(group).toHaveClass('gap-y-1.5');
-        // Wrapped rows on touch: 30px chips 14px apart put the 44px hit areas edge to edge, never overlapping.
         expect(group).toHaveClass('pointer-coarse:gap-y-3.5');
         expect(screen.getByRole('button', { name: 'Ada Lovelace, on page 1' })).toHaveTextContent('Ada Lovelace');
         expect(screen.getByRole('button', { name: 'Bo Diddley, on page 1' })).toHaveTextContent('Bo Diddley');
