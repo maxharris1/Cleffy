@@ -12,6 +12,12 @@ import { dialogStack } from '@/ui/dialogStack';
 const SHEET_CLOSE_DISTANCE = 96;
 const SHEET_CLOSE_VELOCITY = 0.5;
 
+const MAX_WIDTH_CLASSES: Record<NonNullable<DialogProps['maxWidth']>, string> = {
+    448: 'max-w-md',
+    480: 'max-w-[480px]',
+    520: 'max-w-[520px]',
+};
+
 /**
  * Drag a phone sheet down by its grab bar to dismiss it. The sheet follows the
  * finger 1:1 (transform only, no layout), and on release either closes or
@@ -90,6 +96,7 @@ export const DialogPanel = ({
     withHeader = true,
     sheet = false,
     alert = false,
+    maxWidth = 448,
     stackId,
 }: DialogPanelProps) => {
     const popupRef = useRef<HTMLDivElement | null>(null);
@@ -146,7 +153,7 @@ export const DialogPanel = ({
                         aria-modal="true"
                         aria-label={label}
                         initialFocus={popupRef}
-                        className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} dialog-paper w-full max-w-md overscroll-contain rounded-[22px] bg-paper p-7 shadow-[0_40px_90px_-30px_rgba(28,25,23,0.6),0_0_0_1px_rgba(28,25,23,0.08)] outline-none ${
+                        className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} dialog-paper w-full ${MAX_WIDTH_CLASSES[maxWidth]} overscroll-contain rounded-[22px] bg-paper p-7 shadow-[0_40px_90px_-30px_rgba(28,25,23,0.6),0_0_0_1px_rgba(28,25,23,0.08)] outline-none ${
                             sheet
                                 ? 'max-h-[80dvh] overflow-y-auto overflow-x-hidden pb-[max(1.75rem,var(--safe-bottom))] pl-[max(1.75rem,var(--safe-left))] pr-[max(1.75rem,var(--safe-right))]'
                                 : // Fits any viewport (the viewport's p-4 is the 2rem) and scrolls inside, so a

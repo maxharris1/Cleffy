@@ -200,4 +200,36 @@ describe('AssignDialog', () => {
         await user.click(screen.getByRole('button', { name: 'View only' }));
         expect(screen.getByText('They can read and play from it, but not mark it up.')).toBeInTheDocument();
     });
+
+    it('tints every checked row, the students who already have the score included', async () => {
+        const user = userEvent.setup();
+        listAssignmentsForStudents.mockResolvedValue(new Map([['s1-user', [rosterAssignment('doc-1', 's1-user')]]]));
+        renderDialog();
+
+        const ada = await screen.findByRole('checkbox', { name: /Ada Lovelace/ });
+        const bo = screen.getByRole('checkbox', { name: /Bo Diddley/ });
+        expect(bo.closest('label')).not.toHaveClass('bg-accent/7');
+        await user.click(bo);
+
+        expect(ada).toBeDisabled();
+        expect(within(ada.closest('label') as HTMLElement).getByText('Assigned')).toBeInTheDocument();
+        expect(ada.closest('label')).toHaveClass('bg-accent/7');
+        expect(bo.closest('label')).toHaveClass('bg-accent/7');
+    });
+
+    it('anchors each visually hidden checkbox in its own row, so tabbing to it scrolls the list', async () => {
+        renderDialog();
+
+        await screen.findByRole('checkbox', { name: /Ada Lovelace/ });
+        for (const box of screen.getAllByRole('checkbox')) {
+            expect(box).toHaveClass('sr-only');
+            expect(box.closest('label')).toHaveClass('relative');
+        }
+    });
+
+    it('opens at the design width of 520 px', async () => {
+        renderDialog();
+
+        expect(await screen.findByRole('dialog', { name: 'Assign to students' })).toHaveClass('max-w-[520px]');
+    });
 });

@@ -18,6 +18,7 @@ export interface DialogProps {
      * on the scrim does not dismiss it; Escape and Cancel do.
      */
     alert?: boolean;
+    maxWidth?: 448 | 480 | 520;
 }
 
 const LazyDialogPanel = lazy(() => dialogPanel.load().then((module) => ({ default: module.DialogPanel })));

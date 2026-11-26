@@ -505,7 +505,7 @@ export const RosterPage = () => {
             )}
 
             {codeCard ? (
-                <Dialog label="Setup card" onClose={() => setCodeCard(null)}>
+                <Dialog label="Setup card" onClose={() => setCodeCard(null)} maxWidth={480}>
                     <p className="text-[15px] leading-normal text-ink-muted">
                         Print this now or write it down. The code is stored as a hash, so nothing can read it back — a
                         lost card is replaced by resetting their access, never recovered. It works once: the student

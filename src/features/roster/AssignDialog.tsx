@@ -132,7 +132,7 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
     ).length;
 
     return (
-        <Dialog label="Assign to students" onClose={onClose} sheet>
+        <Dialog label="Assign to students" onClose={onClose} sheet maxWidth={520}>
             <p className="text-[15px] leading-normal text-ink-muted">
                 Give “{documentTitle}” to students on your roster. They will find it waiting the next time they sign in.
             </p>
@@ -160,9 +160,9 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                             return (
                                 <li key={student.id}>
                                     <label
-                                        className={`flex min-h-11 items-center gap-3 rounded-[10px] px-2.5 text-[15px] transition-colors ${
+                                        className={`relative flex min-h-11 items-center gap-3 rounded-[10px] px-2.5 text-[15px] transition-colors ${
                                             already
-                                                ? 'text-ink-muted'
+                                                ? 'bg-accent/7 text-ink-muted'
                                                 : picked
                                                   ? 'cursor-pointer bg-accent/7 font-semibold text-ink'
                                                   : 'cursor-pointer text-ink hover:bg-ink/5'

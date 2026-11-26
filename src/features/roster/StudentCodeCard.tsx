@@ -68,7 +68,10 @@ export const StudentCodeCard = ({
             <div className="flex items-center justify-between gap-3">
                 <span className="inline-flex items-center gap-2">
                     <span className="landing-brand font-display text-[22px] font-semibold">Cleffy</span>
-                    <span aria-hidden="true" className="student-code-card-rule mt-1 h-0.5 w-[21px] bg-accent" />
+                    <span
+                        aria-hidden="true"
+                        className="student-code-card-rule mt-1 w-[21px] border-t-2 border-accent"
+                    />
                 </span>
                 <p className="student-code-card-label text-xs font-semibold tracking-[0.08em] text-ink-muted uppercase">
                     Setup card
