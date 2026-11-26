@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { type ButtonSize, type ButtonVariant, buttonClassName, chipClassName, fieldClassName } from './classNames';
+import {
+    type ButtonSize,
+    type ButtonVariant,
+    buttonClassName,
+    chipClassName,
+    chipRowClassName,
+    fieldClassName,
+} from './classNames';
 
 const classes = (s: string) => s.split(/\s+/);
 
@@ -58,5 +65,14 @@ describe('chipClassName', () => {
     it.each([true, false])('is 34px tall with 13px sides, and a 44px target on touch (active %s)', (active) => {
         const c = classes(chipClassName(active));
         expect(c).toEqual(expect.arrayContaining(['h-[34px]', 'px-[13px]', 'pointer-coarse:hit-44']));
+    });
+});
+
+describe('chipRowClassName', () => {
+    it('scrolls on phones, wraps from sm, and pads coarse-pointer phones so the 44px chip hit area is not clipped', () => {
+        const c = classes(chipRowClassName);
+        expect(c).toContain('overflow-x-auto');
+        expect(c).toContain('sm:overflow-x-visible');
+        expect(c).toContain('max-sm:pointer-coarse:py-[5px]');
     });
 });

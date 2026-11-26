@@ -38,7 +38,7 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { ViewToggle } from '@/ui/ViewToggle';
-import { chipClassName, fieldClassName } from '@/ui/classNames';
+import { chipClassName, chipRowClassName, fieldClassName } from '@/ui/classNames';
 
 interface ImslpSearchPanelProps {
     disabled?: boolean;
@@ -53,10 +53,6 @@ const DEFAULT_SEARCH_LIMIT = 100;
  * never "For piano"), see INSTRUMENT_FACETS.
  */
 const DEFAULT_INSTRUMENT = 'piano';
-
-/** Chip strips scroll on phones (like the library's) and wrap from sm up. */
-const CHIP_ROW_CLASS =
-    'no-scrollbar -mx-4 flex items-center gap-2 overflow-x-auto overscroll-x-contain px-4 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0';
 
 /** The library shelf's exact columns — both pages fill the same shell width. */
 const GRID_UL_CLASS = 'grid grid-cols-2 gap-x-5 gap-y-7 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6';
@@ -547,7 +543,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 </div>
             </div>
 
-            <div role="group" aria-label="Filter by" className={`${CHIP_ROW_CLASS} mt-2.5`}>
+            <div role="group" aria-label="Filter by" className={`${chipRowClassName} mt-2.5`}>
                 {FACET_DIMENSIONS.map((dim) => (
                     <button
                         key={dim.id}
@@ -567,7 +563,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 ) : null}
             </div>
 
-            <div role="group" aria-label={`${dimension} values`} className={`${CHIP_ROW_CLASS} mt-1.5`}>
+            <div role="group" aria-label={`${dimension} values`} className={`${chipRowClassName} mt-1.5`}>
                 {valueFacets.map((value) => (
                     <button
                         key={value.id}
@@ -590,7 +586,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             ) : null}
 
             {showResults && (q.length >= 2 || categoryBackedFilters(filters)) ? (
-                <div role="group" aria-label="Sort results" className={`${CHIP_ROW_CLASS} mt-1.5`}>
+                <div role="group" aria-label="Sort results" className={`${chipRowClassName} mt-1.5`}>
                     {(
                         [
                             { id: 'relevance' as const, label: 'Best' },

@@ -70,7 +70,7 @@ import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
 import { toast } from '@/ui/toast';
 import { ViewToggle } from '@/ui/ViewToggle';
-import { buttonClassName, chipClassName, fieldClassName } from '@/ui/classNames';
+import { buttonClassName, chipClassName, chipRowClassName, fieldClassName } from '@/ui/classNames';
 import { SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
 
 /** Above this count, tag filters switch from chips to a select. */
@@ -1074,7 +1074,7 @@ export const LibraryPage = () => {
                             ) : null}
                         </div>
 
-                        <div className="no-scrollbar -mx-4 mt-2 flex items-center gap-2 overflow-x-auto overscroll-x-contain px-4 py-0.5 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0">
+                        <div className={`${chipRowClassName} mt-2 py-0.5`}>
                             <FilterChip active={favoritesOnly} onClick={() => setFavoritesOnly((v) => !v)}>
                                 Favorites
                             </FilterChip>

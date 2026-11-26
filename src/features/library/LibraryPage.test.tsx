@@ -8,6 +8,7 @@ import { libraryMutationEpoch, noteLibraryMutation } from '@/features/library/li
 import { LibraryPage } from '@/features/library/LibraryPage';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
+import { chipRowClassName } from '@/ui/classNames';
 
 const toast = vi.hoisted(() => ({
     success: vi.fn(),
@@ -250,6 +251,9 @@ describe('LibraryPage', () => {
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
         expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
         expect(screen.getByRole('heading', { level: 1, name: 'Library' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add a tag…' }).parentElement).toHaveClass(
+            ...chipRowClassName.split(' '),
+        );
     });
 
     it('says “1 page”, not “1 pages”, for a single-page score', async () => {

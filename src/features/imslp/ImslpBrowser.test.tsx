@@ -27,6 +27,7 @@ import {
 import { moonlightFilenames, moonlightWorkDetail } from '../../../tests/imslp/moonlightEditions';
 import { groupPopularByComposer, POPULAR_WORKS, popularWorkTags } from '@/features/imslp/popularWorks';
 import { buildSearchFilters, hasActiveFilters, labelsForCategories } from '@/features/imslp/searchFacets';
+import { chipRowClassName } from '@/ui/classNames';
 
 /**
  * Node defines a `localStorage` global whose getter returns undefined unless
@@ -516,6 +517,12 @@ describe('ImslpBrowser', () => {
         const instrumentTab = screen.getByRole('button', { name: 'Instrument' });
         instrumentTab.click();
         expect(await screen.findByRole('button', { name: 'Piano' })).toHaveAttribute('aria-pressed', 'true');
+        for (const row of [
+            screen.getByRole('group', { name: 'Filter by' }),
+            screen.getByRole('button', { name: 'Piano' }).closest('[role="group"]'),
+        ]) {
+            expect(row).toHaveClass(...chipRowClassName.split(' '));
+        }
         expect(screen.queryByText('Swan Lake')).not.toBeInTheDocument();
         expect(screen.getByText(/Piano · Popular ·/)).toBeInTheDocument();
         // No fake ARIA widgets remain.

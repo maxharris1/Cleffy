@@ -185,3 +185,37 @@ describe('dialog text on the paper panel', () => {
         },
     );
 });
+
+describe('hovered dialog row', () => {
+    const alpha = Number(read('src/features/library/TagManageDialog.tsx').match(/hover:bg-ink\/(\d+)/)?.[1]) / 100;
+    const ink = hexOrStock('ink');
+    const washOver = (surface: string): [number, number, number] => {
+        const under = hexToLinearSrgb(surface);
+        const [r, g, b] = ink.map((v, i) =>
+            srgbToLinear(linearToSrgb(v) * alpha + linearToSrgb(under[i] ?? 0) * (1 - alpha)),
+        );
+        return [r ?? 0, g ?? 0, b ?? 0];
+    };
+    const contrast = (fg: [number, number, number], bg: [number, number, number]) => {
+        const [a, b] = [relativeLuminance(fg), relativeLuminance(bg)];
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    };
+    const dialogStone500 = INDEX_CSS.match(/\.dialog-paper\s*\{[^}]*--color-stone-500:\s*(#[0-9a-f]{6});/)?.[1] ?? '';
+    const surfaces = { paper: ownHex('paper'), white: '#ffffff' };
+
+    it('reproduces the failure review reported, so the arithmetic below can be trusted', () => {
+        expect(alpha).toBeGreaterThan(0);
+        expect(contrast(hexToLinearSrgb('#736b65'), washOver(surfaces.paper))).toBeCloseTo(4.3, 1);
+    });
+
+    it.each(Object.entries(surfaces))(
+        'text-stone-500 inside a dialog reads at AA on a hovered row over %s',
+        (_n, s) => {
+            expect(contrast(hexToLinearSrgb(dialogStone500), washOver(s))).toBeGreaterThanOrEqual(4.5);
+        },
+    );
+
+    it.each(Object.entries(surfaces))('text-danger reads at AA on a hovered row over %s', (_n, s) => {
+        expect(contrast(oklchToLinearSrgb(resolveColor('danger')), washOver(s))).toBeGreaterThanOrEqual(4.5);
+    });
+});
