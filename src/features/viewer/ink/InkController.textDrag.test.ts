@@ -148,6 +148,22 @@ describe('InkController text tool: tap edits, drag moves', () => {
         expect(store.canRedo).toBe(true);
     });
 
+    it('is one undo step when the tool is put down before the drag lifts', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf'));
+        ink.delegate.onInkDown(pointer(305, 655));
+        vi.setSystemTime(Date.now() + TEXT_DRAG_SYNC_MS + 1);
+        ink.delegate.onInkMove(pointer(355, 705));
+        useViewerStore.getState().setTool(null);
+        ink.delegate.onInkUp(pointer(405, 705));
+        await settle();
+        expect(payloadOf('note').x).toBeCloseTo(0.4, 5);
+
+        await store.undoLast();
+        await settle();
+        expect(payloadOf('note').x).toBeCloseTo(0.3, 5);
+        expect(payloadOf('note').y).toBeCloseTo(0.5, 5);
+    });
+
     it('throttles intermediate commits to the live-sync interval', async () => {
         await store.create(textNote('note', 0.3, 0.5, 'mf'));
         const update = vi.spyOn(store, 'update');

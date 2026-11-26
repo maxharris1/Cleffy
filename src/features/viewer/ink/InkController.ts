@@ -23,7 +23,14 @@ import type { LiveInkPublisher } from '@/sync/realtimeChannel';
 import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
 import type { InkProgressMsg } from '@/sync/wire';
 import { ERASER_RADIUS_CSS, HIGHLIGHT_WIDTH_FACTOR, STROKE_WIDTHS, useViewerStore } from '@/state/store';
-import { isTextPayload, type Annotation, type StrokePayload, type TextPayload, type ViewState } from '@/types/models';
+import {
+    isTextPayload,
+    type Annotation,
+    type StrokePayload,
+    type TextPayload,
+    type Tool,
+    type ViewState,
+} from '@/types/models';
 
 export interface TextIntent {
     pageIndex: number;
@@ -145,6 +152,8 @@ export class InkController {
     private selectedText: { id: string; pageIndex: number } | null = null;
     /** Open gesture undo frame (eraser / text drag / pinch). Convert uses its own handle. */
     private openBatch: ReturnType<AnnotationStore['beginBatch']> | null = null;
+    /** The tool that began the gesture in flight; a tool change mid-gesture does not reroute its end. */
+    private gestureTool: Tool | null = null;
     private downX = 0;
     private downY = 0;
     private moved = false;
@@ -433,6 +442,7 @@ export class InkController {
         if (!point) {
             return;
         }
+        this.gestureTool = tool;
         this.downX = x;
         this.downY = y;
         this.moved = false;
@@ -509,7 +519,7 @@ export class InkController {
             this.moved = true;
         }
 
-        const tool = useViewerStore.getState().tool;
+        const tool = this.gestureTool;
         if (tool === 'fingering') {
             const sel = this.fingeringSel;
             const layout = sel ? this.opts.getLayout().layouts[sel.pageIndex] : undefined;
@@ -580,7 +590,8 @@ export class InkController {
     }
 
     private onUp(e: PointerEvent): void {
-        const tool = useViewerStore.getState().tool;
+        const tool = this.gestureTool;
+        this.gestureTool = null;
         if (tool === 'fingering') {
             const sel = this.fingeringSel;
             this.fingeringSel = null;
@@ -721,9 +732,10 @@ export class InkController {
             }
             this.endTextScale();
         }
-        if (useViewerStore.getState().tool === 'eraser') {
+        if (this.gestureTool === 'eraser') {
             this.finishUndoBatch();
         }
+        this.gestureTool = null;
     }
 
     /**
