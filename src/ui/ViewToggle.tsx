@@ -4,8 +4,8 @@ import { Segmented } from '@/ui/Segmented';
 export type ToggleView = 'grid' | 'list';
 
 const OPTIONS = [
-    { value: 'grid', label: 'Grid view', icon: <LayoutGridIcon size={15} /> },
-    { value: 'list', label: 'List view', icon: <ListIcon size={15} /> },
+    { value: 'grid', label: 'Grid view', icon: <LayoutGridIcon size={17} /> },
+    { value: 'list', label: 'List view', icon: <ListIcon size={17} /> },
 ] as const;
 
 /**
@@ -14,5 +14,5 @@ const OPTIONS = [
  * slides across (Segmented), so the switch reads as one choice moving.
  */
 export const ViewToggle = ({ view, onChange }: { view: ToggleView; onChange: (v: ToggleView) => void }) => (
-    <Segmented label="View" value={view} options={OPTIONS} onChange={onChange} />
+    <Segmented label="View" value={view} options={OPTIONS} onChange={onChange} size="md" />
 );

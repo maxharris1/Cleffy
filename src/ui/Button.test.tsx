@@ -30,7 +30,7 @@ describe('Button', () => {
     });
 
     it('exposes class strings for link- and label-shaped CTAs', () => {
-        expect(buttonClassName('primary')).toContain('landing-cta');
+        expect(buttonClassName('primary')).toContain('bg-accent');
         expect(buttonClassName('ghost', 'sm')).toContain('text-sm');
     });
 });

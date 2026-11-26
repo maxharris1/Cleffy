@@ -146,9 +146,9 @@ export const DialogPanel = ({
                         aria-modal="true"
                         aria-label={label}
                         initialFocus={popupRef}
-                        className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} w-full max-w-md overscroll-contain rounded-2xl border border-stone-200 bg-white p-5 shadow-xl outline-none ${
+                        className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} dialog-paper w-full max-w-md overscroll-contain rounded-[22px] bg-paper p-7 shadow-[0_40px_90px_-30px_rgba(28,25,23,0.6),0_0_0_1px_rgba(28,25,23,0.08)] outline-none ${
                             sheet
-                                ? 'max-h-[80dvh] overflow-y-auto overflow-x-hidden pb-[max(1.25rem,var(--safe-bottom))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
+                                ? 'max-h-[80dvh] overflow-y-auto overflow-x-hidden pb-[max(1.75rem,var(--safe-bottom))] pl-[max(1.75rem,var(--safe-left))] pr-[max(1.75rem,var(--safe-right))]'
                                 : // Fits any viewport (the viewport's p-4 is the 2rem) and scrolls inside, so a
                                   // tall dialog on a short phone or landscape screen never pushes its title,
                                   // Close or actions off-screen — the page behind cannot scroll to reveal them.
@@ -161,7 +161,7 @@ export const DialogPanel = ({
                                 {...sheetDrag}
                                 aria-hidden="true"
                                 data-sheet-grabber
-                                className="relative z-20 -mx-5 -mt-3 flex h-4 cursor-grab touch-none items-start justify-center sm:hidden"
+                                className="relative z-20 -mx-7 -mt-3 flex h-4 cursor-grab touch-none items-start justify-center sm:hidden"
                             >
                                 <span className="h-1 w-10 rounded-full bg-stone-300" />
                             </div>
@@ -170,19 +170,21 @@ export const DialogPanel = ({
                             // Sticky, bleeding over the panel padding, so Close stays in reach while a
                             // long dialog scrolls and the content passes under an opaque header. The gap
                             // below stays a margin: some dialogs tuck a subtitle into it with -mt-2.
-                            // -top-5: the sticky edge is the panel's content box, not its border.
+                            // -top-7: the sticky edge is the panel's content box, not its border.
                             <div
-                                className={`sticky -top-5 z-10 -mt-5 mb-3 flex items-center justify-between gap-3 bg-white pt-5 ${
+                                className={`sticky -top-7 z-10 -mt-7 mb-3 flex items-start justify-between gap-4 bg-paper pt-7 ${
                                     sheet
-                                        ? '-ml-[max(1.25rem,var(--safe-left))] -mr-[max(1.25rem,var(--safe-right))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
-                                        : '-mx-5 px-5'
+                                        ? '-ml-[max(1.75rem,var(--safe-left))] -mr-[max(1.75rem,var(--safe-right))] pl-[max(1.75rem,var(--safe-left))] pr-[max(1.75rem,var(--safe-right))]'
+                                        : '-mx-7 px-7'
                                 }`}
                             >
-                                <Parts.Title className="min-w-0 text-lg font-semibold text-stone-800 [overflow-wrap:anywhere]">
+                                <Parts.Title className="min-w-0 font-display text-[28px] leading-[1.15] font-semibold tracking-[-0.01em] text-balance text-ink [font-variation-settings:'opsz'_10] [overflow-wrap:anywhere]">
                                     {label}
                                 </Parts.Title>
-                                {/* 44px hit area on touch (CloseButton's hit-44), the icon where it sits on desktop. */}
-                                <CloseButton onClick={() => onCloseRef.current()} />
+                                <CloseButton
+                                    onClick={() => onCloseRef.current()}
+                                    className="-mt-2.5 -mr-2.5 size-11 rounded-xl text-ink-muted hover:bg-ink/5"
+                                />
                             </div>
                         ) : null}
                         {children}

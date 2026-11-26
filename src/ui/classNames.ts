@@ -4,27 +4,35 @@
  * non-buttons (router <Link>s, file-input <label>s) can share the exact look.
  */
 
-export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'dangerGhost';
+/** The ink* variants sit on the dark ink surfaces (top bar, viewer chrome). */
+export type ButtonVariant =
+    'primary' | 'secondary' | 'ghost' | 'danger' | 'dangerGhost' | 'inkPrimary' | 'inkOutline' | 'inkGhost';
 export type ButtonSize = 'md' | 'sm';
 
 /*
  * Pressed buttons give a little (scale .97 over --duration-press): feedback
- * the hand feels before the result arrives. Disabled ones do not move.
+ * the hand feels before the result arrives. Disabled ones do not move, and
+ * nothing moves under reduced motion.
  */
 const BUTTON_BASE =
-    'inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap font-medium transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50 disabled:active:scale-100';
+    'inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap border-[1.5px] font-semibold transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50 disabled:active:scale-100 motion-reduce:transition-none motion-reduce:active:scale-100';
 
 const BUTTON_SIZE_CLASSES: Record<ButtonSize, string> = {
-    md: 'rounded-xl px-5 py-3',
-    sm: 'rounded-lg px-3.5 py-2 text-sm',
+    md: 'min-h-11 rounded-xl px-[18px] text-[15px]',
+    sm: 'min-h-11 rounded-[10px] px-3.5 text-sm',
 };
 
 const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
-    primary: 'landing-cta text-white',
-    secondary: 'border border-stone-300/90 bg-white/70 text-stone-800 hover:bg-white',
-    ghost: 'text-stone-600 hover:bg-ink/5',
-    danger: 'bg-danger text-white hover:bg-red-800',
-    dangerGhost: 'text-danger hover:bg-red-50',
+    primary:
+        'border-accent bg-accent text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_20px_-12px_rgba(67,56,202,0.75)] hover:border-accent-hover hover:bg-accent-hover',
+    secondary: 'border-button-line bg-transparent text-ink hover:bg-ink/5',
+    ghost: 'border-transparent bg-transparent text-ink-soft hover:bg-ink/5',
+    danger: 'border-danger bg-danger text-white hover:border-red-800 hover:bg-red-800',
+    dangerGhost: 'border-transparent bg-transparent text-destructive hover:bg-red-50',
+    inkPrimary:
+        'border-ink-cta bg-ink-cta text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_22px_-12px_rgba(79,70,229,0.95)]',
+    inkOutline: 'border-paper/42 bg-transparent text-paper hover:bg-paper/10',
+    inkGhost: 'border-transparent bg-transparent text-on-ink-muted hover:bg-paper/10',
 };
 
 export const buttonClassName = (variant: ButtonVariant, size: ButtonSize = 'md', extra = ''): string =>
@@ -42,7 +50,7 @@ export type FieldSize = 'md' | 'sm' | 'xs' | 'inline';
  * only under a fine pointer.
  */
 const FIELD_SIZE_CLASSES: Record<FieldSize, string> = {
-    md: 'rounded-xl px-3.5 py-3',
+    md: 'min-h-12 rounded-xl px-3.5 py-2.5 text-base',
     sm: 'rounded-lg px-3 py-2 text-base pointer-fine:text-sm',
     xs: 'rounded-lg px-3 py-0 text-base pointer-fine:text-xs',
     inline: 'rounded-md px-1 py-0.5 text-center text-base tabular-nums pointer-fine:text-sm',
@@ -58,24 +66,26 @@ export type FieldWidth = 'full' | 'auto';
  */
 export const fieldClassName = (size: FieldSize = 'md', extra = '', opts: { width?: FieldWidth } = {}): string => {
     const width = size === 'inline' ? '' : (opts.width ?? 'full') === 'full' ? 'w-full ' : 'w-auto ';
-    return `landing-input border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition-colors placeholder:text-stone-500 ${width}${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
+    return `landing-input border-[1.5px] border-field-line bg-white text-ink outline-none transition-colors placeholder:text-ink-muted ${width}${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
 };
 
 /**
  * Filter/facet chip — pill toggle matching the transport bar's pill language.
- * h-8 (32px) meets the minimum touch target. Callers add aria-pressed when the
- * chip is a toggle rather than an action.
+ * 34px tall; hit-44 grows its target on touch. Callers add aria-pressed when
+ * the chip is a toggle rather than an action.
  */
 export const chipClassName = (active: boolean, extra = ''): string =>
     [
-        'inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-xs font-medium transition-colors',
-        active ? 'border-accent bg-accent-soft text-accent' : 'border-stone-200 text-stone-600 hover:bg-ink/5',
+        'inline-flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-[13px] text-[13px] transition-colors pointer-coarse:hit-44',
+        active
+            ? 'border-accent/40 bg-accent-tint font-semibold text-accent'
+            : 'border-panel-line font-medium text-ink-soft hover:bg-ink/5',
         extra,
     ]
         .filter(Boolean)
         .join(' ');
 
-export const fieldLabelClassName = 'block text-xs font-medium uppercase tracking-[0.08em] text-stone-600';
+export const fieldLabelClassName = 'block text-xs font-semibold uppercase tracking-[0.08em] text-ink-muted';
 
 /**
  * Inline text link. On touch screens an invisible ::after widens the hit area

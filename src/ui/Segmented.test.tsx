@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Segmented } from '@/ui/Segmented';
+import { ViewToggle } from '@/ui/ViewToggle';
 
 afterEach(cleanup);
 
@@ -63,5 +64,32 @@ describe('Segmented', () => {
             />,
         );
         expect(screen.getByRole('button', { name: 'Grid view' })).toHaveAttribute('title', 'Grid view');
+    });
+});
+
+describe('Segmented touch targets', () => {
+    it.each(['sm', 'md'] as const)('every %s key is at least 44px wide on a coarse pointer', (size) => {
+        render(
+            <Segmented
+                label="View"
+                value="grid"
+                size={size}
+                options={[
+                    { value: 'grid', label: 'Grid view', icon: <svg /> },
+                    { value: 'list', label: 'List' },
+                ]}
+                onChange={() => undefined}
+            />,
+        );
+        for (const name of ['Grid view', 'List']) {
+            expect(screen.getByRole('button', { name })).toHaveClass('pointer-coarse:min-w-11');
+        }
+    });
+
+    it('ViewToggle draws its icons at 17px', () => {
+        render(<ViewToggle view="grid" onChange={() => undefined} />);
+        for (const name of ['Grid view', 'List view']) {
+            expect(screen.getByRole('button', { name }).querySelector('svg')).toHaveAttribute('width', '17');
+        }
     });
 });
