@@ -981,8 +981,10 @@ export const LibraryPage = () => {
                   subtitle rather than standing alone where the button used to be.
                 */}
                 <PageHead
-                    // With pages still unloaded, documents.length is not the library's size.
-                    eyebrow={libraryEyebrow(userLabel, hasMore ? null : documents)}
+                    width="wide"
+                    // Unloaded pages leave documents.length short of the library's size, and a failed
+                    // first load leaves an empty placeholder, not an empty library.
+                    eyebrow={libraryEyebrow(userLabel, hasMore || loadFailure ? null : documents)}
                     title="Library"
                     subtitle={
                         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">

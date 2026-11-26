@@ -28,6 +28,7 @@ export const SearchPage = () => {
                 </header>
             ) : (
                 <PageHead
+                    width="wide"
                     eyebrow="Public domain · free to add"
                     title="Find a score"
                     subtitle="Search thousands of public-domain scores."

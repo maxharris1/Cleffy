@@ -177,6 +177,26 @@ describe('RosterPage', () => {
         expect(link.className).toMatch(/(^| )sm:flex-1( |$)/);
     });
 
+    it('heads the roster with its known counts, a zero still-to-set-up included', async () => {
+        listRoster.mockResolvedValue([
+            student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' }),
+        ]);
+        renderRoster();
+
+        expect(await screen.findByText('1 student · 0 still to set up')).toBeInTheDocument();
+    });
+
+    it('leaves the counts out of the head when a first load fails with nothing cached', async () => {
+        await getDb().rosterCache.clear();
+        listRoster.mockRejectedValue(new Error('network down'));
+        listAssignmentsForStudents.mockRejectedValue(new Error('network down'));
+        renderRoster();
+
+        expect(await screen.findByText('network down')).toBeInTheDocument();
+        expect(screen.queryByText(/^\d+ students?( ·|$)/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/still to set up/)).not.toBeInTheDocument();
+    });
+
     it('serves the cached roster with its counts when the network fails, error beside it', async () => {
         await getDb().rosterCache.put({
             userId: 'teacher-1',

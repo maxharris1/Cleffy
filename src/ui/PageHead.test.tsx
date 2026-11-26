@@ -11,6 +11,7 @@ describe('PageHead', () => {
     it('renders the title as the page heading with eyebrow, subtitle and action', () => {
         render(
             <PageHead
+                width="wide"
                 eyebrow="Ada · 3 scores"
                 title="Library"
                 subtitle="Upload, organize, and share."
@@ -24,7 +25,7 @@ describe('PageHead', () => {
     });
 
     it('renders only the heading when nothing else is given', () => {
-        render(<PageHead title="Account" />);
+        render(<PageHead width="narrow" title="Account" />);
         const banner = screen.getByRole('banner');
         expect(banner).toHaveTextContent(/^Account$/);
         expect(screen.queryByRole('button')).not.toBeInTheDocument();

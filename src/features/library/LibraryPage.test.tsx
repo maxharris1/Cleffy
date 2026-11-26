@@ -781,6 +781,16 @@ describe('LibraryPage', () => {
             expect(writeCachedLibraryList).not.toHaveBeenCalled();
         });
 
+        it('leaves the score count out of the head when a never-loaded library cannot be reached', async () => {
+            fetchLibraryBootstrap.mockRejectedValue(new Error('offline'));
+            listDocuments.mockRejectedValue(new Error('offline'));
+            renderLibrary();
+
+            expect(await screen.findByText('Couldn’t load your scores')).toBeInTheDocument();
+            expect(screen.getByText('Ada Teacher')).toBeInTheDocument();
+            expect(screen.queryByText(/\d+ scores?$/)).not.toBeInTheDocument();
+        });
+
         it('says it is offline, not empty, when a never-loaded library cannot be reached', async () => {
             vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
             fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));

@@ -42,10 +42,8 @@ import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
 import { MoreVerticalIcon } from '@/ui/icons';
 
-const rosterEyebrow = (active: number, unclaimed: number): string => {
-    const students = `${active} ${active === 1 ? 'student' : 'students'}`;
-    return unclaimed === 0 ? students : `${students} · ${unclaimed} still to set up`;
-};
+const rosterEyebrow = (active: number, unclaimed: number): string =>
+    `${active} ${active === 1 ? 'student' : 'students'} · ${unclaimed} still to set up`;
 
 /** A code, held only long enough to show and print it. */
 interface CodeCard {
@@ -410,13 +408,15 @@ export const RosterPage = () => {
     const archivedCount = (students?.length ?? 0) - activeCount;
     const unclaimedCount =
         students?.filter((student) => student.archived_at === null && student.claimed_at === null).length ?? 0;
+    const rosterUnavailable = students === null || (loadError !== null && students.length === 0);
 
     return (
         <div>
             {/* The upgrade state below explains the roster in its own words —
                 printing the pitch twice on the same screen just reads as noise. */}
             <PageHead
-                eyebrow={students === null ? undefined : rosterEyebrow(activeCount, unclaimedCount)}
+                width="narrow"
+                eyebrow={rosterUnavailable ? undefined : rosterEyebrow(activeCount, unclaimedCount)}
                 title="Students"
                 subtitle={
                     canManageStudents
@@ -439,7 +439,7 @@ export const RosterPage = () => {
 
             {students === null ? (
                 <RosterSkeleton label="Loading your roster…" />
-            ) : loadError && students.length === 0 ? (
+            ) : rosterUnavailable ? (
                 <ErrorText className="mt-8">{loadError}</ErrorText>
             ) : students.length === 0 ? (
                 canManageStudents ? (
