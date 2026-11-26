@@ -97,7 +97,7 @@ export const StandModeButton = () => {
             aria-label="Full screen"
             aria-pressed={standMode}
             onClick={() => (standMode ? exitStandMode() : enterStandMode())}
-            className={buttonClassName('inkGhost', 'sm')}
+            className={buttonClassName('inkGhost', 'sm', 'text-[15px]! font-medium! pointer-coarse:hit-44')}
         >
             <FullScreenIcon size={16} />
             <span className="hidden sm:inline">Full screen</span>

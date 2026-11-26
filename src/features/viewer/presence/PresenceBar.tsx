@@ -3,8 +3,6 @@ import { Popover } from '@base-ui/react/popover';
 import { linkViewerCount } from '@/lib/presenceName';
 import type { PresencePeer } from '@/sync/wire';
 
-const MAX_CHIPS = 5;
-
 export interface PresenceBarProps {
     peers: PresencePeer[];
     selfUserId: string;
@@ -25,12 +23,12 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
     if (others.length === 0) {
         return null;
     }
-    const shown = others.slice(0, MAX_CHIPS);
-    const overflow = others.length - shown.length;
-
     return (
-        <div className="flex flex-wrap items-center gap-1.5" aria-label={`${others.length} collaborators viewing`}>
-            {shown.map((peer) => {
+        <div
+            className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
+            aria-label={`${others.length} collaborators viewing`}
+        >
+            {others.map((peer) => {
                 const name = labelOf(peer);
                 const who = `${name}${peer.isAnonymous && peer.via !== 'link' ? ' (guest)' : ''}`;
                 return (
@@ -59,7 +57,6 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
                     </Popover.Root>
                 );
             })}
-            {overflow > 0 ? <span className={CHIP}>+{overflow}</span> : null}
         </div>
     );
 };

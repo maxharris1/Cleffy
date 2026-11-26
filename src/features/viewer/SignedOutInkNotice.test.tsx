@@ -83,6 +83,8 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
         );
         expect(within(notice).getByRole('button', { name: 'Export' })).toBeInTheDocument();
         expect(within(notice).getByRole('button', { name: 'Discard' })).toBeInTheDocument();
+        expect(notice).toHaveClass('bg-paper');
+        expect(notice.outerHTML).not.toMatch(/amber/);
     });
 
     it('Export lists each score, exported for the account that made the marks', async () => {

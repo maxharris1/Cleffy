@@ -104,7 +104,7 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, pixelRatio, regis
 
     return (
         <div
-            className="absolute bg-white shadow-[0_0_0_1px_rgba(28,25,23,0.08),0_30px_60px_-30px_rgba(28,25,23,0.45)]"
+            className="absolute bg-white shadow-[0_0_0_1px_rgba(28,25,23,0.08),0_20px_40px_-24px_rgba(28,25,23,0.5)] sm:shadow-[0_0_0_1px_rgba(28,25,23,0.08),0_30px_60px_-30px_rgba(28,25,23,0.45)]"
             style={{
                 top: layout.top * scale,
                 left: layout.left * scale,

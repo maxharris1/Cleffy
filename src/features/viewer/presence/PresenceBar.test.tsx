@@ -33,6 +33,30 @@ describe('PresenceBar', () => {
         }
     });
 
+    it('gives every collaborator present a named chip in their ink colour, however many there are', () => {
+        const names = ['Player 1', 'Player 2', 'Player 3', 'Player 4', 'Player 5', 'Player 6'];
+        render(
+            <PresenceBar
+                peers={names.map((name, i) => ({ ...peer(`p${i}`, name), color: `#00000${i}` }))}
+                selfUserId="me"
+            />,
+        );
+        const chips = screen.getAllByRole('button');
+        expect(chips.map((chip) => chip.textContent)).toEqual(names);
+        chips.forEach((chip, i) => {
+            expect(chip.querySelector('[aria-hidden="true"]')).toHaveStyle({ backgroundColor: `#00000${i}` });
+        });
+        expect(screen.queryByText(/^\+\d/)).toBeNull();
+    });
+
+    it('wraps its chips within the width it is given', () => {
+        render(<PresenceBar peers={[peer('a', 'Alexandria Williamson')]} selfUserId="me" />);
+        const group = screen.getByLabelText('1 collaborators viewing');
+        expect(group).toHaveClass('flex-wrap');
+        expect(group).toHaveClass('min-w-0');
+        expect(group).toHaveClass('max-w-full');
+    });
+
     it('labels a non-member Anonymous <animal> through presenceLabel, whatever it claims (R4)', () => {
         const members = new Set(['me', 'a']);
         render(

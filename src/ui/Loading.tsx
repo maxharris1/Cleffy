@@ -7,7 +7,7 @@ export interface LoadingTextProps {
 
 /** Pulsing status line — the app-wide loading treatment. */
 export const LoadingText = ({ children, className = '' }: LoadingTextProps) => (
-    <p role="status" className={`animate-pulse text-stone-500${className ? ` ${className}` : ''}`}>
+    <p role="status" className={`animate-loading-pulse text-ink-muted${className ? ` ${className}` : ''}`}>
         {children}
     </p>
 );

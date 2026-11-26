@@ -20,6 +20,7 @@ import {
     MIN_SCALE,
     NO_OBSCURED,
     PAGE_GAP,
+    SM_BREAKPOINT,
     bitmapBudgetFactor,
     clampScroll,
     computeDocumentLayout,
@@ -31,6 +32,7 @@ import {
     pageTopView,
     pageTurnView,
     reanchorView,
+    rowTopScrollY,
     turnFromPageIndex,
     viewportToPagePoint,
     visiblePageRange,
@@ -111,13 +113,10 @@ const wrapperTransform = (view: ViewState, renderScale: number): string =>
 /** Default text-note size as a fraction of page width. */
 const DEFAULT_TEXT_SIZE = 0.018;
 
-/** Tailwind's `sm` breakpoint (px): below it the viewer uses its phone layout. */
-const SM_BREAKPOINT = 640;
-
 /**
- * Phones: the strip (px) the pager and zoom row cover at the top of the
- * viewport (top-2 + one 44px control + 4px), kept clear of page 1 the way a
- * toolbar docked at the top is.
+ * Phones: the strip (px) the pager and zoom row cover above the bottom
+ * toolbar (0.5rem + one 44px control + 4px), so the top of the viewport is
+ * left to page 1.
  */
 const PHONE_CONTROLS_STRIP = 56;
 
@@ -355,16 +354,16 @@ export const PdfViewport = ({
     // the document and reports (child effects first) in the same commit as the
     // first fit, which must already see it. Syncing it from state in the effect
     // above would put the stale value back before the fit reads it.
-    // Phones add the pager/zoom strip to the top edge (see PHONE_CONTROLS_STRIP),
-    // and any notices floating over the score extend it (noticeInset).
+    // Phones add the pager/zoom strip to the bottom edge (see PHONE_CONTROLS_STRIP),
+    // and any notices floating over the score extend the top one (noticeInset).
     const toolbarEdgesRef = useRef<ObscuredEdges>(NO_OBSCURED);
     const controlsStripRef = useRef(0);
     const noticeInsetRef = useRef(noticeInset);
     const applyObscured = useCallback(() => {
         const toolbar = toolbarEdgesRef.current;
         const edges = {
-            top: Math.max(toolbar.top, controlsStripRef.current, noticeInsetRef.current),
-            bottom: toolbar.bottom,
+            top: Math.max(toolbar.top, noticeInsetRef.current),
+            bottom: toolbar.bottom + controlsStripRef.current,
         };
         obscuredRef.current = edges;
         setObscured((prev) => (prev.top === edges.top && prev.bottom === edges.bottom ? prev : edges));
@@ -593,7 +592,7 @@ export const PdfViewport = ({
         // Start with the top of page 1 below a toolbar docked at the top.
         const edges = obscuredRef.current;
         const fitted = clampScroll(
-            { scale, scrollX: 0, scrollY: -edges.top },
+            { scale, scrollX: 0, scrollY: rowTopScrollY(PAGE_GAP, scale, viewportSize.width, edges) },
             layout,
             viewportSize.width,
             viewportSize.height,
@@ -637,7 +636,11 @@ export const PdfViewport = ({
                 Math.max(MIN_SCALE, fitPageWidthScale(layout, viewportSize.width) * relative),
             );
             const top = layout.layouts[focused]?.top ?? PAGE_GAP;
-            next = { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - obscuredRef.current.top };
+            next = {
+                scale,
+                scrollX: 0,
+                scrollY: rowTopScrollY(top, scale, viewportSize.width, obscuredRef.current),
+            };
         } else {
             const ratio = fitPageWidthScale(layout, viewportSize.width) / fitPageWidthScale(layout, prev.width);
             const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * ratio));
@@ -839,7 +842,7 @@ export const PdfViewport = ({
         setSpreadCover(coverPage);
         setView(
             clampScroll(
-                { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - obscured.top },
+                { scale, scrollX: 0, scrollY: rowTopScrollY(top, scale, width, obscured) },
                 nextLayout,
                 width,
                 height,
@@ -1401,15 +1404,14 @@ export const PdfViewport = ({
                     {overlayMode === 'history' && !standMode ? (
                         <div
                             data-ui-overlay
-                            // Phones: below the pager/zoom strip (PHONE_CONTROLS_STRIP), not over it.
                             className="pointer-events-none absolute inset-x-0 top-14 z-20 flex justify-center sm:top-3"
                         >
-                            <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950 shadow">
+                            <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-panel-line bg-paper px-3 py-1.5 text-sm text-ink shadow">
                                 <span>Viewing day starting point</span>
                                 <button
                                     type="button"
                                     onClick={() => annotationStore.setHistoryOverlay(null)}
-                                    className="rounded-full bg-amber-800 px-2.5 py-0.5 text-xs font-medium text-white hover:bg-amber-700"
+                                    className="rounded-full bg-ink px-2.5 py-0.5 text-xs font-medium text-paper hover:bg-ink-soft"
                                 >
                                     Back to current
                                 </button>
@@ -1569,7 +1571,7 @@ const Pager = ({
     return (
         <div
             data-ui-overlay
-            className="absolute left-[max(0.5rem,var(--safe-left))] top-2 z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:left-[max(1.25rem,var(--safe-left))] sm:top-auto sm:gap-2"
+            className="absolute bottom-[calc(var(--toolbar-bottom-clearance,var(--safe-bottom))+0.5rem)] left-[max(0.5rem,var(--safe-left))] z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:left-[max(1.25rem,var(--safe-left))] sm:gap-2"
         >
             <button
                 type="button"
@@ -1619,12 +1621,11 @@ const ZoomControls = ({
     return (
         <div
             data-ui-overlay
-            // Phones: a row at the top-right, beside the pager, clear of the
-            // bottom toolbar; page 1 starts below the strip they share
-            // (PHONE_CONTROLS_STRIP). Larger screens: a column at the
+            // Phones: a row at the bottom-right, beside the pager, above the
+            // bottom toolbar (PHONE_CONTROLS_STRIP). Larger screens: a column at the
             // bottom-right — a row again on short landscape screens, where the
             // column would climb under the toolbar.
-            className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row items-center gap-2 sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:right-[max(1.25rem,var(--safe-right))] sm:top-auto sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
+            className="absolute bottom-[calc(var(--toolbar-bottom-clearance,var(--safe-bottom))+0.5rem)] right-[max(0.5rem,var(--safe-right))] flex flex-row items-center gap-2 sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:right-[max(1.25rem,var(--safe-right))] sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
         >
             {pageColumns !== null ? (
                 <PageLayoutMenu

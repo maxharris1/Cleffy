@@ -427,11 +427,21 @@ describe('clampScroll', () => {
     const layout = computeDocumentLayout(pages);
 
     it('clamps scroll to the content bounds', () => {
-        const clamped = clampScroll({ scale: 1, scrollX: 5000, scrollY: 99999 }, layout, 400, 600);
-        expect(clamped.scrollX).toBe(layout.contentWidth - 400);
-        expect(clamped.scrollY).toBe(layout.contentHeight - 600);
-        const zeroed = clampScroll({ scale: 1, scrollX: -50, scrollY: -50 }, layout, 400, 600);
+        const clamped = clampScroll({ scale: 2, scrollX: 5000, scrollY: 99999 }, layout, 800, 600);
+        expect(clamped.scrollX).toBe(layout.contentWidth * 2 - 800);
+        expect(clamped.scrollY).toBe(layout.contentHeight * 2 - 600);
+        const zeroed = clampScroll({ scale: 2, scrollX: -50, scrollY: -50 }, layout, 800, 600);
         expect(zeroed.scrollY).toBe(0);
+    });
+
+    it('stops page 1 14px below the top on a phone, under whatever covers it', () => {
+        const page1Top = (scrollY: number, scale: number) => layout.layouts[0]!.top * scale - scrollY;
+        for (const scale of [0.6, 1, 2]) {
+            const bare = clampScroll({ scale, scrollX: 0, scrollY: -500 }, layout, 390, 600);
+            expect(page1Top(bare.scrollY, scale)).toBeCloseTo(14);
+            const covered = clampScroll({ scale, scrollX: 0, scrollY: -500 }, layout, 390, 600, { top: 80, bottom: 0 });
+            expect(page1Top(covered.scrollY, scale)).toBeCloseTo(94);
+        }
     });
 
     it('centers content narrower than the viewport', () => {
@@ -454,11 +464,11 @@ describe('clampScroll', () => {
     it('lets the top of page 1 scroll below a bar docked at the top, and no further', () => {
         // From sm the toolbar sits over the top edge and used to hide the first
         // system for good: scrollY could not go below 0.
-        const clamped = clampScroll({ scale: 1, scrollX: 0, scrollY: -500 }, layout, 400, 600, { top: 66, bottom: 0 });
+        const clamped = clampScroll({ scale: 1, scrollX: 0, scrollY: -500 }, layout, 800, 600, { top: 66, bottom: 0 });
         expect(clamped.scrollY).toBe(-66);
         expect(PAGE_GAP - clamped.scrollY).toBeGreaterThanOrEqual(66);
         expect(
-            clampScroll({ scale: 1, scrollX: 0, scrollY: 99999 }, layout, 400, 600, { top: 66, bottom: 0 }).scrollY,
+            clampScroll({ scale: 1, scrollX: 0, scrollY: 99999 }, layout, 800, 600, { top: 66, bottom: 0 }).scrollY,
         ).toBe(layout.contentHeight - 600);
     });
 
@@ -470,10 +480,10 @@ describe('clampScroll', () => {
     it('lets a short document scroll only as far as the bar requires', () => {
         const short = computeDocumentLayout([{ width: 300, height: 200 }]);
         expect(
-            clampScroll({ scale: 1, scrollX: 0, scrollY: 500 }, short, 400, 600, { top: 0, bottom: 64 }).scrollY,
+            clampScroll({ scale: 1, scrollX: 0, scrollY: 500 }, short, 800, 600, { top: 0, bottom: 64 }).scrollY,
         ).toBe(0);
         expect(
-            clampScroll({ scale: 1, scrollX: 0, scrollY: 500 }, short, 400, 240, { top: 0, bottom: 64 }).scrollY,
+            clampScroll({ scale: 1, scrollX: 0, scrollY: 500 }, short, 800, 240, { top: 0, bottom: 64 }).scrollY,
         ).toBe(short.contentHeight - (240 - 64));
     });
 });
@@ -543,8 +553,8 @@ describe('scrollForPagePoint', () => {
 describe('fitPageWidthScale', () => {
     it('fits the widest page with margins', () => {
         const layout = computeDocumentLayout(pages);
-        const scale = fitPageWidthScale(layout, 632);
-        expect(scale).toBeCloseTo(1); // (632 - 32) / 600
+        expect(fitPageWidthScale(layout, 1232)).toBeCloseTo(2); // (1232 - 2×16) / 600
+        expect(fitPageWidthScale(layout, 620)).toBeCloseTo(1); // phone: (620 - 2×10) / 600
     });
 
     it('returns 1 for empty documents', () => {

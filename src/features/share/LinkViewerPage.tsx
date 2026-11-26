@@ -209,7 +209,7 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
                     key={busy.attempt}
                     retryAfterSec={busy.sec}
                     onRetry={() => renewRef.current()}
-                    className="bg-amber-50 px-3 py-1.5 text-sm text-stone-700"
+                    className="border-b border-panel-line bg-paper px-3 py-1.5 text-sm text-ink"
                 />
             ) : null}
             <div className="relative min-h-0 flex-1">

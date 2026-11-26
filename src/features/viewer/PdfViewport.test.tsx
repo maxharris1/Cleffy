@@ -429,6 +429,15 @@ const manualFrames = () => {
 /** How far down the stack reaches with `cards` notices up (56 + cards×52 + gaps). */
 const stackBottomPx = (cards: number) => REGION_TOP_PX + cards * NOTICE_PX + (cards - 1) * NOTICE_GAP_PX;
 
+/** The pager and zoom row's strip (px) over the bottom of a phone viewport. */
+const PHONE_CONTROLS_PX = 56;
+
+/** Flow-Phone-Viewer's page 1 margin (px) below whatever covers the top. */
+const PHONE_TOP_MARGIN_PX = 14;
+
+/** A phone's top scroll bound with `cards` notices up: page 1 sits its margin below the stack. */
+const phoneTopBound = (cards: number) => PAGE_GAP * view().scale - PHONE_TOP_MARGIN_PX - stackBottomPx(cards);
+
 /** The region measures itself on resize, which jsdom never reports on its own. */
 const reportResizes = () => {
     act(() => {
@@ -488,15 +497,16 @@ describe('PdfViewport page turns under a tall notice stack', () => {
         render(<ViewerUnderNotices />);
         expect(screen.getAllByRole('status')).toHaveLength(3);
         // The first fit starts page 1 below the stack, at the top scroll bound.
-        await waitFor(() => expect(view().scrollY).toBe(-STACK));
+        await waitFor(() => expect(view().scrollY).toBe(phoneTopBound(3)));
     };
 
     it.each(Object.entries(turners))(
         'pages forward to the last page and back at minimum zoom in a short phone viewport (%s)',
         async (_, turn) => {
-            viewport = { width: 390, height: 480 };
+            viewport = { width: 390, height: 480 + PHONE_CONTROLS_PX };
             await openUnderStack();
             act(() => useViewerStore.getState().setView({ ...view(), scale: MIN_SCALE }));
+            act(() => useViewerStore.getState().setView({ ...view(), scrollY: phoneTopBound(3) }));
             expectPager(1, false, true);
 
             // Page 1 -> 2 lands above 0 (808 × 0.25 − 224 = −22): still page 2, not page 1.
@@ -508,7 +518,7 @@ describe('PdfViewport page turns under a tall notice stack', () => {
             act(() => turn(1));
             expectPager(3, true, false);
             expect(pageEdges(2).top).toBeGreaterThanOrEqual(STACK);
-            expect(pageEdges(2).bottom).toBeLessThanOrEqual(480);
+            expect(pageEdges(2).bottom).toBeLessThanOrEqual(viewport.height - PHONE_CONTROLS_PX);
             const atEnd = view().scrollY;
             act(() => turn(1));
             expect(view().scrollY).toBe(atEnd);
@@ -519,9 +529,9 @@ describe('PdfViewport page turns under a tall notice stack', () => {
             expect(pageEdges(1).top).toBeCloseTo(STACK + 16 * MIN_SCALE);
             act(() => turn(-1));
             expectPager(1, false, true);
-            expect(view().scrollY).toBe(-STACK);
+            expect(view().scrollY).toBe(phoneTopBound(3));
             act(() => turn(-1));
-            expect(view().scrollY).toBe(-STACK);
+            expect(view().scrollY).toBe(phoneTopBound(3));
         },
     );
 
@@ -545,13 +555,14 @@ describe('PdfViewport page turns under a tall notice stack', () => {
             }
             // The rest of page 3 is still below: Next goes on to its end, then stops.
             act(() => turn(1));
-            expect(pageEdges(2).bottom).toBeCloseTo(400 - 16 * view().scale);
+            expect(pageEdges(2).bottom).toBeCloseTo(400 - PHONE_CONTROLS_PX - 16 * view().scale);
             expectPager(3, true, false);
-            for (const page of [2, 1]) {
-                act(() => turn(-1));
-                expect(pageEdges(page - 1).top).toBeCloseTo(STACK + 16 * view().scale);
-                expectPager(page, page > 1, true);
-            }
+            act(() => turn(-1));
+            expect(pageEdges(1).top).toBeCloseTo(STACK + 16 * view().scale);
+            expectPager(2, true, true);
+            act(() => turn(-1));
+            expect(pageEdges(0).top).toBeCloseTo(STACK + PHONE_TOP_MARGIN_PX);
+            expectPager(1, false, true);
         },
     );
 });
@@ -560,9 +571,9 @@ describe('PdfViewport zoomed out under a tall notice stack', () => {
     it('lets Previous bring the top of page 1 out from under notices that came up over it', async () => {
         viewport = { width: 390, height: 480 };
         render(<ViewerUnderNotices />);
-        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+        await waitFor(() => expect(view().scrollY).toBe(phoneTopBound(3)));
         // The score was opened before the notices came up (the fit put page 1
-        // below the pager strip only), then zoomed out about the viewport centre.
+        // at the very top), then zoomed out about the viewport centre.
         act(() => useViewerStore.getState().setView({ ...view(), scrollY: -REGION_TOP_PX }));
         for (let i = 0; i < 4; i++) {
             fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
@@ -572,7 +583,7 @@ describe('PdfViewport zoomed out under a tall notice stack', () => {
         expect(screen.getByText('p. 1 / 3')).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Previous page' })).toBeEnabled();
         fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
-        expect(view().scrollY).toBe(-stackBottomPx(3));
+        expect(view().scrollY).toBe(phoneTopBound(3));
         expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
     });
 });
@@ -589,14 +600,14 @@ describe('PdfViewport when a notice goes away', () => {
     const openUnderStack = async () => {
         viewport = PHONE;
         render(<ViewerUnderNotices />);
-        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+        await waitFor(() => expect(view().scrollY).toBe(phoneTopBound(3)));
     };
 
     it('settles the score up into the room it leaves at once under reduced motion', async () => {
         vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), media: query }));
         await openUnderStack();
         dismiss();
-        expect(view().scrollY).toBe(-stackBottomPx(2));
+        expect(view().scrollY).toBe(phoneTopBound(2));
     });
 
     it('glides up into the room it leaves', async () => {
@@ -618,11 +629,11 @@ describe('PdfViewport when a notice goes away', () => {
         now += 90;
         flushFrames();
         const midway = view().scrollY;
-        expect(midway).toBeGreaterThan(-stackBottomPx(3));
-        expect(midway).toBeLessThan(-stackBottomPx(2));
+        expect(midway).toBeGreaterThan(phoneTopBound(3));
+        expect(midway).toBeLessThan(phoneTopBound(2));
         now += 1000;
         flushFrames();
-        expect(view().scrollY).toBe(-stackBottomPx(2));
+        expect(view().scrollY).toBe(phoneTopBound(2));
         expect(frames).toHaveLength(0);
     });
 
@@ -636,15 +647,15 @@ describe('PdfViewport when a notice goes away', () => {
             );
         touch('pointerdown', 300);
         dismiss();
-        expect(view().scrollY).toBe(-stackBottomPx(3));
+        expect(view().scrollY).toBe(phoneTopBound(3));
         // Dragging further down cannot take it past where it was, nor snap it up.
         act(() => touch('pointermove', 310));
-        expect(view().scrollY).toBe(-stackBottomPx(3));
+        expect(view().scrollY).toBe(phoneTopBound(3));
         // Dragging back up moves it with the finger.
         act(() => touch('pointermove', 300));
-        expect(view().scrollY).toBe(-stackBottomPx(3) + 10);
+        expect(view().scrollY).toBe(phoneTopBound(3) + 10);
         act(() => touch('pointerup', 300));
-        expect(view().scrollY).toBe(-stackBottomPx(2));
+        expect(view().scrollY).toBe(phoneTopBound(2));
     });
 
     it('leaves a view already clear of the room alone', async () => {
@@ -662,8 +673,8 @@ describe('PdfViewport when a notice goes away', () => {
             frames.advance(0);
             frames.advance(30);
             const midway = view().scrollY;
-            expect(midway).toBeGreaterThan(-stackBottomPx(3));
-            expect(midway).toBeLessThan(-stackBottomPx(2) - 10);
+            expect(midway).toBeGreaterThan(phoneTopBound(3));
+            expect(midway).toBeLessThan(phoneTopBound(2) - 10);
             return midway;
         };
 
@@ -671,9 +682,9 @@ describe('PdfViewport when a notice goes away', () => {
         const expectSettlesAfterRelease = (frames: ReturnType<typeof manualFrames>) => {
             frames.advance(0);
             frames.advance(30);
-            expect(view().scrollY).toBeGreaterThan(-stackBottomPx(3));
+            expect(view().scrollY).toBeGreaterThan(phoneTopBound(3));
             frames.advance(1000);
-            expect(view().scrollY).toBe(-stackBottomPx(2));
+            expect(view().scrollY).toBe(phoneTopBound(2));
             expect(frames.pending()).toHaveLength(0);
         };
 
@@ -682,7 +693,7 @@ describe('PdfViewport when a notice goes away', () => {
             let store: AnnotationStore | null = null;
             viewport = PHONE;
             render(<ViewerUnderNotices readOnly={false} onStore={(s) => (store = s)} />);
-            await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+            await waitFor(() => expect(view().scrollY).toBe(phoneTopBound(3)));
             await waitFor(() => expect(store).not.toBeNull());
             const create = vi.spyOn(store as unknown as AnnotationStore, 'create');
             act(() => useViewerStore.getState().setTool('pen'));
@@ -764,7 +775,7 @@ describe('PdfViewport when a notice goes away', () => {
                 }}
             />,
         );
-        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+        await waitFor(() => expect(view().scrollY).toBe(phoneTopBound(3)));
         frames.advance(0);
         act(() => useViewerStore.getState().setPlaybackStatus('playing'));
 
@@ -775,7 +786,7 @@ describe('PdfViewport when a notice goes away', () => {
         act(() => useViewerStore.getState().setFollowMode('on'));
         frames.advance(0);
         frames.advance(200);
-        expect(view().scrollY).toBeLessThan(-stackBottomPx(2));
+        expect(view().scrollY).toBeLessThan(phoneTopBound(2));
 
         // A card goes mid-glide: the top bound tightens to the two-card stack.
         dismiss();
@@ -783,12 +794,12 @@ describe('PdfViewport when a notice goes away', () => {
             frames.advance(16);
         }
         expect(useViewerStore.getState().followMode).toBe('on');
-        expect(view().scrollY).toBeCloseTo(-stackBottomPx(2));
+        expect(view().scrollY).toBeCloseTo(phoneTopBound(2));
         // Still playing, the follow holds it there.
         for (let i = 0; i < 10; i++) {
             frames.advance(16);
         }
-        expect(view().scrollY).toBeCloseTo(-stackBottomPx(2));
+        expect(view().scrollY).toBeCloseTo(phoneTopBound(2));
     });
 });
 
@@ -906,5 +917,59 @@ describe('PdfViewport page layout button', () => {
         const { useViewerStore: reloaded } = await import('@/state/store');
         expect(reloaded.getState().pageColumns).toBe(2);
         expect(reloaded.getState().spreadCover).toBe(true);
+    });
+});
+
+describe('PdfViewport fitted page box', () => {
+    const layout = computeDocumentLayout(PAGE_SIZES, 1, false);
+
+    /** Page `i`'s box in viewport px. */
+    const pageBox = (i: number) => {
+        const v = view();
+        const page = layout.layouts[i]!;
+        return {
+            left: page.left * v.scale - v.scrollX,
+            top: page.top * v.scale - v.scrollY,
+            width: page.width * v.scale,
+        };
+    };
+
+    it('opens page 1 with the Flow-Phone-Viewer margins on a 390px phone, pager and zoom still there', async () => {
+        viewport = { width: 390, height: 664 };
+        render(<PdfViewport docId="doc-phone-fit" readOnly />);
+        await waitFor(() => expect(view().scale).not.toBe(1));
+        const box = pageBox(0);
+        expect(box.left).toBeCloseTo(10);
+        expect(box.top).toBeCloseTo(PHONE_TOP_MARGIN_PX);
+        expect(box.width).toBeCloseTo(370);
+        expect(screen.getByRole('button', { name: 'Next page' })).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Zoom in' })).toBeTruthy();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+        expect(pageBox(0).top).toBeCloseTo(PHONE_TOP_MARGIN_PX);
+    });
+
+    it('keeps the page gap around page 1 from sm up', async () => {
+        viewport = { width: 800, height: 600 };
+        render(<PdfViewport docId="doc-wide-fit" readOnly />);
+        await waitFor(() => expect(view().scale).not.toBe(1));
+        const box = pageBox(0);
+        expect(box.left).toBeCloseTo(PAGE_GAP);
+        expect(box.width).toBeCloseTo(800 - 2 * PAGE_GAP);
+        expect(box.top).toBeCloseTo(PAGE_GAP * view().scale);
+    });
+});
+
+describe('PdfViewport lesson starting point notice', () => {
+    it('sits on the flat paper surface, not amber', async () => {
+        viewport = { width: 390, height: 664 };
+        let store: AnnotationStore | null = null;
+        render(<PdfViewport docId="doc-history-notice" onStoreReady={(s) => (store = s)} />);
+        await waitFor(() => expect(store).not.toBeNull());
+        act(() => store!.setHistoryOverlay([]));
+        const notice = (await screen.findByText('Viewing day starting point')).parentElement!;
+        expect(notice).toHaveClass('bg-paper');
+        expect(notice.outerHTML).not.toMatch(/amber/);
     });
 });

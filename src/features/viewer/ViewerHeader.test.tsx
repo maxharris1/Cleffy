@@ -41,6 +41,13 @@ describe('ViewerHeader', () => {
         expect(nav.className).toMatch(/lg:justify-end/);
     });
 
+    it('caps each score control at the row width, so a wide presence group wraps inside the viewport', () => {
+        renderHeader();
+        const nav = screen.getByRole('navigation', { name: 'Score' });
+        expect(nav.className).toMatch(/\[&>\*\]:max-w-full/);
+        expect(nav.className).not.toMatch(/\[&>\*\]:shrink-0/);
+    });
+
     it('sets the piece name in italic when the title reads "Composer — Piece"', () => {
         render(
             <MemoryRouter>
