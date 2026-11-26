@@ -299,6 +299,10 @@ body {
     letter-spacing: -0.01em;
 }
 
+.display-opsz {
+    font-variation-settings: 'opsz' 10;
+}
+
 .landing-rule {
     width: 3rem;
     height: 2px;

@@ -65,6 +65,7 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
+import { PageHead } from '@/ui/PageHead';
 import { LibrarySkeleton } from '@/ui/Skeleton';
 import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
@@ -107,9 +108,14 @@ interface RemoteResults {
     cursor: DocumentRow | null;
 }
 
+/** documents is null while unloaded and while only a page is loaded: neither length is the library's size. */
+const libraryEyebrow = (name: string, documents: DocumentRow[] | null): string =>
+    documents === null ? name : `${name} · ${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`;
+
 export const LibraryPage = () => {
     const {
         userId,
+        userLabel,
         uploading,
         uploadPct,
         onUpload,
@@ -974,11 +980,19 @@ export const LibraryPage = () => {
                   local-only path has no other home, so it rides alongside the
                   subtitle rather than standing alone where the button used to be.
                 */}
-                <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Library</h1>
-                    <p className="text-sm text-stone-500">Upload, organize, and share the scores you teach from.</p>
-                    {hasScores ? <LocalOpenControl label="Open locally without uploading" subtle /> : null}
-                </header>
+                <PageHead
+                    width="wide"
+                    // Unloaded pages leave documents.length short of the library's size, and a failed
+                    // first load leaves an empty placeholder, not an empty library.
+                    eyebrow={libraryEyebrow(userLabel, hasMore || loadFailure ? null : documents)}
+                    title="Library"
+                    subtitle={
+                        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                            <p>Upload, organize, and share the scores you teach from.</p>
+                            {hasScores ? <LocalOpenControl label="Open locally without uploading" subtle /> : null}
+                        </div>
+                    }
+                />
 
                 {hasScores ? (
                     uploading && uploadPct !== null ? (

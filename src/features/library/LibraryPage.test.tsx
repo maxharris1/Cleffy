@@ -146,6 +146,7 @@ const mockBootstrap = (
 
 const outletContext: LibraryOutletContext = {
     userId: 'teacher-1',
+    userLabel: 'Ada Teacher',
     uploadPct: null,
     uploading: false,
     onUpload: vi.fn(),
@@ -250,6 +251,7 @@ describe('LibraryPage', () => {
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
         expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
         expect(screen.getByRole('heading', { level: 1, name: 'Library' })).toBeInTheDocument();
+        expect(screen.getByText('Ada Teacher · 2 scores')).toBeInTheDocument();
     });
 
     it('says “1 page”, not “1 pages”, for a single-page score', async () => {
@@ -779,6 +781,16 @@ describe('LibraryPage', () => {
             expect(writeCachedLibraryList).not.toHaveBeenCalled();
         });
 
+        it('leaves the score count out of the head when a never-loaded library cannot be reached', async () => {
+            fetchLibraryBootstrap.mockRejectedValue(new Error('offline'));
+            listDocuments.mockRejectedValue(new Error('offline'));
+            renderLibrary();
+
+            expect(await screen.findByText('Couldn’t load your scores')).toBeInTheDocument();
+            expect(screen.getByText('Ada Teacher')).toBeInTheDocument();
+            expect(screen.queryByText(/\d+ scores?$/)).not.toBeInTheDocument();
+        });
+
         it('says it is offline, not empty, when a never-loaded library cannot be reached', async () => {
             vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
             fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));
@@ -1209,12 +1221,14 @@ describe('pagination and server search', () => {
         await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
         expect(screen.getByText('Showing 2 most recent')).toBeInTheDocument();
         expect(screen.queryByText(/showing latest 100/)).not.toBeInTheDocument();
+        expect(screen.getByText('Ada Teacher')).toBeInTheDocument();
 
         await user.click(screen.getByRole('button', { name: 'Load more scores' }));
         expect(await screen.findByText('Gymnopédie (Satie, Erik)')).toBeInTheDocument();
         // The cursor is the last row on screen, in the bootstrap's own order.
         expect(fetchLibraryPage).toHaveBeenCalledWith({ sort: 'recent', after: firstPage[1] });
         expect(screen.getByText('3 scores')).toBeInTheDocument();
+        expect(screen.getByText('Ada Teacher · 3 scores')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Load more scores' })).not.toBeInTheDocument();
     });
 

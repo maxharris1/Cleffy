@@ -121,6 +121,7 @@ const sessionFor = (displayName?: string) => ({
 const outletContext: LibraryOutletContext = {
     canManageStudents: true,
     userId: 'teacher-1',
+    userLabel: 'Ada Teacher',
     uploadPct: null,
     uploading: false,
     onUpload: vi.fn(),
@@ -180,6 +181,7 @@ describe('AccountPage', () => {
         expect(screen.getByText('AD')).toBeInTheDocument();
         // Locale decides the month's spelling; the year is the part under test.
         expect(screen.getByText(/^Member since .*2026$/)).toBeInTheDocument();
+        expect(screen.getByText('ada@example.com · Free plan')).toBeInTheDocument();
     });
 
     it('prefers the stored display name for the avatar and seeds the field with it', async () => {

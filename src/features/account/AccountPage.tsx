@@ -23,7 +23,7 @@ import { PricingDialog } from '@/features/billing/PricingDialog';
 import { StudioSeats } from '@/features/billing/StudioSeats';
 import { clearCachedEntitlements, loadUsage } from '@/features/billing/entitlementsService';
 import { formatPlanDate, ownSubscriptionOf, planPeriodOf } from '@/features/billing/planStatus';
-import { TIER_LABELS } from '@/features/billing/pricing';
+import { PLAN_LABELS, TIER_LABELS } from '@/features/billing/pricing';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { CancelSubscriptionLink } from '@/features/billing/CancelSubscriptionLink';
 import { LegalLinks } from '@/features/legal/LegalLinks';
@@ -35,6 +35,7 @@ import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { PageHead } from '@/ui/PageHead';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
@@ -322,316 +323,329 @@ export const AccountPage = () => {
     // heading start at the container's left edge, and a centred column under a
     // left-aligned bar reads as a different site.
     return (
-        <div className="w-full max-w-3xl">
-            <header>
-                <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Account</h1>
-                <p className="mt-1 text-sm text-stone-500">Your profile, plan, and what this device is holding.</p>
-            </header>
-
-            {checkout === 'success' ? (
-                <p
-                    role="status"
-                    className="mt-4 rounded-xl border border-emerald-300/70 bg-emerald-50/70 px-4 py-3 text-sm text-emerald-900"
-                >
-                    Thanks — your subscription is active. It can take a moment to appear here.
-                </p>
-            ) : null}
-            {checkout === 'cancelled' ? (
-                <p role="status" className="mt-4 text-sm text-stone-600">
-                    Checkout cancelled — nothing was charged.
-                </p>
-            ) : null}
-
-            <section className={SECTION}>
-                <h2 className={SECTION_HEADING}>Profile</h2>
-
-                <div className="mt-4 flex items-center gap-4">
-                    <span
-                        aria-hidden="true"
-                        className="grid h-16 w-16 shrink-0 place-items-center rounded-full bg-accent-soft text-xl font-semibold text-accent"
+        <div>
+            <PageHead
+                width="narrow"
+                eyebrow={`${label} · ${PLAN_LABELS[tier]} plan`}
+                title="Account"
+                subtitle="Your profile, plan, and what this device is holding."
+            />
+            <div className="w-full max-w-3xl">
+                {checkout === 'success' ? (
+                    <p
+                        role="status"
+                        className="mt-4 rounded-xl border border-emerald-300/70 bg-emerald-50/70 px-4 py-3 text-sm text-emerald-900"
                     >
-                        {initialsOf(label)}
-                    </span>
-                    <div className="min-w-0">
-                        <p className="truncate font-display text-lg font-semibold text-stone-800">{label}</p>
-                        {/* displayNameOf falls back to the email, so the second
+                        Thanks — your subscription is active. It can take a moment to appear here.
+                    </p>
+                ) : null}
+                {checkout === 'cancelled' ? (
+                    <p role="status" className="mt-4 text-sm text-stone-600">
+                        Checkout cancelled — nothing was charged.
+                    </p>
+                ) : null}
+
+                <section className={SECTION}>
+                    <h2 className={SECTION_HEADING}>Profile</h2>
+
+                    <div className="mt-4 flex items-center gap-4">
+                        <span
+                            aria-hidden="true"
+                            className="grid h-16 w-16 shrink-0 place-items-center rounded-full bg-accent-soft text-xl font-semibold text-accent"
+                        >
+                            {initialsOf(label)}
+                        </span>
+                        <div className="min-w-0">
+                            <p className="truncate font-display text-lg font-semibold text-stone-800">{label}</p>
+                            {/* displayNameOf falls back to the email, so the second
                             line only appears when it would say something the
                             first does not — the same rule the top bar follows. */}
-                        {email && email !== label ? (
-                            <p className="mt-0.5 truncate text-sm text-stone-600">{email}</p>
-                        ) : null}
-                        {joined ? <p className="mt-0.5 text-sm text-stone-500">Member since {joined}</p> : null}
+                            {email && email !== label ? (
+                                <p className="mt-0.5 truncate text-sm text-stone-600">{email}</p>
+                            ) : null}
+                            {joined ? <p className="mt-0.5 text-sm text-stone-500">Member since {joined}</p> : null}
+                        </div>
                     </div>
-                </div>
-                <p className="mt-3 text-xs text-stone-500">
-                    Your sign-in address can’t be changed here — write to us and we’ll move it for you.
-                </p>
+                    <p className="mt-3 text-xs text-stone-500">
+                        Your sign-in address can’t be changed here — write to us and we’ll move it for you.
+                    </p>
 
-                <form className="mt-6" onSubmit={(event) => void saveName(event)}>
-                    {/* A name is a short string; a field the full width of the
+                    <form className="mt-6" onSubmit={(event) => void saveName(event)}>
+                        {/* A name is a short string; a field the full width of the
                         column would invite a sentence. Capped like the password
                         pair below so the three inputs read as one set. */}
-                    <div className="max-w-sm">
-                        <TextField
-                            id="account-display-name"
-                            label="Display name"
-                            value={nameValue}
-                            autoComplete="name"
-                            maxLength={80}
-                            placeholder={email.split('@')[0] || 'Your name'}
-                            onChange={(event) => setNameDraft(event.target.value)}
-                        />
-                    </div>
-                    <p className="mt-1.5 text-xs text-stone-500">
-                        Shown on shared scores and in a student’s session, in place of your email address.
-                    </p>
-                    <div className="mt-3 flex flex-wrap items-center gap-3">
-                        <Button type="submit" size="sm" disabled={!nameDirty || nameBusy}>
-                            <SwapLabel
-                                labels={{ idle: 'Save name', busy: 'Saving…' }}
-                                active={nameBusy ? 'busy' : 'idle'}
+                        <div className="max-w-sm">
+                            <TextField
+                                id="account-display-name"
+                                label="Display name"
+                                value={nameValue}
+                                autoComplete="name"
+                                maxLength={80}
+                                placeholder={email.split('@')[0] || 'Your name'}
+                                onChange={(event) => setNameDraft(event.target.value)}
                             />
-                        </Button>
-                        {nameSaved ? (
-                            <p role="status" className={CONFIRMATION}>
-                                Name saved.
-                            </p>
-                        ) : null}
-                    </div>
-                    {nameError ? <ErrorText className="mt-2">{nameError}</ErrorText> : null}
-                </form>
-
-                <form
-                    className="mt-6 border-t border-stone-200/70 pt-5"
-                    onSubmit={(event) => void changePassword(event)}
-                >
-                    <h3 className={SUB_HEADING}>Change password</h3>
-                    <p className="mt-1 text-xs text-stone-500">{PASSWORD_HINT} You stay signed in on this device.</p>
-                    <div className="mt-3 max-w-sm">
-                        <TextField
-                            id="account-new-password"
-                            label="New password"
-                            type="password"
-                            autoComplete="new-password"
-                            value={password}
-                            onChange={(event) => setPassword(event.target.value)}
-                        />
-                        <TextField
-                            id="account-confirm-password"
-                            label="Confirm new password"
-                            type="password"
-                            autoComplete="new-password"
-                            spaced
-                            value={confirmPassword}
-                            onChange={(event) => setConfirmPassword(event.target.value)}
-                        />
-                    </div>
-                    <div className="mt-3 flex flex-wrap items-center gap-3">
-                        <Button type="submit" size="sm" variant="secondary" disabled={passwordBusy}>
-                            <SwapLabel
-                                labels={{ idle: 'Change password', busy: 'Changing…' }}
-                                active={passwordBusy ? 'busy' : 'idle'}
-                            />
-                        </Button>
-                        {passwordSaved ? (
-                            <p role="status" className={CONFIRMATION}>
-                                Password changed.
-                            </p>
-                        ) : null}
-                    </div>
-                    {passwordError ? <ErrorText className="mt-2">{passwordError}</ErrorText> : null}
-                </form>
-            </section>
-
-            <section className={SECTION}>
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                        <h2 className={SECTION_HEADING}>Plan &amp; billing</h2>
-                        <p className="mt-1.5 flex items-center gap-2 text-stone-900">
-                            <PlanBadge tier={tier} />
-                            {entitlements?.seat_read_only ? (
-                                <span className="text-sm text-amber-800">read-only academy seat</span>
-                            ) : entitlements?.source === 'studio_member' ? (
-                                <span className="text-sm text-stone-600">through your academy</span>
-                            ) : null}
+                        </div>
+                        <p className="mt-1.5 text-xs text-stone-500">
+                            Shown on shared scores and in a student’s session, in place of your email address.
                         </p>
-                        {period?.kind === 'renews' ? (
-                            <p className="mt-1 text-sm text-stone-500">Renews {formatPlanDate(period.endsAt)}</p>
-                        ) : period?.kind === 'ends' ? (
-                            <p className="mt-1 text-sm text-amber-800">
-                                {period.viaAcademy
-                                    ? `Your academy’s plan ends ${formatPlanDate(period.endsAt)} — ask its owner if you need it longer.`
-                                    : `Ends ${formatPlanDate(period.endsAt)} — your plan won’t renew. Resume it any time before then.`}
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                            <Button type="submit" size="sm" disabled={!nameDirty || nameBusy}>
+                                <SwapLabel
+                                    labels={{ idle: 'Save name', busy: 'Saving…' }}
+                                    active={nameBusy ? 'busy' : 'idle'}
+                                />
+                            </Button>
+                            {nameSaved ? (
+                                <p role="status" className={CONFIRMATION}>
+                                    Name saved.
+                                </p>
+                            ) : null}
+                        </div>
+                        {nameError ? <ErrorText className="mt-2">{nameError}</ErrorText> : null}
+                    </form>
+
+                    <form
+                        className="mt-6 border-t border-stone-200/70 pt-5"
+                        onSubmit={(event) => void changePassword(event)}
+                    >
+                        <h3 className={SUB_HEADING}>Change password</h3>
+                        <p className="mt-1 text-xs text-stone-500">
+                            {PASSWORD_HINT} You stay signed in on this device.
+                        </p>
+                        <div className="mt-3 max-w-sm">
+                            <TextField
+                                id="account-new-password"
+                                label="New password"
+                                type="password"
+                                autoComplete="new-password"
+                                value={password}
+                                onChange={(event) => setPassword(event.target.value)}
+                            />
+                            <TextField
+                                id="account-confirm-password"
+                                label="Confirm new password"
+                                type="password"
+                                autoComplete="new-password"
+                                spaced
+                                value={confirmPassword}
+                                onChange={(event) => setConfirmPassword(event.target.value)}
+                            />
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                            <Button type="submit" size="sm" variant="secondary" disabled={passwordBusy}>
+                                <SwapLabel
+                                    labels={{ idle: 'Change password', busy: 'Changing…' }}
+                                    active={passwordBusy ? 'busy' : 'idle'}
+                                />
+                            </Button>
+                            {passwordSaved ? (
+                                <p role="status" className={CONFIRMATION}>
+                                    Password changed.
+                                </p>
+                            ) : null}
+                        </div>
+                        {passwordError ? <ErrorText className="mt-2">{passwordError}</ErrorText> : null}
+                    </form>
+                </section>
+
+                <section className={SECTION}>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <h2 className={SECTION_HEADING}>Plan &amp; billing</h2>
+                            <p className="mt-1.5 flex items-center gap-2 text-stone-900">
+                                <PlanBadge tier={tier} />
+                                {entitlements?.seat_read_only ? (
+                                    <span className="text-sm text-amber-800">read-only academy seat</span>
+                                ) : entitlements?.source === 'studio_member' ? (
+                                    <span className="text-sm text-stone-600">through your academy</span>
+                                ) : null}
                             </p>
-                        ) : null}
+                            {period?.kind === 'renews' ? (
+                                <p className="mt-1 text-sm text-stone-500">Renews {formatPlanDate(period.endsAt)}</p>
+                            ) : period?.kind === 'ends' ? (
+                                <p className="mt-1 text-sm text-amber-800">
+                                    {period.viaAcademy
+                                        ? `Your academy’s plan ends ${formatPlanDate(period.endsAt)} — ask its owner if you need it longer.`
+                                        : `Ends ${formatPlanDate(period.endsAt)} — your plan won’t renew. Resume it any time before then.`}
+                                </p>
+                            ) : null}
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                            {tier === 'free' ? (
+                                <Button size="sm" onClick={() => setPricingOpen(true)}>
+                                    Upgrade
+                                </Button>
+                            ) : (
+                                <Button size="sm" variant="secondary" onClick={() => setPricingOpen(true)}>
+                                    Change plan
+                                </Button>
+                            )}
+                            {entitlements?.source !== 'studio_member' ? (
+                                <Button
+                                    size="sm"
+                                    variant="secondary"
+                                    disabled={portalBusy}
+                                    onClick={() => void openPortal()}
+                                >
+                                    {portalBusy
+                                        ? 'Opening…'
+                                        : resumable
+                                          ? 'Resume subscription'
+                                          : 'Manage subscription'}
+                                </Button>
+                            ) : null}
+                        </div>
                     </div>
 
-                    <div className="flex flex-wrap gap-2">
-                        {tier === 'free' ? (
-                            <Button size="sm" onClick={() => setPricingOpen(true)}>
-                                Upgrade
-                            </Button>
-                        ) : (
-                            <Button size="sm" variant="secondary" onClick={() => setPricingOpen(true)}>
-                                Change plan
-                            </Button>
-                        )}
-                        {entitlements?.source !== 'studio_member' ? (
-                            <Button
-                                size="sm"
-                                variant="secondary"
-                                disabled={portalBusy}
-                                onClick={() => void openPortal()}
-                            >
-                                {portalBusy ? 'Opening…' : resumable ? 'Resume subscription' : 'Manage subscription'}
-                            </Button>
-                        ) : null}
-                    </div>
-                </div>
+                    {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
+                </section>
 
-                {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
-            </section>
-
-            <section className={SECTION}>
-                <h2 className={SECTION_HEADING}>Usage this month</h2>
-                <ul className="mt-4 flex flex-col gap-4">
-                    {meteredRows().map(({ metric, label: metricLabel }) => {
-                        const limit = entitlements?.limits[metric] ?? 0;
-                        const used = usage[metric] ?? 0;
-                        // A bar for an unlimited allowance can only lie: full says
-                        // "spent", empty says "none used". The word is the truth.
-                        const unlimited = limit < 0;
-                        return (
-                            <li key={metric}>
-                                <div className="flex items-baseline justify-between gap-4 text-sm">
-                                    <span className="text-stone-700">{metricLabel}</span>
-                                    <span className="tabular-nums text-stone-500">
-                                        {unlimited ? 'unlimited' : `${used} of ${limit} used this month`}
-                                    </span>
-                                </div>
-                                {unlimited ? null : (
-                                    <ProgressBar
-                                        className="account-meter mt-2"
-                                        value={meterPercent(used, limit)}
-                                        label={`${metricLabel} used this month`}
-                                    />
-                                )}
-                            </li>
-                        );
-                    })}
-                    <li className="flex items-baseline justify-between gap-4 text-sm">
-                        <span className="text-stone-700">Active cloud scores</span>
-                        <span className="tabular-nums text-stone-500">
-                            {describeStock(entitlements?.limits.cloud_scores ?? 0)}
-                        </span>
-                    </li>
-                    <li className="flex items-baseline justify-between gap-4 text-sm">
-                        <span className="text-stone-700">Student seats</span>
-                        <span className="tabular-nums text-stone-500">
-                            {describeStock(entitlements?.limits.students ?? 0)}
-                        </span>
-                    </li>
-                </ul>
-                {/*
+                <section className={SECTION}>
+                    <h2 className={SECTION_HEADING}>Usage this month</h2>
+                    <ul className="mt-4 flex flex-col gap-4">
+                        {meteredRows().map(({ metric, label: metricLabel }) => {
+                            const limit = entitlements?.limits[metric] ?? 0;
+                            const used = usage[metric] ?? 0;
+                            // A bar for an unlimited allowance can only lie: full says
+                            // "spent", empty says "none used". The word is the truth.
+                            const unlimited = limit < 0;
+                            return (
+                                <li key={metric}>
+                                    <div className="flex items-baseline justify-between gap-4 text-sm">
+                                        <span className="text-stone-700">{metricLabel}</span>
+                                        <span className="tabular-nums text-stone-500">
+                                            {unlimited ? 'unlimited' : `${used} of ${limit} used this month`}
+                                        </span>
+                                    </div>
+                                    {unlimited ? null : (
+                                        <ProgressBar
+                                            className="account-meter mt-2"
+                                            value={meterPercent(used, limit)}
+                                            label={`${metricLabel} used this month`}
+                                        />
+                                    )}
+                                </li>
+                            );
+                        })}
+                        <li className="flex items-baseline justify-between gap-4 text-sm">
+                            <span className="text-stone-700">Active cloud scores</span>
+                            <span className="tabular-nums text-stone-500">
+                                {describeStock(entitlements?.limits.cloud_scores ?? 0)}
+                            </span>
+                        </li>
+                        <li className="flex items-baseline justify-between gap-4 text-sm">
+                            <span className="text-stone-700">Student seats</span>
+                            <span className="tabular-nums text-stone-500">
+                                {describeStock(entitlements?.limits.students ?? 0)}
+                            </span>
+                        </li>
+                    </ul>
+                    {/*
                   PDF export is deliberately absent: it is metered, and on
                   {TIER_LABELS.free} the very list above this line reads "0 of 1
                   used this month". The unlimited claim belongs to the two tools
                   that really are ungated everywhere.
                 */}
-                <p className="mt-4 text-xs text-stone-500">
-                    {features.fingering
-                        ? `Annotation and the fingering optimizer are unlimited on every plan, including ${TIER_LABELS.free}.`
-                        : `Annotation is unlimited on every plan, including ${TIER_LABELS.free}.`}
-                </p>
-            </section>
+                    <p className="mt-4 text-xs text-stone-500">
+                        {features.fingering
+                            ? `Annotation and the fingering optimizer are unlimited on every plan, including ${TIER_LABELS.free}.`
+                            : `Annotation is unlimited on every plan, including ${TIER_LABELS.free}.`}
+                    </p>
+                </section>
 
-            <StudioSeats
-                userId={userId}
-                tier={tier}
-                source={entitlements?.source ?? 'none'}
-                seatReadOnly={entitlements?.seat_read_only === true}
-            />
+                <StudioSeats
+                    userId={userId}
+                    tier={tier}
+                    source={entitlements?.source ?? 'none'}
+                    seatReadOnly={entitlements?.seat_read_only === true}
+                />
 
-            <section className={SECTION}>
-                <h2 className={SECTION_HEADING}>Preferences</h2>
+                <section className={SECTION}>
+                    <h2 className={SECTION_HEADING}>Preferences</h2>
 
-                <HomeScreenPreferences />
+                    <HomeScreenPreferences />
 
-                <ScoreLayoutPreferences />
+                    <ScoreLayoutPreferences />
 
-                <h3 className={`${SUB_HEADING} mt-6`}>Offline storage</h3>
-                <p className="mt-1.5 text-sm text-stone-600">
-                    {storage === null
-                        ? 'Checking what this device has downloaded…'
-                        : storage.scoreCount === 0
-                          ? 'No scores are downloaded to this device yet.'
-                          : `${storage.scoreCount} ${storage.scoreCount === 1 ? 'score' : 'scores'} downloaded to this device, using about ${formatMegabytes(storage.bytes)}.`}
-                </p>
-                <p className="mt-1 text-xs text-stone-500">
-                    Removing them frees the space and nothing else: your annotations are not affected, and each score
-                    downloads again the next time you open it.
-                </p>
-                <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <h3 className={`${SUB_HEADING} mt-6`}>Offline storage</h3>
+                    <p className="mt-1.5 text-sm text-stone-600">
+                        {storage === null
+                            ? 'Checking what this device has downloaded…'
+                            : storage.scoreCount === 0
+                              ? 'No scores are downloaded to this device yet.'
+                              : `${storage.scoreCount} ${storage.scoreCount === 1 ? 'score' : 'scores'} downloaded to this device, using about ${formatMegabytes(storage.bytes)}.`}
+                    </p>
+                    <p className="mt-1 text-xs text-stone-500">
+                        Removing them frees the space and nothing else: your annotations are not affected, and each
+                        score downloads again the next time you open it.
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                        <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={storage === null || nothingCached || clearBusy}
+                            onClick={() => setClearOpen(true)}
+                        >
+                            <SwapLabel
+                                labels={{ idle: 'Remove downloaded scores', busy: 'Removing…' }}
+                                active={clearBusy ? 'busy' : 'idle'}
+                            />
+                        </Button>
+                        {clearedFlag ? (
+                            <p role="status" className={CONFIRMATION}>
+                                Downloaded scores removed.
+                            </p>
+                        ) : null}
+                    </div>
+                    {storageError ? <ErrorText className="mt-2">{storageError}</ErrorText> : null}
+                </section>
+
+                <section className={SECTION}>
+                    <h2 className={SECTION_HEADING}>Sign out</h2>
+                    <p className="mt-2 text-sm text-stone-600">
+                        Signing out removes your cached plan, downloaded scores and the offline copy of your marks from
+                        this device. Everything stays in your account; changes not yet saved to it are uploaded first.
+                    </p>
                     <Button
                         size="sm"
                         variant="secondary"
-                        disabled={storage === null || nothingCached || clearBusy}
-                        onClick={() => setClearOpen(true)}
+                        className="mt-3"
+                        disabled={signingOut || guardedSignOut.checking}
+                        onClick={() => void guardedSignOut.requestSignOut()}
                     >
-                        <SwapLabel
-                            labels={{ idle: 'Remove downloaded scores', busy: 'Removing…' }}
-                            active={clearBusy ? 'busy' : 'idle'}
-                        />
+                        {guardedSignOut.checking ? 'Saving changes…' : signingOut ? 'Signing out…' : 'Sign out'}
                     </Button>
-                    {clearedFlag ? (
-                        <p role="status" className={CONFIRMATION}>
-                            Downloaded scores removed.
-                        </p>
-                    ) : null}
-                </div>
-                {storageError ? <ErrorText className="mt-2">{storageError}</ErrorText> : null}
-            </section>
+                    {signOutError ? <ErrorText className="mt-2">{signOutError}</ErrorText> : null}
+                </section>
 
-            <section className={SECTION}>
-                <h2 className={SECTION_HEADING}>Sign out</h2>
-                <p className="mt-2 text-sm text-stone-600">
-                    Signing out removes your cached plan, downloaded scores and the offline copy of your marks from this
-                    device. Everything stays in your account; changes not yet saved to it are uploaded first.
-                </p>
-                <Button
-                    size="sm"
-                    variant="secondary"
-                    className="mt-3"
-                    disabled={signingOut || guardedSignOut.checking}
-                    onClick={() => void guardedSignOut.requestSignOut()}
-                >
-                    {guardedSignOut.checking ? 'Saving changes…' : signingOut ? 'Signing out…' : 'Sign out'}
-                </Button>
-                {signOutError ? <ErrorText className="mt-2">{signOutError}</ErrorText> : null}
-            </section>
+                {guardedSignOut.dialog}
 
-            {guardedSignOut.dialog}
+                <DeleteAccountSection session={session} />
 
-            <DeleteAccountSection session={session} />
+                <LegalLinks withContact className="mt-10" />
+                <CancelSubscriptionLink className="mt-3" />
 
-            <LegalLinks withContact className="mt-10" />
-            <CancelSubscriptionLink className="mt-3" />
+                {clearOpen ? (
+                    <ConfirmDialog
+                        title="Remove downloaded scores?"
+                        body="This deletes the offline copies stored on this device. Your annotations are not affected, and each score downloads again the next time you open it."
+                        confirmLabel="Remove"
+                        danger
+                        busy={clearBusy}
+                        onConfirm={() => void removeDownloads()}
+                        onCancel={() => setClearOpen(false)}
+                    />
+                ) : null}
 
-            {clearOpen ? (
-                <ConfirmDialog
-                    title="Remove downloaded scores?"
-                    body="This deletes the offline copies stored on this device. Your annotations are not affected, and each score downloads again the next time you open it."
-                    confirmLabel="Remove"
-                    danger
-                    busy={clearBusy}
-                    onConfirm={() => void removeDownloads()}
-                    onCancel={() => setClearOpen(false)}
-                />
-            ) : null}
-
-            {pricingOpen ? (
-                <PricingDialog currentTier={tier} subscription={subscription} onClose={() => setPricingOpen(false)} />
-            ) : null}
+                {pricingOpen ? (
+                    <PricingDialog
+                        currentTier={tier}
+                        subscription={subscription}
+                        onClose={() => setPricingOpen(false)}
+                    />
+                ) : null}
+            </div>
         </div>
     );
 };

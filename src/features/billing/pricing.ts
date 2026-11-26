@@ -1,6 +1,6 @@
 import { PAID_VISION_READS } from '@/features/billing/paidAllowances';
 import { features } from '@/lib/features';
-import type { BillingTier } from '@/types/database';
+import type { BillingTier, EffectiveTier } from '@/types/database';
 
 import {
     formatMoney,
@@ -306,3 +306,5 @@ export const TIER_LABELS: Record<BillingTier, string> = {
     teacher: 'Teacher',
     academy: 'Academy',
 };
+
+export const PLAN_LABELS: Record<EffectiveTier, string> = { ...TIER_LABELS, student: 'Student' };
