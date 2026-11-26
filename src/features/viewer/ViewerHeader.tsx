@@ -10,16 +10,11 @@ interface ViewerHeaderProps {
     title: string;
     /** Right-side chrome: presence, sync status, badges, actions. */
     children?: ReactNode;
-    /**
-     * The one filled action (Share). Last in the row from lg; below lg it sits
-     * on the title's row, as on a phone, while staying last in focus order.
-     */
     primary?: ReactNode;
 }
 
 const TITLE_SEPARATOR = ' — ';
 
-/** "Composer — Piece" sets the piece in italic; any other title stays as it is. */
 const ScoreTitle = ({ title }: { title: string }) => {
     const at = title.indexOf(TITLE_SEPARATOR);
     if (at <= 0 || at + TITLE_SEPARATOR.length >= title.length) {

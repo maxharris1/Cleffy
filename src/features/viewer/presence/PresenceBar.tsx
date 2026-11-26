@@ -13,7 +13,7 @@ export interface PresenceBarProps {
 }
 
 const CHIP =
-    'inline-flex h-[30px] items-center gap-2 whitespace-nowrap rounded-full bg-paper/10 pl-2.5 pr-3 text-[13px] font-semibold text-paper ring-1 ring-paper/24';
+    'inline-flex h-[30px] min-w-11 items-center gap-2 whitespace-nowrap rounded-full bg-paper/10 pl-2.5 pr-3 text-[13px] font-semibold text-paper ring-1 ring-paper/24';
 
 /**
  * Who's here: one named chip per person, a dot in their ink colour. Each chip is a button that opens a small
@@ -29,8 +29,6 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
     const overflow = others.length - shown.length;
 
     return (
-        // Each chip is wider than 44px with its name, so on touch only the
-        // height needs to grow (hit-44-y) and neighbours never overlap.
         <div className="flex flex-wrap items-center gap-1.5" aria-label={`${others.length} collaborators viewing`}>
             {shown.map((peer) => {
                 const name = labelOf(peer);
