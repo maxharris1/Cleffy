@@ -39,6 +39,7 @@ import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { SwapLabel } from '@/ui/SwapLabel';
 import { toast } from '@/ui/toast';
+import { Wordmark } from '@/ui/Wordmark';
 
 /** The legal documents, as the account menu's last row lists them. */
 const LEGAL_MENU_LINKS = [
@@ -55,6 +56,7 @@ const PricingDialog = lazy(() =>
 
 export type LibraryOutletContext = {
     userId: string;
+    userLabel: string;
     uploadPct: number | null;
     uploading: boolean;
     onUpload: (file: File) => Promise<void>;
@@ -512,6 +514,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
 
     const outlet: LibraryOutletContext = {
         userId,
+        userLabel,
         uploadPct,
         uploading,
         onUpload,
@@ -539,8 +542,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 <div
                     className={`${SHELL_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-6 sm:py-0`}
                 >
-                    <Link to="/library" className="landing-brand shrink-0 font-display text-2xl font-semibold">
-                        Cleffy
+                    <Link to="/library" className="shrink-0">
+                        <Wordmark className="text-[26px] sm:text-[28px]" />
                     </Link>
 
                     {/* Below sm the strip drops to its own row (order-last) and scrolls

@@ -36,10 +36,16 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { Menu, MenuItem } from '@/ui/Menu';
+import { PageHead } from '@/ui/PageHead';
 import { RosterSkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
 import { MoreVerticalIcon } from '@/ui/icons';
+
+const rosterEyebrow = (active: number, unclaimed: number): string => {
+    const students = `${active} ${active === 1 ? 'student' : 'students'}`;
+    return unclaimed === 0 ? students : `${students} · ${unclaimed} still to set up`;
+};
 
 /** A code, held only long enough to show and print it. */
 interface CodeCard {
@@ -402,19 +408,22 @@ export const RosterPage = () => {
 
     const activeCount = students?.filter((student) => student.archived_at === null).length ?? 0;
     const archivedCount = (students?.length ?? 0) - activeCount;
+    const unclaimedCount =
+        students?.filter((student) => student.archived_at === null && student.claimed_at === null).length ?? 0;
 
     return (
         <div>
-            <h1 className="font-display text-2xl font-semibold text-stone-800 sm:text-3xl">Students</h1>
             {/* The upgrade state below explains the roster in its own words —
                 printing the pitch twice on the same screen just reads as noise. */}
-            {canManageStudents ? (
-                <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-stone-600">
-                    Each student gets their own sign-in: a printed setup code they turn into a username, or an email
-                    invite if they have an address. Assign scores from your library: with Edit access a student marks up
-                    the same score you do.
-                </p>
-            ) : null}
+            <PageHead
+                eyebrow={students === null ? undefined : rosterEyebrow(activeCount, unclaimedCount)}
+                title="Students"
+                subtitle={
+                    canManageStudents
+                        ? 'Each student gets their own sign-in: a printed setup code they turn into a username, or an email invite if they have an address. Assign scores from your library: with Edit access a student marks up the same score you do.'
+                        : undefined
+                }
+            />
 
             {/*
               The nav hides this page on a plan without a roster, but a bookmark

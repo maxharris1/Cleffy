@@ -3,6 +3,7 @@ import { useOutletContext, useSearchParams } from 'react-router';
 import { ImslpBrowser } from '@/features/imslp/ImslpBrowser';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
+import { PageHead } from '@/ui/PageHead';
 
 export const SearchPage = () => {
     const {
@@ -21,18 +22,17 @@ export const SearchPage = () => {
 
     return (
         <div>
-            <header>
-                {workOpen ? (
+            {workOpen ? (
+                <header>
                     <h1 className="text-sm font-medium text-stone-500">Find a score</h1>
-                ) : (
-                    <>
-                        <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">
-                            Find a score
-                        </h1>
-                        <p className="mt-1 text-sm text-stone-500">Search thousands of public-domain scores.</p>
-                    </>
-                )}
-            </header>
+                </header>
+            ) : (
+                <PageHead
+                    eyebrow="Public domain · free to add"
+                    title="Find a score"
+                    subtitle="Search thousands of public-domain scores."
+                />
+            )}
 
             {/* Quota refusals — and a cap the account is already at — get the
                 amber notice with its way to the plans, not red error text: same

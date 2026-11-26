@@ -88,6 +88,7 @@ const openPricing = vi.fn();
 
 const outletContext: LibraryOutletContext = {
     userId: 'teacher-1',
+    userLabel: 'Ada Teacher',
     uploadPct: null,
     uploading: false,
     onUpload: vi.fn(),
@@ -349,6 +350,7 @@ describe('RosterPage', () => {
         // Nothing to type yet: the card is out but the code has not been spent.
         expect(screen.getByRole('button', { name: /Bo Diddley/ })).toHaveTextContent('Invited');
         expect(screen.getByRole('button', { name: /Clara Schumann/ })).toHaveTextContent('clara@example.com');
+        expect(screen.getByText('3 students · 1 still to set up')).toBeInTheDocument();
     });
 
     it('names the reset after what it does to this particular student', async () => {

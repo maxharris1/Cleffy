@@ -23,7 +23,7 @@ import { PricingDialog } from '@/features/billing/PricingDialog';
 import { StudioSeats } from '@/features/billing/StudioSeats';
 import { clearCachedEntitlements, loadUsage } from '@/features/billing/entitlementsService';
 import { formatPlanDate, ownSubscriptionOf, planPeriodOf } from '@/features/billing/planStatus';
-import { TIER_LABELS } from '@/features/billing/pricing';
+import { PLAN_LABELS, TIER_LABELS } from '@/features/billing/pricing';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { CancelSubscriptionLink } from '@/features/billing/CancelSubscriptionLink';
 import { LegalLinks } from '@/features/legal/LegalLinks';
@@ -35,6 +35,7 @@ import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { PageHead } from '@/ui/PageHead';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
@@ -323,10 +324,11 @@ export const AccountPage = () => {
     // left-aligned bar reads as a different site.
     return (
         <div className="w-full max-w-3xl">
-            <header>
-                <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Account</h1>
-                <p className="mt-1 text-sm text-stone-500">Your profile, plan, and what this device is holding.</p>
-            </header>
+            <PageHead
+                eyebrow={`${label} · ${PLAN_LABELS[tier]} plan`}
+                title="Account"
+                subtitle="Your profile, plan, and what this device is holding."
+            />
 
             {checkout === 'success' ? (
                 <p
