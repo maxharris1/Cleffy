@@ -1404,7 +1404,7 @@ export const PdfViewport = ({
                     {overlayMode === 'history' && !standMode ? (
                         <div
                             data-ui-overlay
-                            className="pointer-events-none absolute inset-x-0 top-14 z-20 flex justify-center sm:top-3"
+                            className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center sm:top-3"
                         >
                             <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-panel-line bg-paper px-3 py-1.5 text-sm text-ink shadow">
                                 <span>Viewing day starting point</span>

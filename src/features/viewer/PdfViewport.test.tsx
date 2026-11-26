@@ -33,8 +33,8 @@ let viewport = { width: 800, height: 600 };
 /** Rendered heights (px) of one notice card and the gap between cards, phone size. */
 const NOTICE_PX = 52;
 const NOTICE_GAP_PX = 6;
-/** The region's top on phones (top-14). */
-const REGION_TOP_PX = 56;
+/** The region's top on phones (top-2): nothing else sits at the top of a phone's score. */
+const REGION_TOP_PX = 8;
 
 const resizeCallbacks = new Set<() => void>();
 
@@ -314,7 +314,7 @@ describe('PdfViewport follow under the notice stack', () => {
 
         const tick = { current: 0 };
         render(<ViewerWithNotices tick={tick} />);
-        // Three cards: the stack reaches 56 + 3×52 + 2×6 = 224px down a 664px phone.
+        // Three cards: the stack reaches 8 + 3×52 + 2×6 = 176px down a 664px phone.
         const stackBottom = REGION_TOP_PX + 3 * NOTICE_PX + 2 * NOTICE_GAP_PX;
         expect(screen.getAllByRole('status')).toHaveLength(3);
 
@@ -426,7 +426,7 @@ const manualFrames = () => {
     };
 };
 
-/** How far down the stack reaches with `cards` notices up (56 + cards×52 + gaps). */
+/** How far down the stack reaches with `cards` notices up (8 + cards×52 + gaps). */
 const stackBottomPx = (cards: number) => REGION_TOP_PX + cards * NOTICE_PX + (cards - 1) * NOTICE_GAP_PX;
 
 /** The pager and zoom row's strip (px) over the bottom of a phone viewport. */
@@ -496,6 +496,7 @@ describe('PdfViewport page turns under a tall notice stack', () => {
     const openUnderStack = async () => {
         render(<ViewerUnderNotices />);
         expect(screen.getAllByRole('status')).toHaveLength(3);
+        expect(document.querySelector('[data-viewer-notices]')).toHaveClass('top-2');
         // The first fit starts page 1 below the stack, at the top scroll bound.
         await waitFor(() => expect(view().scrollY).toBe(phoneTopBound(3)));
     };
@@ -503,15 +504,15 @@ describe('PdfViewport page turns under a tall notice stack', () => {
     it.each(Object.entries(turners))(
         'pages forward to the last page and back at minimum zoom in a short phone viewport (%s)',
         async (_, turn) => {
-            viewport = { width: 390, height: 480 + PHONE_CONTROLS_PX };
+            viewport = { width: 390, height: 480 };
             await openUnderStack();
             act(() => useViewerStore.getState().setView({ ...view(), scale: MIN_SCALE }));
             act(() => useViewerStore.getState().setView({ ...view(), scrollY: phoneTopBound(3) }));
             expectPager(1, false, true);
 
-            // Page 1 -> 2 lands above 0 (808 × 0.25 − 224 = −22): still page 2, not page 1.
+            // Page 1 -> 2 puts page 2's top at the foot of the stack (808 × 0.25 − 176 = 26).
             act(() => turn(1));
-            expect(view().scrollY).toBeCloseTo(-22);
+            expect(view().scrollY).toBeCloseTo(26);
             expectPager(2, true, true);
 
             // And on to page 3, which comes fully into view below the stack.
@@ -538,11 +539,11 @@ describe('PdfViewport page turns under a tall notice stack', () => {
     it.each(Object.entries(turners))(
         'pages through every page at fit width when the stack reaches past the viewport middle (%s)',
         async (_, turn) => {
-            // 224 px of notices over a 400 px viewport: the middle of the whole
+            // 176 px of notices over a 340 px viewport: the middle of the whole
             // viewport is under the stack.
-            viewport = { width: 390, height: 400 };
+            viewport = { width: 390, height: 340 };
             await openUnderStack();
-            expect(STACK).toBeGreaterThan(400 / 2);
+            expect(STACK).toBeGreaterThan(340 / 2);
             expectPager(1, false, true);
 
             for (const page of [2, 3]) {
@@ -555,7 +556,7 @@ describe('PdfViewport page turns under a tall notice stack', () => {
             }
             // The rest of page 3 is still below: Next goes on to its end, then stops.
             act(() => turn(1));
-            expect(pageEdges(2).bottom).toBeCloseTo(400 - PHONE_CONTROLS_PX - 16 * view().scale);
+            expect(pageEdges(2).bottom).toBeCloseTo(340 - PHONE_CONTROLS_PX - 16 * view().scale);
             expectPager(3, true, false);
             act(() => turn(-1));
             expect(pageEdges(1).top).toBeCloseTo(STACK + 16 * view().scale);

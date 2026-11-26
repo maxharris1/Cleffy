@@ -38,8 +38,7 @@ export const ViewerNotice = ({
 
 /**
  * The one region the notices live in: absolute over the score's top edge,
- * below the phone's pager/zoom strip and below the toolbar docked at the top
- * from `sm`, inset from the notch. Lets presses through wherever there is no
+ * below the toolbar docked at the top from `sm`, inset from the notch. Lets presses through wherever there is no
  * notice. Tighter on phones, where a stack of them would otherwise cover a
  * good part of the score.
  *
@@ -82,7 +81,7 @@ export const ViewerNoticeRegion = ({
             ref={regionRef}
             data-ui-overlay
             data-viewer-notices
-            className="pointer-events-none absolute inset-x-0 top-14 z-30 flex flex-col gap-1.5 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] sm:top-[4.5rem] sm:gap-2"
+            className="pointer-events-none absolute inset-x-0 top-2 z-30 flex flex-col gap-1.5 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] sm:top-[4.5rem] sm:gap-2"
         >
             {children}
         </div>

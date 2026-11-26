@@ -964,6 +964,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     ) : null
                 }
             >
+                <StandModeButton />
                 <PresenceBar
                     peers={peers}
                     selfUserId={resolvedUserId}
@@ -972,7 +973,6 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 {features.shareV2 && state.role === 'owner' ? <LinkViewerCount peers={peers} /> : null}
                 {/* No engine yet (no role to sync under): say whether that is the network, or the server not having answered. */}
                 <SyncDot status={syncing ? syncStatus : !online ? 'offline' : awaitingServer ? 'waiting' : 'syncing'} />
-                <StandModeButton />
                 {archived ? (
                     <span title="Read-only — over your plan’s score limit">
                         <Badge tone="warn">Archived</Badge>

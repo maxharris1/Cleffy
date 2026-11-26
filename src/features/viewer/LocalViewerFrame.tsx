@@ -68,7 +68,7 @@ export const LocalViewerFrame = ({
                             data-ui-overlay
                             // Where the notice region starts, or just below its notices.
                             style={noticeInset > 0 ? { top: noticeInset + 8 } : undefined}
-                            className="pointer-events-none absolute inset-x-0 top-14 z-30 flex flex-col pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] sm:top-[4.5rem]"
+                            className="pointer-events-none absolute inset-x-0 top-2 z-30 flex flex-col pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] sm:top-[4.5rem]"
                         >
                             {overlay}
                         </div>

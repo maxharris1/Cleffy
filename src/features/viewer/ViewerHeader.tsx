@@ -67,7 +67,7 @@ export const ViewerHeader = ({ backTo, backLabel, title, children, primary }: Vi
                     {children ? (
                         <nav
                             aria-label="Score"
-                            className="order-2 flex min-w-0 flex-[1_1_100%] flex-wrap items-center justify-start gap-x-1.5 gap-y-0.5 lg:order-none lg:flex-[0_1_auto] lg:justify-end [&>*]:max-w-full [&>button]:px-3"
+                            className="order-2 flex min-w-0 flex-[1_1_100%] flex-wrap items-center justify-start gap-x-1.5 gap-y-0.5 pointer-coarse:gap-y-2 lg:order-none lg:flex-[0_1_auto] lg:justify-end [&>*]:max-w-full [&>button]:px-3"
                         >
                             {children}
                         </nav>

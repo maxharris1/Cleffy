@@ -8,6 +8,7 @@ import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { holdOps, resetInkRecoveryForTests } from '@/sync/inkRecovery';
+import type { PresencePeer } from '@/sync/wire';
 import type { DocumentRow } from '@/types/database';
 
 const fetchDocument = vi.fn();
@@ -68,7 +69,9 @@ vi.mock('@/features/student/studentApi', () => ({
 }));
 
 /** The sync wiring the viewer last handed the viewport, for driving realtime callbacks. */
-const viewportSync: { current: { onMembershipChanged?: () => void } | undefined } = { current: undefined };
+const viewportSync: {
+    current: { onMembershipChanged?: () => void; onPeers?: (peers: PresencePeer[]) => void } | undefined;
+} = { current: undefined };
 
 /** What the viewer last handed the PDF provider: the source, and the stream callbacks. */
 const pdfProps = vi.hoisted(() => ({
@@ -143,7 +146,19 @@ vi.mock('@/features/viewer/ViewerHeader', () => ({
     ),
 }));
 
-vi.mock('@/features/viewer/presence/PresenceBar', () => ({ PresenceBar: () => null }));
+vi.mock('@/features/viewer/presence/PresenceBar', () => ({
+    PresenceBar: ({ peers, selfUserId }: { peers: PresencePeer[]; selfUserId: string }) => (
+        <div>
+            {peers
+                .filter((peer) => peer.userId !== selfUserId)
+                .map((peer) => (
+                    <button key={peer.userId} type="button" aria-label={`${peer.name}, on page ${peer.page + 1}`}>
+                        {peer.name}
+                    </button>
+                ))}
+        </div>
+    ),
+}));
 vi.mock('@/features/viewer/history/LessonHistoryButton', () => ({ LessonHistoryButton: () => null }));
 vi.mock('@/features/export/ShareExportMenu', () => ({
     ShareExportMenu: ({
@@ -1139,6 +1154,32 @@ describe('CloudViewer membership changes', () => {
         expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Share' }));
         expect(screen.getByTestId('share-dialog')).toHaveAttribute('data-role', 'owner');
+    });
+
+    it('tabs through the header as before the restyle: Full screen, then the presence chips, then Share last', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        act(() =>
+            viewportSync.current?.onPeers?.([
+                { userId: 'ada', name: 'Ada', color: '#000', page: 0, isAnonymous: false },
+            ]),
+        );
+        expect(screen.getByRole('button', { name: 'Ada, on page 1' })).toBeInTheDocument();
+
+        const visited: string[] = [];
+        while (!visited.includes('Share') && visited.length < 20) {
+            await user.tab();
+            const focused = document.activeElement as HTMLElement;
+            visited.push(focused.getAttribute('aria-label') ?? focused.textContent ?? '');
+        }
+        const at = (name: string) => visited.indexOf(name);
+        expect(at('Full screen')).toBeGreaterThanOrEqual(0);
+        expect(at('Full screen')).toBeLessThan(at('Ada, on page 1'));
+        expect(at('Ada, on page 1')).toBeLessThan(at('Share'));
     });
 
     it('offers the owner no smart import while the feature is off, even on the post-upload ?import=1', async () => {

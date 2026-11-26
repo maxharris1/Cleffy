@@ -48,6 +48,12 @@ describe('ViewerHeader', () => {
         expect(nav.className).not.toMatch(/\[&>\*\]:shrink-0/);
     });
 
+    it('keeps wrapped rows of touch targets apart on a coarse pointer, so a chip never steals a tap meant for the row above', () => {
+        renderHeader();
+        const nav = screen.getByRole('navigation', { name: 'Score' });
+        expect(nav).toHaveClass('pointer-coarse:gap-y-2');
+    });
+
     it('sets the piece name in italic when the title reads "Composer — Piece"', () => {
         render(
             <MemoryRouter>

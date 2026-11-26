@@ -25,7 +25,7 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
     }
     return (
         <div
-            className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"
+            className="flex min-w-0 max-w-full flex-wrap items-center gap-x-1.5 gap-y-1.5 pointer-coarse:gap-y-3.5"
             aria-label={`${others.length} collaborators viewing`}
         >
             {others.map((peer) => {

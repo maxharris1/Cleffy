@@ -25,7 +25,11 @@ describe('PresenceBar', () => {
 
     it('names each person on their chip, with a touch target 44px tall that never overlaps a neighbour', () => {
         render(<PresenceBar peers={[peer('a', 'Ada Lovelace'), peer('b', 'Bo Diddley')]} selfUserId="me" />);
-        expect(screen.getByLabelText('2 collaborators viewing')).toHaveClass('gap-1.5');
+        const group = screen.getByLabelText('2 collaborators viewing');
+        expect(group).toHaveClass('gap-x-1.5');
+        expect(group).toHaveClass('gap-y-1.5');
+        // Wrapped rows on touch: 30px chips 14px apart put the 44px hit areas edge to edge, never overlapping.
+        expect(group).toHaveClass('pointer-coarse:gap-y-3.5');
         expect(screen.getByRole('button', { name: 'Ada Lovelace, on page 1' })).toHaveTextContent('Ada Lovelace');
         expect(screen.getByRole('button', { name: 'Bo Diddley, on page 1' })).toHaveTextContent('Bo Diddley');
         for (const chip of screen.getAllByRole('button')) {
