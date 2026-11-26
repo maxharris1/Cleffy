@@ -20,9 +20,13 @@ export interface DialogProps {
      * on the scrim does not dismiss it; Escape and Cancel do.
      */
     alert?: boolean;
+    /** Panel width: md takes its width from maxWidth (the default), wide 1120px. */
+    size?: DialogSize;
     /** Desktop width in px, from the screen's Flow reference. */
     maxWidth?: DialogMaxWidth;
 }
+
+export type DialogSize = 'md' | 'wide';
 
 const LazyDialogPanel = lazy(() => dialogPanel.load().then((module) => ({ default: module.DialogPanel })));
 

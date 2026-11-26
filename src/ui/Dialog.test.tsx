@@ -143,6 +143,25 @@ describe('Dialog', () => {
         expect(onClose).toHaveBeenCalledTimes(1);
     });
 
+    it('renders a wide panel with size="wide" and the 448px panel by default', async () => {
+        const { unmount } = render(
+            <Dialog label="Plans" onClose={() => {}} size="wide">
+                <p>Body</p>
+            </Dialog>,
+        );
+        const wide = await screen.findByRole('dialog', { name: 'Plans' });
+        expect(wide).toHaveClass('max-w-[1120px]', 'rounded-[24px]');
+        expect(wide).not.toHaveClass('max-w-md');
+        unmount();
+
+        render(
+            <Dialog label="Rename score" onClose={() => {}}>
+                <p>Body</p>
+            </Dialog>,
+        );
+        expect(await screen.findByRole('dialog', { name: 'Rename score' })).toHaveClass('max-w-md', 'rounded-[22px]');
+    });
+
     it('closes a phone sheet dragged down by its grab bar, and springs back from a short drag', async () => {
         const onClose = vi.fn();
         render(
