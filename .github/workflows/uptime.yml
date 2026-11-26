@@ -1,0 +1,107 @@
+name: Uptime
+
+on:
+    schedule:
+        - cron: '*/10 * * * *'
+    workflow_dispatch:
+        inputs:
+            down_url:
+                description: point the try probe here to force a failure
+                required: false
+                type: string
+
+permissions:
+    contents: read
+    issues: write
+
+concurrency:
+    group: uptime
+    cancel-in-progress: false
+
+jobs:
+    probe:
+        runs-on: ubuntu-latest
+        timeout-minutes: 3
+        steps:
+            - name: Probe production
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  GH_REPO: ${{ github.repository }}
+                  SUPABASE_URL: ${{ vars.UPTIME_SUPABASE_URL }}
+                  DOWN_URL: ${{ inputs.down_url }}
+                  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+              run: |
+                  set -euo pipefail
+
+                  probes=(
+                    "home|https://cleffy.io/|root"
+                    "try|${DOWN_URL:-https://cleffy.io/try}|ok200"
+                  )
+                  if [[ -n "$SUPABASE_URL" ]]; then
+                    probes+=("supabase|${SUPABASE_URL%/}/rest/v1/|below500")
+                  else
+                    echo "::notice::UPTIME_SUPABASE_URL is not set; skipping the supabase probe"
+                  fi
+
+                  body=$(mktemp)
+                  msg=$(mktemp)
+
+                  fetch() {
+                    : > "$body"
+                    curl -sS -L --max-time 10 -o "$body" -w '%{http_code}' "$1" || true
+                  }
+
+                  passes() {
+                    case "$1" in
+                      root) [[ "$2" == 200 ]] && grep -q 'id="root"' "$body" ;;
+                      ok200) [[ "$2" == 200 ]] ;;
+                      below500) [[ "$2" != 000 && "$2" -lt 500 ]] ;;
+                      *) return 1 ;;
+                    esac
+                  }
+
+                  report=""
+                  failed=()
+                  probe() {
+                    local name=$1 url=$2 rule=$3 status state=up
+                    status=$(fetch "$url")
+                    if ! passes "$rule" "$status"; then
+                      sleep 5
+                      status=$(fetch "$url")
+                      passes "$rule" "$status" || state=DOWN
+                    fi
+                    [[ "$state" == up ]] || failed+=("$name")
+                    local line="$name $url $status $state"
+                    echo "$line"
+                    report+="$line"$'\n'
+                  }
+
+                  for entry in "${probes[@]}"; do
+                    IFS='|' read -r name url rule <<< "$entry"
+                    probe "$name" "$url" "$rule"
+                  done
+
+                  gh label create uptime --color B60205 --description "Production uptime alerts" --force
+                  issue=$(gh issue list --label uptime --state open --json number --jq '.[0].number // empty')
+
+                  if (( ${#failed[@]} > 0 )); then
+                    printf '@maxharris1 production is down.\n\n~~~\n%s~~~\n\nRun: %s\n' "$report" "$RUN_URL" > "$msg"
+                    if [[ -z "$issue" ]]; then
+                      names=$(printf '%s, ' "${failed[@]}")
+                      title="Production down: ${names%, }"
+                      if [[ -n "$DOWN_URL" ]]; then
+                        title+=" (forced test)"
+                      fi
+                      gh issue create --title "$title" --label uptime --body-file "$msg"
+                    else
+                      gh issue comment "$issue" --body-file "$msg"
+                    fi
+                    exit 1
+                  fi
+
+                  if [[ -n "$issue" ]]; then
+                    printf 'Recovered at %s\n\n~~~\n%s~~~\n\nRun: %s\n' "$(date -u '+%Y-%m-%d %H:%M UTC')" "$report" "$RUN_URL" > "$msg"
+                    gh issue comment "$issue" --body-file "$msg"
+                    gh issue close "$issue"
+                  fi
