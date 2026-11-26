@@ -66,6 +66,12 @@ describe('chipClassName', () => {
         const c = classes(chipClassName(active));
         expect(c).toEqual(expect.arrayContaining(['h-[34px]', 'px-[13px]', 'pointer-coarse:hit-44']));
     });
+
+    it('is at least 44px wide on coarse phones so its target never overlaps a neighbour', () => {
+        expect(classes(chipClassName(false))).toEqual(
+            expect.arrayContaining(['max-sm:pointer-coarse:min-w-11', 'justify-center']),
+        );
+    });
 });
 
 describe('chipRowClassName', () => {

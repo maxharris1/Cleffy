@@ -8,7 +8,7 @@ import { libraryMutationEpoch, noteLibraryMutation } from '@/features/library/li
 import { LibraryPage } from '@/features/library/LibraryPage';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
-import { chipRowClassName } from '@/ui/classNames';
+import { effectiveBox, expectOwnTouchTargets, useViewport } from '@/test/touchLayout';
 
 const toast = vi.hoisted(() => ({
     success: vi.fn(),
@@ -240,6 +240,7 @@ beforeEach(() => {
 afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
 });
 
 describe('LibraryPage', () => {
@@ -251,9 +252,32 @@ describe('LibraryPage', () => {
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
         expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
         expect(screen.getByRole('heading', { level: 1, name: 'Library' })).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Add a tag…' }).parentElement).toHaveClass(
-            ...chipRowClassName.split(' '),
-        );
+    });
+
+    it('gives each Favorites-row chip, even a one-letter tag, its own unclipped 44px target on a coarse phone', async () => {
+        useViewport({ width: 390, coarse: true });
+        const tags = [tag('t-i', 'i'), tag('t-l', 'l')];
+        listLibraryTags.mockResolvedValue(tags);
+        mockBootstrap({ tags, documentTags: new Map() });
+        renderLibrary();
+        await screen.findByRole('button', { name: 'l', pressed: false });
+        const row = screen.getByRole('button', { name: 'Favorites' }).parentElement as HTMLElement;
+        expect(Array.from(row.querySelectorAll('button'), (b) => b.textContent)).toEqual([
+            'Favorites',
+            'i',
+            'l',
+            'Manage',
+        ]);
+        expectOwnTouchTargets(row);
+    });
+
+    it('keeps the Favorites row compact on desktop', async () => {
+        useViewport({ width: 1024, coarse: false });
+        renderLibrary();
+        const favorites = await screen.findByRole('button', { name: 'Favorites' });
+        const row = favorites.parentElement as HTMLElement;
+        expect(effectiveBox(row)).toMatchObject({ paddingTop: 2, paddingBottom: 2 });
+        expect(effectiveBox(favorites)).toMatchObject({ height: 34, minWidth: 0 });
     });
 
     it('says “1 page”, not “1 pages”, for a single-page score', async () => {

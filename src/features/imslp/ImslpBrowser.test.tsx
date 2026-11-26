@@ -27,7 +27,7 @@ import {
 import { moonlightFilenames, moonlightWorkDetail } from '../../../tests/imslp/moonlightEditions';
 import { groupPopularByComposer, POPULAR_WORKS, popularWorkTags } from '@/features/imslp/popularWorks';
 import { buildSearchFilters, hasActiveFilters, labelsForCategories } from '@/features/imslp/searchFacets';
-import { chipRowClassName } from '@/ui/classNames';
+import { effectiveBox, expectOwnTouchTargets, useViewport } from '@/test/touchLayout';
 
 /**
  * Node defines a `localStorage` global whose getter returns undefined unless
@@ -490,6 +490,7 @@ describe('ImslpBrowser', () => {
         const { cleanup } = await import('@testing-library/react');
         cleanup();
         vi.unstubAllEnvs();
+        vi.unstubAllGlobals();
         vi.restoreAllMocks();
     });
 
@@ -502,6 +503,29 @@ describe('ImslpBrowser', () => {
             </MemoryRouter>,
         );
     };
+
+    const facetRows = async () => {
+        const { screen } = await import('@testing-library/react');
+        await renderBrowser();
+        screen.getByRole('button', { name: 'Instrument' }).click();
+        const piano = await screen.findByRole('button', { name: 'Piano' });
+        return [screen.getByRole('group', { name: 'Filter by' }), piano.closest('[role="group"]') as HTMLElement];
+    };
+
+    it('gives every facet chip its own unclipped 44px target on a coarse phone', async () => {
+        useViewport({ width: 390, coarse: true });
+        for (const row of await facetRows()) expectOwnTouchTargets(row);
+    });
+
+    it('keeps the facet rows compact on desktop', async () => {
+        useViewport({ width: 1024, coarse: false });
+        for (const row of await facetRows()) {
+            expect(effectiveBox(row)).toMatchObject({ paddingTop: 0, paddingBottom: 0 });
+            for (const chip of row.querySelectorAll('button')) {
+                expect(effectiveBox(chip)).toMatchObject({ height: 34, minWidth: 0 });
+            }
+        }
+    });
 
     it('starts piano-scoped with the curated list and no network call', async () => {
         const { screen } = await import('@testing-library/react');
@@ -517,12 +541,6 @@ describe('ImslpBrowser', () => {
         const instrumentTab = screen.getByRole('button', { name: 'Instrument' });
         instrumentTab.click();
         expect(await screen.findByRole('button', { name: 'Piano' })).toHaveAttribute('aria-pressed', 'true');
-        for (const row of [
-            screen.getByRole('group', { name: 'Filter by' }),
-            screen.getByRole('button', { name: 'Piano' }).closest('[role="group"]'),
-        ]) {
-            expect(row).toHaveClass(...chipRowClassName.split(' '));
-        }
         expect(screen.queryByText('Swan Lake')).not.toBeInTheDocument();
         expect(screen.getByText(/Piano · Popular ·/)).toBeInTheDocument();
         // No fake ARIA widgets remain.
