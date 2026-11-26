@@ -134,10 +134,11 @@ vi.mock('@/features/viewer/PdfViewport', () => ({
 }));
 
 vi.mock('@/features/viewer/ViewerHeader', () => ({
-    ViewerHeader: ({ title, children }: { title: string; children: ReactNode }) => (
+    ViewerHeader: ({ title, children, primary }: { title: string; children: ReactNode; primary?: ReactNode }) => (
         <header>
             <h1>{title}</h1>
             {children}
+            {primary}
         </header>
     ),
 }));

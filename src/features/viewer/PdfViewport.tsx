@@ -122,7 +122,7 @@ const SM_BREAKPOINT = 640;
 const PHONE_CONTROLS_STRIP = 56;
 
 /** Larger screens: the strip (px) the pager and zoom row cover above the bottom safe area. */
-const FLOATING_CONTROLS_STRIP = 60;
+const FLOATING_CONTROLS_STRIP = 66;
 
 /**
  * A tap in the left/right margin strip of the viewport turns the page (the
@@ -1357,7 +1357,7 @@ export const PdfViewport = ({
         <div
             ref={containerRef}
             data-stand-mode={standMode || undefined}
-            className="ink-surface relative h-full overflow-clip bg-stone-200 data-stand-mode:fixed data-stand-mode:inset-x-0 data-stand-mode:top-0 data-stand-mode:z-[60] data-stand-mode:h-dvh"
+            className="ink-surface relative h-full overflow-clip bg-desk data-stand-mode:fixed data-stand-mode:inset-x-0 data-stand-mode:top-0 data-stand-mode:z-[60] data-stand-mode:h-dvh"
         >
             {status === 'loading' ? (
                 <div className="flex h-full items-center justify-center">
@@ -1569,7 +1569,7 @@ const Pager = ({
     return (
         <div
             data-ui-overlay
-            className="absolute left-[max(0.5rem,var(--safe-left))] top-2 z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-[max(1rem,var(--safe-left))] sm:top-auto"
+            className="absolute left-[max(0.5rem,var(--safe-left))] top-2 z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:left-[max(1.25rem,var(--safe-left))] sm:top-auto sm:gap-2"
         >
             <button
                 type="button"
@@ -1580,7 +1580,7 @@ const Pager = ({
             >
                 <ChevronLeftIcon size={20} />
             </button>
-            <span className="rounded-full border border-stone-200 bg-white/95 px-2.5 py-1 text-xs font-medium tabular-nums text-stone-600 shadow-sm">
+            <span className="inline-flex h-[34px] items-center rounded-full bg-white px-3 text-[13px] font-semibold tabular-nums text-ink shadow-[0_0_0_1px_rgba(28,25,23,0.08)]">
                 p. {Math.min(pageIndex + 1, pageCount)} / {pageCount}
             </span>
             <button
@@ -1598,7 +1598,7 @@ const Pager = ({
 
 /* Pager and zoom keys: a press dips the key (scale .97) as well as greying it. */
 const roundControlClassName =
-    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition-[scale] duration-(--duration-press) ease-out active:scale-[0.97] active:bg-stone-100';
+    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-ink-soft shadow-[0_0_0_1px_rgba(28,25,23,0.08),0_10px_22px_-12px_rgba(28,25,23,0.45)] transition-[scale] duration-(--duration-press) ease-out active:scale-[0.97] active:bg-stone-100 sm:h-[46px] sm:w-[46px]';
 
 const pagerButtonClassName = `${roundControlClassName} disabled:opacity-40 disabled:active:scale-100 disabled:active:bg-white`;
 
@@ -1624,7 +1624,7 @@ const ZoomControls = ({
             // (PHONE_CONTROLS_STRIP). Larger screens: a column at the
             // bottom-right — a row again on short landscape screens, where the
             // column would climb under the toolbar.
-            className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row items-center gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-[max(1rem,var(--safe-right))] sm:top-auto sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
+            className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row items-center gap-2 sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:right-[max(1.25rem,var(--safe-right))] sm:top-auto sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
         >
             {pageColumns !== null ? (
                 <PageLayoutMenu

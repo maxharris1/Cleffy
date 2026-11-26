@@ -57,6 +57,7 @@
     --color-ink-hand: #facc15;
     --color-highlighter: #fde047;
     --color-tick: #15803d;
+    --color-tick-on-ink: #4ade80;
 
     /* Motion. One strong ease-out for anything entering or responding (UI
        motion should start fast and settle), a drawer curve for sheets, and

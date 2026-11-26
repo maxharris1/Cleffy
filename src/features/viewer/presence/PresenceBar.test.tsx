@@ -23,13 +23,13 @@ describe('PresenceBar', () => {
         expect(screen.queryByRole('button', { name: /^Me/ })).not.toBeInTheDocument();
     });
 
-    it('stands the chips apart on touch, so no two 44px tap areas overlap', () => {
+    it('names each person on their chip, with a touch target 44px tall that never overlaps a neighbour', () => {
         render(<PresenceBar peers={[peer('a', 'Ada Lovelace'), peer('b', 'Bo Diddley')]} selfUserId="me" />);
-        const row = screen.getByLabelText('2 collaborators viewing');
-        // Overlapped with a mouse; 28px chips + a 16px gap on a coarse pointer.
-        expect(row).toHaveClass('-space-x-1.5', 'pointer-coarse:space-x-0', 'pointer-coarse:gap-4');
+        expect(screen.getByLabelText('2 collaborators viewing')).toHaveClass('gap-1.5');
+        expect(screen.getByRole('button', { name: 'Ada Lovelace, on page 1' })).toHaveTextContent('Ada Lovelace');
+        expect(screen.getByRole('button', { name: 'Bo Diddley, on page 1' })).toHaveTextContent('Bo Diddley');
         for (const chip of screen.getAllByRole('button')) {
-            expect(chip).toHaveClass('h-7', 'w-7', 'pointer-coarse:hit-44');
+            expect(chip).toHaveClass('pointer-coarse:hit-44-y');
         }
     });
 

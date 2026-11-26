@@ -22,6 +22,7 @@ import type { DocumentRow, MemberRole } from '@/types/database';
 import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { SwapLabel } from '@/ui/SwapLabel';
+import { useGhostVariant } from '@/ui/onInk';
 import { buttonClassName } from '@/ui/classNames';
 import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
 import { toast } from '@/ui/toast';
@@ -115,6 +116,7 @@ export const ShareExportMenu = ({
     lostAccess = false,
 }: ShareExportMenuProps) => {
     const [menuOpen, setMenuOpen] = useState(false);
+    const ghost = useGhostVariant();
     /** The panel under the button that says how the last export went. */
     const [noticeOpen, setNoticeOpen] = useState(false);
     const anchorRef = useRef<HTMLSpanElement | null>(null);
@@ -352,7 +354,7 @@ export const ShareExportMenu = ({
                 <Menu
                     label={active === 'idle' ? 'Export' : active === 'exporting' ? 'Exporting…' : downloadingLabel}
                     triggerTitle="Export — this page as a photo or PDF, or the whole score as PDF"
-                    triggerClassName={buttonClassName('ghost', 'sm', 'tabular-nums')}
+                    triggerClassName={buttonClassName(ghost, 'sm', 'tabular-nums')}
                     triggerContent={
                         <SwapLabel
                             labels={{

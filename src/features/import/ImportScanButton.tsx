@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { ImportReviewPanel } from '@/features/import/ImportReviewPanel';
 import type { ClassifyFn, CleanFn } from '@/features/import/importTypes';
 import type { AnnotationStore } from '@/sync/annotationStore';
+import { useGhostVariant } from '@/ui/onInk';
 import { buttonClassName } from '@/ui/classNames';
 
 interface ImportScanButtonProps {
@@ -27,6 +28,7 @@ export const ImportScanButton = ({
     autoOpen = false,
 }: ImportScanButtonProps) => {
     const [open, setOpen] = useState(autoOpen);
+    const ghost = useGhostVariant();
 
     return (
         <>
@@ -35,7 +37,7 @@ export const ImportScanButton = ({
                 title="Detect handwritten marks already on the pages and make them editable"
                 aria-label="Import marks"
                 onClick={() => setOpen(true)}
-                className={buttonClassName('ghost', 'sm')}
+                className={buttonClassName(ghost, 'sm')}
             >
                 <span className="sm:hidden">Import</span>
                 <span className="hidden sm:inline">Import marks</span>

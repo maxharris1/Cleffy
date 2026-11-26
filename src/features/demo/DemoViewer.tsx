@@ -389,9 +389,9 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
                 }
                 header={
                     <ViewerHeader backTo="/" backLabel="Back to home" title={DEMO_TITLE}>
-                        <Badge tone="accent">Demo</Badge>
+                        <Badge tone="ink">Demo</Badge>
                         <Button
-                            variant="ghost"
+                            variant="inkGhost"
                             size="sm"
                             className={HIT_Y}
                             disabled={phase !== 'ready'}
@@ -407,7 +407,7 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
                         <Link
                             to={signUpPath}
                             onClick={countSignUpClick}
-                            className={buttonClassName('primary', 'sm', `ml-auto lg:ml-0 ${HIT_Y}`)}
+                            className={buttonClassName('inkPrimary', 'sm', `ml-auto lg:ml-0 ${HIT_Y}`)}
                         >
                             Start free
                         </Link>
@@ -475,12 +475,12 @@ const KeepToggle = ({ keep, help, onToggle }: { keep: boolean; help: string; onT
                 aria-describedby={helpId}
                 title={help}
                 onClick={onToggle}
-                className={buttonClassName('ghost', 'sm', `max-sm:hidden ${HIT_Y}`)}
+                className={buttonClassName('inkGhost', 'sm', `max-sm:hidden ${HIT_Y}`)}
             >
                 <KeepBox keep={keep} />
                 Keep my markings
             </button>
-            <span id={helpId} className="mr-2 hidden text-xs text-stone-500 lg:inline">
+            <span id={helpId} className="mr-2 hidden text-xs text-on-ink-faint lg:inline">
                 {help}
             </span>
         </>
@@ -496,7 +496,7 @@ const DemoMenu = ({ keep, help, onToggleKeep }: { keep: boolean; help: string; o
     <Menu
         label="Demo options"
         triggerContent={<MoreVerticalIcon size={16} />}
-        triggerClassName={buttonClassName('ghost', 'sm', 'px-2 pointer-coarse:mx-1 pointer-coarse:hit-44 sm:hidden')}
+        triggerClassName={buttonClassName('inkGhost', 'sm', 'px-2 pointer-coarse:mx-1 pointer-coarse:hit-44 sm:hidden')}
         popupClassName="w-64"
     >
         <MenuItem onClick={onToggleKeep}>
