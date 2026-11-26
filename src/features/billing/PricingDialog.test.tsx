@@ -55,7 +55,7 @@ describe('PricingDialog', () => {
 
     it('shows all four tiers', async () => {
         await renderPricing(<PricingDialog currentTier="free" onClose={vi.fn()} />);
-        expect(screen.getByRole('heading', { name: /^Free/ })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: /^Free/, level: 3 })).toBeInTheDocument();
         expect(screen.getByRole('heading', { name: /^Personal/ })).toBeInTheDocument();
         expect(screen.getByRole('heading', { name: /^Teacher/ })).toBeInTheDocument();
         expect(screen.getByRole('heading', { name: /^Academy/ })).toBeInTheDocument();
@@ -244,7 +244,7 @@ describe('PricingDialog', () => {
 
     it('says students never pay', async () => {
         await renderPricing(<PricingDialog currentTier="free" onClose={vi.fn()} />);
-        expect(screen.getByText(/Students never pay/)).toBeInTheDocument();
+        expect(screen.getAllByText(/Students never pay/).length).toBeGreaterThan(0);
     });
 });
 

@@ -55,7 +55,10 @@ export const CheckoutReview = ({
 
     return (
         <section aria-labelledby={`${consentId}-title`} className="w-full">
-            <h3 id={`${consentId}-title`} className="font-display text-lg font-semibold text-stone-900">
+            <h3
+                id={`${consentId}-title`}
+                className="font-display text-[22px] leading-[1.15] font-semibold tracking-[-0.01em] text-balance text-ink [font-variation-settings:'opsz'_10]"
+            >
                 Review your {terms.planName} subscription
             </h3>
 
@@ -69,15 +72,15 @@ export const CheckoutReview = ({
                 }}
             />
 
-            <ul className="mt-4 flex list-disc flex-col gap-1.5 pl-5 text-sm text-stone-700">
+            <ul className="mt-4 flex list-disc flex-col gap-1.5 pl-5 text-sm text-ink-soft">
                 {preCheckoutFacts(terms).map((fact) => (
                     <li key={fact}>{fact}</li>
                 ))}
             </ul>
 
-            <p className="mt-3 text-xs leading-relaxed text-stone-500">{WITHDRAWAL_SUMMARY}</p>
+            <p className="mt-3 text-xs leading-relaxed text-ink-muted">{WITHDRAWAL_SUMMARY}</p>
 
-            <p className="mt-3 text-xs leading-relaxed text-stone-500">
+            <p className="mt-3 text-xs leading-relaxed text-ink-muted">
                 Sold by {TRADER.name}, {traderAddress()} ·{' '}
                 <a href={`mailto:${TRADER.supportEmail}`} className={link}>
                     {TRADER.supportEmail}
@@ -95,7 +98,7 @@ export const CheckoutReview = ({
 
             <label
                 htmlFor={consentId}
-                className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-stone-300/90 bg-white/70 p-3 text-sm text-stone-800"
+                className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border-[1.5px] border-field-line bg-white p-3 text-sm text-ink"
             >
                 <input
                     id={consentId}
@@ -110,14 +113,14 @@ export const CheckoutReview = ({
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
 
             <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                <Button variant="ghost" size="sm" onClick={onBack} disabled={busy}>
+                <Button variant="ghost" size="md" onClick={onBack} disabled={busy}>
                     Back to plans
                 </Button>
-                <Button size="sm" disabled={!agreed || busy} onClick={() => onConfirm(consentText)}>
+                <Button size="md" disabled={!agreed || busy} onClick={() => onConfirm(consentText)}>
                     {busy ? 'Opening secure checkout…' : 'Continue to payment'}
                 </Button>
             </div>
-            <p className="mt-2 text-xs text-stone-500">
+            <p className="mt-2 text-xs text-ink-muted">
                 Payment is taken by Stripe on the next page, which shows the total including any tax before you pay.
             </p>
         </section>

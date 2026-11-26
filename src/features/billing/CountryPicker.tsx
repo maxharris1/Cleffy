@@ -14,7 +14,7 @@ export const CountryPicker = ({ value, onChange, className = '' }: CountryPicker
     const id = useId();
     const options = useMemo(() => countryOptions(), []);
     return (
-        <p className={`flex flex-wrap items-center gap-2 text-sm text-stone-600 ${className}`}>
+        <p className={`flex flex-wrap items-center gap-2 text-sm text-ink-muted ${className}`}>
             <label htmlFor={id}>Prices for</label>
             <select
                 id={id}
