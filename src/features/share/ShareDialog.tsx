@@ -317,7 +317,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                         {/* Middle-truncated: the origin and the token's end are what
                                             tell links apart. The full URL is what Copy copies. */}
                                         <span
-                                            className="min-w-0 flex-[1_1_160px] truncate text-[13px] text-ink-soft"
+                                            className="min-w-0 flex-[1_1_96px] truncate text-[13px] text-ink-soft"
                                             title={shareUrlFor(link.token)}
                                         >
                                             {middleEllipsis(shareUrlFor(link.token), 36)}
