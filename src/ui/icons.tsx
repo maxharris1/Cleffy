@@ -18,6 +18,7 @@ import {
     Play,
     Plus,
     Pointer,
+    Printer,
     RectangleVertical,
     Redo2,
     RefreshCw,
@@ -61,6 +62,7 @@ export const TwoPagesIcon = withBrandStroke(Columns2);
 export const CheckboxIcon = withBrandStroke(Square);
 export const CheckboxCheckedIcon = withBrandStroke(SquareCheck);
 export const PointerIcon = withBrandStroke(Pointer);
+export const PrinterIcon = withBrandStroke(Printer);
 export const PrintHandwritingIcon = withBrandStroke(WandSparkles);
 export const StarIcon = withBrandStroke(Star);
 export const TagIcon = withBrandStroke(Tags);
