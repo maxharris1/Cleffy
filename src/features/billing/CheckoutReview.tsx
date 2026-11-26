@@ -3,6 +3,7 @@ import { useId, useState } from 'react';
 import { CountryPicker } from '@/features/billing/CountryPicker';
 import { Button } from '@/ui/Button';
 import { linkClassName } from '@/ui/classNames';
+import { dialogTitleClassName } from '@/ui/dialogTitle';
 import { ErrorText } from '@/ui/ErrorText';
 
 import {
@@ -55,10 +56,7 @@ export const CheckoutReview = ({
 
     return (
         <section aria-labelledby={`${consentId}-title`} className="w-full">
-            <h3
-                id={`${consentId}-title`}
-                className="font-display text-[22px] leading-[1.15] font-semibold tracking-[-0.01em] text-balance text-ink [font-variation-settings:'opsz'_10]"
-            >
+            <h3 id={`${consentId}-title`} className={dialogTitleClassName}>
                 Review your {terms.planName} subscription
             </h3>
 

@@ -4,6 +4,7 @@ import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PricingDialog } from '@/features/billing/PricingDialog';
+import { utilityStyleAt } from '@/test/tailwindStyle';
 
 import { autoRenewalConsentText, purchaseTermsFor } from '../../../supabase/functions/_shared/billingTerms';
 
@@ -245,6 +246,57 @@ describe('PricingDialog', () => {
     it('says students never pay', async () => {
         await renderPricing(<PricingDialog currentTier="free" onClose={vi.fn()} />);
         expect(screen.getAllByText(/Students never pay/).length).toBeGreaterThan(0);
+    });
+
+    describe('layout', () => {
+        const PHONE_TABLET_DESKTOP = [390, 768, 844, 1440];
+
+        const closeIsStickyAt = async (width: number) => {
+            const dialog = screen.getByRole('dialog', { name: 'Plans' });
+            for (
+                let node = screen.getByRole('button', { name: 'Close' }).parentElement;
+                node && node !== dialog;
+                node = node.parentElement
+            ) {
+                if ((await utilityStyleAt(node, 'position', width)) === 'sticky') {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        it('keeps Close in reach while the plans scroll, at every width', async () => {
+            await renderPricing(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            for (const width of PHONE_TABLET_DESKTOP) {
+                expect(await closeIsStickyAt(width), `Close sticky at ${width}px`).toBe(true);
+            }
+        });
+
+        it('keeps Close in reach while the review step scrolls, at every width', async () => {
+            const user = userEvent.setup();
+            await renderPricing(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            await user.click(screen.getByRole('button', { name: 'Choose Teacher' }));
+            await screen.findByRole('heading', { name: 'Review your Teacher subscription' });
+            for (const width of PHONE_TABLET_DESKTOP) {
+                expect(await closeIsStickyAt(width), `Close sticky at ${width}px`).toBe(true);
+            }
+        });
+
+        it('sets the review title in the shared dialog title type', async () => {
+            const user = userEvent.setup();
+            await renderPricing(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            await user.click(screen.getByRole('button', { name: 'Choose Teacher' }));
+            const review = await screen.findByRole('heading', { name: 'Review your Teacher subscription' });
+            const shared = screen.getByRole('heading', { name: 'Plans' });
+            for (const width of PHONE_TABLET_DESKTOP) {
+                for (const property of ['font-size', 'line-height', 'font-family', 'font-weight', 'letter-spacing']) {
+                    expect(await utilityStyleAt(review, property, width), `${property} at ${width}px`).toBe(
+                        await utilityStyleAt(shared, property, width),
+                    );
+                }
+                expect(await utilityStyleAt(review, 'font-size', width)).toBe('28px');
+            }
+        });
     });
 });
 

@@ -6,6 +6,7 @@ import type { PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent, 
 import { prefersReducedMotion } from '@/lib/motion';
 import { CloseButton } from '@/ui/CloseButton';
 import type { DialogMaxWidth, DialogProps, DialogSize } from '@/ui/Dialog';
+import { dialogTitleClassName } from '@/ui/dialogTitle';
 import { dialogStack } from '@/ui/dialogStack';
 
 /** A sheet dragged down this far (px), or flicked faster than this (px/ms), closes. */
@@ -192,7 +193,7 @@ export const DialogPanel = ({
                                         : '-mx-7 px-7'
                                 }`}
                             >
-                                <Parts.Title className="min-w-0 font-display text-[28px] leading-[1.15] font-semibold tracking-[-0.01em] text-balance text-ink [font-variation-settings:'opsz'_10] [overflow-wrap:anywhere]">
+                                <Parts.Title className={`${dialogTitleClassName} min-w-0 [overflow-wrap:anywhere]`}>
                                     {label}
                                 </Parts.Title>
                                 <CloseButton

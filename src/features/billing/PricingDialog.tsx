@@ -133,8 +133,10 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
     return (
         <Dialog key="plans" label="Plans" onClose={onClose} sheet size="wide" withHeader={false}>
             <div className="relative w-full">
-                <div className="sticky -top-7 z-10 -mx-7 -mt-7 flex justify-end bg-paper px-4 pt-5 pb-1 sm:absolute sm:-top-3 sm:-right-3 sm:m-0 sm:block sm:bg-transparent sm:p-0">
-                    <CloseButton onClick={onClose} className="size-11 rounded-xl text-ink-muted hover:bg-ink/5" />
+                <div className="sticky -top-7 z-10 -mx-7 -mt-7 flex justify-end bg-paper px-4 pt-5 pb-1 sm:-top-3 sm:-mt-3 sm:-mr-3 sm:mb-3 sm:ml-0 sm:h-0 sm:items-start sm:bg-transparent sm:p-0">
+                    <span className="rounded-xl bg-paper">
+                        <CloseButton onClick={onClose} className="size-11 rounded-xl text-ink-muted hover:bg-ink/5" />
+                    </span>
                 </div>
 
                 <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-5">
