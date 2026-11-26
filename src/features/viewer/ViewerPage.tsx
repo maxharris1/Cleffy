@@ -889,7 +889,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         const escapeTo = isRegisteredSession(session) ? '/library' : '/';
         const escapeLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
         return (
-            <main className="landing-page flex min-h-full flex-col items-center justify-center gap-3 p-8">
+            <main className="paper-page flex min-h-full flex-col items-center justify-center gap-3 p-8">
                 <ErrorText className="max-w-md text-center">{loadError}</ErrorText>
                 {RETRYABLE_OPEN_MESSAGES.has(loadError) ? (
                     <Button size="sm" variant="secondary" onClick={askAgain}>
@@ -1315,7 +1315,7 @@ const LocalViewer = ({ docId }: { docId: string }) => {
 
     if (!bytes) {
         return (
-            <main className="landing-page flex min-h-full flex-col items-center justify-center p-8">
+            <main className="paper-page flex min-h-full flex-col items-center justify-center p-8">
                 <EmptyState
                     title="Re-open this score"
                     body="This score isn't loaded in this session. Re-open the same file to continue — your annotations are saved on this device."

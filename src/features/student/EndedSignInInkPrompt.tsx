@@ -39,7 +39,7 @@ export const EndedSignInInkPrompt = ({ prompt, signingOut, onSignOut }: EndedSig
     }, [prompt.docIds, known]);
 
     return (
-        <main className="landing-page flex min-h-full flex-col items-center justify-center gap-4 p-8">
+        <main className="paper-page flex min-h-full flex-col items-center justify-center gap-4 p-8">
             <div className="flex w-full max-w-md flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
                 <p className="text-sm leading-snug" role="status">
                     {prompt.accountDeleted

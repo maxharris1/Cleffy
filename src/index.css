@@ -34,6 +34,17 @@
     --color-accent-soft: rgb(67 56 202 / 0.1);
     --color-scrim: rgb(28 25 23 / 0.45);
 
+    --color-ink-soft: #44403c;
+    --color-hairline: #e3dfd3;
+    --color-panel-line: #d9d4c6;
+    --color-field-line: #cfc9bb;
+    --color-button-line: #bdb6a6;
+    --color-trough: #e4dfd2;
+    --color-accent-tint: #e9e8fb;
+    --color-on-ink-muted: #d6d3d1;
+    --color-on-ink-faint: #a8a29e;
+    --color-desk: #ebe8df;
+
     /* The landing page's ink bands (features/marketing/landing.css). The
        accent is too dark on ink, so the filled button there is indigo-600;
        handwriting on ink is yellow, on paper the danger red. */
@@ -217,11 +228,6 @@ body {
     -webkit-touch-callout: none;
 }
 
-/*
- * Paper wash + engraved five-line staves — for sparse surfaces only
- * (marketing, auth, join, 404). Dense app surfaces use .paper-page, where
- * the staves would fight the content.
- */
 .landing-page {
     background-color: var(--color-paper);
     background-image:
@@ -252,12 +258,8 @@ body {
         );
 }
 
-/* Quiet paper for dense app surfaces: the wash without the staves. */
 .paper-page {
     background-color: var(--color-paper);
-    background-image:
-        radial-gradient(ellipse 90% 55% at 50% -10%, rgb(255 255 255 / 0.75), transparent 60%),
-        linear-gradient(180deg, transparent 0%, var(--color-paper-deep) 100%);
 }
 
 .landing-hero {
