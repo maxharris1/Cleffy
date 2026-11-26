@@ -14,5 +14,5 @@ const OPTIONS = [
  * slides across (Segmented), so the switch reads as one choice moving.
  */
 export const ViewToggle = ({ view, onChange }: { view: ToggleView; onChange: (v: ToggleView) => void }) => (
-    <Segmented label="View" value={view} options={OPTIONS} onChange={onChange} />
+    <Segmented label="View" value={view} options={OPTIONS} onChange={onChange} size="md" />
 );

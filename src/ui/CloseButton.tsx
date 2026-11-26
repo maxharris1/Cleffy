@@ -13,7 +13,7 @@ export interface CloseButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEl
  * The app's ✕. Compact on a mouse; on a coarse pointer an invisible ::after
  * (hit-44) makes it a 44px target without moving the icon, so headers and
  * banners keep their desktop layout. Tone (text colour, hover) comes from
- * className when the default stone does not suit the surface.
+ * className when the default muted ink does not suit the surface.
  */
 export const CloseButton = ({
     label = 'Close',
@@ -26,7 +26,7 @@ export const CloseButton = ({
         type={type}
         aria-label={label}
         className={`inline-flex shrink-0 items-center justify-center rounded-lg transition-colors pointer-coarse:hit-44 ${
-            className || 'size-7.5 text-stone-500 hover:bg-stone-100'
+            className || 'size-7.5 text-ink-muted hover:bg-ink/5'
         }`}
         {...rest}
     >

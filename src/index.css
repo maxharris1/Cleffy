@@ -184,6 +184,10 @@ body {
     :where(a[href]) {
         touch-action: manipulation;
     }
+
+    :where(input[type='checkbox'], input[type='radio']) {
+        accent-color: var(--color-accent);
+    }
 }
 
 /*

@@ -115,7 +115,9 @@ describe('danger text colour', () => {
 
     it('white text on a danger button reads at AA, hovered or not', () => {
         expect(contrastOnWhite(resolveColor('danger'))).toBeGreaterThanOrEqual(4.5);
-        const hover = read('src/ui/classNames.ts').match(/danger: 'bg-danger text-white hover:bg-(red-\d+)'/)?.[1];
+        const hover = read('src/ui/classNames.ts').match(
+            /\bdanger: '[^']*\bbg-danger text-white\b[^']*\bhover:bg-(red-\d+)'/,
+        )?.[1];
         expect(hover).toBeDefined();
         const stock = TAILWIND_THEME.match(new RegExp(`--color-${hover}:\\s*([^;]+);`))?.[1]?.trim() ?? '';
         expect(contrastOnWhite(stock)).toBeGreaterThanOrEqual(4.5);
