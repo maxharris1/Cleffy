@@ -165,7 +165,7 @@ body {
 @layer base {
     /* Visible keyboard focus everywhere by default; utilities may still override. */
     :where(:focus-visible) {
-        outline: 2px solid var(--color-accent);
+        outline: 2px solid var(--focus-ring, var(--color-accent));
         outline-offset: 2px;
     }
 
@@ -509,7 +509,7 @@ body {
 }
 
 .shell-upload:has(:focus-visible) {
-    outline: 2px solid var(--color-accent);
+    outline: 2px solid var(--focus-ring, var(--color-accent));
     outline-offset: 2px;
 }
 
@@ -519,7 +519,7 @@ body {
  * glow. Class+pseudo beats the utility, so keyboard focus gets a real ring.
  */
 .landing-input:focus-visible {
-    outline: 2px solid var(--color-accent);
+    outline: 2px solid var(--focus-ring, var(--color-accent));
     outline-offset: 1px;
 }
 
@@ -532,7 +532,7 @@ body {
 }
 
 .label-focus-ring:has(:focus-visible) {
-    outline: 2px solid var(--color-accent);
+    outline: 2px solid var(--focus-ring, var(--color-accent));
     outline-offset: 2px;
 }
 
@@ -820,6 +820,26 @@ body {
         -webkit-backdrop-filter: none;
         backdrop-filter: none;
         background-color: #fff;
+    }
+}
+
+/*
+ * From sm up the top bar is ink. Unlayered and after the block above so the
+ * opaque-paper fallback for .chrome-paper cannot put paper text on paper. The
+ * accent is under 3:1 on ink, so focus rings and the progress fill use the
+ * wordmark's ink rule instead.
+ */
+@media (width >= 40rem) {
+    .shell-bar {
+        --focus-ring: var(--color-ink-rule);
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+        background-color: var(--color-ink);
+        color: var(--color-paper);
+    }
+
+    .shell-bar .shell-progress > div {
+        background-color: var(--color-ink-rule);
     }
 }
 

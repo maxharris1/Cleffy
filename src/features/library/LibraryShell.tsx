@@ -135,10 +135,14 @@ const NAV_ITEMS: { to: string; label: string; end: boolean; needsStudents?: bool
  * 896px of dead space a max-w-5xl column left behind.
  */
 const SHELL_CONTAINER = 'mx-auto w-full max-w-[100rem] px-4 sm:px-6 lg:px-10';
+const BAR_CONTAINER = 'mx-auto w-full max-w-[85rem] px-4 sm:px-6 lg:px-10';
 
-const NAV_LINK_BASE = 'shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors';
-const NAV_LINK_ACTIVE = 'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50';
-const NAV_LINK_IDLE = 'text-stone-600 hover:bg-ink/5 hover:text-stone-900';
+const NAV_LINK_BASE =
+    'shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors sm:flex sm:min-h-16 sm:items-center sm:rounded-none sm:border-b-2 sm:px-0.5 sm:py-0 sm:text-[15px] sm:focus-visible:-outline-offset-4';
+const NAV_LINK_ACTIVE =
+    'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50 sm:border-ink-hand sm:bg-transparent sm:font-semibold sm:text-paper sm:shadow-none sm:ring-0';
+const NAV_LINK_IDLE =
+    'text-stone-600 hover:bg-ink/5 hover:text-stone-900 sm:border-transparent sm:text-on-ink-muted sm:hover:bg-transparent sm:hover:text-paper';
 
 /** Authenticated app chrome: top bar + shared upload for library/search. */
 export const LibraryShell = () => {
@@ -537,13 +541,13 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 progress and the account menu stay reachable from any page. */}
             <header
                 ref={headerRef}
-                className="chrome-paper sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur"
+                className="chrome-paper shell-bar sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur sm:border-b-0"
             >
                 <div
-                    className={`${SHELL_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-6 sm:py-0`}
+                    className={`${BAR_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-3 sm:py-0 md:gap-x-6 lg:gap-x-10`}
                 >
                     <Link to="/library" className="shrink-0">
-                        <Wordmark className="text-[26px] sm:text-[28px]" />
+                        <Wordmark className="text-[26px] sm:text-[28px] sm:text-paper sm:[&>span]:bg-ink-rule" />
                     </Link>
 
                     {/* Below sm the strip drops to its own row (order-last) and scrolls
@@ -553,7 +557,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         one gutter short and strand the last link behind a dead margin. */}
                     <nav
                         aria-label="Main"
-                        className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto overscroll-x-contain px-4 sm:order-none sm:mx-0 sm:w-auto sm:overflow-x-visible sm:px-0"
+                        className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto overscroll-x-contain px-4 sm:order-none sm:mx-0 sm:w-auto sm:flex-1 sm:gap-3 sm:overflow-x-visible sm:px-0 md:gap-5 lg:gap-7"
                     >
                         {navItems.map((item) => (
                             <NavLink
@@ -569,13 +573,13 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         ))}
                     </nav>
 
-                    <div className="ml-auto flex shrink-0 items-center gap-2">
+                    <div className="ml-auto flex shrink-0 items-center gap-2 lg:gap-3.5">
                         <ShellUploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
                         {/* The menu closes on click, and the upload before sign-out can
                             take seconds on a slow connection: say what is happening
                             where the menu was, or the click looks like it did nothing. */}
                         {savingBeforeSignOut ? (
-                            <span role="status" className="text-sm text-stone-600">
+                            <span role="status" className="text-sm text-stone-600 sm:text-on-ink-muted">
                                 Saving changes…
                             </span>
                         ) : null}
@@ -668,7 +672,7 @@ const ShellUploadButton = ({
         className={buttonClassName(
             'primary',
             'sm',
-            `shell-upload${uploading || quotaExhausted ? ' pointer-events-none opacity-80' : ''}`,
+            `shell-upload sm:border-ink-cta sm:bg-ink-cta lg:rounded-xl lg:px-[18px] lg:text-[15px] sm:shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_22px_-12px_rgba(79,70,229,0.95)] sm:hover:border-ink-cta sm:hover:bg-ink-cta${uploading || quotaExhausted ? ' pointer-events-none opacity-80' : ''}`,
         )}
     >
         <UploadIcon size={16} />
@@ -743,16 +747,16 @@ const AccountMenu = ({
             popupClassName="w-64"
             open={open}
             onOpenChange={(next) => setOpenedAt(next ? pathname : null)}
-            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-ink/5 sm:pr-1.5"
+            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-ink/5 sm:pr-1.5 sm:hover:bg-paper/10"
             triggerContent={
                 <>
                     <span
                         aria-hidden="true"
-                        className="grid h-8 w-8 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
+                        className="grid h-8 w-8 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent sm:h-9 sm:w-9 sm:bg-red-600 sm:text-white sm:shadow-[0_0_0_2px_var(--color-ink)]"
                     >
                         {initialsOf(userLabel)}
                     </span>
-                    <ChevronDownIcon size={16} className="hidden text-stone-500 sm:block" />
+                    <ChevronDownIcon size={16} className="hidden text-stone-500 sm:block sm:text-on-ink-faint" />
                 </>
             }
         >

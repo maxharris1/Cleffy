@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect } from 'react';
 import { MemoryRouter, Route, Routes, useNavigate, useOutletContext, useParams } from 'react-router';
@@ -397,6 +397,13 @@ describe('LibraryShell', () => {
         expect(await screen.findByRole('menuitem', { name: 'Terms' })).toHaveAttribute('href', '/terms');
         expect(await screen.findByRole('menuitem', { name: 'Refunds' })).toHaveAttribute('href', '/refunds');
         expect(await screen.findByRole('menuitem', { name: 'Copyright' })).toHaveAttribute('href', '/copyright');
+    });
+
+    it('marks only the current tab as the current page', () => {
+        renderShell('/search');
+        const nav = screen.getByRole('navigation', { name: 'Main' });
+        expect(within(nav).getByRole('link', { name: 'Find a score' })).toHaveAttribute('aria-current', 'page');
+        expect(within(nav).getByRole('link', { name: 'Library' })).not.toHaveAttribute('aria-current');
     });
 
     it('pads the chrome for the iPhone status bar', () => {
