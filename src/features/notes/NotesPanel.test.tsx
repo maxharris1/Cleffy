@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -64,7 +64,8 @@ describe('NotesPanel — the teacher’s journal', () => {
 
         expect(await screen.findByText('Private: still rushing the left hand.')).toBeInTheDocument();
         expect(screen.getByLabelText('New note')).toBeInTheDocument();
-        expect(screen.getByText('Shared: metronome at 60.')).toBeInTheDocument();
+        const sharedRow = screen.getByText('Shared: metronome at 60.').closest('li') as HTMLElement;
+        expect(within(sharedRow).getByText('Visible to student')).toBeInTheDocument();
         expect(screen.getByText('Private: chose the Bach for the recital.')).toBeInTheDocument();
 
         // One heading per lesson day, newest first — today's is named as such.
@@ -100,6 +101,29 @@ describe('NotesPanel — the teacher’s journal', () => {
 
         expect(updateNote).toHaveBeenCalledWith('n1', { shared: true });
         await waitFor(() => expect(screen.queryByText('Only you')).not.toBeInTheDocument());
+        const row = screen.getByText('Still rushing the left hand.').closest('li') as HTMLElement;
+        expect(within(row).getByText('Visible to student')).toBeInTheDocument();
+    });
+
+    it('keeps the visibility pill on one line beside a long recipient name', async () => {
+        listNoteRecipients.mockResolvedValue([
+            { studentUserId: 'student-1', displayName: 'Alexandra Montgomery-Williams' },
+            bo,
+        ]);
+        listNotes.mockResolvedValue([note('n1', 'Shared: metronome at 60.', { shared: true })]);
+        renderPanel('owner');
+
+        const row = (await screen.findByText('Shared: metronome at 60.')).closest('li') as HTMLElement;
+        const name = await within(row).findByText('Alexandra Montgomery-Williams');
+        const pill = within(row).getByText('Visible to student');
+        expect(pill).not.toBe(name);
+        expect(pill).not.toContainElement(name);
+        expect(pill).toHaveClass('whitespace-nowrap');
+    });
+
+    it('opens at the Practice notes reference width', async () => {
+        renderPanel('owner');
+        expect(await screen.findByRole('dialog', { name: 'Practice notes' })).toHaveClass('max-w-[480px]');
     });
 });
 

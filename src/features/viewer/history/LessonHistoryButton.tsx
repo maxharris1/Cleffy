@@ -115,7 +115,7 @@ const LessonHistoryDialog = ({
     };
 
     return (
-        <Dialog label="Lesson history" onClose={onClose} sheet>
+        <Dialog label="Lesson history" onClose={onClose} sheet maxWidth={460}>
             <p className="-mt-0.5 text-[15px] leading-normal text-pretty text-ink-muted">
                 Starting point captured on first edit each day
             </p>

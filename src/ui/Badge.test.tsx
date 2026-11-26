@@ -15,4 +15,9 @@ describe('Badge', () => {
         render(<Badge tone="ok">edit</Badge>);
         expect(screen.getByText('edit')).toHaveClass('bg-tick/10', 'text-done');
     });
+
+    it('never wraps or shrinks beside a long neighbour', () => {
+        render(<Badge tone="ok">Visible to student</Badge>);
+        expect(screen.getByText('Visible to student')).toHaveClass('whitespace-nowrap', 'shrink-0');
+    });
 });

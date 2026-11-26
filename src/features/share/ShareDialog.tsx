@@ -20,7 +20,8 @@ import {
 } from '@/features/share/shareService';
 import type { DocumentMemberListing, MemberRole, ShareLinkRow, ShareRole } from '@/types/database';
 import { features } from '@/lib/features';
-import { middleEllipsis, useFlash } from '@/lib/useFlash';
+import { useFlash } from '@/lib/useFlash';
+import { LinkUrl } from '@/features/share/LinkUrl';
 import { OwnerSharingV2 } from '@/features/share/owner/OwnerSharingV2';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -81,7 +82,7 @@ export const ShareDialog = ({
     onLeft,
     onGuestDeleted = leaveForGuestDeletedPage,
 }: ShareDialogProps) => (
-    <Dialog label={role === 'owner' ? 'Share this score' : 'Sharing'} onClose={onClose}>
+    <Dialog label={role === 'owner' ? 'Share this score' : 'Sharing'} onClose={onClose} maxWidth={500}>
         {role === 'owner' ? (
             features.shareV2 ? (
                 <OwnerSharingV2 docId={docId} userId={userId} linkViewers={linkViewers} />
@@ -314,14 +315,10 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                         <Badge tone={link.role === 'editor' ? 'ok' : 'neutral'}>
                                             {link.role === 'editor' ? 'edit' : 'view'}
                                         </Badge>
-                                        {/* Middle-truncated: the origin and the token's end are what
-                                            tell links apart. The full URL is what Copy copies. */}
-                                        <span
-                                            className="min-w-0 flex-[1_1_96px] truncate text-[13px] text-ink-soft"
-                                            title={shareUrlFor(link.token)}
-                                        >
-                                            {middleEllipsis(shareUrlFor(link.token), 36)}
-                                        </span>
+                                        <LinkUrl
+                                            url={shareUrlFor(link.token)}
+                                            className="min-w-0 flex-[1_1_96px] text-[13px] text-ink-soft"
+                                        />
                                         <Button
                                             variant="accentGhost"
                                             size="sm"

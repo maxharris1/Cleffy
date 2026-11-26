@@ -150,7 +150,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
     const soleRecipient = recipients.length === 1 ? recipients[0] : undefined;
 
     return (
-        <Dialog label="Practice notes" onClose={onClose} sheet>
+        <Dialog label="Practice notes" onClose={onClose} sheet maxWidth={480}>
             {isOwner ? (
                 <form
                     onSubmit={(event) => {
@@ -316,7 +316,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                         <>
                                                             <Badge tone="ok">Visible to student</Badge>
                                                             {recipientLabel(note.student_user_id) ? (
-                                                                <span className="min-w-0 text-[13px] text-ink-muted [overflow-wrap:anywhere]">
+                                                                <span className="min-w-0 flex-1 text-[13px] text-ink-muted [overflow-wrap:anywhere]">
                                                                     {recipientLabel(note.student_user_id)}
                                                                 </span>
                                                             ) : null}

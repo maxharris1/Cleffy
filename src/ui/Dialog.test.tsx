@@ -14,6 +14,25 @@ afterEach(() => {
 });
 
 describe('Dialog', () => {
+    it('takes a Flow reference width on desktop and keeps max-w-md by default', async () => {
+        const { unmount } = render(
+            <Dialog label="Wide" onClose={() => {}} maxWidth={500}>
+                <p>Body</p>
+            </Dialog>,
+        );
+        const wide = await screen.findByRole('dialog', { name: 'Wide' });
+        expect(wide).toHaveClass('max-w-[500px]');
+        expect(wide).not.toHaveClass('max-w-md');
+        unmount();
+
+        render(
+            <Dialog label="Default" onClose={() => {}}>
+                <p>Body</p>
+            </Dialog>,
+        );
+        expect(await screen.findByRole('dialog', { name: 'Default' })).toHaveClass('max-w-md');
+    });
+
     it('renders an aria-modal dialog with a visible title and closes on Escape', async () => {
         const user = userEvent.setup();
         const onClose = vi.fn();
