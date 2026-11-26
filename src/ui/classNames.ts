@@ -71,12 +71,14 @@ export const fieldClassName = (size: FieldSize = 'md', extra = '', opts: { width
 
 /**
  * Filter/facet chip — pill toggle matching the transport bar's pill language.
- * 34px tall; hit-44 grows its target on touch. Callers add aria-pressed when
+ * 34px tall; hit-44 grows its target on touch, and coarse phones widen the
+ * face to 44px so a one-letter chip's target stays inside it and never overlaps
+ * its gap-2 neighbour's. Callers add aria-pressed when
  * the chip is a toggle rather than an action.
  */
 export const chipClassName = (active: boolean, extra = ''): string =>
     [
-        'inline-flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-[13px] text-[13px] transition-colors pointer-coarse:hit-44',
+        'inline-flex h-[34px] shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-full border px-[13px] text-[13px] transition-colors pointer-coarse:hit-44 max-sm:pointer-coarse:min-w-11',
         active
             ? 'border-accent/40 bg-accent-tint font-semibold text-accent'
             : 'border-panel-line font-medium text-ink-soft hover:bg-ink/5',
@@ -84,6 +86,11 @@ export const chipClassName = (active: boolean, extra = ''): string =>
     ]
         .filter(Boolean)
         .join(' ');
+
+/* overflow-x: auto forces overflow-y to clip, so coarse-pointer phones pad the
+   5px each side the chip's 44px hit area overhangs its 34px body. */
+export const chipRowClassName =
+    'no-scrollbar -mx-4 flex items-center gap-2 overflow-x-auto overscroll-x-contain px-4 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0 max-sm:pointer-coarse:py-[5px]';
 
 export const fieldLabelClassName = 'block text-xs font-semibold uppercase tracking-[0.08em] text-ink-muted';
 

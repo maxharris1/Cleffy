@@ -228,9 +228,9 @@ body {
 }
 
 /* Dialogs sit on paper, where stock stone-500 text is 4.4:1; this shade keeps
-   their small grey text at WCAG AA (statusColorContrast.test.ts). */
+   their small grey text at WCAG AA, on hovered rows too (statusColorContrast.test.ts). */
 .dialog-paper {
-    --color-stone-500: #736b65;
+    --color-stone-500: #6b635d;
 }
 
 /* Annotation surfaces manage their own gestures. */
