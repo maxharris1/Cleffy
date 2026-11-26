@@ -6,6 +6,7 @@ import {
     chipClassName,
     chipRowClassName,
     fieldClassName,
+    menuPopupClassName,
 } from './classNames';
 
 const classes = (s: string) => s.split(/\s+/);
@@ -34,6 +35,7 @@ const VARIANTS: readonly ButtonVariant[] = [
     'primary',
     'secondary',
     'ghost',
+    'accentGhost',
     'danger',
     'dangerGhost',
     'inkPrimary',
@@ -80,5 +82,17 @@ describe('chipRowClassName', () => {
         expect(c).toContain('overflow-x-auto');
         expect(c).toContain('sm:overflow-x-visible');
         expect(c).toContain('max-sm:pointer-coarse:py-[5px]');
+    });
+});
+
+describe('menuPopupClassName', () => {
+    it('paper is the dialog paper, not a white card', () => {
+        const c = classes(menuPopupClassName('paper'));
+        expect(c).toEqual(expect.arrayContaining(['bg-paper', 'dialog-paper', 'rounded-[18px]']));
+        expect(c).not.toContain('bg-white');
+    });
+
+    it('white stays the stock dropdown', () => {
+        expect(classes(menuPopupClassName('white'))).toEqual(expect.arrayContaining(['bg-white', 'rounded-xl']));
     });
 });

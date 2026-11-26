@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -71,8 +71,8 @@ describe('NotesPanel — the teacher’s journal', () => {
         const days = screen.getAllByRole('heading', { level: 3 });
         expect(days).toHaveLength(2);
         expect(screen.getByRole('heading', { level: 3, name: 'Today' })).toBeInTheDocument();
-        // Only the shared note is marked; sharing is always a deliberate act.
-        expect(screen.getAllByText('Shared')).toHaveLength(1);
+        // Each note says who sees it; sharing is always a deliberate act.
+        expect(screen.getAllByText('Only you')).toHaveLength(2);
     });
 
     it('writes a new note as shared when the box is ticked', async () => {
@@ -99,7 +99,7 @@ describe('NotesPanel — the teacher’s journal', () => {
         await user.click(screen.getByRole('button', { name: 'Make visible to student' }));
 
         expect(updateNote).toHaveBeenCalledWith('n1', { shared: true });
-        expect(await screen.findByText('Shared')).toBeInTheDocument();
+        await waitFor(() => expect(screen.queryByText('Only you')).not.toBeInTheDocument());
     });
 });
 

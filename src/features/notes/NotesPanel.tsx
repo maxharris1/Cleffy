@@ -157,7 +157,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                         event.preventDefault();
                         void save();
                     }}
-                    className="rounded-xl border border-stone-200/80 bg-paper/60 p-3"
+                    className="mt-1 rounded-2xl border border-panel-line bg-transparent p-4"
                 >
                     <label htmlFor="practice-note-body" className={fieldLabelClassName}>
                         New note
@@ -169,9 +169,9 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                         disabled={busy}
                         onChange={(event) => setDraft(event.target.value)}
                         placeholder="What to practise before the next lesson…"
-                        className={fieldClassName('sm', 'mt-1.5 resize-y')}
+                        className={fieldClassName('md', 'mt-2 resize-y leading-[1.45] pointer-fine:text-[15px]')}
                     />
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2.5">
                         <div className="w-44">
                             <label htmlFor="practice-note-date" className="sr-only">
                                 Lesson day
@@ -182,15 +182,10 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                 value={notedOn}
                                 disabled={busy}
                                 onChange={(event) => setNotedOn(event.target.value || todayIsoDate())}
-                                className={fieldClassName('sm')}
+                                className={fieldClassName('sm', 'min-h-11 pointer-fine:text-[15px]')}
                             />
                         </div>
-                        <Button
-                            type="submit"
-                            size="sm"
-                            disabled={busy || draft.trim().length === 0}
-                            className="ml-auto"
-                        >
+                        <Button type="submit" disabled={busy || draft.trim().length === 0} className="ml-auto">
                             {busy ? 'Saving…' : 'Save'}
                         </Button>
                     </div>
@@ -201,7 +196,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                       day read the note.
                     */}
                     {recipients.length > 1 ? (
-                        <div className="mt-2.5">
+                        <div className="mt-3">
                             <label htmlFor="practice-note-student" className={fieldLabelClassName}>
                                 About
                             </label>
@@ -210,7 +205,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                 value={recipientId ?? ''}
                                 disabled={busy}
                                 onChange={(event) => setRecipientId(event.target.value || null)}
-                                className={fieldClassName('sm', 'mt-1.5')}
+                                className={fieldClassName('sm', 'mt-2 min-h-11')}
                             >
                                 {recipients.map((person) => (
                                     <option key={person.studentUserId} value={person.studentUserId}>
@@ -220,24 +215,30 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                             </select>
                         </div>
                     ) : null}
-                    <label className="mt-2.5 flex items-center gap-2.5 text-sm text-stone-600">
+                    <label
+                        className={`mt-1.5 flex min-h-11 items-center gap-3 rounded-[10px] px-2.5 text-[15px] transition-colors ${
+                            shareDraft ? 'bg-accent/7 font-semibold' : ''
+                        } ${busy || recipients.length === 0 ? 'text-ink-muted' : 'cursor-pointer text-ink'}`}
+                    >
                         <input
                             type="checkbox"
                             checked={shareDraft}
                             disabled={busy || recipients.length === 0}
                             onChange={(event) => setShareDraft(event.target.checked)}
-                            className="size-4 shrink-0 rounded border-stone-300 text-accent focus:ring-accent"
+                            className="size-5 shrink-0 cursor-[inherit] rounded-md"
                         />
                         <span>{soleRecipient ? `Visible to ${soleRecipient.displayName}` : 'Visible to student'}</span>
                     </label>
                     {recipients.length === 0 ? (
-                        <p className="mt-1 text-xs text-stone-500">
+                        <p className="mt-1 px-2.5 text-[13px] text-ink-muted">
                             Assign this score to a student to share notes with them.
                         </p>
                     ) : null}
                 </form>
             ) : (
-                <p className="-mt-2 text-xs text-stone-500">Notes your teacher has shared with you.</p>
+                <p className="-mt-0.5 text-[15px] leading-normal text-pretty text-ink-muted">
+                    Notes your teacher has shared with you.
+                </p>
             )}
 
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
@@ -247,7 +248,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                     <LoadingText className="text-sm">Loading…</LoadingText>
                 ) : visible.length === 0 ? (
                     isOwner ? (
-                        <p className="text-sm text-stone-600">
+                        <p className="text-[15px] leading-normal text-ink-muted">
                             Nothing written down yet. The first note you save starts this score&apos;s journal.
                         </p>
                     ) : (
@@ -259,11 +260,14 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                     )
                 ) : (
                     days.map((day) => (
-                        <section key={day.day} className="mt-5 first:mt-0">
+                        <section key={day.day} className="mt-4 first:mt-0">
                             <h3 className={fieldLabelClassName}>{formatDay(day.day)}</h3>
                             <ul className="mt-2 flex flex-col gap-2">
                                 {day.notes.map((note) => (
-                                    <li key={note.id} className="rounded-xl border border-stone-200/80 px-3 py-2.5">
+                                    <li
+                                        key={note.id}
+                                        className="rounded-[14px] border border-panel-line bg-transparent px-4 py-3.5"
+                                    >
                                         <div className="flex items-start gap-2">
                                             <div className="min-w-0 flex-1">
                                                 {editingId === note.id ? (
@@ -288,7 +292,6 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                                 size="sm"
                                                                 disabled={busy}
                                                                 onClick={() => setEditingId(null)}
-                                                                className="px-2.5 py-1"
                                                             >
                                                                 Cancel
                                                             </Button>
@@ -298,27 +301,30 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                                 onClick={() =>
                                                                     void patchNote(note.id, { body: editBody.trim() })
                                                                 }
-                                                                className="px-2.5 py-1"
                                                             >
                                                                 Save
                                                             </Button>
                                                         </div>
                                                     </>
                                                 ) : (
-                                                    <p className="whitespace-pre-wrap text-sm leading-relaxed text-stone-800 [overflow-wrap:anywhere]">
+                                                    <p className="whitespace-pre-wrap text-[15px] leading-normal text-ink [overflow-wrap:anywhere]">
                                                         {note.body}
                                                     </p>
                                                 )}
-                                                {note.shared ? (
-                                                    <div className="mt-1.5 flex items-center gap-1.5">
-                                                        <Badge tone="accent">Shared</Badge>
-                                                        {recipientLabel(note.student_user_id) ? (
-                                                            <span className="min-w-0 text-xs text-stone-500 [overflow-wrap:anywhere]">
-                                                                {recipientLabel(note.student_user_id)}
-                                                            </span>
-                                                        ) : null}
-                                                    </div>
-                                                ) : null}
+                                                <div className="mt-2.5 flex items-center gap-1.5">
+                                                    {note.shared ? (
+                                                        <>
+                                                            <Badge tone="ok">Visible to student</Badge>
+                                                            {recipientLabel(note.student_user_id) ? (
+                                                                <span className="min-w-0 text-[13px] text-ink-muted [overflow-wrap:anywhere]">
+                                                                    {recipientLabel(note.student_user_id)}
+                                                                </span>
+                                                            ) : null}
+                                                        </>
+                                                    ) : (
+                                                        <Badge>Only you</Badge>
+                                                    )}
+                                                </div>
                                             </div>
                                             {isOwner ? (
                                                 <button
@@ -328,7 +334,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                     onClick={() =>
                                                         setMenuFor((current) => (current === note.id ? null : note.id))
                                                     }
-                                                    className="rounded-lg p-1.5 text-stone-500 transition-colors hover:bg-ink/5 pointer-coarse:-m-2 pointer-coarse:p-3.5"
+                                                    className="-mt-1 -mr-1.5 rounded-lg p-1.5 text-ink-muted transition-colors hover:bg-ink/5 pointer-coarse:-m-2 pointer-coarse:p-3.5"
                                                 >
                                                     <MoreVerticalIcon size={16} />
                                                 </button>
@@ -341,7 +347,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                           would be clipped by its own overflow container.
                                         */}
                                         {isOwner && menuFor === note.id ? (
-                                            <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-stone-100 pt-2">
+                                            <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-hairline pt-2">
                                                 {note.student_user_id ? (
                                                     <Button
                                                         variant="ghost"
@@ -350,14 +356,13 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                         onClick={() =>
                                                             void patchNote(note.id, { shared: !note.shared })
                                                         }
-                                                        className="px-2.5 py-1"
                                                     >
                                                         {note.shared ? 'Hide from student' : 'Make visible to student'}
                                                     </Button>
                                                 ) : (
                                                     // student_user_id is immutable by design, so a note written
                                                     // with nobody named can never be shared with anyone.
-                                                    <span className="px-2.5 py-1 text-xs text-stone-500">
+                                                    <span className="px-2.5 py-1 text-[13px] text-ink-muted">
                                                         Not addressed to a student
                                                     </span>
                                                 )}
@@ -370,7 +375,6 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                         setEditBody(note.body);
                                                         setMenuFor(null);
                                                     }}
-                                                    className="px-2.5 py-1"
                                                 >
                                                     Edit
                                                 </Button>
@@ -379,7 +383,6 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                     size="sm"
                                                     disabled={busy}
                                                     onClick={() => setConfirmDeleteId(note.id)}
-                                                    className="px-2.5 py-1"
                                                 >
                                                     Delete
                                                 </Button>
