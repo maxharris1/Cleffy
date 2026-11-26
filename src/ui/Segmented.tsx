@@ -76,7 +76,7 @@ export const Segmented = <V extends string>({
                         aria-label={option.icon ? option.label : undefined}
                         title={option.icon ? option.label : undefined}
                         onClick={() => onChange(option.value)}
-                        className={`relative flex h-full items-center justify-center rounded-lg transition-colors pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2.5 ${
+                        className={`relative flex h-full items-center justify-center rounded-lg transition-colors pointer-coarse:min-w-11 pointer-coarse:before:absolute pointer-coarse:before:inset-x-0 pointer-coarse:before:-inset-y-2.5 ${
                             option.icon ? SIZE_CLASSES[size].iconKey : SIZE_CLASSES[size].textKey
                         } ${selected ? 'font-semibold text-ink' : 'font-medium text-ink-muted hover:text-ink'}`}
                     >

@@ -11,14 +11,15 @@ export type ButtonSize = 'md' | 'sm';
 
 /*
  * Pressed buttons give a little (scale .97 over --duration-press): feedback
- * the hand feels before the result arrives. Disabled ones do not move.
+ * the hand feels before the result arrives. Disabled ones do not move, and
+ * nothing moves under reduced motion.
  */
 const BUTTON_BASE =
-    'inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap border-[1.5px] font-semibold transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50 disabled:active:scale-100';
+    'inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap border-[1.5px] font-semibold transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50 disabled:active:scale-100 motion-reduce:transition-none motion-reduce:active:scale-100';
 
 const BUTTON_SIZE_CLASSES: Record<ButtonSize, string> = {
     md: 'min-h-11 rounded-xl px-[18px] text-[15px]',
-    sm: 'rounded-[10px] px-3.5 py-2 text-sm',
+    sm: 'min-h-11 rounded-[10px] px-3.5 text-sm',
 };
 
 const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
@@ -27,7 +28,7 @@ const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
     secondary: 'border-button-line bg-transparent text-ink hover:bg-ink/5',
     ghost: 'border-transparent bg-transparent text-ink-soft hover:bg-ink/5',
     danger: 'border-danger bg-danger text-white hover:border-red-800 hover:bg-red-800',
-    dangerGhost: 'border-transparent bg-transparent text-danger hover:bg-red-50',
+    dangerGhost: 'border-transparent bg-transparent text-destructive hover:bg-red-50',
     inkPrimary:
         'border-ink-cta bg-ink-cta text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_22px_-12px_rgba(79,70,229,0.95)]',
     inkOutline: 'border-paper/42 bg-transparent text-paper hover:bg-paper/10',
@@ -70,12 +71,12 @@ export const fieldClassName = (size: FieldSize = 'md', extra = '', opts: { width
 
 /**
  * Filter/facet chip — pill toggle matching the transport bar's pill language.
- * h-8 (32px) meets the minimum touch target. Callers add aria-pressed when the
- * chip is a toggle rather than an action.
+ * 34px tall; hit-44 grows its target on touch. Callers add aria-pressed when
+ * the chip is a toggle rather than an action.
  */
 export const chipClassName = (active: boolean, extra = ''): string =>
     [
-        'inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-[13px] transition-colors',
+        'inline-flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-[13px] text-[13px] transition-colors pointer-coarse:hit-44',
         active
             ? 'border-accent/40 bg-accent-tint font-semibold text-accent'
             : 'border-panel-line font-medium text-ink-soft hover:bg-ink/5',

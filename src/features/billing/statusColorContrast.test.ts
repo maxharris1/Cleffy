@@ -123,3 +123,65 @@ describe('danger text colour', () => {
         expect(contrastOnWhite(stock)).toBeGreaterThanOrEqual(4.5);
     });
 });
+
+const hexContrast = (fg: string, bg: string) => {
+    const [a, b] = [relativeLuminance(hexToLinearSrgb(fg)), relativeLuminance(hexToLinearSrgb(bg))];
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+};
+
+const linearToSrgb = (v: number) => (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
+const srgbToLinear = (v: number) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+
+/** A `--color-<name>` as linear sRGB: our own hex, or Tailwind's stock oklch. */
+const hexOrStock = (name: string): [number, number, number] => {
+    const own = INDEX_CSS.match(new RegExp(`--color-${name}:\\s*(#[0-9a-f]{6});`))?.[1];
+    if (own) {
+        return hexToLinearSrgb(own);
+    }
+    const stock = TAILWIND_THEME.match(new RegExp(`--color-${name}:\\s*([^;]+);`))?.[1]?.trim();
+    expect(stock, `--color-${name} is neither ours nor Tailwind's`).toBeDefined();
+    return oklchToLinearSrgb(stock ?? '');
+};
+
+describe('dialog text on the paper panel', () => {
+    const paper = ownHex('paper');
+    const dialogStone500 = INDEX_CSS.match(/\.dialog-paper\s*\{[^}]*--color-stone-500:\s*(#[0-9a-f]{6});/)?.[1] ?? '';
+
+    it('reproduces the failure review reported, so the arithmetic below can be trusted', () => {
+        expect(contrastOn(TAILWIND_THEME.match(/--color-stone-500:\s*([^;]+);/)?.[1] ?? '', paper)).toBeCloseTo(
+            4.41,
+            1,
+        );
+    });
+
+    it('every dialog panel carries the paper text palette', () => {
+        expect(read('src/ui/DialogPanel.tsx')).toMatch(/\bdialog-paper\b/);
+    });
+
+    it('text-stone-500 inside a dialog reads at AA on paper', () => {
+        expect(dialogStone500).toMatch(/^#/);
+        expect(hexContrast(dialogStone500, paper)).toBeGreaterThanOrEqual(4.5);
+    });
+
+    /** Each Badge tone's text on its own tint, laid over the surfaces a badge sits on. */
+    const BADGE = read('src/ui/Badge.tsx');
+    const toneOf = (tone: string) => {
+        const [, bg, alpha, text] = BADGE.match(new RegExp(`${tone}: 'bg-([\\w-]+)(?:/(\\d+))? text-([\\w-]+)'`)) ?? [];
+        expect(text, `Badge tone ${tone}`).toBeDefined();
+        return { bg: hexOrStock(bg ?? ''), alpha: alpha ? Number(alpha) / 100 : 1, text: hexOrStock(text ?? '') };
+    };
+
+    it.each(['ok', 'warn', 'neutral'].flatMap((tone) => [[tone, 'paper'] as const, [tone, 'white'] as const]))(
+        'the %s badge reads at AA on %s',
+        (tone, surface) => {
+            const { bg, alpha, text } = toneOf(tone);
+            const under = hexToLinearSrgb(surface === 'paper' ? paper : '#ffffff');
+            const [r, g, b] = bg.map((v, i) =>
+                srgbToLinear(linearToSrgb(v) * alpha + linearToSrgb(under[i] ?? 0) * (1 - alpha)),
+            );
+            const fg = relativeLuminance(text);
+            const back = relativeLuminance([r ?? 0, g ?? 0, b ?? 0]);
+            expect((Math.max(fg, back) + 0.05) / (Math.min(fg, back) + 0.05)).toBeGreaterThanOrEqual(4.5);
+        },
+    );
+});

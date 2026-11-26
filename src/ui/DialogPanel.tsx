@@ -146,7 +146,7 @@ export const DialogPanel = ({
                         aria-modal="true"
                         aria-label={label}
                         initialFocus={popupRef}
-                        className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} w-full max-w-md overscroll-contain rounded-[22px] bg-paper p-7 shadow-[0_40px_90px_-30px_rgba(28,25,23,0.6),0_0_0_1px_rgba(28,25,23,0.08)] outline-none ${
+                        className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} dialog-paper w-full max-w-md overscroll-contain rounded-[22px] bg-paper p-7 shadow-[0_40px_90px_-30px_rgba(28,25,23,0.6),0_0_0_1px_rgba(28,25,23,0.08)] outline-none ${
                             sheet
                                 ? 'max-h-[80dvh] overflow-y-auto overflow-x-hidden pb-[max(1.75rem,var(--safe-bottom))] pl-[max(1.75rem,var(--safe-left))] pr-[max(1.75rem,var(--safe-right))]'
                                 : // Fits any viewport (the viewport's p-4 is the 2rem) and scrolls inside, so a

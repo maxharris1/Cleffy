@@ -44,6 +44,9 @@
     --color-on-ink-muted: #d6d3d1;
     --color-on-ink-faint: #a8a29e;
     --color-desk: #ebe8df;
+    --color-destructive: #b91c1c;
+    --color-due: #854d0e;
+    --color-done: #166534;
 
     /* The landing page's ink bands (features/marketing/landing.css). The
        accent is too dark on ink, so the filled button there is indigo-600;
@@ -222,6 +225,12 @@ body {
         height: max(100%, 44px);
         translate: 0 -50%;
     }
+}
+
+/* Dialogs sit on paper, where stock stone-500 text is 4.4:1; this shade keeps
+   their small grey text at WCAG AA (statusColorContrast.test.ts). */
+.dialog-paper {
+    --color-stone-500: #736b65;
 }
 
 /* Annotation surfaces manage their own gestures. */
