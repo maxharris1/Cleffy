@@ -105,8 +105,8 @@ const STAND_INK_TOOLS: ReadonlySet<Tool> = new Set<Tool>(['pen', 'highlighter', 
  * highlighter and eraser. The text and fingering tools need the chrome stand
  * mode hides, so nothing starts them there.
  */
-export const standMayInk = (pointerType: string, tool: Tool): boolean =>
-    pointerType === 'pen' && STAND_INK_TOOLS.has(tool);
+export const standMayInk = (pointerType: string, tool: Tool | null): boolean =>
+    pointerType === 'pen' && tool !== null && STAND_INK_TOOLS.has(tool);
 
 // ---------------------------------------------------------------------------
 // Fullscreen API, with the webkit prefix older iPadOS Safari still needs.

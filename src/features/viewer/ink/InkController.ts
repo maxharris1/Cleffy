@@ -408,7 +408,7 @@ export class InkController {
 
     private shouldInk(e: PointerEvent): boolean {
         const { tool, fingerDraws } = useViewerStore.getState();
-        if (tool === 'pan') {
+        if (tool === null) {
             return false;
         }
         // The fingering tool only selects a region (never writes), so view-only

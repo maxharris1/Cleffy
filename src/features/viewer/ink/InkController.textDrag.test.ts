@@ -347,7 +347,7 @@ describe('InkController text tool: resize', () => {
     it('a pinch is not claimed for other tools or read-only viewers', async () => {
         await store.create(textNote('note', 0.3, 0.5, 'mf'));
         await select('note', 305, 655);
-        useViewerStore.getState().setTool('pan');
+        useViewerStore.getState().setTool(null);
         expect(ink.delegate.onPinch!(1.2)).toBe(false);
     });
 
