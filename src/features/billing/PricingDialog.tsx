@@ -141,7 +141,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
 
                 <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-5">
                     <div className="min-w-0 flex-1 basis-[420px]">
-                        <h2 className="font-display text-[34px] leading-[1.05] font-semibold tracking-[-0.02em] text-balance text-ink sm:text-[48px] sm:leading-[1.02]">
+                        <h2 className="font-display text-[34px] leading-[1.05] font-semibold tracking-[-0.02em] text-balance text-ink sm:pr-10 sm:text-[48px] sm:leading-[1.02]">
                             Free to start. <em>Students never pay.</em>
                         </h2>
                         {reason ? <p className="mt-3 text-sm text-ink-muted">{reason}</p> : null}
