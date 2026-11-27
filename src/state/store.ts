@@ -121,6 +121,9 @@ interface ViewerStore extends PlaybackSlice {
     /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
     selectedTextId: string | null;
     setSelectedTextId: (selectedTextId: string | null) => void;
+    penSeen: boolean;
+    touchSeen: boolean;
+    notePointer: (pointerType: string) => void;
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
@@ -146,7 +149,7 @@ const INITIAL_PLAYBACK = {
  * AnnotationStore's in-memory map (plan §sync). Usable outside React via
  * useViewerStore.getState() from high-frequency pointer handlers.
  */
-export const useViewerStore = create<ViewerStore>((set) => ({
+export const useViewerStore = create<ViewerStore>((set, get) => ({
     view: INITIAL_VIEW,
     pinch: null,
     tool: 'pen',
@@ -182,6 +185,16 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setStandMode: (standMode) => set({ standMode }),
     selectedTextId: null,
     setSelectedTextId: (selectedTextId) => set({ selectedTextId }),
+    penSeen: false,
+    touchSeen: false,
+    notePointer: (pointerType) => {
+        if (pointerType === 'pen' && !get().penSeen) {
+            set({ penSeen: true });
+        }
+        if (pointerType === 'touch' && !get().touchSeen) {
+            set({ touchSeen: true });
+        }
+    },
     ...INITIAL_PLAYBACK,
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),

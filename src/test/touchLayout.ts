@@ -23,6 +23,7 @@ const FEATURES: Record<string, (value: string, viewport: Viewport) => boolean> =
     'min-width': (value, { width }) => width >= lengthPx(value),
     'max-width': (value, { width }) => width <= lengthPx(value),
     pointer: (value, { coarse }) => value === (coarse ? 'coarse' : 'fine'),
+    'any-pointer': (value, { coarse }) => value === (coarse ? 'coarse' : 'fine'),
 };
 
 const matchesQuery = (query: string, viewport: Viewport): boolean => {

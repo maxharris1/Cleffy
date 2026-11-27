@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 
 import { features } from '@/lib/features';
+import { useMediaQuery } from '@/lib/useMediaQuery';
+import { showFingerSwitch } from '@/features/viewer/ink/inputPolicy';
 import type { ObscuredEdges } from '@/features/viewer/geometry';
 import { useReportToolbarPopup } from '@/features/viewer/toolbar/toolbarPopup';
 import { settleEdit, type AnnotationStore } from '@/sync/annotationStore';
@@ -67,6 +69,9 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const color = useViewerStore((s) => s.color);
     const widthKey = useViewerStore((s) => s.widthKey);
     const fingerDraws = useViewerStore((s) => s.fingerDraws);
+    const penSeen = useViewerStore((s) => s.penSeen);
+    const touchSeen = useViewerStore((s) => s.touchSeen);
+    const touchScreen = useMediaQuery('(any-pointer: coarse)');
     const { setTool, setColor, setWidthKey, setFingerDraws } = useViewerStore.getState();
     const [styleOpen, setStyleOpen] = useState(false);
     const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -336,24 +341,30 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                     <RedoIcon size={20} />
                 </button>
 
-                <div className={DIVIDER} />
-                <button
-                    type="button"
-                    title={
-                        fingerDraws ? 'Finger drawing on — a finger draws ink' : 'Finger drawing off — a finger pans'
-                    }
-                    aria-label="Draw with finger"
-                    aria-pressed={fingerDraws}
-                    onClick={() => setFingerDraws(!fingerDraws)}
-                    className={`${BAR_BUTTON} gap-1 sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
-                        fingerDraws ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
-                    }`}
-                >
-                    <span className="flex h-5 w-5 items-center justify-center">
-                        <PointerIcon size={20} />
-                    </span>
-                    <span className="hidden text-[10px] font-medium leading-none sm:block">Finger</span>
-                </button>
+                {showFingerSwitch({ touchScreen, touchSeen, penSeen }) && (
+                    <>
+                        <div className={DIVIDER} />
+                        <button
+                            type="button"
+                            title={
+                                fingerDraws
+                                    ? 'Finger drawing on — a finger draws ink'
+                                    : 'Finger drawing off — a finger pans'
+                            }
+                            aria-label="Draw with finger"
+                            aria-pressed={fingerDraws}
+                            onClick={() => setFingerDraws(!fingerDraws)}
+                            className={`${BAR_BUTTON} gap-1 sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
+                                fingerDraws ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
+                            }`}
+                        >
+                            <span className="flex h-5 w-5 items-center justify-center">
+                                <PointerIcon size={20} />
+                            </span>
+                            <span className="hidden text-[10px] font-medium leading-none sm:block">Finger</span>
+                        </button>
+                    </>
+                )}
             </div>
         </div>
     );
