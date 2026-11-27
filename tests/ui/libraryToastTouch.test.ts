@@ -180,6 +180,13 @@ describe.skipIf(!CHROMIUM)('the favorite-error toast over the phone Library head
         },
     );
 
+    it.each(['/library/', '/Library'])(
+        'keeps Upload tappable on %s, which also renders the Library route, at 320 px with a 9 px default font',
+        async (path) => {
+            expect(await withToast(320, 9, tapUpload, { path })).toBe('Upload score');
+        },
+    );
+
     it.each(SETTINGS)(
         'opens the file chooser on Enter from Upload score at %i px with a %i px default font',
         async (width, defaultFont) => {
