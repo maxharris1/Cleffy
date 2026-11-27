@@ -9,6 +9,7 @@ import {
     EllipsisVertical,
     Hourglass,
     LayoutGrid,
+    Library,
     List,
     LocateFixed,
     Maximize,
@@ -24,6 +25,7 @@ import {
     Redo2,
     RefreshCw,
     Repeat,
+    Search,
     Settings2,
     Share,
     SkipBack,
@@ -34,6 +36,7 @@ import {
     Timer,
     Undo2,
     Upload,
+    Users,
     Volume2,
     VolumeX,
     WandSparkles,
@@ -74,6 +77,9 @@ export const UploadIcon = withBrandStroke(Upload);
 export const ShareIcon = withBrandStroke(Share);
 export const LayoutGridIcon = withBrandStroke(LayoutGrid);
 export const ListIcon = withBrandStroke(List);
+export const LibraryIcon = withBrandStroke(Library);
+export const StudentsIcon = withBrandStroke(Users);
+export const SearchIcon = withBrandStroke(Search);
 
 // Play-along transport.
 export const PlayIcon = withBrandStroke(Play);

@@ -385,7 +385,7 @@ describe('LibraryShell', () => {
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
-    it('keeps the saving status and its progress inside the bar from sm up, off the page below', async () => {
+    it('keeps the saving status and its progress inside the bar, off the page below', async () => {
         const user = userEvent.setup();
         sessionMocks.syncBeforeSignOut.mockReturnValue(new Promise(() => undefined));
         renderShell('/search');
@@ -394,9 +394,9 @@ describe('LibraryShell', () => {
         await user.click(await screen.findByRole('menuitem', { name: 'Sign out' }));
 
         const status = screen.getByRole('status');
-        expect(status).toHaveClass('sm:absolute', 'sm:bottom-px', 'sm:pointer-events-none');
+        expect(status).toHaveClass('absolute', 'bottom-px', 'pointer-events-none');
         expect(status).not.toHaveClass('sm:top-full');
-        expect(status.closest('.sm\\:relative')).toHaveClass('sm:h-16');
+        expect(status.closest('.relative')).toHaveClass('sm:h-16');
         const progress = screen.getByRole('progressbar', { name: 'Saving changes before signing out' });
         expect(progress).toHaveClass('sm:top-[var(--safe-top)]', 'sm:bottom-auto', 'sm:pointer-events-none');
         expect(progress).not.toHaveClass('sm:top-full');
@@ -444,6 +444,24 @@ describe('LibraryShell', () => {
         const nav = screen.getByRole('navigation', { name: 'Main' });
         expect(within(nav).getByRole('link', { name: 'Find a score' })).toHaveAttribute('aria-current', 'page');
         expect(within(nav).getByRole('link', { name: 'Library' })).not.toHaveAttribute('aria-current');
+    });
+
+    it('tabs through the wordmark, the nav, the upload and the account menu in that order', async () => {
+        const user = userEvent.setup();
+        renderShell('/search');
+        const nav = () => screen.getByRole('navigation', { name: 'Main' });
+        const expected = [
+            () => screen.getByRole('link', { name: 'Cleffy' }),
+            () => within(nav()).getByRole('link', { name: 'Library' }),
+            () => within(nav()).getByRole('link', { name: 'Students' }),
+            () => within(nav()).getByRole('link', { name: 'Find a score' }),
+            () => screen.getByLabelText('Upload score'),
+            () => screen.getByRole('button', { name: /Account menu/ }),
+        ];
+        for (const element of expected) {
+            await user.tab();
+            expect(document.activeElement).toBe(element());
+        }
     });
 
     it('pads the chrome for the iPhone status bar', () => {

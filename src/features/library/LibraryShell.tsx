@@ -34,7 +34,7 @@ import {
 import { ownSubscriptionOf } from '@/features/billing/planStatus';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { buttonClassName } from '@/ui/classNames';
-import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
+import { ChevronDownIcon, LibraryIcon, SearchIcon, StudentsIcon, UploadIcon } from '@/ui/icons';
 import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { SwapLabel } from '@/ui/SwapLabel';
@@ -124,10 +124,16 @@ const BAR_FADE_MS = 150;
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-const NAV_ITEMS: { to: string; label: string; end: boolean; needsStudents?: boolean }[] = [
-    { to: '/library', label: 'Library', end: true },
-    { to: '/students', label: 'Students', end: true, needsStudents: true },
-    { to: '/search', label: 'Find a score', end: true },
+const NAV_ITEMS: {
+    to: string;
+    label: string;
+    icon: typeof LibraryIcon;
+    end: boolean;
+    needsStudents?: boolean;
+}[] = [
+    { to: '/library', label: 'Library', icon: LibraryIcon, end: true },
+    { to: '/students', label: 'Students', icon: StudentsIcon, end: true, needsStudents: true },
+    { to: '/search', label: 'Find a score', icon: SearchIcon, end: true },
 ];
 
 /**
@@ -146,11 +152,10 @@ const SHELL_PROGRESS =
     'shell-progress absolute inset-x-0 bottom-0 sm:pointer-events-none sm:top-[var(--safe-top)] sm:bottom-auto';
 
 const NAV_LINK_BASE =
-    'shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors sm:flex sm:min-h-16 sm:items-center sm:rounded-none sm:border-b-2 sm:px-0.5 sm:py-0 sm:text-[15px] sm:focus-visible:-outline-offset-4';
-const NAV_LINK_ACTIVE =
-    'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50 sm:border-ink-hand sm:bg-transparent sm:font-semibold sm:text-paper sm:shadow-none sm:ring-0';
+    'flex flex-1 flex-col items-center justify-center gap-1 border-t-2 text-[11px] font-semibold transition-colors focus-visible:-outline-offset-4 sm:min-h-16 sm:flex-none sm:flex-row sm:gap-0 sm:border-t-0 sm:border-b-2 sm:px-0.5 sm:text-[15px] sm:leading-[calc(1.25/0.875)]';
+const NAV_LINK_ACTIVE = 'border-accent text-ink sm:border-ink-hand sm:font-semibold sm:text-paper';
 const NAV_LINK_IDLE =
-    'text-stone-600 hover:bg-ink/5 hover:text-stone-900 sm:border-transparent sm:text-on-ink-muted sm:hover:bg-transparent sm:hover:text-paper';
+    'border-transparent text-ink-muted hover:text-ink sm:border-transparent sm:font-medium sm:text-on-ink-muted sm:hover:text-paper';
 
 /** Authenticated app chrome: top bar + shared upload for library/search. */
 export const LibraryShell = () => {
@@ -561,23 +566,18 @@ const LibraryFrame = ({
                 progress and the account menu stay reachable from any page. */}
             <header
                 ref={headerRef}
-                className="chrome-paper shell-bar sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur sm:pl-0 sm:pr-0 sm:border-b-0"
+                className="shell-bar sticky top-0 z-30 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] sm:pl-0 sm:pr-0"
             >
                 <div
-                    className={`${BAR_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:relative sm:h-16 sm:flex-nowrap sm:gap-x-3 sm:py-0 md:gap-x-6 lg:gap-x-10`}
+                    className={`${BAR_CONTAINER} relative flex items-center gap-x-4 pt-2.5 pb-2 max-sm:pl-[18px] sm:h-16 sm:gap-x-3 sm:py-0 md:gap-x-6 lg:gap-x-10`}
                 >
                     <Link to="/library" className="shrink-0">
-                        <Wordmark className="text-[26px] sm:text-[28px] sm:text-paper sm:[&>span]:bg-ink-rule" />
+                        <Wordmark tone="ink" className="text-[26px] sm:text-[28px]" />
                     </Link>
 
-                    {/* Below sm the strip drops to its own row (order-last) and scrolls
-                        sideways rather than wrapping. The negative margin cancels the
-                        container's gutter so the strip runs edge to edge, and the
-                        matching width keeps it that wide — a plain w-full would stop
-                        one gutter short and strand the last link behind a dead margin. */}
                     <nav
                         aria-label="Main"
-                        className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto overscroll-x-contain px-4 sm:order-none sm:mx-0 sm:w-auto sm:flex-1 sm:gap-3 sm:overflow-x-visible sm:px-0 md:gap-5 lg:gap-7"
+                        className="shell-tabs fixed inset-x-0 bottom-0 z-30 flex border-t border-hairline bg-paper/97 pb-[var(--safe-bottom)] pl-[var(--safe-left)] pr-[var(--safe-right)] sm:static sm:flex-1 sm:items-center sm:gap-3 sm:border-t-0 sm:bg-transparent sm:p-0 md:gap-5 lg:gap-7"
                     >
                         {navItems.map((item) => (
                             <NavLink
@@ -588,23 +588,24 @@ const LibraryFrame = ({
                                     `${NAV_LINK_BASE} ${isActive ? NAV_LINK_ACTIVE : NAV_LINK_IDLE}`
                                 }
                             >
+                                <item.icon size={21} strokeWidth={1.7} className="sm:hidden" />
                                 {item.label}
                             </NavLink>
                         ))}
                     </nav>
 
-                    <div className="ml-auto flex shrink-0 items-center gap-2 lg:gap-3.5">
+                    <div className="ml-auto flex shrink-0 items-center gap-2 max-sm:gap-[8px] lg:gap-3.5">
                         <ShellUploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
                         {/* The menu closes on click, and the upload before sign-out can
                             take seconds on a slow connection: say what is happening
                             where the menu was, or the click looks like it did nothing.
-                            From sm up it sits in the band under the controls instead:
-                            inline, it pushed the row past the viewport at 640-700px,
-                            and below the bar it covered the page's sticky controls. */}
+                            It sits in the band under the controls: inline, it pushed
+                            the row past the viewport at 640-700px, and below the bar
+                            it covered the page's sticky controls. */}
                         {savingBeforeSignOut ? (
                             <span
                                 role="status"
-                                className="text-sm text-stone-600 sm:pointer-events-none sm:absolute sm:right-[max(1.5rem,var(--safe-right))] sm:bottom-px sm:text-[10px] sm:leading-none sm:text-on-ink-muted lg:right-[max(2.5rem,var(--safe-right))]"
+                                className="pointer-events-none absolute right-4 bottom-px text-[10px] leading-none text-on-ink-muted sm:right-[max(1.5rem,var(--safe-right))] lg:right-[max(2.5rem,var(--safe-right))]"
                             >
                                 Saving changes…
                             </span>
@@ -638,7 +639,7 @@ const LibraryFrame = ({
                 ) : null}
             </header>
 
-            <div className={`${SHELL_CONTAINER} py-8 lg:py-10`}>
+            <div className={`${SHELL_CONTAINER} shell-content py-8 lg:py-10`}>
                 <div
                     className="library-shell min-w-0"
                     style={barHeight ? ({ '--shell-bar-height': `${barHeight}px` } as CSSProperties) : undefined}
@@ -692,12 +693,12 @@ const ShellUploadButton = ({
 }) => (
     <label
         className={buttonClassName(
-            'primary',
+            'inkPrimary',
             'sm',
-            `shell-upload sm:border-ink-cta sm:bg-ink-cta lg:rounded-xl lg:px-[18px] lg:text-[15px] sm:shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_22px_-12px_rgba(79,70,229,0.95)] sm:hover:border-ink-cta sm:hover:bg-ink-cta${uploading || quotaExhausted ? ' pointer-events-none opacity-80' : ''}`,
+            `shell-upload max-sm:size-[44px] max-sm:min-h-[44px] max-sm:rounded-xl max-sm:px-0 max-sm:shadow-none lg:rounded-xl lg:px-[18px] lg:text-[15px]${uploading || quotaExhausted ? ' pointer-events-none opacity-80' : ''}`,
         )}
     >
-        <UploadIcon size={16} />
+        <UploadIcon size={16} className="max-sm:size-[19px]" />
         <SwapLabel
             labels={{ idle: 'Upload score', busy: 'Uploading…' }}
             active={uploading ? 'busy' : 'idle'}
@@ -769,16 +770,16 @@ const AccountMenu = ({
             popupClassName="w-64"
             open={open}
             onOpenChange={(next) => setOpenedAt(next ? pathname : null)}
-            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-ink/5 sm:pr-1.5 sm:hover:bg-paper/10"
+            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-paper/10 max-sm:p-[2px] max-sm:pointer-coarse:hit-44 sm:pr-1.5"
             triggerContent={
                 <>
                     <span
                         aria-hidden="true"
-                        className="grid h-8 w-8 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent sm:h-9 sm:w-9 sm:bg-red-600 sm:text-white sm:shadow-[0_0_0_2px_var(--color-ink)]"
+                        className="grid h-9 w-9 place-items-center rounded-full bg-red-600 max-sm:size-[36px] text-xs font-semibold text-white shadow-[0_0_0_2px_var(--color-ink)]"
                     >
                         {initialsOf(userLabel)}
                     </span>
-                    <ChevronDownIcon size={16} className="hidden text-stone-500 sm:block sm:text-on-ink-faint" />
+                    <ChevronDownIcon size={16} className="hidden text-on-ink-faint sm:block" />
                 </>
             }
         >
