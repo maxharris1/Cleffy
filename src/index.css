@@ -573,14 +573,14 @@ body {
 }
 
 /*
- * How much of the viewport the sticky top bar owns: one 4rem row, plus a
- * second row for the nav strip below sm. Anything inside the shell that sticks
- * to the top of the page has to start below it, or it parks itself out of
- * sight behind the bar — the offset belongs to the bar, so it is published
- * from here rather than hard-coded into each surface.
+ * How much of the viewport the sticky top bar owns: a 3.875rem row below sm,
+ * where the nav is the bottom tab bar, and a 4rem row from sm up. Anything
+ * inside the shell that sticks to the top of the page has to start below it,
+ * or it parks itself out of sight behind the bar — the offset belongs to the
+ * bar, so it is published from here rather than hard-coded into each surface.
  */
 .library-shell {
-    --shell-bar-height: calc(6.0625rem + var(--safe-top));
+    --shell-bar-height: calc(3.875rem + var(--safe-top));
 }
 
 @media (min-width: 40rem) {
@@ -695,6 +695,24 @@ body {
     background: color-mix(in srgb, var(--color-paper) 88%, transparent);
     backdrop-filter: blur(6px);
     border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+
+/*
+ * Below sm the shell's nav is a tab bar fixed to the bottom edge: a hairline
+ * over 60px cells, above the home indicator. The page pads its foot by the
+ * same amount so the last row scrolls clear of it, and the edition picker's
+ * sticky footer parks on top of it rather than behind it.
+ */
+@media (max-width: 39.99rem) {
+    .shell-content {
+        --shell-tabs-height: calc(3.8125rem + var(--safe-bottom));
+        padding-bottom: calc(2rem + var(--shell-tabs-height));
+    }
+
+    .shell-content .imslp-action-footer {
+        bottom: var(--shell-tabs-height);
+        padding-bottom: 0.75rem;
+    }
 }
 
 /* Edition picker's Add and legal line. Below sm an open edition list runs
@@ -816,13 +834,12 @@ body {
 
 /*
  * Translucent, blurred chrome reads as mush to anyone who asked the system for
- * less transparency or more contrast: it goes opaque. .chrome-paper sits on the
- * paper wash, .chrome-glass on white.
+ * less transparency or more contrast: it goes opaque. The IMSLP bars sit on
+ * the paper wash, .chrome-glass on white.
  */
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
     .imslp-search-sticky,
-    .imslp-action-footer,
-    .chrome-paper {
+    .imslp-action-footer {
         -webkit-backdrop-filter: none;
         backdrop-filter: none;
         background-color: var(--color-paper);
@@ -836,27 +853,28 @@ body {
 }
 
 /*
- * From sm up the top bar is ink. Unlayered and after the block above so the
- * opaque-paper fallback for .chrome-paper cannot put paper text on paper. The
- * accent is under 3:1 on ink, so focus rings and the progress fill use the
- * wordmark's ink rule instead.
+ * The top bar is ink. The accent is under 3:1 on ink, so focus rings and the
+ * progress fill use the wordmark's ink rule instead. Below sm the nav inside
+ * it is the paper tab bar, which takes the accent back.
  */
-@media (width >= 40rem) {
-    .shell-bar {
-        --focus-ring: var(--color-ink-rule);
-        -webkit-backdrop-filter: none;
-        backdrop-filter: none;
-        background-color: var(--color-ink);
-        color: var(--color-paper);
-    }
+.shell-bar {
+    --focus-ring: var(--color-ink-rule);
+    background-color: var(--color-ink);
+    color: var(--color-paper);
+}
 
-    .shell-bar .shell-progress {
-        background-color: var(--color-ink);
-        border-radius: 0;
-    }
+.shell-bar .shell-progress {
+    background-color: var(--color-ink);
+    border-radius: 0;
+}
 
-    .shell-bar .shell-progress > div {
-        background-color: var(--color-ink-rule);
+.shell-bar .shell-progress > div {
+    background-color: var(--color-ink-rule);
+}
+
+@media (max-width: 39.99rem) {
+    .shell-tabs {
+        --focus-ring: var(--color-accent);
     }
 }
 

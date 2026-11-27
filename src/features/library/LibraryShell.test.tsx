@@ -385,7 +385,7 @@ describe('LibraryShell', () => {
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
-    it('keeps the saving status and its progress inside the bar from sm up, off the page below', async () => {
+    it('keeps the saving status and its progress inside the bar, off the page below', async () => {
         const user = userEvent.setup();
         sessionMocks.syncBeforeSignOut.mockReturnValue(new Promise(() => undefined));
         renderShell('/search');
@@ -394,9 +394,9 @@ describe('LibraryShell', () => {
         await user.click(await screen.findByRole('menuitem', { name: 'Sign out' }));
 
         const status = screen.getByRole('status');
-        expect(status).toHaveClass('sm:absolute', 'sm:bottom-px', 'sm:pointer-events-none');
+        expect(status).toHaveClass('absolute', 'bottom-px', 'pointer-events-none');
         expect(status).not.toHaveClass('sm:top-full');
-        expect(status.closest('.sm\\:relative')).toHaveClass('sm:h-16');
+        expect(status.closest('.relative')).toHaveClass('sm:h-16');
         const progress = screen.getByRole('progressbar', { name: 'Saving changes before signing out' });
         expect(progress).toHaveClass('sm:top-[var(--safe-top)]', 'sm:bottom-auto', 'sm:pointer-events-none');
         expect(progress).not.toHaveClass('sm:top-full');
