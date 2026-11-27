@@ -938,7 +938,7 @@ export const PdfViewport = ({
             store: annotationStore,
             registry,
             isReadOnly: () => readOnlyRef.current,
-            panKeyHeld: () => spaceRef.current.held,
+            panKeyHeld: () => spaceRef.current.held && !standModeRef.current,
             getView: () => useViewerStore.getState().view,
             getLayout: () => layoutRef.current,
             toLocal,
