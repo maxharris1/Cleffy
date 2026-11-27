@@ -17,9 +17,7 @@ export interface PageHeadProps {
 export const PageHead = ({ width, eyebrow, title, subtitle, action }: PageHeadProps) => (
     // The shell's content wrapper already pads 32/40px; the extra top padding
     // lands the head 48px under the bar from sm up without moving other routes.
-    // The bottom margin collapses with the first content's own top margin, so
-    // content starts 32px under the hairline under any top margin up to that.
-    <header className={`${HEAD_WIDTH[width]} mb-8 border-b border-hairline pb-6 sm:pt-4 sm:pb-8 lg:pt-2`}>
+    <header className={`page-head ${HEAD_WIDTH[width]} mb-8 border-b border-hairline pb-6 sm:pt-4 sm:pb-8 lg:pt-2`}>
         <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-[18px]">
             <div className="max-w-[760px] min-w-0 [overflow-wrap:anywhere]">
                 {eyebrow ? (
