@@ -712,9 +712,6 @@ body {
 @media (hover: hover) and (pointer: fine) {
     .library-card:hover .library-card-cover {
         transform: translateY(-2px);
-        box-shadow:
-            0 4px 6px -1px rgb(28 25 23 / 0.1),
-            0 2px 4px -2px rgb(28 25 23 / 0.08);
     }
 }
 
@@ -865,7 +862,7 @@ body {
 
     /* Shelf: no entrance stagger, and the cover stays flat on hover. The
        :hover selector is repeated so this matches the lift's specificity and
-       wins on source order; the shadow still changes, which is not motion. */
+       wins on source order. */
     .library-card {
         animation: none;
     }

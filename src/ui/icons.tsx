@@ -60,6 +60,7 @@ export const CheckIcon = withBrandStroke(Check);
 export const UndoIcon = withBrandStroke(Undo2);
 export const RedoIcon = withBrandStroke(Redo2);
 export const ZoomInIcon = withBrandStroke(Plus);
+export const PlusIcon = withBrandStroke(Plus);
 export const ZoomOutIcon = withBrandStroke(Minus);
 export const SinglePageIcon = withBrandStroke(RectangleVertical);
 export const TwoPagesIcon = withBrandStroke(Columns2);
