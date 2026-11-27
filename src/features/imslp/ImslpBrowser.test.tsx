@@ -781,7 +781,7 @@ describe('ImslpBrowser', () => {
     /** The card above the toggle: the edition Add will import. */
     const editionCard = async () => {
         const { screen } = await import('@testing-library/react');
-        return screen.getByRole('button', { name: /^Choose a different edition/ }).closest('.rounded-xl')!
+        return screen.getByRole('button', { name: /^Choose a different edition/ }).closest('.rounded-2xl')!
             .firstElementChild as HTMLElement;
     };
 

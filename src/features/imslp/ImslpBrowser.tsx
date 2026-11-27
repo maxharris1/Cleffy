@@ -108,7 +108,7 @@ export const ImslpBrowser = ({
     quotaUpgradeHint = true,
     onUpgrade,
     showHeading = true,
-    className = 'mt-6',
+    className = '',
 }: ImslpBrowserProps) => {
     const [flow, dispatch] = useReducer(reduce, initial);
     const [error, setError] = useState<string | null>(null);
@@ -240,15 +240,15 @@ export const ImslpBrowser = ({
         <section className={className}>
             {showHeading ? (
                 <div>
-                    <h2 className="text-sm font-medium text-stone-800">Find a score</h2>
-                    <p className="mt-0.5 text-xs text-stone-500">Search thousands of public-domain scores.</p>
+                    <h2 className="text-sm font-medium text-ink">Find a score</h2>
+                    <p className="mt-0.5 text-[13px] text-ink-muted">Search thousands of public-domain scores.</p>
                 </div>
             ) : null}
 
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
 
             {flow.phase === 'loadingWork' ? (
-                <LoadingText className="mt-4 text-xs">Loading editions…</LoadingText>
+                <LoadingText className="mt-2 text-sm">Loading editions…</LoadingText>
             ) : null}
 
             {/* Kept mounted so query, facets and results survive opening a work. */}

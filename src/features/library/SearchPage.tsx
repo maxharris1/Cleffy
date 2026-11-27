@@ -21,10 +21,10 @@ export const SearchPage = () => {
     const workOpen = useSearchParams()[0].has('work');
 
     return (
-        <div>
+        <div className="mx-auto max-w-[1280px]">
             {workOpen ? (
                 <header>
-                    <h1 className="text-sm font-medium text-stone-500">Find a score</h1>
+                    <h1 className="text-sm font-medium text-ink-muted">Find a score</h1>
                 </header>
             ) : (
                 <PageHead

@@ -38,7 +38,8 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { ViewToggle } from '@/ui/ViewToggle';
-import { chipClassName, chipRowClassName, fieldClassName } from '@/ui/classNames';
+import { chipClassName, chipRowClassName } from '@/ui/classNames';
+import { ChevronRightIcon, SearchIcon } from '@/ui/icons';
 
 interface ImslpSearchPanelProps {
     disabled?: boolean;
@@ -56,6 +57,27 @@ const DEFAULT_INSTRUMENT = 'piano';
 
 /** The library shelf's exact columns — both pages fill the same shell width. */
 const GRID_UL_CLASS = 'grid grid-cols-2 gap-x-5 gap-y-7 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6';
+
+const SEARCH_FIELD_CLASS =
+    'landing-input h-[52px] w-full rounded-xl border-[1.5px] border-field-line bg-white pr-3.5 pl-[42px] text-base text-ink outline-none transition-colors placeholder:text-ink-muted';
+
+const COLUMNS_CLASS = 'columns-[2_420px] gap-x-14';
+
+const TOGGLE_FIRST_IN_TAB_ORDER_FACETS_DRAWN_LEFT_CLASS =
+    'mt-[18px] flex flex-col-reverse gap-3 sm:flex-row-reverse sm:flex-wrap-reverse sm:items-center sm:justify-between';
+
+const RULED_UL_CLASS = 'border-b border-hairline';
+
+const ROW_BUTTON_CLASS =
+    'flex min-h-[60px] w-full cursor-pointer items-center justify-between gap-3 px-1 py-2 text-left text-ink transition-colors hover:bg-ink/5 disabled:cursor-default disabled:opacity-50';
+
+const EYEBROW_CLASS = 'text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-muted';
+
+const RowChevron = () => (
+    <span className="flex-none text-ink-muted">
+        <ChevronRightIcon size={18} aria-hidden="true" />
+    </span>
+);
 
 const setsEqual = (a: Set<string>, b: Set<string>): boolean => {
     if (a.size !== b.size) {
@@ -455,22 +477,27 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         const parsed = displayWorkTitle(hit.title);
         const composer = hit.composer ?? parsed.composer;
         return (
-            <li key={`${hit.pageid}-${hit.title}`}>
+            <li key={`${hit.pageid}-${hit.title}`} className="break-inside-avoid border-t border-hairline">
                 <button
                     type="button"
                     onClick={() => onSelectTitle(hit.title)}
                     disabled={disabled}
-                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
+                    className={ROW_BUTTON_CLASS}
                 >
-                    <span className="text-sm font-medium text-stone-800">{highlightMatches(parsed.work, tokens)}</span>
-                    {composer ? (
-                        <span className="text-xs text-stone-500">{highlightMatches(composer, tokens)}</span>
-                    ) : null}
-                    {hit.snippet ? (
-                        <span className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-stone-500/90">
-                            {hit.snippet}
-                        </span>
-                    ) : null}
+                    <span className="min-w-0">
+                        <span className="block text-base font-semibold">{highlightMatches(parsed.work, tokens)}</span>
+                        {composer ? (
+                            <span className="mt-0.5 block text-[13px] text-ink-muted">
+                                {highlightMatches(composer, tokens)}
+                            </span>
+                        ) : null}
+                        {hit.snippet ? (
+                            <span className="mt-0.5 line-clamp-2 text-[13px] leading-relaxed text-ink-muted">
+                                {hit.snippet}
+                            </span>
+                        ) : null}
+                    </span>
+                    <RowChevron />
                 </button>
             </li>
         );
@@ -505,10 +532,11 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     let cardIndex = 0;
 
     return (
-        <div className="mt-4">
+        <div>
             <div className="imslp-search-sticky">
                 <form
                     role="search"
+                    className="relative"
                     onSubmit={(e) => {
                         e.preventDefault();
                         submitNow();
@@ -517,6 +545,11 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     <label className="sr-only" htmlFor={searchId}>
                         Search scores by composer or piece
                     </label>
+                    <SearchIcon
+                        size={18}
+                        aria-hidden="true"
+                        className="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-ink-muted"
+                    />
                     <input
                         ref={searchRef}
                         id={searchId}
@@ -528,42 +561,48 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                             setIgnoreQueryPeriod(false);
                         }}
                         placeholder="Beethoven moonlight, bolero, Chopin nocturne…"
-                        className={fieldClassName('sm')}
+                        className={SEARCH_FIELD_CLASS}
                         autoComplete="off"
                         enterKeyHint="search"
                     />
                 </form>
 
-                <div className="mt-2 flex items-center justify-between gap-3">
-                    <p className="text-xs text-stone-500" aria-live="polite">
-                        {statusLine}
-                    </p>
-                    {/* Never disabled with the panel: switching views is free. */}
-                    <ViewToggle view={view} onChange={changeView} />
+                <div className={TOGGLE_FIRST_IN_TAB_ORDER_FACETS_DRAWN_LEFT_CLASS}>
+                    <div className="flex items-center justify-between gap-3.5 sm:justify-end">
+                        <p className="text-sm tabular-nums text-ink-muted" aria-live="polite">
+                            {statusLine}
+                        </p>
+                        {/* Never disabled with the panel: switching views is free. */}
+                        <ViewToggle view={view} onChange={changeView} />
+                    </div>
+                    <div role="group" aria-label="Filter by" className={`${chipRowClassName} min-w-0 sm:mr-auto`}>
+                        {FACET_DIMENSIONS.map((dim) => (
+                            <button
+                                key={dim.id}
+                                type="button"
+                                aria-pressed={dimension === dim.id}
+                                className={chipClassName(dimension === dim.id)}
+                                onClick={() => setDimension(dim.id)}
+                                disabled={disabled}
+                            >
+                                {dim.label}
+                            </button>
+                        ))}
+                        {!isDefaultState ? (
+                            <button
+                                type="button"
+                                className={chipClassName(false)}
+                                onClick={resetToDefault}
+                                disabled={disabled}
+                            >
+                                Reset
+                            </button>
+                        ) : null}
+                    </div>
                 </div>
             </div>
 
-            <div role="group" aria-label="Filter by" className={`${chipRowClassName} mt-2.5`}>
-                {FACET_DIMENSIONS.map((dim) => (
-                    <button
-                        key={dim.id}
-                        type="button"
-                        aria-pressed={dimension === dim.id}
-                        className={chipClassName(dimension === dim.id)}
-                        onClick={() => setDimension(dim.id)}
-                        disabled={disabled}
-                    >
-                        {dim.label}
-                    </button>
-                ))}
-                {!isDefaultState ? (
-                    <button type="button" className={chipClassName(false)} onClick={resetToDefault} disabled={disabled}>
-                        Reset
-                    </button>
-                ) : null}
-            </div>
-
-            <div role="group" aria-label={`${dimension} values`} className={`${chipRowClassName} mt-1.5`}>
+            <div role="group" aria-label={`${dimension} values`} className={`${chipRowClassName} mt-3`}>
                 {valueFacets.map((value) => (
                     <button
                         key={value.id}
@@ -580,13 +619,13 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 ))}
             </div>
             {dimensionFull ? (
-                <p className="mt-1.5 text-xs text-stone-500">
+                <p className="mt-2 text-[13px] text-ink-muted">
                     Up to {MAX_FILTERS_PER_DIMENSION} per group — unselect one to choose another.
                 </p>
             ) : null}
 
             {showResults && (q.length >= 2 || categoryBackedFilters(filters)) ? (
-                <div role="group" aria-label="Sort results" className={`${chipRowClassName} mt-1.5`}>
+                <div role="group" aria-label="Sort results" className={`${chipRowClassName} mt-3`}>
                     {(
                         [
                             { id: 'relevance' as const, label: 'Best' },
@@ -609,82 +648,95 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             ) : null}
 
             {liveError ? (
-                <div className="mt-3 flex flex-wrap items-center gap-3">
+                <div className="mt-6 flex flex-wrap items-center gap-3 border-y border-hairline px-1 py-3">
                     <ErrorText>{liveError}</ErrorText>
-                    <Button variant="ghost" size="sm" onClick={searchNow}>
+                    <Button variant="secondary" size="sm" onClick={searchNow}>
                         Try again
                     </Button>
                 </div>
             ) : null}
 
             {isLiveQuery && relaxedHint && (results?.length ?? 0) > 0 ? (
-                <p className="mt-2 text-xs text-stone-500">{relaxedHint}</p>
+                <p className="mt-3 text-[13px] text-ink-muted">{relaxedHint}</p>
             ) : null}
 
             {showCurated ? (
-                <div key="popular" className="imslp-panel-view mt-4">
-                    <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">Popular</h3>
-                    {curatedGroups.map((group) => (
-                        <div key={group.composer} className="mt-3 first:mt-1">
-                            <h4 className="text-xs font-medium text-stone-400">{group.composer}</h4>
-                            <ul className={view === 'grid' ? `mt-2 ${GRID_UL_CLASS}` : ''}>
-                                {group.works.map((item: PopularWork) =>
-                                    view === 'grid' ? (
-                                        // Composer omitted on the card — the group
-                                        // heading above already says it (the same
-                                        // reasoning as the library's stripComposer).
-                                        <ImslpScoreCard
-                                            key={`${item.label}-${item.title}`}
-                                            index={cardIndex++}
-                                            coverTitle={item.label}
-                                            coverComposer={null}
-                                            title={item.label}
-                                            tags={popularWorkTags(item)}
-                                            description={item.note ?? null}
-                                            disabled={disabled}
-                                            onClick={() => onSelectTitle(item.title)}
-                                        />
-                                    ) : (
-                                        <li key={`${item.label}-${item.title}`}>
-                                            <button
-                                                type="button"
-                                                onClick={() => onSelectTitle(item.title)}
+                <div key="popular" className="imslp-panel-view mt-9">
+                    <h3 className={EYEBROW_CLASS}>Popular</h3>
+                    <div className={view === 'grid' ? 'mt-[18px]' : `mt-[18px] ${COLUMNS_CLASS}`}>
+                        {curatedGroups.map((group) => (
+                            <section key={group.composer} className="mb-7 break-inside-avoid">
+                                <h4 className="display-opsz text-balance font-display text-2xl leading-[1.15] font-semibold tracking-[-0.01em] text-ink">
+                                    {group.composer}
+                                </h4>
+                                <ul className={view === 'grid' ? `mt-3 ${GRID_UL_CLASS}` : `mt-3 ${RULED_UL_CLASS}`}>
+                                    {group.works.map((item: PopularWork) =>
+                                        view === 'grid' ? (
+                                            // Composer omitted on the card — the group
+                                            // heading above already says it (the same
+                                            // reasoning as the library's stripComposer).
+                                            <ImslpScoreCard
+                                                key={`${item.label}-${item.title}`}
+                                                index={cardIndex++}
+                                                coverTitle={item.label}
+                                                coverComposer={null}
+                                                title={item.label}
+                                                tags={popularWorkTags(item)}
+                                                description={item.note ?? null}
                                                 disabled={disabled}
-                                                className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
+                                                onClick={() => onSelectTitle(item.title)}
+                                            />
+                                        ) : (
+                                            <li
+                                                key={`${item.label}-${item.title}`}
+                                                className="border-t border-hairline"
                                             >
-                                                <span className="text-sm font-medium text-stone-800">{item.label}</span>
-                                                <span className="text-xs text-stone-500">
-                                                    {item.composer}
-                                                    {item.note ? ` · ${item.note}` : ''}
-                                                </span>
-                                            </button>
-                                        </li>
-                                    ),
-                                )}
-                            </ul>
-                        </div>
-                    ))}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onSelectTitle(item.title)}
+                                                    disabled={disabled}
+                                                    className={ROW_BUTTON_CLASS}
+                                                >
+                                                    <span className="min-w-0">
+                                                        <span className="block text-base font-semibold">
+                                                            {item.label}
+                                                        </span>
+                                                        <span className="mt-0.5 block text-[13px] text-ink-muted">
+                                                            {item.composer}
+                                                            {item.note ? ` · ${item.note}` : ''}
+                                                        </span>
+                                                    </span>
+                                                    <RowChevron />
+                                                </button>
+                                            </li>
+                                        ),
+                                    )}
+                                </ul>
+                            </section>
+                        ))}
+                    </div>
                 </div>
             ) : null}
 
             {showResults && results.length === 0 && !searching && !liveError ? (
-                <EmptyState
-                    className="imslp-panel-view mt-8"
-                    title={!indexReady ? 'Preparing scores' : 'No matches'}
-                    body={
-                        !indexReady
-                            ? `We’re still preparing scores for ${indexLabel}. Try typing a title.`
-                            : q.length >= 2
-                              ? `No scores match “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
-                              : `No scores are in all of: ${emptyParts.join(' · ') || 'these filters'}.`
-                    }
-                >
-                    {!isDefaultState ? (
-                        <Button variant="ghost" size="sm" onClick={resetToDefault}>
-                            Reset filters
-                        </Button>
-                    ) : null}
-                </EmptyState>
+                <div className="imslp-panel-view mt-9 border-y border-hairline px-1 py-12">
+                    <EmptyState
+                        title={!indexReady ? 'Preparing scores' : 'No matches'}
+                        body={
+                            !indexReady
+                                ? `We’re still preparing scores for ${indexLabel}. Try typing a title.`
+                                : q.length >= 2
+                                  ? `No scores match “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
+                                  : `No scores are in all of: ${emptyParts.join(' · ') || 'these filters'}.`
+                        }
+                    >
+                        {!isDefaultState ? (
+                            <Button variant="secondary" size="sm" onClick={resetToDefault}>
+                                Reset filters
+                            </Button>
+                        ) : null}
+                    </EmptyState>
+                </div>
             ) : null}
 
             {showResults && results.length > 0 ? (
@@ -694,18 +746,26 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     // Keyed on q, every keystroke remounted it and replayed the entrance.
                     key="results"
                     aria-busy={searching}
-                    className={`imslp-panel-view mt-3 transition-opacity ${searching ? 'opacity-60' : ''}`}
+                    className={`imslp-panel-view mt-9 transition-opacity ${searching ? 'opacity-60' : ''}`}
                 >
-                    <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">Best matches</h3>
-                    <ul className={view === 'grid' ? `mt-3 ${GRID_UL_CLASS}` : 'mt-1'}>
+                    <h3 className={EYEBROW_CLASS}>Best matches</h3>
+                    <ul
+                        className={
+                            view === 'grid' ? `mt-[18px] ${GRID_UL_CLASS}` : `mt-3 ${COLUMNS_CLASS} ${RULED_UL_CLASS}`
+                        }
+                    >
                         {best.map((hit, i) => (view === 'grid' ? renderHitCard(hit, i) : renderHit(hit)))}
                     </ul>
                     {more.length > 0 ? (
                         <>
-                            <h3 className="mt-4 text-xs font-medium uppercase tracking-wide text-stone-500">
-                                More scores
-                            </h3>
-                            <ul className={view === 'grid' ? `mt-3 ${GRID_UL_CLASS}` : 'mt-1'}>
+                            <h3 className={`mt-9 ${EYEBROW_CLASS}`}>More scores</h3>
+                            <ul
+                                className={
+                                    view === 'grid'
+                                        ? `mt-[18px] ${GRID_UL_CLASS}`
+                                        : `mt-3 ${COLUMNS_CLASS} ${RULED_UL_CLASS}`
+                                }
+                            >
                                 {more.map((hit, i) =>
                                     view === 'grid' ? renderHitCard(hit, best.length + i) : renderHit(hit),
                                 )}
@@ -713,15 +773,15 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                         </>
                     ) : null}
                     {hasMore ? (
-                        <div className="mt-3">
-                            <Button variant="ghost" size="sm" onClick={showMore} disabled={searching}>
+                        <div className="mt-4">
+                            <Button variant="secondary" size="sm" onClick={showMore} disabled={searching}>
                                 Show more
                             </Button>
                         </div>
                     ) : null}
                 </div>
             ) : null}
-            <p className="mt-6 text-xs text-stone-500">Public-domain scores via IMSLP</p>
+            <p className="mt-8 text-[13px] text-ink-muted">Public-domain scores via IMSLP</p>
         </div>
     );
 };
