@@ -1,5 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
+import type * as Uifuzz from '../../scripts/ui/uifuzz.mjs';
 import { API, reply, STUB_ENTITLEMENTS, stubApi } from '../../scripts/ui/uifuzz.mjs';
 
 type Fulfilled = { status: number; body: string };
@@ -35,5 +39,37 @@ describe('stubApi', () => {
     it.each(RPCS)('lets a short suffix caller handler for %s win over the default', async (path) => {
         const suffix = path.slice(path.lastIndexOf('_'));
         expect(await answer(path, { [suffix]: { tier: 'free' } })).toEqual({ status: 200, body: { tier: 'free' } });
+    });
+});
+
+const DECLARED: Record<keyof typeof Uifuzz, true> = {
+    ACCOUNTS: true,
+    API: true,
+    BASE: true,
+    SHOTS: true,
+    STUB_ENTITLEMENTS: true,
+    STUB_USER: true,
+    VIEWPORTS: true,
+    audit: true,
+    close: true,
+    login: true,
+    open: true,
+    reply: true,
+    shot: true,
+    stubApi: true,
+};
+
+describe('uifuzz type declarations', () => {
+    it('declare every runtime export', async () => {
+        expect(Object.keys(await import('../../scripts/ui/uifuzz.mjs')).sort()).toEqual(Object.keys(DECLARED).sort());
+    });
+
+    it('declare every helper the ui-check skill tells agents to import', () => {
+        const skill = readFileSync(resolve(process.cwd(), '.claude/skills/ui-check/SKILL.md'), 'utf8');
+        const documented = [...skill.matchAll(/import\s*{([^}]*)}\s*from\s*'[^']*scripts\/ui\/uifuzz\.mjs'/g)].flatMap(
+            ([, names]) => names!.split(',').map((name) => name.trim()),
+        );
+        expect(documented.length).toBeGreaterThan(0);
+        expect(documented.filter((name) => !(name in DECLARED))).toEqual([]);
     });
 });
