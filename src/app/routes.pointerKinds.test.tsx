@@ -60,7 +60,7 @@ const pressTryItNow = async (pointerType: 'touch' | 'pen') => {
         tryItNow!.dispatchEvent(new PointerEvent('pointerdown', { pointerType, button: 0, bubbles: true }));
         tryItNow!.dispatchEvent(new PointerEvent('pointerup', { pointerType, button: 0, bubbles: true }));
     });
-    fireEvent.click(tryItNow!);
+    fireEvent(tryItNow!, new PointerEvent('click', { pointerType, button: 0, bubbles: true, cancelable: true }));
     await screen.findByRole('button', { name: 'Pen' });
 };
 

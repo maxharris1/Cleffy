@@ -56,9 +56,12 @@ describe('ViewerHeader, the pointers seen in the viewer', () => {
         expect(useViewerStore.getState()).toMatchObject({ penSeen: true, touchSeen: false });
     });
 
-    it('records a touch', () => {
+    it('records a touch once its tap has clicked', () => {
         renderHeader();
         fireEvent.pointerDown(document.body, { pointerType: 'touch' });
+        fireEvent.pointerUp(document.body, { pointerType: 'touch' });
+        expect(useViewerStore.getState().touchSeen).toBe(false);
+        fireEvent(document.body, new PointerEvent('click', { bubbles: true, pointerType: 'touch' }));
         expect(useViewerStore.getState()).toMatchObject({ penSeen: false, touchSeen: true });
     });
 
