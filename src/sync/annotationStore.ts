@@ -1,5 +1,5 @@
 import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
-import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/viewer/ink/undoStack';
+import { UndoStack, type UndoableOp, type UndoBatchHandle, type UndoSlot } from '@/features/viewer/ink/undoStack';
 import type { LocalAnnotation, ScribblerDb } from '@/sync/db';
 import {
     baseOf,
@@ -1197,7 +1197,7 @@ export class AnnotationStore {
             const preEdit = options.recordUndo ? this.startingPointFor(author) : [];
             this.applyLocal(op.annotation);
             if (options.recordUndo) {
-                this.pushCommitInverse(op);
+                this.pushCommitInverse(op, null);
                 try {
                     await this.captureStartingPoint(author, preEdit, live);
                 } catch (err) {
@@ -1234,6 +1234,7 @@ export class AnnotationStore {
         }
 
         const { annotation } = op;
+        const slotInFrameOpenAtStart = options.recordUndo ? this.undo.reserve() : null;
 
         // From here the edit is unsaved (see hasUnsavedEdit), though it is
         // not drawn until the snapshot below is checked: a reconcile of this
@@ -1256,6 +1257,7 @@ export class AnnotationStore {
                     if (live()) {
                         noteRefusedEdit(this.db, author, this.docId, preEdit);
                     }
+                    this.undo.release(slotInFrameOpenAtStart);
                     this.notifyMeta();
                     throw err;
                 }
@@ -1266,6 +1268,7 @@ export class AnnotationStore {
             // the edit apply once its account has signed out, or memory been
             // reset for another account: it was never drawn, so nothing is lost.
             if (!live() || generation !== this.generation || !this.stillApplies(op)) {
+                this.undo.release(slotInFrameOpenAtStart);
                 return false;
             }
 
@@ -1285,7 +1288,7 @@ export class AnnotationStore {
 
         // 2. Inverse for undo.
         if (options.recordUndo) {
-            this.pushCommitInverse(op);
+            this.pushCommitInverse(op, slotInFrameOpenAtStart);
         }
 
         // 3. Durable mirror + outbox, atomically. 4. Repaint — memory has the
@@ -1344,19 +1347,19 @@ export class AnnotationStore {
         }
     }
 
-    private pushCommitInverse(op: CommitOp): void {
+    private pushCommitInverse(op: CommitOp, slot: UndoSlot | null): void {
         switch (op.type) {
             case 'create':
-                this.undo.pushInverse({ type: 'delete', id: op.annotation.id });
+                this.undo.fill(slot, { type: 'delete', id: op.annotation.id });
                 return;
             case 'update':
-                this.undo.pushInverse({ type: 'update', id: op.annotation.id, annotation: op.prev });
+                this.undo.fill(slot, { type: 'update', id: op.annotation.id, annotation: op.prev });
                 return;
             case 'delete':
-                this.undo.pushInverse({ type: 'restore', id: op.annotation.id });
+                this.undo.fill(slot, { type: 'restore', id: op.annotation.id });
                 return;
             case 'restore':
-                this.undo.pushInverse({ type: 'delete', id: op.annotation.id });
+                this.undo.fill(slot, { type: 'delete', id: op.annotation.id });
                 return;
             default: {
                 const _exhaustive: never = op;

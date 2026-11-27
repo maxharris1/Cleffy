@@ -145,3 +145,60 @@ describe('InkController ends a gesture with the tool that began it', () => {
         expect(strokesShown()).toBe(1);
     });
 });
+
+describe('InkController erase undo batch', () => {
+    const eraseFirstTwoOfThree = async () => {
+        drawStroke(100, 300);
+        drawStroke(300, 300);
+        drawStroke(500, 300);
+        await settle();
+        expect(strokesShown()).toBe(3);
+        useViewerStore.getState().setTool('eraser');
+        ink.delegate.onInkDown(pointer(110, 302));
+        ink.delegate.onInkMove(pointer(130, 304));
+        await settle();
+        expect(strokesShown()).toBe(2);
+        ink.delegate.onInkMove(pointer(310, 302));
+        ink.delegate.onInkMove(pointer(330, 304));
+    };
+
+    it('one undo restores every mark the gesture erased when the stylus lifts before the last delete lands', async () => {
+        await eraseFirstTwoOfThree();
+        ink.delegate.onInkUp(pointer(330, 304));
+        await settle();
+        expect(strokesShown()).toBe(1);
+
+        await store.undoLast();
+        await settle();
+        expect(strokesShown()).toBe(3);
+    });
+
+    it('one undo restores every mark the gesture erased when the gesture is cancelled before the last delete lands', async () => {
+        await eraseFirstTwoOfThree();
+        ink.delegate.onInkCancel(pointer(330, 304));
+        await settle();
+        expect(strokesShown()).toBe(1);
+
+        await store.undoLast();
+        await settle();
+        expect(strokesShown()).toBe(3);
+    });
+
+    it('undo and redo replay a settled erase as one step', async () => {
+        await eraseFirstTwoOfThree();
+        await settle();
+        ink.delegate.onInkUp(pointer(330, 304));
+        await settle();
+        expect(strokesShown()).toBe(1);
+
+        await store.undoLast();
+        await settle();
+        expect(strokesShown()).toBe(3);
+        await store.redoLast();
+        await settle();
+        expect(strokesShown()).toBe(1);
+        await store.undoLast();
+        await settle();
+        expect(strokesShown()).toBe(3);
+    });
+});
