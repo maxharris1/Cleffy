@@ -246,6 +246,7 @@ export const RosterPage = () => {
             return;
         }
         setStudents(roster);
+        setLoadError(null);
         persistRoster(userId, roster, currentCounts());
     };
     const reloadAssignments = async () => {
@@ -448,13 +449,7 @@ export const RosterPage = () => {
                         <p className="mt-2">{UNDER_AGE_TEACHER_NOTE}</p>
                     </div>
                 ) : (
-                    <EmptyState
-                        className="mt-10"
-                        title="Your plan doesn’t include students"
-                        body="Teacher and Academy add a roster: each student gets their own sign-in, and you assign scores straight from your library."
-                    >
-                        <Button onClick={openPricing}>See plans</Button>
-                    </EmptyState>
+                    <NoRosterOnPlan onSeePlans={openPricing} />
                 )
             ) : (
                 <section className="mt-8">
@@ -607,6 +602,16 @@ export const RosterPage = () => {
         </div>
     );
 };
+
+export const NoRosterOnPlan = ({ onSeePlans }: { onSeePlans: () => void }) => (
+    <EmptyState
+        className="mt-10"
+        title="Your plan doesn’t include students"
+        body="Teacher and Academy add a roster: each student gets their own sign-in, and you assign scores straight from your library."
+    >
+        <Button onClick={onSeePlans}>See plans</Button>
+    </EmptyState>
+);
 
 /**
  * Adds one student.

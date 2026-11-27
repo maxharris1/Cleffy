@@ -482,6 +482,18 @@ body {
 }
 
 /*
+ * Unlayered on purpose: Tailwind 4 puts its utilities in `@layer utilities`,
+ * and this has to outrank the margin utilities on whatever follows the head.
+ * Two levels down too: Account and Search wrap their first content, and a
+ * nested top margin collapses through the wrapper into the head's gap.
+ */
+.page-head + *,
+.page-head + * > :first-child,
+.page-head + * > :first-child > :first-child {
+    margin-top: 0;
+}
+
+/*
  * Upload progress hugging the bottom edge of the top bar. The shared
  * ProgressBar is a standalone pill (h-1.5, rounded, grey track); pinned to a
  * hairline border it has to read as part of that border instead, so the track

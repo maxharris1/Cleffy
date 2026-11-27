@@ -226,6 +226,31 @@ describe('RosterPage', () => {
         }
     });
 
+    it('shows the counts again once a later roster load succeeds after a failed first load', async () => {
+        await getDb().rosterCache.put({
+            userId: 'teacher-1',
+            students: [student('s1', 'Ada Lovelace')],
+            assignmentCounts: [],
+            cachedAt: '2026-08-29T00:00:00Z',
+        });
+        listRoster.mockRejectedValueOnce(new Error('network down')).mockResolvedValue([]);
+        listAssignmentsForStudents.mockRejectedValueOnce(new Error('network down')).mockResolvedValue(new Map());
+        deleteStudent.mockResolvedValue(undefined);
+        try {
+            const user = userEvent.setup();
+            renderRoster();
+            await screen.findByText('network down');
+
+            await pickRowAction(user, 'Delete student…');
+            const dialog = await screen.findByRole('alertdialog', { name: 'Delete this student?' });
+            await user.click(within(dialog).getByRole('button', { name: 'Delete student' }));
+
+            expect(await screen.findByText('0 students · 0 still to set up')).toBeInTheDocument();
+        } finally {
+            await getDb().rosterCache.clear();
+        }
+    });
+
     it('provisions a code student and shows the setup code once, on a printable card', async () => {
         const user = userEvent.setup();
         provisionStudent.mockResolvedValue({
