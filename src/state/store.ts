@@ -215,11 +215,7 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
 /* Chromium hit-tests a tap again for its click, after the press. */
 const TOUCH_PRESS_SETTLE_MS = 500;
 
-/**
- * Notes the kind of every press in the session, wherever on the page it lands.
- * A touch counts once its press is over (its click, a cancel, or a beat after
- * the finger lifts), so the toolbar it reshapes cannot move under the tap.
- */
+/** Notes the kind of every press in the session, wherever on the page it lands. */
 export const trackPointerKinds = (doc: Document): (() => void) => {
     let touchPressed = false;
     let settle: ReturnType<typeof setTimeout> | undefined;
