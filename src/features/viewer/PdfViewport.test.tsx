@@ -363,11 +363,13 @@ const ViewerUnderNotices = ({
     playback,
     onStore,
     rejected,
+    docId = 'doc-notices',
 }: {
     readOnly?: boolean;
     playback?: PlaybackFeature;
     onStore?: (store: AnnotationStore) => void;
     rejected?: boolean;
+    docId?: string;
 }) => {
     const [inset, setInset] = useState(0);
     const [shown, setShowRejected] = useState(true);
@@ -382,7 +384,7 @@ const ViewerUnderNotices = ({
                 <SyncHeldNotice count={3} />
             </ViewerNoticeRegion>
             <PdfViewport
-                docId="doc-notices"
+                docId={docId}
                 readOnly={readOnly}
                 noticeInset={inset}
                 playback={playback}
@@ -685,7 +687,7 @@ describe('PdfViewport when a notice goes away', () => {
             const frames = manualFrames();
             let store: AnnotationStore | null = null;
             viewport = PHONE;
-            render(<ViewerUnderNotices readOnly={false} onStore={(s) => (store = s)} />);
+            render(<ViewerUnderNotices readOnly={false} docId={crypto.randomUUID()} onStore={(s) => (store = s)} />);
             await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
             await waitFor(() => expect(store).not.toBeNull());
             const create = vi.spyOn(store as unknown as AnnotationStore, 'create');
@@ -921,7 +923,7 @@ describe('PdfViewport with no tool in hand', () => {
     it.each(['mouse', 'touch'])('scrolls the score under a %s drag and inks nothing', async (pointerType) => {
         viewport = { width: 390, height: 664 };
         let store: AnnotationStore | null = null;
-        render(<ViewerUnderNotices readOnly={false} onStore={(s) => (store = s)} />);
+        render(<ViewerUnderNotices readOnly={false} docId={crypto.randomUUID()} onStore={(s) => (store = s)} />);
         await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
         await waitFor(() => expect(store).not.toBeNull());
         const create = vi.spyOn(store as unknown as AnnotationStore, 'create');
@@ -961,28 +963,31 @@ describe('PdfViewport Space-held panning', () => {
     const renderEditable = async () => {
         viewport = { width: 390, height: 664 };
         let store: AnnotationStore | null = null;
-        render(<ViewerUnderNotices readOnly={false} onStore={(s) => (store = s)} />);
+        render(<ViewerUnderNotices readOnly={false} docId={crypto.randomUUID()} onStore={(s) => (store = s)} />);
         await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
         await waitFor(() => expect(store).not.toBeNull());
         return vi.spyOn(store as unknown as AnnotationStore, 'create');
     };
 
     let nextPointerId = 10;
-    const mouseDrag = (dy: number) => {
+    const mousePointer = (x = 200) => {
         const pointerId = nextPointerId++;
-        const at = (type: string, y: number) =>
+        return (type: string, y: number) =>
             act(() => {
                 document.querySelector('.ink-surface')!.dispatchEvent(
                     new PointerEvent(type, {
                         pointerId,
                         pointerType: 'mouse',
                         buttons: type === 'pointerup' ? 0 : 1,
-                        clientX: 200,
+                        clientX: x,
                         clientY: y,
                         bubbles: true,
                     }),
                 );
             });
+    };
+    const mouseDrag = (dy: number, x = 200) => {
+        const at = mousePointer(x);
         at('pointerdown', 400);
         at('pointermove', 400 + dy / 2);
         at('pointermove', 400 + dy);
@@ -1035,6 +1040,44 @@ describe('PdfViewport Space-held panning', () => {
         expect(view().scrollY).toBe(start);
     });
 
+    it('turns no page when a short Space-drag ends in the edge strip', async () => {
+        await renderEditable();
+        viewport = { width: 800, height: 600 };
+        act(() => useViewerStore.setState({ tool: 'pen' }));
+        const start = view().scrollY;
+        fireEvent.keyDown(document.body, { key: ' ' });
+        mouseDrag(-6, 769);
+        expect(view().scrollY).toBeCloseTo(start + 6);
+        fireEvent.keyUp(document.body, { key: ' ' });
+        expect(view().scrollY).toBeCloseTo(start + 6);
+    });
+
+    it('keeps the pan when Space is released and pressed again before the mouse comes up', async () => {
+        await renderEditable();
+        const start = view().scrollY;
+        const at = mousePointer();
+        fireEvent.keyDown(document.body, { key: ' ' });
+        at('pointerdown', 400);
+        at('pointermove', 370);
+        fireEvent.keyUp(document.body, { key: ' ' });
+        fireEvent.keyDown(document.body, { key: ' ' });
+        at('pointermove', 340);
+        at('pointerup', 340);
+        fireEvent.keyUp(document.body, { key: ' ' });
+        expect(view().scrollY).toBeCloseTo(start + 60);
+    });
+
+    it('still turns a page on a later Space tap after a Space-drag', async () => {
+        await renderEditable();
+        fireEvent.keyDown(document.body, { key: ' ' });
+        mouseDrag(-40);
+        fireEvent.keyUp(document.body, { key: ' ' });
+        const panned = view().scrollY;
+        fireEvent.keyDown(document.body, { key: ' ' });
+        fireEvent.keyUp(document.body, { key: ' ' });
+        expect(view().scrollY).toBeGreaterThan(panned + 40);
+    });
+
     it('wheel scrolling is unchanged', async () => {
         await renderEditable();
         const start = view().scrollY;
@@ -1077,6 +1120,35 @@ describe('PdfViewport Space-held panning', () => {
             expect(note.value).toBe('a b');
             fireEvent.keyUp(note, { key: ' ' });
             expect(note.value).toBe('a b');
+        });
+
+        it('types nothing when Shift comes down during a Space-drag with the caret between a and b', async () => {
+            const { create, note } = await openNote();
+            const start = view().scrollY;
+            fireEvent.keyDown(note, { key: ' ' });
+            fireEvent.keyDown(note, { key: 'Shift', shiftKey: true });
+            mouseDrag(-80);
+            expect(view().scrollY).toBeCloseTo(start + 80);
+            fireEvent.keyUp(document.body, { key: ' ' });
+            expect(note.value).toBe('ab');
+            fireEvent.blur(note);
+            await waitFor(() => expect(create).toHaveBeenCalled());
+            expect(create.mock.calls[0]![0]).toMatchObject({ payload: { text: 'ab' } });
+        });
+
+        it('keeps selected text when Shift comes down during a Space-drag', async () => {
+            const { create, note } = await openNote();
+            note.setSelectionRange(0, 2);
+            const start = view().scrollY;
+            fireEvent.keyDown(note, { key: ' ' });
+            fireEvent.keyDown(note, { key: 'Shift', shiftKey: true });
+            mouseDrag(-80);
+            expect(view().scrollY).toBeCloseTo(start + 80);
+            fireEvent.keyUp(document.body, { key: ' ' });
+            expect(note.value).toBe('ab');
+            fireEvent.blur(note);
+            await waitFor(() => expect(create).toHaveBeenCalled());
+            expect(create.mock.calls[0]![0]).toMatchObject({ payload: { text: 'ab' } });
         });
 
         it('never types the space when the score is dragged while it is held', async () => {

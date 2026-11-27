@@ -313,10 +313,10 @@ export const PdfViewport = ({
     const viewportSizeRef = useRef(viewportSize);
     const obscuredRef = useRef(obscured);
     const readOnlyRef = useRef(effectiveReadOnly);
-    const spaceRef = useRef<{ held: boolean; turnOnRelease: -1 | 1 | null; pannedWhileHeld: boolean }>({
+    const spaceRef = useRef<{ held: boolean; turnOnRelease: -1 | 1 | null; panGesture: boolean }>({
         held: false,
         turnOnRelease: null,
-        pannedWhileHeld: false,
+        panGesture: false,
     });
     const renderScaleRef = useRef(renderScale);
     const playbackRef = useRef(playback);
@@ -1033,6 +1033,9 @@ export const PdfViewport = ({
                     }
                     return;
                 }
+                if (spaceRef.current.panGesture) {
+                    return;
+                }
                 // A tap in the margin strip turns the page, whatever the tool:
                 // only pointers the ink layer declined get here.
                 const strip = edgeTapStripPx(viewportSizeRef.current.width);
@@ -1244,25 +1247,26 @@ export const PdfViewport = ({
         };
         const onSpaceDownBeforeTextNote = (e: KeyboardEvent) => {
             if (e.key === ' ' && !e.repeat) {
-                spaceRef.current = { held: true, turnOnRelease: null, pannedWhileHeld: false };
+                const panGesture = spaceRef.current.panGesture && gestureRef.current?.pointerActive === true;
+                spaceRef.current = { held: true, turnOnRelease: null, panGesture };
             }
         };
         const onKeyUp = (e: KeyboardEvent) => {
             if (e.key !== ' ') {
                 return;
             }
-            const { turnOnRelease, pannedWhileHeld } = spaceRef.current;
-            spaceRef.current = { held: false, turnOnRelease: null, pannedWhileHeld };
-            if (turnOnRelease !== null && !pannedWhileHeld && !isDialogOpen()) {
+            const { turnOnRelease, panGesture } = spaceRef.current;
+            spaceRef.current = { held: false, turnOnRelease: null, panGesture };
+            if (turnOnRelease !== null && !panGesture && !isDialogOpen()) {
                 turnPage(turnOnRelease);
             }
         };
         const onBlur = () => {
-            spaceRef.current = { held: false, turnOnRelease: null, pannedWhileHeld: false };
+            spaceRef.current = { held: false, turnOnRelease: null, panGesture: false };
         };
         const onScorePointerDown = (e: PointerEvent) => {
-            if (spaceRef.current.held && !(e.target instanceof Element && e.target.closest('[data-ui-overlay]'))) {
-                spaceRef.current.pannedWhileHeld = true;
+            if (!(e.target instanceof Element && e.target.closest('[data-ui-overlay]'))) {
+                spaceRef.current.panGesture = spaceRef.current.held;
             }
         };
         const container = containerRef.current;

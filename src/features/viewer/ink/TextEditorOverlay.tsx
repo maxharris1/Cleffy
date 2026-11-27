@@ -37,6 +37,10 @@ export interface TextEditorOverlayProps {
 
 /** Gap (CSS px) the editor keeps from the viewer's right and bottom edges. */
 const VIEWPORT_MARGIN = 8;
+
+/** Keys that only qualify another key: holding one with Space types nothing yet. */
+const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'Fn', 'OS']);
+
 /** The textarea's p-1 padding plus its 1px border, both sides. */
 const BOX_EXTRA = 10;
 /** Smallest font (CSS px) the editor lays text out at; smaller notes are scaled down from it. */
@@ -217,7 +221,9 @@ export const TextEditorOverlay = ({
                     spacePending.current ||= !e.repeat;
                     return;
                 }
-                typePendingSpace(e.currentTarget);
+                if (!MODIFIER_KEYS.has(e.key)) {
+                    typePendingSpace(e.currentTarget);
+                }
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     commit(e.currentTarget.value);
