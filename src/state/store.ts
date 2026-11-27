@@ -217,23 +217,27 @@ const TOUCH_PRESS_SETTLE_MS = 500;
 
 /** Notes the kind of every press in the session, wherever on the page it lands. */
 export const trackPointerKinds = (doc: Document): (() => void) => {
-    let touchPressed = false;
+    const touchesDown = new Set<number>();
+    let touchUnrecorded = false;
     let settle: ReturnType<typeof setTimeout> | undefined;
-    const endTouchPress = () => {
+    const recordTouch = () => {
         clearTimeout(settle);
-        if (touchPressed) {
-            touchPressed = false;
+        if (touchUnrecorded) {
+            touchUnrecorded = false;
             useViewerStore.getState().notePointer('touch');
         }
     };
+    const isTouch = (e: Event) => (e as PointerEvent).pointerType === 'touch';
+    const lift = (e: Event) => isTouch(e) && touchesDown.delete((e as PointerEvent).pointerId) && !touchesDown.size;
     const listeners: [string, (e: Event) => void, boolean][] = [
         [
             'pointerdown',
             (e) => {
-                const { pointerType } = e as PointerEvent;
+                const { pointerType, pointerId } = e as PointerEvent;
                 if (pointerType === 'touch') {
                     clearTimeout(settle);
-                    touchPressed = true;
+                    touchesDown.add(pointerId);
+                    touchUnrecorded = true;
                 } else {
                     useViewerStore.getState().notePointer(pointerType);
                 }
@@ -242,16 +246,31 @@ export const trackPointerKinds = (doc: Document): (() => void) => {
         ],
         [
             'pointerup',
-            () => {
-                if (touchPressed) {
-                    clearTimeout(settle);
-                    settle = setTimeout(endTouchPress, TOUCH_PRESS_SETTLE_MS);
+            (e) => {
+                if (lift(e)) {
+                    settle = setTimeout(recordTouch, TOUCH_PRESS_SETTLE_MS);
                 }
             },
             true,
         ],
-        ['pointercancel', endTouchPress, true],
-        ['click', endTouchPress, false],
+        [
+            'pointercancel',
+            (e) => {
+                if (lift(e)) {
+                    recordTouch();
+                }
+            },
+            true,
+        ],
+        [
+            'click',
+            (e) => {
+                if (isTouch(e) && !touchesDown.size) {
+                    recordTouch();
+                }
+            },
+            false,
+        ],
     ];
     for (const [type, listener, capture] of listeners) doc.addEventListener(type, listener, { capture });
     return () => {

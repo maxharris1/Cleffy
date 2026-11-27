@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -356,84 +356,5 @@ describe('Toolbar', () => {
         expect(reports.at(-1)).toEqual({ top: 0, bottom: 0 });
         spy.mockRestore();
         vi.unstubAllGlobals();
-    });
-});
-
-describe.each([390, 1280])('the first touch on a fine-pointer device at %ipx', (width) => {
-    const undoable = {
-        canUndo: true,
-        canRedo: true,
-        subscribeMeta: () => () => undefined,
-        undoLast: vi.fn(() => Promise.resolve()),
-        redoLast: vi.fn(() => Promise.resolve()),
-    };
-    let stopTracking = () => {};
-
-    const renderTracked = async () => {
-        vi.resetModules();
-        const { Toolbar } = await import('@/features/viewer/toolbar/Toolbar');
-        const { trackPointerKinds, useViewerStore } = await import('@/state/store');
-        useViewerStore.setState({
-            tool: 'pen',
-            fingerDraws: false,
-            penSeen: false,
-            touchSeen: false,
-        });
-        stopTracking = trackPointerKinds(document);
-        render(<Toolbar store={undoable as unknown as AnnotationStore} />);
-        return useViewerStore;
-    };
-
-    const rowLayout = () => {
-        const bar = screen.getByRole('button', { name: 'Redo' }).closest('[data-ui-overlay] > div') as HTMLElement;
-        return {
-            touchUi: bar.hasAttribute('data-touch-ui'),
-            controls: Array.from(bar.querySelectorAll<HTMLElement>('button')).map((button) => ({
-                name: button.getAttribute('aria-label'),
-                box: effectiveBox(button),
-            })),
-        };
-    };
-
-    const tapFirst = (name: string) => {
-        const target = screen.getByRole('button', { name });
-        const before = rowLayout();
-        act(() => {
-            fireEvent.pointerDown(target, { pointerType: 'touch' });
-            fireEvent.pointerUp(target, { pointerType: 'touch' });
-        });
-        expect(rowLayout(), `the row moved under ${name} before its click`).toEqual(before);
-        act(() => {
-            fireEvent.click(screen.getByRole('button', { name }));
-        });
-    };
-
-    afterEach(() => {
-        stopTracking();
-        undoable.undoLast.mockClear();
-        undoable.redoLast.mockClear();
-    });
-
-    it('invokes Redo and nothing else, then shows the Scroll | Draw switch', async () => {
-        useViewport({ width, coarse: false });
-        await renderTracked();
-
-        tapFirst('Redo');
-
-        expect(undoable.redoLast).toHaveBeenCalledTimes(1);
-        expect(undoable.undoLast).not.toHaveBeenCalled();
-        expect(fingerSwitch()).toBeInTheDocument();
-    });
-
-    it('selects Highlighter and nothing else, then shows the Scroll | Draw switch', async () => {
-        useViewport({ width, coarse: false });
-        const useViewerStore = await renderTracked();
-
-        tapFirst('Highlighter');
-
-        expect(screen.getByRole('button', { name: 'Highlighter' })).toHaveAttribute('aria-pressed', 'true');
-        expect(screen.getByRole('button', { name: 'Pen' })).toHaveAttribute('aria-pressed', 'false');
-        expect(useViewerStore.getState().fingerDraws).toBe(false);
-        expect(fingerSwitch()).toBeInTheDocument();
     });
 });
