@@ -147,6 +147,20 @@
     padding-right: max(1.5rem, var(--safe-right));
 }
 
+.safe-split-pane {
+    padding-top: max(2.25rem, var(--safe-top));
+    padding-bottom: max(2rem, var(--safe-bottom));
+    padding-left: max(1.5rem, var(--safe-left));
+    padding-right: max(1.5rem, var(--safe-right));
+}
+
+@media (min-width: 64rem) {
+    .safe-split-pane {
+        padding-left: max(3.5rem, var(--safe-left));
+        padding-right: 3.5rem;
+    }
+}
+
 html,
 body,
 #root {
@@ -378,6 +392,20 @@ body {
 
 :where(.is-inview) .hero-chip {
     animation: hero-chip-in 0.35s var(--ease-out) var(--d, 0s) forwards;
+}
+
+.score-ink-still .hero-ink {
+    stroke-dashoffset: 0;
+    animation: none;
+}
+
+.score-ink-still .ink-write {
+    transform: none;
+    animation: none;
+}
+
+.score-ink-pending .font-hand {
+    visibility: hidden;
 }
 
 @keyframes hero-draw {

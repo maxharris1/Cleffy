@@ -5,20 +5,7 @@
  * live in @theme (index.css).
  */
 
-/*
- * Caveat (SIL OFL 1.1, src/assets/fonts/Caveat-OFL.txt), subset to Basic
- * Latin and typographic punctuation, weights 500 to 700: the page's
- * handwritten phrases and the notes on the score. Kept out of the service
- * worker's precache (vite.config.ts globIgnores): guests do not need it
- * offline. The notes on the score wait for it (useHandwritingReady).
- */
-@font-face {
-    font-family: 'Caveat';
-    font-style: normal;
-    font-weight: 500 700;
-    font-display: swap;
-    src: url('../../assets/fonts/caveat-latin-wght.woff2') format('woff2-variations');
-}
+@import './handwriting.css';
 
 /*
  * The page root. Optical size 10 on every Bodoni element: left alone, large
