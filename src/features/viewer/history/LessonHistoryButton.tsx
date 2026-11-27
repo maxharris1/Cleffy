@@ -115,49 +115,47 @@ const LessonHistoryDialog = ({
     };
 
     return (
-        <Dialog label="Lesson history" onClose={onClose} sheet>
-            <p className="-mt-2 text-xs text-stone-500">Starting point captured on first edit each day</p>
+        <Dialog label="Lesson history" onClose={onClose} sheet maxWidth={460}>
+            <p className="-mt-0.5 text-[15px] leading-normal text-pretty text-ink-muted">
+                Starting point captured on first edit each day
+            </p>
 
             {viewing ? (
-                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
-                    <p className="text-sm text-amber-900">Viewing a past starting point (read-only).</p>
-                    <button
-                        type="button"
-                        onClick={exitView}
-                        className="mt-2 rounded-lg bg-amber-800 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-amber-700"
-                    >
+                <div className="mt-4 rounded-[14px] border border-amber-200 bg-amber-50 px-4 py-3.5">
+                    <p className="text-[15px] leading-normal text-due">Viewing a past starting point (read-only).</p>
+                    <button type="button" onClick={exitView} className={buttonClassName('secondary', 'sm', 'mt-2.5')}>
                         Back to current
                     </button>
                 </div>
             ) : null}
 
-            <div className="mt-3">
+            <div className="mt-4">
                 {error ? <ErrorText className="mb-2">{error}</ErrorText> : null}
                 {rows === null ? (
                     <LoadingText className="text-sm">Loading…</LoadingText>
                 ) : rows.length === 0 ? (
-                    <p className="text-sm text-stone-600">
+                    <p className="text-[15px] leading-normal text-ink-muted">
                         No daily starting points yet. The first mark you make each day freezes that morning&apos;s state
                         automatically.
                     </p>
                 ) : (
                     <>
                         {rows.length >= SNAPSHOT_PULL_LIMIT ? (
-                            <p className="mb-2 text-xs text-stone-500">
+                            <p className="mb-2 text-[13px] text-ink-muted">
                                 Showing the latest {SNAPSHOT_PULL_LIMIT} starting points.
                             </p>
                         ) : null}
-                        <ul className="flex flex-col gap-2">
+                        <ul className="border-b border-hairline">
                             {rows.map((row) => (
                                 <li
                                     key={row.id}
-                                    className="flex flex-wrap items-center gap-2 rounded-xl border border-stone-200/80 px-3 py-2"
+                                    className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-hairline py-3"
                                 >
-                                    <div className="min-w-0 flex-1">
-                                        <p className="text-sm font-medium text-stone-800">
+                                    <div className="min-w-0 flex-[1_1_180px]">
+                                        <p className="text-[15px] font-semibold text-ink">
                                             {formatDay(row.capturedOn)}
                                         </p>
-                                        <p className="text-xs text-stone-500">
+                                        <p className="text-[13px] text-ink-muted tabular-nums">
                                             {row.payload.filter((a) => !a.deletedAt).length} marks
                                         </p>
                                     </div>
@@ -165,17 +163,16 @@ const LessonHistoryDialog = ({
                                         type="button"
                                         disabled={busy}
                                         onClick={() => void viewDay(row.id)}
-                                        className="rounded-lg px-2.5 py-1 text-sm text-accent transition-colors hover:bg-accent-soft disabled:opacity-50 pointer-coarse:min-h-11"
+                                        className={buttonClassName('accentGhost', 'sm')}
                                     >
                                         View
                                     </button>
                                     {canRestore ? (
                                         <Button
-                                            variant="ghost"
+                                            variant="secondary"
                                             size="sm"
                                             disabled={busy}
                                             onClick={() => setConfirmRestoreId(row.id)}
-                                            className="px-2.5 py-1 pointer-coarse:min-h-11"
                                         >
                                             Restore
                                         </Button>

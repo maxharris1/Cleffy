@@ -132,6 +132,26 @@ describe('ShareDialog for the owner', () => {
         expect(within(oldLink).getByRole('button', { name: 'Copy' })).toBeDisabled();
     });
 
+    it('keeps each link’s token ending visible so two links read differently', async () => {
+        const expiresAt = new Date(Date.now() + 5 * DAY).toISOString();
+        listShareLinks.mockResolvedValue([
+            link('a'.repeat(26), { expires_at: expiresAt }),
+            link('b'.repeat(26), { expires_at: expiresAt }),
+        ]);
+        renderOwner();
+        const items = await screen.findAllByRole('listitem');
+        const aLink = items.find((li) => li.textContent?.includes('a'.repeat(26))) as HTMLElement;
+        const bLink = items.find((li) => li.textContent?.includes('b'.repeat(26))) as HTMLElement;
+
+        expect(within(aLink).getByText('aaaaaaaa')).toHaveClass('shrink-0');
+        expect(within(bLink).getByText('bbbbbbbb')).toHaveClass('shrink-0');
+    });
+
+    it('opens at the Share reference width', async () => {
+        renderOwner();
+        expect(await screen.findByRole('dialog', { name: 'Share this score' })).toHaveClass('max-w-[500px]');
+    });
+
     it('lists people with their access, the owner fixed and labelled', async () => {
         renderOwner();
         await screen.findByText('Ed');
@@ -277,7 +297,7 @@ describe('ShareDialog for the owner', () => {
         listShareLinks.mockRejectedValue(new Error('Could not load share links: timeout'));
         await user.click(screen.getByRole('button', { name: 'Create link & copy' }));
 
-        await waitFor(() => expect(screen.getByText(/\/join\/tok-new/)).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByTitle(/\/join\/tok-new$/)).toHaveTextContent(/\/join\/tok-new$/));
         expect(await navigator.clipboard.readText()).toContain('/join/tok-new');
         expect(screen.getByRole('button', { name: 'Copied!' })).toBeInTheDocument();
         expect(screen.queryByText(/Could not create the link/)).not.toBeInTheDocument();

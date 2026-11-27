@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 
 import { isChunkLoadError, reloadForStaleChunk } from '@/lib/staleChunk';
 import { menuBaseModule as menuBase } from '@/ui/lazyPrimitives';
+import type { MenuSurface } from '@/ui/classNames';
 import type { MenuOpenKey } from '@/ui/MenuBase';
 
 /**
@@ -27,6 +28,8 @@ export interface MenuProps {
     menuLabel?: string;
     /** Width and any extras for the popup. */
     popupClassName?: string;
+    /** The popup's surface: white by default, paper over the score. */
+    surface?: MenuSurface;
     /** Which side of the trigger the popup opens on (it flips if it would not fit). Below by default. */
     side?: 'top' | 'bottom';
     /** Controlled open state (the account menu closes on navigation). */

@@ -20,7 +20,8 @@ import {
 } from '@/features/share/shareService';
 import type { DocumentMemberListing, MemberRole, ShareLinkRow, ShareRole } from '@/types/database';
 import { features } from '@/lib/features';
-import { middleEllipsis, useFlash } from '@/lib/useFlash';
+import { useFlash } from '@/lib/useFlash';
+import { LinkUrl } from '@/features/share/LinkUrl';
 import { OwnerSharingV2 } from '@/features/share/owner/OwnerSharingV2';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -29,7 +30,8 @@ import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { SwapLabel } from '@/ui/SwapLabel';
-import { fieldClassName } from '@/ui/classNames';
+import { Segmented, type SegmentedOption } from '@/ui/Segmented';
+import { fieldClassName, fieldLabelClassName } from '@/ui/classNames';
 import { CheckIcon } from '@/ui/icons';
 
 export interface ShareDialogProps {
@@ -55,6 +57,13 @@ const leaveForGuestDeletedPage = () => window.location.replace(GUEST_DELETED_PAT
 
 const ROLE_LABEL: Record<ShareRole, string> = { editor: 'Can edit', viewer: 'View only' };
 
+const LINK_ROLE_OPTIONS = [
+    { value: 'viewer', label: ROLE_LABEL.viewer },
+    { value: 'editor', label: ROLE_LABEL.editor },
+] as const satisfies readonly SegmentedOption<ShareRole>[];
+
+const RULED_ROW = 'flex flex-wrap items-center gap-x-3 gap-y-2.5 border-t border-hairline py-2.5 last:border-b';
+
 const errorText = (err: unknown, fallback: string) => (err instanceof Error ? err.message : fallback);
 
 /**
@@ -73,7 +82,7 @@ export const ShareDialog = ({
     onLeft,
     onGuestDeleted = leaveForGuestDeletedPage,
 }: ShareDialogProps) => (
-    <Dialog label={role === 'owner' ? 'Share this score' : 'Sharing'} onClose={onClose}>
+    <Dialog label={role === 'owner' ? 'Share this score' : 'Sharing'} onClose={onClose} maxWidth={500}>
         {role === 'owner' ? (
             features.shareV2 ? (
                 <OwnerSharingV2 docId={docId} userId={userId} linkViewers={linkViewers} />
@@ -256,29 +265,21 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
 
     return (
         <>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-                <div role="group" aria-label="Link access" className="flex rounded-lg border border-stone-300 p-0.5">
-                    {(['viewer', 'editor'] as const).map((r) => (
-                        <button
-                            key={r}
-                            type="button"
-                            aria-pressed={linkRole === r}
-                            onClick={() => setLinkRole(r)}
-                            className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
-                                linkRole === r ? 'bg-accent text-white' : 'text-stone-600 hover:bg-ink/5'
-                            }`}
-                        >
-                            {ROLE_LABEL[r]}
-                        </button>
-                    ))}
-                </div>
-                <label className="flex items-center gap-1.5 text-sm text-stone-600">
+            <div className="mt-1 flex flex-wrap items-center gap-3">
+                <Segmented
+                    label="Link access"
+                    size="md"
+                    value={linkRole}
+                    options={LINK_ROLE_OPTIONS}
+                    onChange={setLinkRole}
+                />
+                <label className="flex items-center gap-3 text-sm text-ink-muted">
                     Expires
                     <select
                         aria-label="Link expires after"
                         value={expiry}
                         onChange={(e) => setExpiry(e.target.value as LinkExpiry)}
-                        className={fieldClassName('sm', 'shrink-0 py-1.5', { width: 'auto' })}
+                        className={fieldClassName('sm', 'h-11 shrink-0 py-0', { width: 'auto' })}
                     >
                         {LINK_EXPIRY_CHOICES.map((choice) => (
                             <option key={choice.value} value={choice.value}>
@@ -288,45 +289,41 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                     </select>
                 </label>
             </div>
-            <Button size="sm" disabled={busy} onClick={() => void create()} className="mt-2 w-full">
+            <Button disabled={busy} onClick={() => void create()} className="mt-3.5 w-full">
                 <SwapLabel labels={{ idle: 'Create link & copy', busy: 'Working…' }} active={busy ? 'busy' : 'idle'} />
             </Button>
 
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
 
-            <section className="mt-4">
-                <h3 className="text-sm font-medium text-stone-600">Links</h3>
+            <section className="mt-6">
+                <h3 className={fieldLabelClassName}>Links</h3>
                 {linksError ? <ErrorText className="mt-2">{linksError}</ErrorText> : null}
                 {links === null ? (
                     linksError ? null : (
                         <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
                     )
                 ) : links.length === 0 ? (
-                    <p className="mt-2 text-sm text-stone-500">No links yet.</p>
+                    <p className="mt-2.5 text-sm text-ink-muted">No links yet.</p>
                 ) : (
-                    <ul className="mt-2 space-y-2">
+                    <ul className="mt-2.5 space-y-2">
                         {links.map((link) => {
                             const expired = isLinkExpired(link);
                             const joined = joinedVia(link.token).length;
                             return (
-                                <li key={link.token} className="rounded-lg border border-stone-200 px-3 py-2">
-                                    <div className="flex items-center gap-2">
+                                <li key={link.token} className="rounded-[14px] border border-panel-line px-3.5 py-3">
+                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                                         <Badge tone={link.role === 'editor' ? 'ok' : 'neutral'}>
                                             {link.role === 'editor' ? 'edit' : 'view'}
                                         </Badge>
-                                        {/* Middle-truncated: the origin and the token's end are what
-                                            tell links apart. The full URL is what Copy copies. */}
-                                        <span
-                                            className="min-w-0 flex-1 truncate text-xs text-stone-500"
-                                            title={shareUrlFor(link.token)}
-                                        >
-                                            {middleEllipsis(shareUrlFor(link.token), 36)}
-                                        </span>
-                                        <button
-                                            type="button"
+                                        <LinkUrl
+                                            url={shareUrlFor(link.token)}
+                                            className="flex-[1_1_96px] text-[13px] text-ink-soft"
+                                        />
+                                        <Button
+                                            variant="accentGhost"
+                                            size="sm"
                                             disabled={expired}
                                             onClick={() => void copy(link.token)}
-                                            className="rounded px-2 py-1 text-xs text-accent transition-colors hover:bg-accent-soft disabled:opacity-40 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                                         >
                                             {/* Both labels share one grid cell, so the button keeps
                                                 the wider one's width and Revoke never shifts; Copied!
@@ -345,17 +342,12 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                                 }}
                                                 active={copiedToken === link.token ? 'copied' : 'copy'}
                                             />
-                                        </button>
-                                        {/* On touch, extra room between Copy and the destructive Revoke. */}
-                                        <button
-                                            type="button"
-                                            onClick={() => setRevokeTarget(link)}
-                                            className="rounded px-2 py-1 text-xs text-danger transition-colors hover:bg-red-50 pointer-coarse:ml-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
-                                        >
+                                        </Button>
+                                        <Button variant="dangerGhost" size="sm" onClick={() => setRevokeTarget(link)}>
                                             Revoke
-                                        </button>
+                                        </Button>
                                     </div>
-                                    <p className="mt-1 text-xs text-stone-500">
+                                    <p className="mt-0.5 text-[13px] text-ink-muted">
                                         {expired ? <Badge tone="warn">Expired</Badge> : linkExpiryLabel(link)}
                                         {joined > 0 ? ` · ${joined} joined` : ''}
                                     </p>
@@ -366,15 +358,15 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                 )}
             </section>
 
-            <section className="mt-5">
-                <h3 className="text-sm font-medium text-stone-600">People with access</h3>
+            <section className="mt-6">
+                <h3 className={fieldLabelClassName}>People with access</h3>
                 {membersError ? <ErrorText className="mt-2">{membersError}</ErrorText> : null}
                 {members === null ? (
                     membersError ? null : (
                         <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
                     )
                 ) : (
-                    <ul className="mt-2 divide-y divide-stone-100">
+                    <ul className="mt-2.5">
                         {members.map((member) => {
                             const label = memberLabel(member);
                             const isSelf = member.user_id === userId;
@@ -387,13 +379,15 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                         ? 'Guest'
                                         : null;
                             return (
-                                <li key={member.user_id} className="flex items-center gap-2 py-2">
-                                    <div className="min-w-0 flex-1">
-                                        <p className="truncate text-sm text-stone-800">
+                                <li key={member.user_id} className={RULED_ROW}>
+                                    <div className="min-w-0 flex-[1_1_140px]">
+                                        <p className="truncate text-[15px] font-semibold text-ink">
                                             {label}
-                                            {isSelf ? <span className="text-stone-500"> (you)</span> : null}
+                                            {isSelf ? <span className="font-normal text-ink-muted"> (you)</span> : null}
                                         </p>
-                                        {detail ? <p className="truncate text-xs text-stone-500">{detail}</p> : null}
+                                        {detail ? (
+                                            <p className="truncate text-[13px] text-ink-muted">{detail}</p>
+                                        ) : null}
                                     </div>
                                     {member.role === 'owner' ? (
                                         <Badge tone="accent">Owner</Badge>
@@ -404,20 +398,22 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                                 value={member.role}
                                                 disabled={busy}
                                                 onChange={(e) => void changeRole(member, e.target.value as ShareRole)}
-                                                className={fieldClassName('sm', 'shrink-0 py-1.5', { width: 'auto' })}
+                                                className={fieldClassName('sm', 'h-11 shrink-0 py-0', {
+                                                    width: 'auto',
+                                                })}
                                             >
                                                 <option value="editor">{ROLE_LABEL.editor}</option>
                                                 <option value="viewer">{ROLE_LABEL.viewer}</option>
                                             </select>
-                                            <button
-                                                type="button"
+                                            <Button
+                                                variant="dangerGhost"
+                                                size="sm"
                                                 aria-label={`Remove ${label}`}
                                                 disabled={busy}
                                                 onClick={() => setRemoveTarget(member)}
-                                                className="rounded px-2 py-1 text-xs text-danger transition-colors hover:bg-red-50 disabled:opacity-40"
                                             >
                                                 Remove
-                                            </button>
+                                            </Button>
                                         </>
                                     )}
                                 </li>
@@ -508,12 +504,12 @@ const RevokeLinkDialog = ({
     const students = joined.filter((m) => m.is_assigned).length;
     return (
         <Dialog label="Revoke this link?" onClose={onCancel}>
-            <p className="text-sm leading-relaxed text-stone-600">
+            <p className="text-[15px] leading-relaxed text-ink-muted">
                 Nobody new can join with this {link.role === 'editor' ? 'edit' : 'view'} link once it is revoked.
                 {joined.length === 0 ? ' Anyone who has joined with it loses access too.' : ''}
             </p>
             {joined.length > 0 ? (
-                <label className="mt-3 flex items-start gap-2 text-sm text-stone-700">
+                <label className="mt-3 flex items-start gap-2 text-[15px] text-ink-soft">
                     <input
                         type="checkbox"
                         checked={removeMembers}
@@ -624,25 +620,25 @@ const MemberSharing = ({
 
     return (
         <>
-            <p className="text-sm text-stone-600">
+            <p className="text-[15px] text-ink-muted">
                 This score was shared with you. You can {role === 'editor' ? 'view and mark it up' : 'view it'}.
             </p>
 
             {canList ? (
-                <section className="mt-4">
-                    <h3 className="text-sm font-medium text-stone-600">People with access</h3>
+                <section className="mt-6">
+                    <h3 className={fieldLabelClassName}>People with access</h3>
                     {members === null ? (
                         error ? null : (
                             <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
                         )
                     ) : (
-                        <ul className="mt-2 divide-y divide-stone-100">
+                        <ul className="mt-2.5">
                             {members.map((member) => (
-                                <li key={member.user_id} className="flex items-center gap-2 py-2">
-                                    <p className="min-w-0 flex-1 truncate text-sm text-stone-800">
+                                <li key={member.user_id} className={RULED_ROW}>
+                                    <p className="min-w-0 flex-1 truncate text-[15px] font-semibold text-ink">
                                         {memberLabel(member)}
                                         {member.user_id === userId ? (
-                                            <span className="text-stone-500"> (you)</span>
+                                            <span className="font-normal text-ink-muted"> (you)</span>
                                         ) : null}
                                     </p>
                                     <Badge tone={member.role === 'owner' ? 'accent' : 'neutral'}>

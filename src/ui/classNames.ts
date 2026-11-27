@@ -6,7 +6,15 @@
 
 /** The ink* variants sit on the dark ink surfaces (top bar, viewer chrome). */
 export type ButtonVariant =
-    'primary' | 'secondary' | 'ghost' | 'danger' | 'dangerGhost' | 'inkPrimary' | 'inkOutline' | 'inkGhost';
+    | 'primary'
+    | 'secondary'
+    | 'ghost'
+    | 'accentGhost'
+    | 'danger'
+    | 'dangerGhost'
+    | 'inkPrimary'
+    | 'inkOutline'
+    | 'inkGhost';
 export type ButtonSize = 'md' | 'sm';
 
 /*
@@ -27,6 +35,7 @@ const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
         'border-accent bg-accent text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_20px_-12px_rgba(67,56,202,0.75)] hover:border-accent-hover hover:bg-accent-hover',
     secondary: 'border-button-line bg-transparent text-ink hover:bg-ink/5',
     ghost: 'border-transparent bg-transparent text-ink-soft hover:bg-ink/5',
+    accentGhost: 'border-transparent bg-transparent text-accent hover:bg-accent/5',
     danger: 'border-danger bg-danger text-white hover:border-red-800 hover:bg-red-800',
     dangerGhost: 'border-transparent bg-transparent text-destructive hover:bg-red-50',
     inkPrimary:
@@ -101,6 +110,21 @@ export const fieldLabelClassName = 'block text-xs font-semibold uppercase tracki
  */
 export const linkClassName =
     'relative text-sm text-accent underline decoration-accent/30 underline-offset-2 transition-colors hover:text-accent-hover hover:decoration-accent/60 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3.5';
+
+/**
+ * white: the stock dropdown. paper: a menu over the score, as the viewer's
+ * dialogs are: paper, rounded 18px, its rows inset 8px and rounded to match.
+ * dialog-paper keeps small grey text at AA on paper.
+ */
+export type MenuSurface = 'white' | 'paper';
+
+const MENU_POPUP_SURFACE_CLASSES: Record<MenuSurface, string> = {
+    white: 'rounded-xl border border-stone-200 bg-white py-1 shadow-lg',
+    paper: 'dialog-paper rounded-[18px] bg-paper p-2 shadow-[0_0_0_1px_rgba(28,25,23,0.1),0_30px_60px_-24px_rgba(28,25,23,0.55)] [&_[role^=menuitem]]:rounded-xl',
+};
+
+export const menuPopupClassName = (surface: MenuSurface, extra = ''): string =>
+    `ui-menu-pop outline-none ${MENU_POPUP_SURFACE_CLASSES[surface]}${extra ? ` ${extra}` : ''}`;
 
 /** One row: 44px tall on touch, highlighted by pointer or keyboard alike. */
 export const menuItemClassName = (danger = false, extra = ''): string =>

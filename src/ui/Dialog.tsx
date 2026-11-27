@@ -4,6 +4,8 @@ import type { ReactNode } from 'react';
 import { dialogStack } from '@/ui/dialogStack';
 import { dialogPanelModule as dialogPanel } from '@/ui/lazyPrimitives';
 
+export type DialogMaxWidth = 448 | 460 | 480 | 500 | 520;
+
 export interface DialogProps {
     /** Accessible name; also the visible title when withHeader is set. */
     label: string;
@@ -18,7 +20,8 @@ export interface DialogProps {
      * on the scrim does not dismiss it; Escape and Cancel do.
      */
     alert?: boolean;
-    maxWidth?: 448 | 480 | 520;
+    /** Desktop width in px, from the screen's Flow reference. */
+    maxWidth?: DialogMaxWidth;
 }
 
 const LazyDialogPanel = lazy(() => dialogPanel.load().then((module) => ({ default: module.DialogPanel })));
