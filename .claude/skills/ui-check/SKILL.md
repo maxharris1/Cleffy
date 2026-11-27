@@ -48,6 +48,16 @@ await close();
   controls. It is noisy — **always look at the screenshot (Read the PNG) before
   calling something a bug.** Visual artifacts it cannot see (misalignment, bad
   wrapping, z-index bleed, sticky bars covering content) are only found by looking.
+- `stubApi(page, handlers)` answers every API call in the page, so a check runs
+  with no Docker or Supabase: start Vite with
+  `VITE_SUPABASE_URL=http://127.0.0.1:54421` and any anon key. Handlers map a
+  path suffix to a JSON body, `reply(status, body)`, or `(url, request) => …`;
+  `reply(500, {...})` makes that endpoint fail. Call it before `login(page)`:
+
+  ```js
+  await stubApi(page, { '/rest/v1/scores': reply(500, { message: 'boom' }) });
+  await login(page);
+  ```
 - `shot()` writes to `$CLEFFY_UI_SHOTS` (default `/tmp/cleffy-ui/shots`). Point it
   at the session scratchpad if the user should be able to open the images.
 

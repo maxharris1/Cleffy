@@ -23,7 +23,7 @@ import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { ACTIVE_LABEL_ONLY, SwapLabel } from '@/ui/SwapLabel';
 import { useGhostActionClassName } from '@/ui/onInk';
-import { buttonClassName } from '@/ui/classNames';
+import { buttonClassName, menuPopupClassName } from '@/ui/classNames';
 import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
 import { toast } from '@/ui/toast';
 
@@ -378,6 +378,7 @@ export const ShareExportMenu = ({
                     }
                     menuLabel="Export"
                     popupClassName="w-64"
+                    surface="paper"
                     open={menuOpen}
                     onOpenChange={(next) => {
                         if (next) {
@@ -414,8 +415,8 @@ export const ShareExportMenu = ({
                             )
                         }
                     >
-                        <span className="text-sm text-stone-800">Send page {pageLabel} as photo</span>
-                        <span className="text-xs text-stone-500">PNG — send via Messages</span>
+                        <span className="text-[15px] font-medium text-ink">Send page {pageLabel} as photo</span>
+                        <span className="text-[13px] text-ink-muted">PNG — send via Messages</span>
                     </MenuItem>
                     <MenuItem
                         className={EXPORT_ITEM_CLASS}
@@ -425,7 +426,7 @@ export const ShareExportMenu = ({
                             start(() => runMetered('Exporting…', 'The export', page));
                         }}
                     >
-                        <span className="text-sm text-stone-800">Save page {pageLabel} as PDF</span>
+                        <span className="text-[15px] font-medium text-ink">Save page {pageLabel} as PDF</span>
                     </MenuItem>
                     <MenuSeparator />
                     <MenuItem
@@ -433,7 +434,7 @@ export const ShareExportMenu = ({
                         disabled={busy !== null}
                         onClick={() => start(() => runMetered('Exporting…', 'The export', null))}
                     >
-                        <span className="text-sm text-stone-800">Export whole score as PDF</span>
+                        <span className="text-[15px] font-medium text-ink">Export whole score as PDF</span>
                     </MenuItem>
                 </Menu>
                 {download ? (
@@ -459,7 +460,7 @@ export const ShareExportMenu = ({
                     >
                         <Popover.Popup
                             aria-label="Export"
-                            className="ui-menu-pop w-80 max-w-[calc(100vw-1.5rem)] rounded-xl border border-stone-200 bg-white py-1 shadow-lg outline-none"
+                            className={menuPopupClassName('paper', 'w-80 max-w-[calc(100vw-1.5rem)]')}
                         >
                             {error ? <ErrorText className="mx-3 my-2">{error}</ErrorText> : null}
                             {marksNotice ? (
@@ -489,7 +490,7 @@ export const ShareExportMenu = ({
                             {status ? (
                                 <p
                                     role="status"
-                                    className="m-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700"
+                                    className="m-2 rounded-[14px] border border-panel-line px-4 py-3 text-sm text-ink-soft"
                                 >
                                     {status}
                                 </p>
@@ -527,4 +528,4 @@ export const ShareExportMenu = ({
 
 /** An export item: its label, and a hint under it when there is one. */
 const EXPORT_ITEM_CLASS =
-    'flex w-full cursor-pointer flex-col items-start px-3 py-2 text-left outline-none select-none data-highlighted:bg-ink/5 data-disabled:cursor-default data-disabled:opacity-50 pointer-coarse:min-h-11';
+    'flex w-full cursor-pointer flex-col items-start px-3 py-2.5 text-left outline-none select-none data-highlighted:bg-ink/5 data-disabled:cursor-default data-disabled:opacity-50 pointer-coarse:min-h-11';

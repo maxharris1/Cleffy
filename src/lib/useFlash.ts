@@ -35,17 +35,3 @@ export const useFlash = <T>(ms: number): [T | null, (value: T) => void] => {
 
     return [value, flash];
 };
-
-/**
- * Shorten from the middle, keeping both ends: a share URL's origin says where
- * it goes and its last characters tell two links apart; the middle says
- * nothing. Full text stays available to the caller (title, aria-label, copy).
- */
-export const middleEllipsis = (text: string, max = 36): string => {
-    if (text.length <= max) {
-        return text;
-    }
-    const tail = Math.max(6, Math.floor((max - 1) / 3));
-    const head = max - 1 - tail;
-    return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
-};

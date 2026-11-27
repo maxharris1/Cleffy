@@ -65,6 +65,12 @@ const restore = async () => {
 };
 
 describe('LessonHistoryButton', () => {
+    it('opens at the Lesson history reference width', async () => {
+        render(<LessonHistoryButton store={storeWith(vi.fn(async () => undefined))} canRestore />);
+        await userEvent.setup().click(screen.getByRole('button', { name: 'History' }));
+        expect(await screen.findByRole('dialog', { name: 'Lesson history' })).toHaveClass('max-w-[460px]');
+    });
+
     it('confirms a restore with a toast as the dialog closes', async () => {
         const restoreFromSnapshot = vi.fn(async () => undefined);
         render(<LessonHistoryButton store={storeWith(restoreFromSnapshot)} canRestore />);

@@ -12,7 +12,8 @@ import {
     shareUrlFor,
     type LinkExpiryChoice,
 } from '@/features/share/shareService';
-import { middleEllipsis, useFlash } from '@/lib/useFlash';
+import { LinkUrl } from '@/features/share/LinkUrl';
+import { useFlash } from '@/lib/useFlash';
 import type { ShareLinkRow, ShareRole } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { ErrorText } from '@/ui/ErrorText';
@@ -137,12 +138,7 @@ export const GeneralAccessSection = ({ docId, link, linkViewers, onChanged }: Ge
             {link ? (
                 <div className="mt-2 rounded-lg border border-stone-200 px-3 py-2">
                     <div className="flex items-center gap-2">
-                        <span
-                            className="min-w-0 flex-1 truncate text-xs text-stone-500"
-                            title={shareUrlFor(link.token)}
-                        >
-                            {middleEllipsis(shareUrlFor(link.token), 36)}
-                        </span>
+                        <LinkUrl url={shareUrlFor(link.token)} className="flex-1 text-xs text-stone-500" />
                         <button
                             type="button"
                             disabled={busy}

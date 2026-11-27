@@ -26,6 +26,7 @@ const requirePlaywright = () => {
 const { chromium } = requirePlaywright();
 
 export const BASE = process.env.CLEFFY_UI_BASE ?? 'http://localhost:5173';
+export const API = process.env.CLEFFY_UI_API ?? 'http://127.0.0.1:54421';
 export const SHOTS = process.env.CLEFFY_UI_SHOTS ?? '/tmp/cleffy-ui/shots';
 
 export const VIEWPORTS = {
@@ -49,6 +50,57 @@ export const ACCOUNTS = {
     teacher: { email: 'teacher@cleffy.local', password: 'cleffy-local-test' },
     student: { email: 'student@cleffy.local', password: 'cleffy-local-test' },
 };
+
+export const STUB_USER = {
+    id: '00000000-0000-4000-8000-000000000001',
+    aud: 'authenticated',
+    role: 'authenticated',
+    email: ACCOUNTS.teacher.email,
+    created_at: '2026-01-14T10:00:00Z',
+    app_metadata: { provider: 'email' },
+    user_metadata: { display_name: 'Ada Teacher' },
+};
+
+class Reply {
+    constructor(status, body) {
+        this.status = status;
+        this.body = body;
+    }
+}
+/** Handler value that answers with `status` instead of 200. */
+export const reply = (status, body) => new Reply(status, body);
+
+const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
+
+/** Answers every API call in the page: handlers map a path suffix to a body, a reply(), or (url, request) => either. */
+export async function stubApi(page, handlers = {}) {
+    const exp = Math.floor(Date.now() / 1000) + 86400;
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const claims = { sub: STUB_USER.id, role: 'authenticated', aud: 'authenticated', email: STUB_USER.email, exp };
+    const jwt = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64(claims)}.sig`;
+    const session = {
+        access_token: jwt,
+        token_type: 'bearer',
+        expires_in: 86400,
+        expires_at: exp,
+        refresh_token: 'r',
+        user: STUB_USER,
+    };
+    const auth = { '/auth/v1/token': session, '/auth/v1/user': STUB_USER };
+    await page.route(`${API}/**`, (route) => {
+        const request = route.request();
+        if (request.method() === 'OPTIONS') {
+            return route.fulfill({ status: 204, headers: { ...CORS, 'access-control-allow-methods': '*' } });
+        }
+        const url = new URL(request.url());
+        const key = Object.keys(handlers).find((k) => url.pathname.endsWith(k));
+        let out = auth[url.pathname] ?? (key === undefined ? [] : handlers[key]);
+        if (typeof out === 'function') out = out(url, request);
+        const { status, body } = out instanceof Reply ? out : { status: 200, body: out };
+        const headers = { ...CORS, 'content-range': '*/0' };
+        return route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(body) });
+    });
+}
 
 let browser;
 /** Returns { browser, context, page, consoleErrors } for a named viewport. */

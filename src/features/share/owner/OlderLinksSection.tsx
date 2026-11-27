@@ -1,7 +1,8 @@
 import { useState } from 'react';
 
+import { LinkUrl } from '@/features/share/LinkUrl';
 import { isLinkExpired, linkExpiryText, revokeShareLink, shareUrlFor } from '@/features/share/shareService';
-import { middleEllipsis, useFlash } from '@/lib/useFlash';
+import { useFlash } from '@/lib/useFlash';
 import type { ShareLinkRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -61,16 +62,14 @@ export const OlderLinksSection = ({ links, onChanged }: OlderLinksSectionProps) 
                     const expired = isLinkExpired(link);
                     return (
                         <li key={link.token} className="rounded-lg border border-stone-200 px-3 py-2">
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                                 <Badge tone={link.role === 'editor' ? 'ok' : 'neutral'}>
                                     {link.role === 'editor' ? 'edit' : 'view'}
                                 </Badge>
-                                <span
-                                    className="min-w-0 flex-1 truncate text-xs text-stone-500"
-                                    title={shareUrlFor(link.token)}
-                                >
-                                    {middleEllipsis(shareUrlFor(link.token), 32)}
-                                </span>
+                                <LinkUrl
+                                    url={shareUrlFor(link.token)}
+                                    className="flex-[1_1_96px] text-xs text-stone-500"
+                                />
                                 <button
                                     type="button"
                                     disabled={expired}

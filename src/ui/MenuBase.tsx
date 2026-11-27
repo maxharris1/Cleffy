@@ -1,7 +1,7 @@
 import { Menu as BaseMenu } from '@base-ui/react/menu';
 import { useLayoutEffect, useRef } from 'react';
 
-import { menuItemClassName } from '@/ui/classNames';
+import { menuItemClassName, menuPopupClassName } from '@/ui/classNames';
 import { CheckIcon } from '@/ui/icons';
 import type {
     MenuCheckboxItemProps,
@@ -40,6 +40,7 @@ export const MenuBase = ({
     disabled = false,
     menuLabel,
     popupClassName = 'w-48',
+    surface = 'white',
     side = 'bottom',
     open,
     onOpenChange,
@@ -84,7 +85,10 @@ export const MenuBase = ({
                 <BaseMenu.Positioner side={side} align="end" sideOffset={4} collisionPadding={16} className="z-50">
                     <BaseMenu.Popup
                         aria-label={menuLabel}
-                        className={`ui-menu-pop max-h-[var(--available-height)] overflow-y-auto overscroll-contain rounded-xl border border-stone-200 bg-white py-1 shadow-lg outline-none ${popupClassName}`}
+                        className={menuPopupClassName(
+                            surface,
+                            `max-h-[var(--available-height)] overflow-y-auto overscroll-contain ${popupClassName}`,
+                        )}
                     >
                         {children}
                     </BaseMenu.Popup>

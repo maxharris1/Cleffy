@@ -38,6 +38,7 @@ export const PageLayoutMenu = ({
             triggerContent={<Icon size={20} />}
             menuLabel="Page layout"
             popupClassName="w-60"
+            surface="paper"
             side="top"
         >
             <MenuRadioGroup
