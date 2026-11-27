@@ -712,9 +712,6 @@ body {
 @media (hover: hover) and (pointer: fine) {
     .library-card:hover .library-card-cover {
         transform: translateY(-2px);
-        box-shadow:
-            0 4px 6px -1px rgb(28 25 23 / 0.1),
-            0 2px 4px -2px rgb(28 25 23 / 0.08);
     }
 }
 
@@ -865,7 +862,7 @@ body {
 
     /* Shelf: no entrance stagger, and the cover stays flat on hover. The
        :hover selector is repeated so this matches the lift's specificity and
-       wins on source order; the shadow still changes, which is not motion. */
+       wins on source order. */
     .library-card {
         animation: none;
     }
@@ -938,6 +935,23 @@ body {
 @media (max-width: 39.99rem) {
     .shell-tabs {
         --focus-ring: var(--color-accent);
+    }
+}
+
+/*
+ * Below sm the shell bar's 44px upload button outgrows the 3.5rem lane toasts
+ * drop into (ui/AppToaster) when the browser font is small. While the bar is on
+ * the page, the lane starts below the button, and the stack is clipped at its
+ * top edge so a toast sliding in from above never covers or takes a touch
+ * meant for the bar.
+ */
+@media (max-width: 39.99rem) {
+    :root:has(.shell-bar) {
+        --toast-top: calc(var(--safe-top) + max(3.5rem, 0.625rem + 44px));
+    }
+
+    :root:has(.shell-bar) [data-sonner-toaster][data-y-position='top'] {
+        clip-path: inset(0 -100vmax -100vmax);
     }
 }
 

@@ -33,12 +33,16 @@ vi.mock('@/features/viewer/toolbar/Toolbar', () => ({ Toolbar: () => null }));
 let viewport = { width: 800, height: 600 };
 /** Rendered heights (px) of one notice card and the gap between cards, phone size. */
 const NOTICE_PX = 52;
+/** Two-line notice cards, for a stack that reaches past the middle of a short phone. */
+const TALL_NOTICE_PX = 68;
+let noticePx = NOTICE_PX;
 const NOTICE_GAP_PX = 6;
 const REGION_TOP_PX = 8;
 
 const resizeCallbacks = new Set<() => void>();
 
 beforeEach(() => {
+    noticePx = NOTICE_PX;
     vi.stubGlobal(
         'ResizeObserver',
         class {
@@ -59,7 +63,7 @@ beforeEach(() => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
         if (this.hasAttribute('data-viewer-notices')) {
             const cards = this.children.length;
-            const height = cards === 0 ? 0 : cards * NOTICE_PX + (cards - 1) * NOTICE_GAP_PX;
+            const height = cards === 0 ? 0 : cards * noticePx + (cards - 1) * NOTICE_GAP_PX;
             return DOMRect.fromRect({ x: 0, y: REGION_TOP_PX, width: viewport.width, height });
         }
         return DOMRect.fromRect({ x: 0, y: 0, width: viewport.width, height: viewport.height });
@@ -431,7 +435,7 @@ const manualFrames = () => {
     };
 };
 
-const stackBottomPx = (cards: number) => REGION_TOP_PX + cards * NOTICE_PX + (cards - 1) * NOTICE_GAP_PX;
+const stackBottomPx = (cards: number) => REGION_TOP_PX + cards * noticePx + (cards - 1) * NOTICE_GAP_PX;
 
 /** The pager and zoom row's strip (px) over the bottom of a phone viewport. */
 const PHONE_CONTROLS_PX = 56;
@@ -542,11 +546,13 @@ describe('PdfViewport page turns under a tall notice stack', () => {
     it.each(Object.entries(turners))(
         'pages through every page at fit width when the stack reaches past the viewport middle (%s)',
         async (_, turn) => {
-            // 176 px of notices and the 56 px pager strip over a 400 px viewport:
-            // less than half of it is left for the score.
+            // 224 px of notices over a 400 px viewport: the middle of the whole
+            // viewport is under the stack.
             viewport = { width: 390, height: 400 };
+            noticePx = TALL_NOTICE_PX;
+            const stack = stackBottomPx(3);
             await openUnderStack();
-            expect(STACK + PHONE_CONTROLS_PX).toBeGreaterThan(400 / 2);
+            expect(stack).toBeGreaterThan(400 / 2);
             expectPager(1, false, true);
 
             for (const page of [2, 3]) {
@@ -554,7 +560,7 @@ describe('PdfViewport page turns under a tall notice stack', () => {
                 act(() => turn(1));
                 expect(view().scrollY).toBeGreaterThan(before);
                 // Each turn starts the next page just below the stack.
-                expect(pageEdges(page - 1).top).toBeCloseTo(STACK + 16 * view().scale);
+                expect(pageEdges(page - 1).top).toBeCloseTo(stack + 16 * view().scale);
                 expectPager(page, true, true);
             }
             // The rest of page 3 is still below: Next goes on to its end, then stops.
@@ -562,10 +568,10 @@ describe('PdfViewport page turns under a tall notice stack', () => {
             expect(pageEdges(2).bottom).toBeCloseTo(400 - PHONE_CONTROLS_PX - 16 * view().scale);
             expectPager(3, true, false);
             act(() => turn(-1));
-            expect(pageEdges(1).top).toBeCloseTo(STACK + 16 * view().scale);
+            expect(pageEdges(1).top).toBeCloseTo(stack + 16 * view().scale);
             expectPager(2, true, true);
             act(() => turn(-1));
-            expect(pageEdges(0).top).toBeCloseTo(STACK + PHONE_TOP_MARGIN_PX);
+            expect(pageEdges(0).top).toBeCloseTo(stack + PHONE_TOP_MARGIN_PX);
             expectPager(1, false, true);
         },
     );

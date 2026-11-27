@@ -38,6 +38,7 @@ const VARIANTS: readonly ButtonVariant[] = [
     'accentGhost',
     'danger',
     'dangerGhost',
+    'dangerOutline',
     'inkPrimary',
     'inkOutline',
     'inkGhost',

@@ -16,9 +16,9 @@ import { Menu, MenuItem } from '@/ui/Menu';
  * can also key off in CSS (`has-[[aria-expanded=true]]:…`) to keep a card with
  * an open menu rendered.
  *
- * `inline` is for a trigger that ends a row of other icon buttons: on touch its
- * invisible 40x44 hit area runs past its right edge only, since the all-round
- * ring the shelf card uses would overlap the neighbour on its left.
+ * `inline` is for a trigger that ends a row of other icon buttons: on touch it
+ * grows to 32px with an invisible 44x44 hit area, and the row spaces its icons
+ * so the areas never overlap. Otherwise it is the shelf tile's 44px button.
  */
 export const RowMenu = ({
     onRename,
@@ -60,12 +60,12 @@ export const SharedScoreMenu = ({ onLeave, inline = false }: { onLeave: () => vo
 const ScoreMenu = ({ inline, children }: { inline: boolean; children: ReactNode }) => (
     <Menu
         label="Score actions"
-        triggerContent={<MoreVerticalIcon size={16} />}
-        triggerClassName={`relative grid place-items-center rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-ink/5 hover:text-stone-600 ${
+        triggerContent={<MoreVerticalIcon size={inline ? 16 : 18} />}
+        triggerClassName={
             inline
-                ? 'pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-3 pointer-coarse:before:-inset-y-2'
-                : 'pointer-coarse:before:absolute pointer-coarse:before:-inset-2'
-        }`}
+                ? 'relative grid place-items-center rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-ink/5 hover:text-stone-600 pointer-coarse:p-2 pointer-coarse:hit-44'
+                : 'grid size-11 place-items-center rounded-[10px] text-ink-muted transition-colors hover:bg-ink/5 hover:text-ink'
+        }
     >
         {children}
     </Menu>

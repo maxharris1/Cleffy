@@ -396,4 +396,30 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
             ]);
         },
     );
+
+    it.each([640, 768, 1280])('darkens the upload button fill on hover at %i px', async (width) => {
+        const fill = await withPage(shellMarkup('/library', rows), { width }, async (page) => {
+            const rest = await page.evaluate(
+                () => getComputedStyle(document.querySelector('label.shell-upload')!).backgroundColor,
+            );
+            await page.hover('label.shell-upload');
+            const hovered = await page.evaluate(() => {
+                const style = getComputedStyle(document.querySelector('label.shell-upload')!);
+                return { background: style.backgroundColor, border: style.borderTopColor };
+            });
+            return { rest, hovered };
+        });
+        expect(fill).toEqual({
+            rest: 'rgb(79, 70, 229)',
+            hovered: { background: 'rgb(55, 48, 163)', border: 'rgb(79, 70, 229)' },
+        });
+    });
+
+    it('keeps the phone upload button fill on hover at 390 px', async () => {
+        const background = await withPage(shellMarkup('/library', rows), { width: 390 }, async (page) => {
+            await page.hover('label.shell-upload');
+            return page.evaluate(() => getComputedStyle(document.querySelector('label.shell-upload')!).backgroundColor);
+        });
+        expect(background).toBe('rgb(79, 70, 229)');
+    });
 });

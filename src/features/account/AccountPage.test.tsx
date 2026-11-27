@@ -184,6 +184,16 @@ describe('AccountPage', () => {
         expect(screen.getByText('ada@example.com · Free plan')).toBeInTheDocument();
     });
 
+    it('says what signing out removes from this device and that unsaved changes upload first', async () => {
+        await renderSettled();
+
+        expect(
+            screen.queryByText(
+                'Signing out removes your cached plan, downloaded scores and the offline copy of your marks from this device. Everything stays in your account; changes not yet saved to it are uploaded first.',
+            ),
+        ).toBeInTheDocument();
+    });
+
     it('prefers the stored display name for the avatar and seeds the field with it', async () => {
         useSession.mockReturnValue({ session: sessionFor('Ada Lovelace'), loading: false, lastEvent: null });
         await renderSettled();
