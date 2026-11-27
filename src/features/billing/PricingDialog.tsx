@@ -17,10 +17,17 @@ import { AgreementNote } from '@/features/legal/AgreementNote';
 import type { EffectiveTier } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
+import { CloseButton } from '@/ui/CloseButton';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
+import { Segmented, type SegmentedOption } from '@/ui/Segmented';
 
 import { currencyForCountry } from '../../../supabase/functions/_shared/billingTerms';
+
+const INTERVAL_OPTIONS = [
+    { value: 'monthly', label: 'Monthly' },
+    { value: 'annual', label: 'Annual' },
+] as const satisfies readonly SegmentedOption<BillingInterval>[];
 
 export interface PricingDialogProps {
     onClose: () => void;
@@ -94,7 +101,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
     if (!isBillingConfigured()) {
         return (
             <Dialog label="Plans" onClose={onClose} sheet>
-                <p className="text-sm text-stone-600">
+                <p className="text-sm text-ink-muted">
                     Billing is not configured for this deployment yet. See SETUP_SUPABASE.md.
                 </p>
             </Dialog>
@@ -124,43 +131,44 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
     }
 
     return (
-        <Dialog key="plans" label="Plans" onClose={onClose} sheet>
-            <div className="w-full">
-                {reason ? <p className="mb-4 text-sm text-stone-600">{reason}</p> : null}
-
-                <p className="mb-4 text-sm text-stone-600">
-                    Personal is the practice tool. Teacher adds your students. Academy covers a team of teachers.
-                </p>
-
-                {subscription ? (
-                    <p className="mb-4 text-sm text-stone-600">
-                        You already have a subscription, so switching plans happens in the billing portal — the plan you
-                        have changes there, and you are never billed for two.
-                    </p>
-                ) : null}
-
-                <CountryPicker className="mb-3" value={country} onChange={setCountry} />
-
-                <div className="mb-5 flex items-center gap-2" role="group" aria-label="Billing interval">
-                    {(['monthly', 'annual'] as const).map((option) => (
-                        <button
-                            key={option}
-                            type="button"
-                            aria-pressed={interval === option}
-                            onClick={() => setInterval(option)}
-                            className={[
-                                'cursor-pointer rounded-lg px-3 py-1.5 text-sm transition-colors',
-                                interval === option
-                                    ? 'bg-accent-soft font-medium text-accent'
-                                    : 'text-stone-600 hover:bg-ink/5',
-                            ].join(' ')}
-                        >
-                            {option === 'monthly' ? 'Monthly' : 'Annual'}
-                        </button>
-                    ))}
+        <Dialog key="plans" label="Plans" onClose={onClose} sheet size="wide" withHeader={false}>
+            <div className="relative w-full">
+                <div className="sticky -top-7 z-10 -mx-7 -mt-7 flex justify-end bg-paper px-4 pt-5 pb-1 sm:-top-3 sm:-mt-3 sm:-mr-3 sm:mb-3 sm:ml-0 sm:h-0 sm:items-start sm:bg-transparent sm:p-0">
+                    <span className="rounded-xl bg-paper">
+                        <CloseButton onClick={onClose} className="size-11 rounded-xl text-ink-muted hover:bg-ink/5" />
+                    </span>
                 </div>
 
-                <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-5">
+                    <div className="min-w-0 flex-1 basis-[420px]">
+                        <h2 className="font-display text-[34px] leading-[1.05] font-semibold tracking-[-0.02em] text-balance text-ink sm:text-[48px] sm:leading-[1.02]">
+                            Free to start. <em>Students never pay.</em>
+                        </h2>
+                        {reason ? <p className="mt-3 text-sm text-ink-muted">{reason}</p> : null}
+                        <p className="mt-3 max-w-[560px] text-base text-ink-muted">
+                            Personal is the practice tool. Teacher adds your students. Academy covers a team of
+                            teachers.
+                        </p>
+                        {subscription ? (
+                            <p className="mt-3 text-sm text-ink-muted">
+                                You already have a subscription, so switching plans happens in the billing portal — the
+                                plan you have changes there, and you are never billed for two.
+                            </p>
+                        ) : null}
+                    </div>
+                    <div className="flex w-full flex-col items-start gap-3 sm:w-auto sm:items-end">
+                        <CountryPicker className="w-full sm:w-auto" value={country} onChange={setCountry} />
+                        <Segmented
+                            label="Billing interval"
+                            size="md"
+                            value={interval}
+                            options={INTERVAL_OPTIONS}
+                            onChange={setInterval}
+                        />
+                    </div>
+                </div>
+
+                <div className="mt-7 flex flex-wrap items-stretch gap-3.5">
                     {TIER_CARDS.map((card) => {
                         const price = priceFor(card.tier, interval, currency);
                         const isCurrent = card.tier === currentTier;
@@ -168,11 +176,11 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                             <section
                                 key={card.tier}
                                 className={[
-                                    'rounded-2xl border p-4 transition-colors',
+                                    'flex min-w-0 flex-1 basis-full flex-col sm:basis-[calc(50%-7px)] lg:basis-[210px] rounded-2xl border p-4 transition-colors',
                                     isCurrent ? 'border-accent/40 bg-accent-soft/30' : 'border-stone-200 bg-white',
                                 ].join(' ')}
                             >
-                                <div className="flex items-baseline justify-between gap-3">
+                                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
                                     <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
                                         {card.name}
                                         {isCurrent ? (
@@ -182,7 +190,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                                         ) : null}
                                     </h3>
                                     {price ? (
-                                        <p className="shrink-0 text-right">
+                                        <p className="ml-auto text-right">
                                             <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
                                                 {price.amount}
                                             </span>
@@ -203,7 +211,7 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                                     </p>
                                 ) : null}
 
-                                <ul className="mt-3 flex flex-col gap-1 text-sm text-stone-700">
+                                <ul className="mt-3 flex grow flex-col gap-1 text-sm text-stone-700">
                                     {card.features.map((feature) => (
                                         <li key={feature}>{feature}</li>
                                     ))}
@@ -249,22 +257,22 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                     })}
 
                     {founding?.priceId ? (
-                        <section className="rounded-2xl border border-amber-300/70 bg-amber-50/60 p-4">
-                            <div className="flex items-baseline justify-between gap-3">
+                        <section className="flex min-w-0 flex-1 basis-full flex-col sm:basis-[calc(50%-7px)] lg:basis-[210px] rounded-2xl border border-amber-300/70 bg-amber-50/60 p-4">
+                            <div className="flex flex-wrap items-baseline justify-between gap-x-3">
                                 <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
                                     Founding Teacher
                                     <Badge tone="warn" className="ml-2 align-middle">
                                         Limited
                                     </Badge>
                                 </h3>
-                                <p className="shrink-0 text-right">
+                                <p className="ml-auto text-right">
                                     <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
                                         {founding.amount}
                                     </span>
                                     <span className="block text-xs text-stone-500">{founding.caption}</span>
                                 </p>
                             </div>
-                            <p className="mt-1 text-sm text-stone-700">{founding.note}</p>
+                            <p className="mt-1 grow text-sm text-stone-700">{founding.note}</p>
                             <Button
                                 size="sm"
                                 className="mt-4 w-full"
@@ -279,13 +287,13 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
 
                 {error ? <ErrorText className="mt-4">{error}</ErrorText> : null}
 
-                <p className="mt-4 text-xs text-stone-500">
+                <p className="mt-6 text-sm text-ink-muted">
                     Plans renew automatically until you cancel, which you can do at any time from your Account page or
                     at cleffy.io/cancel. Full refund within 14 days of your first purchase.
                 </p>
                 <AgreementNote action="subscribing" className="mt-1" />
 
-                <p className="mt-4 text-xs text-stone-500">
+                <p className="mt-3 text-sm text-ink-muted">
                     Students never pay and never need an account — share links keep working on every plan.
                 </p>
             </div>
