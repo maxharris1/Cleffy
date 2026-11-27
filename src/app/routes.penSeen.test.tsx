@@ -242,7 +242,7 @@ const penPress = (el: Element) => {
 
 describe("/try, a pen pressed on the router's Loading demo… screen", () => {
     it.each([true, false])(
-        'hides Draw with finger and a finger drag scrolls without ink, Finger-draw %s',
+        'hides the Scroll | Draw switch and a finger drag scrolls without ink, Finger-draw %s',
         async (fingerDraws) => {
             holdImport();
             const loading = await renderTry();
@@ -291,7 +291,7 @@ describe("/try, a pen pressed on the demo's own loading screen", () => {
             expect(useViewerStore.getState().penSeen).toBe(true);
 
             const viewport = await openScore();
-            expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+            expect(screen.queryByRole('group', { name: 'What a finger does' })).not.toBeInTheDocument();
 
             setFingerDraws(fingerDraws);
             fingerSwipe(viewport);
@@ -301,11 +301,11 @@ describe("/try, a pen pressed on the demo's own loading screen", () => {
         },
     );
 
-    it('without a pen, shows Draw with finger and a finger drag inks with it on', async () => {
+    it('without a pen, shows the Scroll | Draw switch and a finger drag inks with it on', async () => {
         await renderTry();
 
         const viewport = await openScore();
-        expect(screen.getByRole('button', { name: 'Draw with finger' })).toBeInTheDocument();
+        expect(screen.getByRole('group', { name: 'What a finger does' })).toBeInTheDocument();
 
         setFingerDraws(true);
         fingerSwipe(viewport);

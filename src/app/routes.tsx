@@ -1,4 +1,4 @@
-import { lazy, Suspense, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 
 import { RequireGuest } from '@/features/auth/AuthGates';
@@ -8,6 +8,7 @@ import { LibraryShell } from '@/features/library/LibraryShell';
 import { NotFoundPage } from '@/features/marketing/NotFoundPage';
 import { useRecordPointerKinds } from '@/features/viewer/useRecordPointerKinds';
 import { features } from '@/lib/features';
+import { trackPointerKinds } from '@/state/store';
 import { BrandLoading } from '@/ui/BrandShell';
 import { LoadingText } from '@/ui/Loading';
 
@@ -112,6 +113,7 @@ const ViewerRoute = ({ label, children }: { label: string; children: ReactNode }
 };
 
 export const AppRoutes = () => {
+    useEffect(() => trackPointerKinds(document), []);
     return (
         <Routes>
             {/* Gate before the lazy chunk: a registered knownSession redirects

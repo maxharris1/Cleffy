@@ -1265,8 +1265,13 @@ export const PdfViewport = ({
             spaceRef.current = { held: false, turnOnRelease: null, panGesture: false };
         };
         const onScorePointerDown = (e: PointerEvent) => {
-            if (!(e.target instanceof Element && e.target.closest('[data-ui-overlay]'))) {
-                spaceRef.current.panGesture = spaceRef.current.held;
+            if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
+                return;
+            }
+            const { held } = spaceRef.current;
+            const touchJoiningActiveGesture = !held && gestureRef.current?.pointerActive;
+            if (!touchJoiningActiveGesture) {
+                spaceRef.current.panGesture = held;
             }
         };
         const container = containerRef.current;

@@ -168,9 +168,25 @@ export const TextEditorOverlay = ({
     }, []);
 
     const spacePending = useRef(false);
+    const undoEarlySpaceOnScoreDrag = useRef<{ value: string; start: number; end: number } | null>(null);
     useEffect(() => {
-        const drop = () => {
+        const drop = (e: PointerEvent) => {
             spacePending.current = false;
+            const before = undoEarlySpaceOnScoreDrag.current;
+            const el = ref.current;
+            const onScore =
+                e.target instanceof Element &&
+                !e.target.closest('[data-ui-overlay]') &&
+                !!el?.parentElement?.contains(e.target);
+            if (!onScore) {
+                return;
+            }
+            undoEarlySpaceOnScoreDrag.current = null;
+            if (before && el) {
+                el.value = before.value;
+                el.setSelectionRange(before.start, before.end);
+                fitHeight(el);
+            }
         };
         document.addEventListener('pointerdown', drop, true);
         return () => document.removeEventListener('pointerdown', drop, true);
@@ -221,8 +237,10 @@ export const TextEditorOverlay = ({
                     spacePending.current ||= !e.repeat;
                     return;
                 }
-                if (!MODIFIER_KEYS.has(e.key)) {
+                if (spacePending.current && !MODIFIER_KEYS.has(e.key)) {
+                    const { value, selectionStart: start, selectionEnd: end } = e.currentTarget;
                     typePendingSpace(e.currentTarget);
+                    undoEarlySpaceOnScoreDrag.current = { value, start, end };
                 }
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -233,14 +251,19 @@ export const TextEditorOverlay = ({
                 }
                 e.stopPropagation();
             }}
-            onInput={(e) => fitHeight(e.currentTarget)}
+            onInput={(e) => {
+                undoEarlySpaceOnScoreDrag.current = null;
+                fitHeight(e.currentTarget);
+            }}
             onKeyUp={(e) => {
                 if (e.key === ' ') {
+                    undoEarlySpaceOnScoreDrag.current = null;
                     typePendingSpace(e.currentTarget);
                 }
             }}
             onBlur={(e) => {
                 spacePending.current = false;
+                undoEarlySpaceOnScoreDrag.current = null;
                 commit(e.currentTarget.value);
             }}
             onPointerDown={(e) => e.stopPropagation()}

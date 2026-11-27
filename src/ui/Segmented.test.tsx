@@ -82,7 +82,7 @@ describe('Segmented touch targets', () => {
             />,
         );
         for (const name of ['Grid view', 'List']) {
-            expect(screen.getByRole('button', { name })).toHaveClass('pointer-coarse:min-w-11');
+            expect(screen.getByRole('button', { name })).toHaveClass('touch-ui:min-w-11');
         }
     });
 
