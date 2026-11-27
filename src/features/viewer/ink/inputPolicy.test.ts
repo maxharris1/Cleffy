@@ -46,12 +46,15 @@ describe('pointerDraws', () => {
 
 describe('showFingerSwitch', () => {
     it.each([
-        // touchScreen, penSeen, shown
-        [false, false, false],
-        [false, true, false],
-        [true, false, true],
-        [true, true, false],
-    ])('touch screen %s, pen seen %s: shown %s', (touchScreen, penSeen, shown) => {
-        expect(showFingerSwitch({ touchScreen, penSeen })).toBe(shown);
+        [false, false, false, false],
+        [false, false, true, false],
+        [false, true, false, true],
+        [false, true, true, false],
+        [true, false, false, true],
+        [true, false, true, false],
+        [true, true, false, true],
+        [true, true, true, false],
+    ])('touch screen %s, touch seen %s, pen seen %s: shown %s', (touchScreen, touchSeen, penSeen, shown) => {
+        expect(showFingerSwitch({ touchScreen, touchSeen, penSeen })).toBe(shown);
     });
 });

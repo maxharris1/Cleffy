@@ -26,7 +26,7 @@ const renderToolbar = async (onObscuredChange?: (edges: { top: number; bottom: n
     vi.resetModules();
     const { Toolbar } = await import('@/features/viewer/toolbar/Toolbar');
     const { useViewerStore } = await import('@/state/store');
-    useViewerStore.setState({ tool: 'pen', color: '#1f2937', widthKey: 'medium', penSeen: false });
+    useViewerStore.setState({ tool: 'pen', color: '#1f2937', widthKey: 'medium', penSeen: false, touchSeen: false });
     const view = render(
         <div data-testid="viewport">
             <Toolbar store={fakeStore} onObscuredChange={onObscuredChange} />
@@ -98,6 +98,18 @@ describe('Toolbar', () => {
         expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
     });
 
+    it('shows the finger switch on a fine-pointer device once a touch is observed', async () => {
+        useViewport({ width: 1280, coarse: false });
+        const { useViewerStore } = await renderToolbar();
+        expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+
+        act(() => useViewerStore.getState().notePointer('touch'));
+        expect(screen.getByRole('button', { name: 'Draw with finger' })).toBeInTheDocument();
+
+        act(() => useViewerStore.getState().notePointer('pen'));
+        expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+    });
+
     it('lets a finger choose between drawing and scrolling on a touch screen with no stylus yet', async () => {
         useViewport({ width: 1024, coarse: true });
         const { useViewerStore } = await renderToolbar();
@@ -113,7 +125,7 @@ describe('Toolbar', () => {
         act(() => useViewerStore.setState({ fingerDraws: true }));
         expect(screen.getByRole('button', { name: 'Draw with finger' })).toBeInTheDocument();
 
-        act(() => useViewerStore.getState().markPenSeen());
+        act(() => useViewerStore.getState().notePointer('pen'));
         expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
     });
 

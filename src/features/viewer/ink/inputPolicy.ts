@@ -2,12 +2,16 @@ export type PointerKind = 'mouse' | 'touch' | 'pen';
 
 export interface InputState {
     touchScreen: boolean;
+    touchSeen: boolean;
     penSeen: boolean;
     fingerDraws: boolean;
 }
 
-export const showFingerSwitch = ({ touchScreen, penSeen }: Pick<InputState, 'touchScreen' | 'penSeen'>): boolean =>
-    touchScreen && !penSeen;
+export const showFingerSwitch = ({
+    touchScreen,
+    touchSeen,
+    penSeen,
+}: Pick<InputState, 'touchScreen' | 'touchSeen' | 'penSeen'>): boolean => (touchScreen || touchSeen) && !penSeen;
 
 const DRAWS: Record<PointerKind, (state: Pick<InputState, 'penSeen' | 'fingerDraws'>) => boolean> = {
     mouse: () => true,

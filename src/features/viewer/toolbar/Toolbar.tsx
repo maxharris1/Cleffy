@@ -70,6 +70,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const widthKey = useViewerStore((s) => s.widthKey);
     const fingerDraws = useViewerStore((s) => s.fingerDraws);
     const penSeen = useViewerStore((s) => s.penSeen);
+    const touchSeen = useViewerStore((s) => s.touchSeen);
     const touchScreen = useMediaQuery('(any-pointer: coarse)');
     const { setTool, setColor, setWidthKey, setFingerDraws } = useViewerStore.getState();
     const [styleOpen, setStyleOpen] = useState(false);
@@ -340,7 +341,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                     <RedoIcon size={20} />
                 </button>
 
-                {showFingerSwitch({ touchScreen, penSeen }) && (
+                {showFingerSwitch({ touchScreen, touchSeen, penSeen }) && (
                     <>
                         <div className={DIVIDER} />
                         <button

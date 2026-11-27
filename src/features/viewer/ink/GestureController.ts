@@ -109,6 +109,7 @@ export class GestureController {
     constructor(el: HTMLElement, callbacks: GestureCallbacks) {
         this.el = el;
         this.callbacks = callbacks;
+        el.ownerDocument.addEventListener('pointerdown', this.onAnyPointerDown, { capture: true });
         el.addEventListener('pointerdown', this.onPointerDown);
         el.addEventListener('pointermove', this.onPointerMove);
         el.addEventListener('pointerup', this.onPointerUp);
@@ -123,6 +124,7 @@ export class GestureController {
 
     destroy(): void {
         const el = this.el;
+        el.ownerDocument.removeEventListener('pointerdown', this.onAnyPointerDown, { capture: true });
         el.removeEventListener('pointerdown', this.onPointerDown);
         el.removeEventListener('pointermove', this.onPointerMove);
         el.removeEventListener('pointerup', this.onPointerUp);
@@ -158,10 +160,11 @@ export class GestureController {
         e.preventDefault();
     };
 
+    private onAnyPointerDown = (e: PointerEvent): void => {
+        useViewerStore.getState().notePointer(e.pointerType);
+    };
+
     private onPointerDown = (e: PointerEvent): void => {
-        if (e.pointerType === 'pen') {
-            useViewerStore.getState().markPenSeen();
-        }
         // Never claim pointers that start on UI overlays (toolbar, zoom buttons,
         // text editor) — capturing them would swallow their click events.
         if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {

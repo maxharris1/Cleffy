@@ -121,9 +121,9 @@ interface ViewerStore extends PlaybackSlice {
     /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
     selectedTextId: string | null;
     setSelectedTextId: (selectedTextId: string | null) => void;
-    /** A stylus has touched the viewer this session. Never persisted. */
     penSeen: boolean;
-    markPenSeen: () => void;
+    touchSeen: boolean;
+    notePointer: (pointerType: string) => void;
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
@@ -186,9 +186,13 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
     selectedTextId: null,
     setSelectedTextId: (selectedTextId) => set({ selectedTextId }),
     penSeen: false,
-    markPenSeen: () => {
-        if (!get().penSeen) {
+    touchSeen: false,
+    notePointer: (pointerType) => {
+        if (pointerType === 'pen' && !get().penSeen) {
             set({ penSeen: true });
+        }
+        if (pointerType === 'touch' && !get().touchSeen) {
+            set({ touchSeen: true });
         }
     },
     ...INITIAL_PLAYBACK,

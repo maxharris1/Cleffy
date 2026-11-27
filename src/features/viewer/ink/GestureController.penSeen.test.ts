@@ -51,7 +51,7 @@ const fakeCanvas = () => {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 
-let clock = 0;
+let clock: number;
 let el: HTMLDivElement;
 let page: ReturnType<typeof fakeCanvas>;
 let ink: InkController;
@@ -71,10 +71,11 @@ const swipe = (pointerType: 'pen' | 'touch', target: Element = el) => {
 };
 
 beforeEach(async () => {
+    clock = 10_000;
     vi.stubGlobal('Path2D', FakePath2D);
     vi.stubGlobal('requestAnimationFrame', () => 0);
     vi.spyOn(performance, 'now').mockImplementation(() => clock);
-    useViewerStore.setState({ tool: 'pen', fingerDraws: true, penSeen: false });
+    useViewerStore.setState({ tool: 'pen', fingerDraws: true, penSeen: false, touchSeen: false });
 
     const store = new AnnotationStore(new ScribblerDb(`test-${crypto.randomUUID()}`), 'local-pen-seen');
     await store.load();
@@ -109,7 +110,7 @@ afterEach(() => {
     gestures.destroy();
     ink.destroy();
     el.remove();
-    useViewerStore.setState({ penSeen: false, fingerDraws: false });
+    useViewerStore.setState({ penSeen: false, touchSeen: false, fingerDraws: false });
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
 });
@@ -147,5 +148,42 @@ describe('a finger once a stylus has been seen', () => {
         await settle();
         expect(page.shown).toHaveLength(0);
         expect(onPan).toHaveBeenCalled();
+    });
+
+    it.each([true, false])(
+        'scrolls after the stylus only tapped the viewer header, Finger-draw %s',
+        async (fingerDraws) => {
+            useViewerStore.setState({ fingerDraws });
+            const title = document.createElement('h1');
+            document.body.appendChild(title);
+            const at = (type: string) =>
+                new PointerEvent(type, { pointerId: nextPointerId, pointerType: 'pen', button: 0, bubbles: true });
+            title.dispatchEvent(at('pointerdown'));
+            title.dispatchEvent(at('pointerup'));
+            nextPointerId++;
+            title.remove();
+
+            expect(useViewerStore.getState().penSeen).toBe(true);
+            swipe('touch');
+            await settle();
+            expect(page.shown).toHaveLength(0);
+            expect(onPan).toHaveBeenCalled();
+        },
+    );
+});
+
+describe('a touch observed in the viewer', () => {
+    it('is recorded on the first finger, before any stylus', () => {
+        useViewerStore.setState({ fingerDraws: false });
+        expect(useViewerStore.getState().touchSeen).toBe(false);
+        swipe('touch');
+        expect(useViewerStore.getState().touchSeen).toBe(true);
+        expect(onPan).toHaveBeenCalled();
+    });
+
+    it('stops recording once the controller is destroyed', () => {
+        gestures.destroy();
+        document.body.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'pen', bubbles: true }));
+        expect(useViewerStore.getState().penSeen).toBe(false);
     });
 });
