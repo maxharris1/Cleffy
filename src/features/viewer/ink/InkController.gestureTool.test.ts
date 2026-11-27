@@ -1,12 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { purgeLocalDocument } from '@/features/library/documentsService';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { InkController } from '@/features/viewer/ink/InkController';
 import { AnnotationStore } from '@/sync/annotationStore';
+import type * as dbModule from '@/sync/db';
 import { ScribblerDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
+
+vi.mock('@/sync/db', async (importOriginal) => ({
+    ...(await importOriginal<typeof dbModule>()),
+    getDb: () => db,
+}));
 
 const DOC = 'local-ink-gesture-tool';
 const PAGE_W = 1000;
@@ -286,5 +293,59 @@ describe('InkController erase undo batch', () => {
         await undoWhileLastDeletePendingThenDraw((e) => ink.delegate.onInkCancel(e));
         expect(strokesShown()).toBe(4);
         expect(await marksSaved()).toBe(4);
+    });
+
+    const mirrorAfterUndoOvertakenByPurge = async (end: (e: PointerEvent) => void, holdLastDelete: boolean) => {
+        drawStroke(100, 300);
+        drawStroke(300, 300);
+        drawStroke(500, 300);
+        await settle();
+        useViewerStore.getState().setTool('eraser');
+        ink.delegate.onInkDown(pointer(110, 302));
+        ink.delegate.onInkMove(pointer(130, 304));
+        await settle();
+        const gate = holdLastDelete ? holdNextSnapshotCheck() : null;
+        ink.delegate.onInkMove(pointer(310, 302));
+        ink.delegate.onInkMove(pointer(330, 304));
+        await (gate ? gate.held : settle());
+        end(pointer(330, 304));
+
+        const undone = Promise.allSettled([store.undoLast()]);
+        await purgeLocalDocument(DOC);
+        gate?.release();
+        await undone;
+        await settle();
+        return {
+            rows: await db.annotations.where('docId').equals(DOC).toArray(),
+            ops: await db.ops.where('docId').equals(DOC).toArray(),
+        };
+    };
+
+    it('undo overtaken by a score purge after lift writes nothing back', async () => {
+        expect(await mirrorAfterUndoOvertakenByPurge((e) => ink.delegate.onInkUp(e), false)).toEqual({
+            rows: [],
+            ops: [],
+        });
+    });
+
+    it('undo overtaken by a score purge after cancel writes nothing back', async () => {
+        expect(await mirrorAfterUndoOvertakenByPurge((e) => ink.delegate.onInkCancel(e), false)).toEqual({
+            rows: [],
+            ops: [],
+        });
+    });
+
+    it('undo overtaken by a score purge while the last delete is pending writes nothing back', async () => {
+        expect(await mirrorAfterUndoOvertakenByPurge((e) => ink.delegate.onInkUp(e), true)).toEqual({
+            rows: [],
+            ops: [],
+        });
+    });
+
+    it('undo overtaken by a score purge after cancel while the last delete is pending writes nothing back', async () => {
+        expect(await mirrorAfterUndoOvertakenByPurge((e) => ink.delegate.onInkCancel(e), true)).toEqual({
+            rows: [],
+            ops: [],
+        });
     });
 });

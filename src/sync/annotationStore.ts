@@ -37,6 +37,12 @@ import type { Annotation, AnnotationPayload } from '@/types/models';
 
 export type PageListener = (pageIndex: number) => void;
 
+interface ReplayGuard {
+    author: string | null;
+    live: InkWriteGuard;
+    generation: number;
+}
+
 export interface AnnotationPatch {
     color?: string;
     payload?: AnnotationPayload;
@@ -1046,12 +1052,13 @@ export class AnnotationStore {
             return; // read-only while an overlay is shown — don't consume the entry
         }
         const request = this.undo.requestUndo();
+        const press = this.guardAtPress();
         for (;;) {
             const entry = await this.undo.popUndo(request);
             if (!entry) {
                 break;
             }
-            const inverses = await this.replayEntry(entry);
+            const inverses = await this.replayEntry(entry, press);
             if (inverses) {
                 this.undo.pushRedoEntry(inverses);
                 break;
@@ -1064,12 +1071,13 @@ export class AnnotationStore {
         if (this.historyOverlay) {
             return;
         }
+        const press = this.guardAtPress();
         for (;;) {
             const entry = this.undo.popRedo();
             if (!entry) {
                 break;
             }
-            const inverses = await this.replayEntry(entry);
+            const inverses = await this.replayEntry(entry, press);
             if (inverses) {
                 this.undo.pushUndoEntryRaw(inverses);
                 break;
@@ -1084,14 +1092,12 @@ export class AnnotationStore {
      * per chunk) instead of one silent multi-second write. Memory state
      * updates op by op — later ops may read earlier ops' effects.
      */
-    private async replayEntry(ops: UndoableOp[] | null): Promise<UndoableOp[] | null> {
+    private async replayEntry(ops: UndoableOp[] | null, press: ReplayGuard): Promise<UndoableOp[] | null> {
         if (!ops) {
             return null;
         }
         const CHUNK = 4000;
-        const author = this.author;
-        const live = editBoundTo(author, this.docId);
-        const generation = this.generation;
+        const { author, live, generation } = press;
         const reversed = [...ops].reverse();
         const inverses: UndoableOp[] = [];
         const wrote: string[] = [];
@@ -1128,6 +1134,11 @@ export class AnnotationStore {
             this.onDirty?.(wrote);
         }
         return inverses.length > 0 ? inverses : null;
+    }
+
+    private guardAtPress(): ReplayGuard {
+        const author = this.author;
+        return { author, live: editBoundTo(author, this.docId), generation: this.generation };
     }
 
     /** Apply an undo/redo op to memory and plan its durable write; return the write + its inverse. */
