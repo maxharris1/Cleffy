@@ -163,6 +163,29 @@ export const TextEditorOverlay = ({
         }
     }, []);
 
+    const spacePending = useRef(false);
+    useEffect(() => {
+        const drop = () => {
+            spacePending.current = false;
+        };
+        document.addEventListener('pointerdown', drop, true);
+        return () => document.removeEventListener('pointerdown', drop, true);
+    }, []);
+    const typePendingSpace = (el: HTMLTextAreaElement) => {
+        if (!spacePending.current) {
+            return;
+        }
+        spacePending.current = false;
+        const { selectionStart: start, selectionEnd: end } = el;
+        if (el.value.length - (end - start) >= el.maxLength) {
+            return;
+        }
+        if (!document.execCommand?.('insertText', false, ' ')) {
+            el.setRangeText(' ', start, end, 'end');
+        }
+        fitHeight(el);
+    };
+
     return (
         <textarea
             ref={ref}
@@ -188,6 +211,13 @@ export const TextEditorOverlay = ({
                 fontWeight: proseFace?.weight,
             }}
             onKeyDown={(e) => {
+                if (e.key === ' ' && !(e.ctrlKey || e.metaKey || e.altKey || e.nativeEvent.isComposing)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    spacePending.current ||= !e.repeat;
+                    return;
+                }
+                typePendingSpace(e.currentTarget);
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     commit(e.currentTarget.value);
@@ -198,7 +228,15 @@ export const TextEditorOverlay = ({
                 e.stopPropagation();
             }}
             onInput={(e) => fitHeight(e.currentTarget)}
-            onBlur={(e) => commit(e.currentTarget.value)}
+            onKeyUp={(e) => {
+                if (e.key === ' ') {
+                    typePendingSpace(e.currentTarget);
+                }
+            }}
+            onBlur={(e) => {
+                spacePending.current = false;
+                commit(e.currentTarget.value);
+            }}
             onPointerDown={(e) => e.stopPropagation()}
         />
     );

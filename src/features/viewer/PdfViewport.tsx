@@ -148,12 +148,13 @@ const pageTurnDirection = (e: KeyboardEvent): -1 | 1 | null => {
         case 'ArrowUp':
         case 'PageUp':
             return e.shiftKey ? null : -1;
-        case ' ':
-            return e.shiftKey ? -1 : 1;
         default:
             return null;
     }
 };
+
+const spaceTurnDirection = (e: KeyboardEvent): -1 | 1 | null =>
+    e.key !== ' ' || e.ctrlKey || e.metaKey || e.altKey ? null : e.shiftKey ? -1 : 1;
 
 /** A horizontal drag this far (px), and mostly sideways, turns the page in stand mode. */
 const STAND_SWIPE_PX = 60;
@@ -312,6 +313,11 @@ export const PdfViewport = ({
     const viewportSizeRef = useRef(viewportSize);
     const obscuredRef = useRef(obscured);
     const readOnlyRef = useRef(effectiveReadOnly);
+    const spaceRef = useRef<{ held: boolean; turnOnRelease: -1 | 1 | null; pannedWhileHeld: boolean }>({
+        held: false,
+        turnOnRelease: null,
+        pannedWhileHeld: false,
+    });
     const renderScaleRef = useRef(renderScale);
     const playbackRef = useRef(playback);
     const textIntentRef = useRef(textIntent);
@@ -932,6 +938,7 @@ export const PdfViewport = ({
             store: annotationStore,
             registry,
             isReadOnly: () => readOnlyRef.current,
+            panKeyHeld: () => spaceRef.current.held,
             getView: () => useViewerStore.getState().view,
             getLayout: () => layoutRef.current,
             toLocal,
@@ -1211,6 +1218,12 @@ export const PdfViewport = ({
             if (keyTargetsControl(e.target)) {
                 return;
             }
+            const spaceTurn = spaceTurnDirection(e);
+            if (spaceTurn !== null) {
+                e.preventDefault();
+                spaceRef.current.turnOnRelease = spaceTurn;
+                return;
+            }
             const direction = pageTurnDirection(e);
             if (direction !== null) {
                 e.preventDefault();
@@ -1229,8 +1242,42 @@ export const PdfViewport = ({
                 settleEdit(annotationStore.redoLast());
             }
         };
+        const onSpaceDownBeforeTextNote = (e: KeyboardEvent) => {
+            if (e.key === ' ' && !e.repeat) {
+                spaceRef.current = { held: true, turnOnRelease: null, pannedWhileHeld: false };
+            }
+        };
+        const onKeyUp = (e: KeyboardEvent) => {
+            if (e.key !== ' ') {
+                return;
+            }
+            const { turnOnRelease, pannedWhileHeld } = spaceRef.current;
+            spaceRef.current = { held: false, turnOnRelease: null, pannedWhileHeld };
+            if (turnOnRelease !== null && !pannedWhileHeld && !isDialogOpen()) {
+                turnPage(turnOnRelease);
+            }
+        };
+        const onBlur = () => {
+            spaceRef.current = { held: false, turnOnRelease: null, pannedWhileHeld: false };
+        };
+        const onScorePointerDown = (e: PointerEvent) => {
+            if (spaceRef.current.held && !(e.target instanceof Element && e.target.closest('[data-ui-overlay]'))) {
+                spaceRef.current.pannedWhileHeld = true;
+            }
+        };
+        const container = containerRef.current;
+        window.addEventListener('keydown', onSpaceDownBeforeTextNote, true);
         window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
+        window.addEventListener('keyup', onKeyUp);
+        window.addEventListener('blur', onBlur);
+        container?.addEventListener('pointerdown', onScorePointerDown, true);
+        return () => {
+            window.removeEventListener('keydown', onSpaceDownBeforeTextNote, true);
+            window.removeEventListener('keydown', onKeyDown);
+            window.removeEventListener('keyup', onKeyUp);
+            window.removeEventListener('blur', onBlur);
+            container?.removeEventListener('pointerdown', onScorePointerDown, true);
+        };
     }, [annotationStore, turnPage, standTurn]);
 
     const commitText = (text: string, at?: { nx: number; ny: number }) => {
