@@ -1,15 +1,12 @@
-students-no-roster desktop-1440 gap=32
-students-no-roster ipad-portrait gap=32
-students-no-roster iphone-14 gap=32
-library-empty desktop-1440 gap=32
-library-empty ipad-portrait gap=32
-library-empty iphone-14 gap=32
-library-failed desktop-1440 gap=32
-library-failed ipad-portrait gap=32
-library-failed iphone-14 gap=32
-account desktop-1440 gap=32
-account ipad-portrait gap=32
-account iphone-14 gap=32
-search desktop-1440 gap=32
-search ipad-portrait gap=32
-search iphone-14 gap=32
+library-desktop-1440 {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+search-desktop-1440 {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+students-desktop-1440 {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+account-desktop-1440 {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+library-ipad-portrait {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+search-ipad-portrait {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+students-ipad-portrait {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+account-ipad-portrait {"gap":32,"withoutHeadMargin":0} audit candidates: 8
+library-iphone-14 {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+search-iphone-14 {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+students-iphone-14 {"gap":32,"withoutHeadMargin":0} audit candidates: 0
+account-iphone-14 {"gap":32,"withoutHeadMargin":0} audit candidates: 8
