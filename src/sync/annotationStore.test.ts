@@ -163,6 +163,28 @@ describe('AnnotationStore', () => {
         expect(store.getPage(0).has('a1')).toBe(true);
     });
 
+    it('an edit made for an outer batch undoes with that batch, not the inner one open over it', async () => {
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+
+        const outer = store.beginBatch();
+        const inner = store.beginBatch();
+        await store.delete('a1', { batch: outer });
+        await store.create(makeStroke('c1'), { batch: outer });
+        await store.delete('a2');
+        store.endBatch(inner);
+        store.endBatch(outer);
+
+        await store.undoLast();
+        expect(store.getPage(0).has('a1')).toBe(true);
+        expect((await db.annotations.get('a1'))?.deletedAt).toBeNull();
+        expect(store.getPage(0).has('c1')).toBe(false);
+        expect(store.getPage(0).has('a2')).toBe(false);
+
+        await store.undoLast();
+        expect(store.getPage(0).has('a2')).toBe(true);
+    });
+
     it('a new op clears the redo stack', async () => {
         await store.create(makeStroke('a1'));
         await store.undoLast();
