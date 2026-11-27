@@ -173,7 +173,7 @@ export const DemoViewer = ({ bytes }: { bytes: ArrayBuffer }) => {
     // Most ad traffic is a phone with no stylus. With finger drawing off (the
     // app's default) a first swipe pans, and the demo looks broken. On while
     // the demo is up; whatever it was comes back on the way out, so the rest
-    // of the app is unaffected. The toolbar toggle stays for Pencil users.
+    // of the app is unaffected. Once a stylus is seen, a finger scrolls anyway.
     useEffect(() => {
         const { fingerDraws: previous, setFingerDraws } = useViewerStore.getState();
         setFingerDraws(true);

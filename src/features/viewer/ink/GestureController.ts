@@ -176,10 +176,9 @@ export class GestureController {
             this.lastTouchDown = performance.now();
         }
         // Palm rejection: ignore touches that land while/just after the pen is
-        // active. Finger-draw is the exception: a second finger on the text
-        // tool promotes the ink pointer into a pinch-resize.
+        // active. A second finger on a finger stroke turns it into a pinch.
         if (e.pointerType === 'touch' && this.inkPointerId !== null) {
-            if (this.inkType === 'touch' && this.inkDelegate?.canPinch?.()) {
+            if (this.inkType === 'touch') {
                 this.promoteInkToPinch(e);
             }
             return;
@@ -188,9 +187,10 @@ export class GestureController {
             return;
         }
 
-        if (this.inkDelegate && this.inkPointerId === null && this.inkDelegate.shouldInk(e)) {
-            // A claimed two-finger pinch (or any multi-touch) must not let a
-            // third Finger-draw touch start a drag/deselect.
+        const joinsNavigation = e.pointerType === 'touch' && this.pointers.size > 0;
+        if (this.inkDelegate && this.inkPointerId === null && !joinsNavigation && this.inkDelegate.shouldInk(e)) {
+            // A claimed two-finger pinch must not let a third Finger-draw touch
+            // start a drag/deselect.
             if (this.inkPinch || this.pointers.size >= 2) {
                 return;
             }
@@ -226,7 +226,7 @@ export class GestureController {
 
     private onPointerMove = (e: PointerEvent): void => {
         if (e.pointerId === this.inkPointerId) {
-            this.lastPenActivity = performance.now();
+            this.notePenActivity();
             const { x, y } = this.toLocal(e);
             this.inkX = x;
             this.inkY = y;
@@ -278,8 +278,8 @@ export class GestureController {
 
     private onPointerUp = (e: PointerEvent): void => {
         if (e.pointerId === this.inkPointerId) {
+            this.notePenActivity();
             this.inkPointerId = null;
-            this.lastPenActivity = performance.now();
             this.inkDelegate?.onInkUp(e);
             return;
         }
@@ -316,16 +316,24 @@ export class GestureController {
         }
     };
 
+    /** Only a stylus stroke opens the palm-rejection window, never a finger stroke. */
+    private notePenActivity(): void {
+        if (this.inkType === 'pen') {
+            this.lastPenActivity = performance.now();
+        }
+    }
+
     /**
-     * Finger-draw claimed the first touch as ink; a second finger on a selected
-     * note becomes pinch-resize instead of a one-finger pan + rejected palm.
+     * Finger-draw claimed the first touch as ink; a second finger makes it a
+     * pinch. On a selected note that pinch resizes it; anywhere else the stroke
+     * is dropped and the pinch pans and zooms the page.
      */
     private promoteInkToPinch(e: PointerEvent): void {
         const inkId = this.inkPointerId;
         if (inkId === null) {
             return;
         }
-        if (this.inkDelegate?.onPromoteToPinch) {
+        if (this.inkDelegate?.onPromoteToPinch && this.inkDelegate.canPinch?.()) {
             this.inkDelegate.onPromoteToPinch();
         } else {
             this.inkDelegate?.onInkCancel(e);

@@ -11,6 +11,9 @@ export interface EffectiveBox {
     height: number;
     minWidth: number;
     hit44: boolean;
+    hit44y: boolean;
+    /** How far a ::before target reaches past the top and bottom edges. */
+    overhangY: number;
 }
 
 const REM_PX = 16;
@@ -23,6 +26,7 @@ const FEATURES: Record<string, (value: string, viewport: Viewport) => boolean> =
     'min-width': (value, { width }) => width >= lengthPx(value),
     'max-width': (value, { width }) => width <= lengthPx(value),
     pointer: (value, { coarse }) => value === (coarse ? 'coarse' : 'fine'),
+    'any-pointer': (value, { coarse }) => value === (coarse ? 'coarse' : 'fine'),
 };
 
 const matchesQuery = (query: string, viewport: Viewport): boolean => {
@@ -50,11 +54,13 @@ export const useViewport = (viewport: Viewport): void => {
     }));
 };
 
-const VARIANTS: Record<string, () => boolean> = {
+const VARIANTS: Record<string, (el: HTMLElement) => boolean> = {
     sm: () => window.matchMedia('(min-width: 40rem)').matches,
     'max-sm': () => !window.matchMedia('(min-width: 40rem)').matches,
     'pointer-coarse': () => window.matchMedia('(pointer: coarse)').matches,
     'pointer-fine': () => window.matchMedia('(pointer: fine)').matches,
+    'touch-ui': (el) =>
+        window.matchMedia('(pointer: coarse)').matches || el.parentElement?.closest('[data-touch-ui]') != null,
 };
 
 const spacingPx = (value: string): number => {
@@ -71,6 +77,8 @@ const UTILITIES: readonly [RegExp, (value: string) => Partial<EffectiveBox>][] =
     [/^h-(.+)$/, (v) => ({ height: spacingPx(v) })],
     [/^min-w-(.+)$/, (v) => ({ minWidth: spacingPx(v) })],
     [/^(hit-44)$/, () => ({ hit44: true })],
+    [/^(hit-44-y)$/, () => ({ hit44y: true })],
+    [/^before:-inset-y-(.+)$/, (v) => ({ overhangY: spacingPx(v) })],
 ];
 
 const inlinePx = (value: string): number | undefined => (value === '' ? undefined : lengthPx(value));
@@ -84,15 +92,23 @@ export const effectiveBox = (el: HTMLElement): EffectiveBox => {
     const applied = Array.from(el.classList)
         .map((cls) => {
             const parts = cls.split(':');
-            const utility = parts.pop() as string;
+            const utility = parts.at(-2) === 'before' ? parts.splice(-2).join(':') : (parts.pop() as string);
             const ruleIndex = UTILITIES.findIndex(([pattern]) => pattern.test(utility));
-            const active = parts.every((variant) => VARIANTS[variant]?.() ?? false);
+            const active = parts.every((variant) => VARIANTS[variant]?.(el) ?? false);
             return { utility, depth: parts.length, ruleIndex, active };
         })
         .filter(({ ruleIndex, active }) => ruleIndex >= 0 && active)
         .sort((a, b) => a.depth - b.depth || a.ruleIndex - b.ruleIndex);
 
-    const box: EffectiveBox = { paddingTop: 0, paddingBottom: 0, height: 0, minWidth: 0, hit44: false };
+    const box: EffectiveBox = {
+        paddingTop: 0,
+        paddingBottom: 0,
+        height: 0,
+        minWidth: 0,
+        hit44: false,
+        hit44y: false,
+        overhangY: 0,
+    };
     for (const { utility, ruleIndex } of applied) {
         const [pattern, resolve] = UTILITIES[ruleIndex] as (typeof UTILITIES)[number];
         Object.assign(box, resolve((pattern.exec(utility) as RegExpExecArray)[1] as string));

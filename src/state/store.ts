@@ -121,6 +121,9 @@ interface ViewerStore extends PlaybackSlice {
     /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
     selectedTextId: string | null;
     setSelectedTextId: (selectedTextId: string | null) => void;
+    penSeen: boolean;
+    touchSeen: boolean;
+    notePointer: (pointerType: string) => void;
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
@@ -146,7 +149,7 @@ const INITIAL_PLAYBACK = {
  * AnnotationStore's in-memory map (plan §sync). Usable outside React via
  * useViewerStore.getState() from high-frequency pointer handlers.
  */
-export const useViewerStore = create<ViewerStore>((set) => ({
+export const useViewerStore = create<ViewerStore>((set, get) => ({
     view: INITIAL_VIEW,
     pinch: null,
     tool: 'pen',
@@ -182,6 +185,16 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setStandMode: (standMode) => set({ standMode }),
     selectedTextId: null,
     setSelectedTextId: (selectedTextId) => set({ selectedTextId }),
+    penSeen: false,
+    touchSeen: false,
+    notePointer: (pointerType) => {
+        if (pointerType === 'pen' && !get().penSeen) {
+            set({ penSeen: true });
+        }
+        if (pointerType === 'touch' && !get().touchSeen) {
+            set({ touchSeen: true });
+        }
+    },
     ...INITIAL_PLAYBACK,
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),
@@ -198,3 +211,70 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     notePlayheadJump: () => set((state) => ({ playheadEpoch: state.playheadEpoch + 1 })),
     resetPlayback: () => set({ ...INITIAL_PLAYBACK }),
 }));
+
+/* Chromium hit-tests a tap again for its click, after the press. */
+const TOUCH_PRESS_SETTLE_MS = 500;
+
+/** Notes the kind of every press in the session, wherever on the page it lands. */
+export const trackPointerKinds = (doc: Document): (() => void) => {
+    const touchesDown = new Set<number>();
+    let touchUnrecorded = false;
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const recordTouch = () => {
+        clearTimeout(settle);
+        if (touchUnrecorded) {
+            touchUnrecorded = false;
+            useViewerStore.getState().notePointer('touch');
+        }
+    };
+    const isTouch = (e: Event) => (e as PointerEvent).pointerType === 'touch';
+    const lift = (e: Event) => isTouch(e) && touchesDown.delete((e as PointerEvent).pointerId) && !touchesDown.size;
+    const listeners: [string, (e: Event) => void, boolean][] = [
+        [
+            'pointerdown',
+            (e) => {
+                const { pointerType, pointerId } = e as PointerEvent;
+                if (pointerType === 'touch') {
+                    clearTimeout(settle);
+                    touchesDown.add(pointerId);
+                    touchUnrecorded = true;
+                } else {
+                    useViewerStore.getState().notePointer(pointerType);
+                }
+            },
+            true,
+        ],
+        [
+            'pointerup',
+            (e) => {
+                if (lift(e)) {
+                    settle = setTimeout(recordTouch, TOUCH_PRESS_SETTLE_MS);
+                }
+            },
+            true,
+        ],
+        [
+            'pointercancel',
+            (e) => {
+                if (lift(e)) {
+                    recordTouch();
+                }
+            },
+            true,
+        ],
+        [
+            'click',
+            (e) => {
+                if (isTouch(e) && !touchesDown.size) {
+                    recordTouch();
+                }
+            },
+            false,
+        ],
+    ];
+    for (const [type, listener, capture] of listeners) doc.addEventListener(type, listener, { capture });
+    return () => {
+        clearTimeout(settle);
+        for (const [type, listener, capture] of listeners) doc.removeEventListener(type, listener, { capture });
+    };
+};

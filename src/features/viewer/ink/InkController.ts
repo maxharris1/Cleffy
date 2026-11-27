@@ -8,6 +8,7 @@ import {
     type DocumentLayout,
 } from '@/features/viewer/geometry';
 import { hitTestPage } from '@/features/viewer/ink/hitTest';
+import { pointerDraws } from '@/features/viewer/ink/inputPolicy';
 import {
     buildStrokePath,
     drawAnnotation,
@@ -174,6 +175,7 @@ export class InkController {
             store: AnnotationStore;
             registry: CanvasRegistry;
             isReadOnly: () => boolean;
+            panKeyHeld: () => boolean;
             getView: () => ViewState;
             getLayout: () => DocumentLayout;
             /** Viewport-local coords for a pointer event. */
@@ -416,8 +418,8 @@ export class InkController {
     }
 
     private shouldInk(e: PointerEvent): boolean {
-        const { tool, fingerDraws } = useViewerStore.getState();
-        if (tool === null) {
+        const { tool, fingerDraws, penSeen } = useViewerStore.getState();
+        if (tool === null || this.opts.panKeyHeld()) {
             return false;
         }
         // The fingering tool only selects a region (never writes), so view-only
@@ -426,7 +428,7 @@ export class InkController {
             if (this.opts.isReadOnly()) {
                 return false;
             }
-            if (e.pointerType === 'touch' && !fingerDraws) {
+            if (!pointerDraws(e.pointerType, true, { penSeen, fingerDraws })) {
                 return false;
             }
         }
@@ -1023,7 +1025,7 @@ export class InkController {
             canvases.committed.height,
         );
         for (const hit of hits) {
-            settleEdit(this.opts.store.delete(hit.id));
+            settleEdit(this.opts.store.delete(hit.id, { batch: this.openBatch ?? undefined }));
         }
     }
 

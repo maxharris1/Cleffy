@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 
+import { useRecordPointerKinds } from '@/features/viewer/useRecordPointerKinds';
 import { ArrowLeftIcon } from '@/ui/icons';
 import { OnInkContext } from '@/ui/onInk';
 
@@ -37,6 +38,7 @@ const ScoreTitle = ({ title }: { title: string }) => {
  */
 export const ViewerHeader = ({ backTo, backLabel, title, children, primary }: ViewerHeaderProps) => {
     const [titleOpen, setTitleOpen] = useState(false);
+    useRecordPointerKinds();
     return (
         <header className="chrome-ink bg-ink pb-1.5 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] pt-[max(0.25rem,var(--safe-top))] text-paper sm:pl-[max(1rem,var(--safe-left))] sm:pr-[max(1rem,var(--safe-right))] sm:pt-[max(0.375rem,var(--safe-top))]">
             <OnInkContext.Provider value>

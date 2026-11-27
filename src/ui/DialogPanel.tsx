@@ -5,7 +5,8 @@ import type { PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent, 
 
 import { prefersReducedMotion } from '@/lib/motion';
 import { CloseButton } from '@/ui/CloseButton';
-import type { DialogMaxWidth, DialogProps } from '@/ui/Dialog';
+import type { DialogMaxWidth, DialogProps, DialogSize } from '@/ui/Dialog';
+import { dialogTitleClassName } from '@/ui/dialogTitle';
 import { dialogStack } from '@/ui/dialogStack';
 
 /** A sheet dragged down this far (px), or flicked faster than this (px/ms), closes. */
@@ -75,6 +76,10 @@ const MAX_WIDTH_CLASS: Record<DialogMaxWidth, string> = {
     520: 'max-w-[520px]',
 };
 
+/** A wide panel is 1120px; an md panel takes its width from `maxWidth`. */
+const panelSizeClasses = (size: DialogSize, maxWidth: DialogMaxWidth) =>
+    size === 'wide' ? 'max-w-[1120px] rounded-[24px]' : `${MAX_WIDTH_CLASS[maxWidth]} rounded-[22px]`;
+
 export interface DialogPanelProps extends DialogProps {
     /** This dialog's entry on dialogStack, which the Dialog wrapper holds. */
     stackId: symbol;
@@ -98,6 +103,7 @@ export const DialogPanel = ({
     withHeader = true,
     sheet = false,
     alert = false,
+    size = 'md',
     maxWidth = 448,
     stackId,
 }: DialogPanelProps) => {
@@ -155,7 +161,7 @@ export const DialogPanel = ({
                         aria-modal="true"
                         aria-label={label}
                         initialFocus={popupRef}
-                        className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} dialog-paper w-full ${MAX_WIDTH_CLASS[maxWidth]} overscroll-contain rounded-[22px] bg-paper p-7 shadow-[0_40px_90px_-30px_rgba(28,25,23,0.6),0_0_0_1px_rgba(28,25,23,0.08)] outline-none ${
+                        className={`${sheet ? 'ui-sheet-pop' : 'ui-dialog-pop'} dialog-paper w-full ${panelSizeClasses(size, maxWidth)} overscroll-contain bg-paper p-7 shadow-[0_40px_90px_-30px_rgba(28,25,23,0.6),0_0_0_1px_rgba(28,25,23,0.08)] outline-none ${
                             sheet
                                 ? 'max-h-[80dvh] overflow-y-auto overflow-x-hidden pb-[max(1.75rem,var(--safe-bottom))] pl-[max(1.75rem,var(--safe-left))] pr-[max(1.75rem,var(--safe-right))]'
                                 : // Fits any viewport (the viewport's p-4 is the 2rem) and scrolls inside, so a
@@ -187,7 +193,7 @@ export const DialogPanel = ({
                                         : '-mx-7 px-7'
                                 }`}
                             >
-                                <Parts.Title className="min-w-0 font-display text-[28px] leading-[1.15] font-semibold tracking-[-0.01em] text-balance text-ink [font-variation-settings:'opsz'_10] [overflow-wrap:anywhere]">
+                                <Parts.Title className={`${dialogTitleClassName} min-w-0 [overflow-wrap:anywhere]`}>
                                     {label}
                                 </Parts.Title>
                                 <CloseButton

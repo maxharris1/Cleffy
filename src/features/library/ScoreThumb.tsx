@@ -19,10 +19,12 @@ export const ScoreThumb = ({
     docId,
     contentRev,
     thumbRev = null,
+    frameClassName = 'h-12 w-9 rounded-md border border-stone-200',
 }: {
     docId: string;
     contentRev: number;
     thumbRev?: number | null;
+    frameClassName?: string;
 }) => {
     const ref = useRef<HTMLSpanElement | null>(null);
     const near = useNearViewport(ref);
@@ -32,7 +34,7 @@ export const ScoreThumb = ({
         <span
             ref={ref}
             aria-hidden="true"
-            className="relative block h-12 w-9 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-white"
+            className={`relative block shrink-0 overflow-hidden bg-white ${frameClassName}`}
         >
             {url ? (
                 <CoverImage

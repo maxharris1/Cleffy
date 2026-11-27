@@ -105,6 +105,7 @@ const makeController = (onRegistry: CanvasRegistry) =>
         store,
         registry: onRegistry,
         isReadOnly: () => false,
+        panKeyHeld: () => false,
         getView: () => ({ scale: 1, scrollX: 0, scrollY: 0 }),
         getLayout: () => layout,
         toLocal: (e) => ({ x: e.clientX, y: e.clientY }),

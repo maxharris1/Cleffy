@@ -13,6 +13,7 @@ import {
     LocateFixed,
     Maximize,
     Minus,
+    MoveVertical,
     Music,
     Pause,
     Play,
@@ -62,6 +63,7 @@ export const TwoPagesIcon = withBrandStroke(Columns2);
 export const CheckboxIcon = withBrandStroke(Square);
 export const CheckboxCheckedIcon = withBrandStroke(SquareCheck);
 export const PointerIcon = withBrandStroke(Pointer);
+export const ScrollIcon = withBrandStroke(MoveVertical);
 export const PrinterIcon = withBrandStroke(Printer);
 export const PrintHandwritingIcon = withBrandStroke(WandSparkles);
 export const StarIcon = withBrandStroke(Star);

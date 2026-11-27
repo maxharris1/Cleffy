@@ -33,7 +33,7 @@ export const LegalLinks = ({ className = '', withContact = false, newTab = false
     const target = newTab ? { target: '_blank', rel: 'noopener noreferrer' } : {};
     return (
         <p
-            className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs pointer-coarse:gap-x-5 pointer-coarse:gap-y-3 text-stone-500 ${className}`}
+            className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs pointer-coarse:gap-x-5 pointer-coarse:gap-y-7 text-stone-500 ${className}`}
         >
             {FOOTER_LINKS.map(({ to, label }, index) => (
                 <Fragment key={to}>

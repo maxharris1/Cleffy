@@ -1,14 +1,20 @@
 import { readFileSync } from 'node:fs';
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
+import { useViewerStore } from '@/state/store';
 import { useGhostVariant } from '@/ui/onInk';
+
+beforeEach(() => {
+    useViewerStore.setState({ penSeen: false, touchSeen: false });
+});
 
 afterEach(() => {
     cleanup();
+    useViewerStore.setState({ penSeen: false, touchSeen: false });
 });
 
 const renderHeader = () =>
@@ -121,5 +127,31 @@ describe('ViewerHeader', () => {
         } finally {
             style.remove();
         }
+    });
+});
+
+describe('ViewerHeader, the pointers seen in the viewer', () => {
+    const title = () => screen.getByRole('button', { name: 'Nocturne (Chopin)' });
+
+    it('records a pen press on the title while no score viewport is mounted', () => {
+        renderHeader();
+        fireEvent.pointerDown(title(), { pointerType: 'pen' });
+        expect(useViewerStore.getState()).toMatchObject({ penSeen: true, touchSeen: false });
+    });
+
+    it('records a touch once its tap has clicked', () => {
+        renderHeader();
+        fireEvent.pointerDown(document.body, { pointerType: 'touch' });
+        fireEvent.pointerUp(document.body, { pointerType: 'touch' });
+        expect(useViewerStore.getState().touchSeen).toBe(false);
+        fireEvent(document.body, new PointerEvent('click', { bubbles: true, pointerType: 'touch' }));
+        expect(useViewerStore.getState()).toMatchObject({ penSeen: false, touchSeen: true });
+    });
+
+    it('stops recording once the header unmounts', () => {
+        const { unmount } = renderHeader();
+        unmount();
+        fireEvent.pointerDown(document.body, { pointerType: 'pen' });
+        expect(useViewerStore.getState().penSeen).toBe(false);
     });
 });

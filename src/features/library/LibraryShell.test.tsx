@@ -402,6 +402,28 @@ describe('LibraryShell', () => {
         expect(progress).not.toHaveClass('sm:top-full');
     });
 
+    it('lets the side safe-area insets share the gutter from sm up instead of adding to it', async () => {
+        const user = userEvent.setup();
+        sessionMocks.syncBeforeSignOut.mockReturnValue(new Promise(() => undefined));
+        renderShell('/search');
+
+        await user.click(await screen.findByRole('button', { name: /Account menu/ }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Sign out' }));
+
+        expect(screen.getByRole('banner')).toHaveClass('sm:pl-0', 'sm:pr-0');
+        const row = screen.getByRole('navigation', { name: 'Main' }).parentElement;
+        expect(row).toHaveClass(
+            'sm:pl-[max(1.5rem,var(--safe-left))]',
+            'sm:pr-[max(1.5rem,var(--safe-right))]',
+            'lg:pl-[max(2.5rem,var(--safe-left))]',
+            'lg:pr-[max(2.5rem,var(--safe-right))]',
+        );
+        expect(screen.getByRole('status')).toHaveClass(
+            'sm:right-[max(1.5rem,var(--safe-right))]',
+            'lg:right-[max(2.5rem,var(--safe-right))]',
+        );
+    });
+
     it('offers help and the legal pages from the account menu', async () => {
         const user = userEvent.setup();
         renderShell();

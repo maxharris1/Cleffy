@@ -1,5 +1,5 @@
 import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
-import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/viewer/ink/undoStack';
+import { UndoStack, type UndoableOp, type UndoBatchHandle, type UndoSlot } from '@/features/viewer/ink/undoStack';
 import type { LocalAnnotation, ScribblerDb } from '@/sync/db';
 import {
     baseOf,
@@ -36,6 +36,12 @@ import { foreignMarkIds } from '@/sync/opOwnership';
 import type { Annotation, AnnotationPayload } from '@/types/models';
 
 export type PageListener = (pageIndex: number) => void;
+
+interface ReplayGuard {
+    author: string | null;
+    live: InkWriteGuard;
+    generation: number;
+}
 
 export interface AnnotationPatch {
     color?: string;
@@ -556,8 +562,8 @@ export class AnnotationStore {
         return this.undo.canRedo;
     }
 
-    async create(annotation: Annotation): Promise<void> {
-        await this.commit({ type: 'create', annotation }, { recordUndo: true });
+    async create(annotation: Annotation, options: { batch?: UndoBatchHandle } = {}): Promise<void> {
+        await this.commit({ type: 'create', annotation }, { recordUndo: true, batch: options.batch });
     }
 
     /**
@@ -610,16 +616,14 @@ export class AnnotationStore {
     }
 
     /** True when this call tombstoned the row; false if it was already gone. */
-    async delete(id: string): Promise<boolean> {
+    async delete(id: string, options: { batch?: UndoBatchHandle } = {}): Promise<boolean> {
         const prev = this.byId.get(id);
         if (!prev || prev.deletedAt) {
             return false;
         }
         return this.commit(
             { type: 'delete', annotation: { ...prev, deletedAt: nowIso(), updatedAt: nowIso() }, prev },
-            {
-                recordUndo: true,
-            },
+            { recordUndo: true, batch: options.batch },
         );
     }
 
@@ -1045,16 +1049,23 @@ export class AnnotationStore {
         if (this.historyOverlay) {
             return; // read-only while an overlay is shown — don't consume the entry
         }
-        for (;;) {
-            const entry = this.undo.popUndo();
-            if (!entry) {
-                break;
+        const request = this.undo.requestUndo();
+        const press = this.guardAtPress();
+        noteEditsInFlight(1, this.docId);
+        try {
+            for (;;) {
+                const entry = await this.undo.popUndo(request);
+                if (!entry) {
+                    break;
+                }
+                const inverses = await this.replayEntry(entry, press);
+                if (inverses) {
+                    this.undo.pushRedoEntry(inverses);
+                    break;
+                }
             }
-            const inverses = await this.replayEntry(entry);
-            if (inverses) {
-                this.undo.pushRedoEntry(inverses);
-                break;
-            }
+        } finally {
+            noteEditsInFlight(-1, this.docId);
         }
         this.notifyMeta();
     }
@@ -1063,16 +1074,22 @@ export class AnnotationStore {
         if (this.historyOverlay) {
             return;
         }
-        for (;;) {
-            const entry = this.undo.popRedo();
-            if (!entry) {
-                break;
+        const press = this.guardAtPress();
+        noteEditsInFlight(1, this.docId);
+        try {
+            for (;;) {
+                const entry = this.undo.popRedo();
+                if (!entry) {
+                    break;
+                }
+                const inverses = await this.replayEntry(entry, press);
+                if (inverses) {
+                    this.undo.pushUndoEntryRaw(inverses);
+                    break;
+                }
             }
-            const inverses = await this.replayEntry(entry);
-            if (inverses) {
-                this.undo.pushUndoEntryRaw(inverses);
-                break;
-            }
+        } finally {
+            noteEditsInFlight(-1, this.docId);
         }
         this.notifyMeta();
     }
@@ -1083,21 +1100,20 @@ export class AnnotationStore {
      * per chunk) instead of one silent multi-second write. Memory state
      * updates op by op — later ops may read earlier ops' effects.
      */
-    private async replayEntry(ops: UndoableOp[] | null): Promise<UndoableOp[] | null> {
+    private async replayEntry(ops: UndoableOp[] | null, press: ReplayGuard): Promise<UndoableOp[] | null> {
         if (!ops) {
             return null;
         }
         const CHUNK = 4000;
-        const author = this.author;
-        const live = editBoundTo(author, this.docId);
-        const generation = this.generation;
+        const { author, live, generation } = press;
         const reversed = [...ops].reverse();
         const inverses: UndoableOp[] = [];
         const wrote: string[] = [];
         for (let start = 0; start < reversed.length; start += CHUNK) {
-            if (!live() || generation !== this.generation) {
-                // Signed out, or reset for another account, between chunks:
-                // the rest of the entry is not applied.
+            if (generation !== this.generation) {
+                // Signed out, or reset for another account, since the press:
+                // the rest of the entry is not applied. A score lost meanwhile
+                // is left to persistMany, which keeps the chunk as closed ink.
                 throw new RecoveryCancelled();
             }
             const commits: CommitOp[] = [];
@@ -1127,6 +1143,11 @@ export class AnnotationStore {
             this.onDirty?.(wrote);
         }
         return inverses.length > 0 ? inverses : null;
+    }
+
+    private guardAtPress(): ReplayGuard {
+        const author = this.author;
+        return { author, live: editBoundTo(author, this.docId), generation: this.generation };
     }
 
     /** Apply an undo/redo op to memory and plan its durable write; return the write + its inverse. */
@@ -1178,7 +1199,7 @@ export class AnnotationStore {
         }
     }
 
-    private async commit(op: CommitOp, options: { recordUndo?: boolean }): Promise<boolean> {
+    private async commit(op: CommitOp, options: { recordUndo?: boolean; batch?: UndoBatchHandle }): Promise<boolean> {
         if (this.historyOverlay) {
             return false;
         }
@@ -1197,7 +1218,7 @@ export class AnnotationStore {
             const preEdit = options.recordUndo ? this.startingPointFor(author) : [];
             this.applyLocal(op.annotation);
             if (options.recordUndo) {
-                this.pushCommitInverse(op);
+                this.pushCommitInverse(op, this.undo.reserve(options.batch));
                 try {
                     await this.captureStartingPoint(author, preEdit, live);
                 } catch (err) {
@@ -1234,6 +1255,7 @@ export class AnnotationStore {
         }
 
         const { annotation } = op;
+        const slotInFrameOpenAtStart = options.recordUndo ? this.undo.reserve(options.batch) : null;
 
         // From here the edit is unsaved (see hasUnsavedEdit), though it is
         // not drawn until the snapshot below is checked: a reconcile of this
@@ -1256,6 +1278,7 @@ export class AnnotationStore {
                     if (live()) {
                         noteRefusedEdit(this.db, author, this.docId, preEdit);
                     }
+                    this.undo.release(slotInFrameOpenAtStart);
                     this.notifyMeta();
                     throw err;
                 }
@@ -1266,6 +1289,7 @@ export class AnnotationStore {
             // the edit apply once its account has signed out, or memory been
             // reset for another account: it was never drawn, so nothing is lost.
             if (!live() || generation !== this.generation || !this.stillApplies(op)) {
+                this.undo.release(slotInFrameOpenAtStart);
                 return false;
             }
 
@@ -1285,7 +1309,7 @@ export class AnnotationStore {
 
         // 2. Inverse for undo.
         if (options.recordUndo) {
-            this.pushCommitInverse(op);
+            this.pushCommitInverse(op, slotInFrameOpenAtStart);
         }
 
         // 3. Durable mirror + outbox, atomically. 4. Repaint — memory has the
@@ -1344,19 +1368,19 @@ export class AnnotationStore {
         }
     }
 
-    private pushCommitInverse(op: CommitOp): void {
+    private pushCommitInverse(op: CommitOp, slot: UndoSlot | null): void {
         switch (op.type) {
             case 'create':
-                this.undo.pushInverse({ type: 'delete', id: op.annotation.id });
+                this.undo.fill(slot, { type: 'delete', id: op.annotation.id });
                 return;
             case 'update':
-                this.undo.pushInverse({ type: 'update', id: op.annotation.id, annotation: op.prev });
+                this.undo.fill(slot, { type: 'update', id: op.annotation.id, annotation: op.prev });
                 return;
             case 'delete':
-                this.undo.pushInverse({ type: 'restore', id: op.annotation.id });
+                this.undo.fill(slot, { type: 'restore', id: op.annotation.id });
                 return;
             case 'restore':
-                this.undo.pushInverse({ type: 'delete', id: op.annotation.id });
+                this.undo.fill(slot, { type: 'delete', id: op.annotation.id });
                 return;
             default: {
                 const _exhaustive: never = op;
