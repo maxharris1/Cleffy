@@ -1,6 +1,7 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 
+import { useViewerStore } from '@/state/store';
 import { ArrowLeftIcon } from '@/ui/icons';
 
 interface ViewerHeaderProps {
@@ -16,6 +17,14 @@ interface ViewerHeaderProps {
     children?: ReactNode;
 }
 
+const useRecordPointerKinds = () => {
+    useEffect(() => {
+        const onPointerDown = (e: PointerEvent) => useViewerStore.getState().notePointer(e.pointerType);
+        document.addEventListener('pointerdown', onPointerDown, { capture: true });
+        return () => document.removeEventListener('pointerdown', onPointerDown, { capture: true });
+    }, []);
+};
+
 /**
  * Slim score-viewer top bar, shared by cloud and local viewers; safe-area aware.
  *
@@ -25,6 +34,7 @@ interface ViewerHeaderProps {
  */
 export const ViewerHeader = ({ backTo, backLabel, title, titleAction, children }: ViewerHeaderProps) => {
     const [titleOpen, setTitleOpen] = useState(false);
+    useRecordPointerKinds();
     return (
         <header className="border-b border-stone-200 bg-white pb-2 pl-[max(0.75rem,var(--safe-left))] pr-[max(0.75rem,var(--safe-right))] pt-[max(0.5rem,var(--safe-top))] shadow-sm">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

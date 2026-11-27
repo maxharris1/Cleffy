@@ -16,6 +16,7 @@ import { ScribblerDb } from '@/sync/db';
 import type * as DbModule from '@/sync/db';
 import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import { stubAnimate } from '@/test/animate';
+import { useViewport } from '@/test/touchLayout';
 import type { Annotation } from '@/types/models';
 
 /**
@@ -148,6 +149,7 @@ beforeEach(() => {
     h.stores = [];
     h.gate = null;
     h.withToolbar = false;
+    useViewerStore.setState({ penSeen: false, touchSeen: false });
     window.sessionStorage.clear();
     window.localStorage.clear();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -159,6 +161,7 @@ afterEach(() => {
     vi.restoreAllMocks();
     resetInkRecoveryForTests();
     useViewerStore.getState().setFingerDraws(false);
+    useViewerStore.setState({ penSeen: false, touchSeen: false });
 });
 
 describe('DemoViewer, opening a session', () => {
@@ -400,6 +403,81 @@ describe('DemoViewer, finger drawing', () => {
 
         unmount();
         expect(useViewerStore.getState().fingerDraws).toBe(previous);
+    });
+});
+
+describe('DemoViewer, a stylus seen before the score', () => {
+    beforeEach(() => {
+        h.withToolbar = true;
+        useViewport({ width: 1024, coarse: true });
+    });
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    const penTapTitle = () => {
+        const title = screen.getByRole('button', { name: 'Für Elise — demo' });
+        fireEvent.pointerDown(title, { pointerType: 'pen' });
+        fireEvent.pointerUp(title, { pointerType: 'pen' });
+    };
+
+    const expectScoreWithoutSwitch = async (fingerDraws: boolean) => {
+        expect(await screen.findByTestId('viewport')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+        expect(useViewerStore.getState().fingerDraws).toBe(fingerDraws);
+    };
+
+    it.each([true, false])(
+        'a pen tap on the header while loading hides the switch, Finger-draw %s',
+        async (fingerDraws) => {
+            const gate = deferred();
+            h.gate = gate.promise;
+            renderDemo();
+            expect(screen.getByText('Loading demo…')).toBeInTheDocument();
+            expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
+
+            penTapTitle();
+
+            expect(useViewerStore.getState().penSeen).toBe(true);
+            act(() => useViewerStore.getState().setFingerDraws(fingerDraws));
+            gate.resolve();
+            await expectScoreWithoutSwitch(fingerDraws);
+        },
+    );
+
+    it.each([true, false])(
+        'a pen tap on the header while Start over clears hides the switch, Finger-draw %s',
+        async (fingerDraws) => {
+            renderDemo();
+            await screen.findByTestId('viewport');
+            fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+            const gate = deferred();
+            h.gate = gate.promise;
+            fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+            expect(await screen.findByText('Clearing your markings…')).toBeInTheDocument();
+            expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
+
+            penTapTitle();
+
+            expect(useViewerStore.getState().penSeen).toBe(true);
+            act(() => useViewerStore.getState().setFingerDraws(fingerDraws));
+            gate.resolve();
+            await expectScoreWithoutSwitch(fingerDraws);
+        },
+    );
+
+    it('shows the switch on the same touch screen when no pen was used', async () => {
+        const gate = deferred();
+        h.gate = gate.promise;
+        renderDemo();
+        expect(screen.getByText('Loading demo…')).toBeInTheDocument();
+
+        gate.resolve();
+
+        expect(await screen.findByTestId('viewport')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Draw with finger' })).toBeInTheDocument();
+        expect(useViewerStore.getState().penSeen).toBe(false);
     });
 });
 
