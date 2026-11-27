@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -1082,6 +1083,37 @@ describe('PdfViewport Space-held panning', () => {
         expect(view().scrollY).toBeCloseTo(start + 6);
     });
 
+    it('keeps the pan of a stylus Space-drag that starts while a finger is already down', async () => {
+        await renderEditable();
+        viewport = { width: 800, height: 600 };
+        act(() => useViewerStore.setState({ tool: 'pen' }));
+        const start = view().scrollY;
+        const surface = document.querySelector('.ink-surface')!;
+        const pointer = (type: string, pointerId: number, pointerType: string, x: number, y: number) =>
+            act(() => {
+                surface.dispatchEvent(
+                    new PointerEvent(type, {
+                        pointerId,
+                        pointerType,
+                        buttons: type === 'pointerup' ? 0 : 1,
+                        clientX: x,
+                        clientY: y,
+                        bubbles: true,
+                    }),
+                );
+            });
+        pointer('pointerdown', 50, 'touch', 200, 470);
+        fireEvent.keyDown(document.body, { key: ' ' });
+        pointer('pointerdown', 51, 'pen', 200, 400);
+        pointer('pointerup', 50, 'touch', 200, 470);
+        pointer('pointermove', 51, 'pen', 200, 397);
+        pointer('pointermove', 51, 'pen', 200, 394);
+        pointer('pointerup', 51, 'pen', 200, 394);
+        expect(view().scrollY).toBeCloseTo(start + 6);
+        fireEvent.keyUp(document.body, { key: ' ' });
+        expect(view().scrollY).toBeCloseTo(start + 6);
+    });
+
     it('keeps the pan when Space is released and pressed again before the mouse comes up', async () => {
         await renderEditable();
         const start = view().scrollY;
@@ -1202,16 +1234,23 @@ describe('PdfViewport Space-held panning', () => {
                 return { note: reopened, writes };
             };
 
-            it.each([
-                ['all of it selected', 0, 2],
-                ['the caret between a and b', 1, 1],
-            ])('keeps ab with %s when ArrowRight comes down during a Space-drag', async (_, from, to) => {
-                const { note, writes } = await reopenNote();
-                note.setSelectionRange(from, to);
-                const start = view().scrollY;
+            const arrowRight = (note: HTMLTextAreaElement) => {
                 fireEvent.keyDown(note, { key: ' ' });
                 fireEvent.keyDown(note, { key: 'ArrowRight' });
                 fireEvent.keyUp(note, { key: 'ArrowRight' });
+            };
+            const ctrlC = () => userEvent.setup().keyboard('[Space>]{Control>}c{/Control}');
+
+            it.each([
+                ['all of it selected', 'ArrowRight', 0, 2, arrowRight],
+                ['the caret between a and b', 'ArrowRight', 1, 1, arrowRight],
+                ['all of it selected', 'Ctrl+C', 0, 2, ctrlC],
+                ['the caret between a and b', 'Ctrl+C', 1, 1, ctrlC],
+            ])('keeps ab with %s when %s comes down during a Space-drag', async (_, _key, from, to, hold) => {
+                const { note, writes } = await reopenNote();
+                note.setSelectionRange(from, to);
+                const start = view().scrollY;
+                await hold(note);
                 mouseDrag(-80);
                 expect(view().scrollY).toBeCloseTo(start + 80);
                 fireEvent.keyUp(document.body, { key: ' ' });
@@ -1221,6 +1260,20 @@ describe('PdfViewport Space-held panning', () => {
                 for (const write of writes) {
                     expect(write).not.toHaveBeenCalled();
                 }
+            });
+
+            it('keeps the space typed before ArrowRight when the note itself is clicked during the hold', async () => {
+                const { note } = await reopenNote();
+                note.setSelectionRange(1, 1);
+                const start = view().scrollY;
+                arrowRight(note);
+                expect(note.value).toBe('a b');
+                fireEvent.pointerDown(note);
+                fireEvent.pointerUp(note);
+                fireEvent.click(note);
+                fireEvent.keyUp(note, { key: ' ' });
+                expect(view().scrollY).toBe(start);
+                expect(note.value).toBe('a b');
             });
         });
 

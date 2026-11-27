@@ -168,15 +168,20 @@ export const TextEditorOverlay = ({
     }, []);
 
     const spacePending = useRef(false);
-    // Before a space typed early for a non-character key: a drag later in the
-    // same Space hold restores it, so the hold edits nothing.
-    const beforeHeldSpace = useRef<{ value: string; start: number; end: number } | null>(null);
+    const undoEarlySpaceOnScoreDrag = useRef<{ value: string; start: number; end: number } | null>(null);
     useEffect(() => {
-        const drop = () => {
+        const drop = (e: PointerEvent) => {
             spacePending.current = false;
-            const before = beforeHeldSpace.current;
+            const before = undoEarlySpaceOnScoreDrag.current;
             const el = ref.current;
-            beforeHeldSpace.current = null;
+            const onScore =
+                e.target instanceof Element &&
+                !e.target.closest('[data-ui-overlay]') &&
+                !!el?.parentElement?.contains(e.target);
+            if (!onScore) {
+                return;
+            }
+            undoEarlySpaceOnScoreDrag.current = null;
             if (before && el) {
                 el.value = before.value;
                 el.setSelectionRange(before.start, before.end);
@@ -232,13 +237,10 @@ export const TextEditorOverlay = ({
                     spacePending.current ||= !e.repeat;
                     return;
                 }
-                if (e.key.length === 1) {
-                    beforeHeldSpace.current = null;
-                    typePendingSpace(e.currentTarget);
-                } else if (spacePending.current && !MODIFIER_KEYS.has(e.key)) {
+                if (spacePending.current && !MODIFIER_KEYS.has(e.key)) {
                     const { value, selectionStart: start, selectionEnd: end } = e.currentTarget;
-                    beforeHeldSpace.current = { value, start, end };
                     typePendingSpace(e.currentTarget);
+                    undoEarlySpaceOnScoreDrag.current = { value, start, end };
                 }
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -249,16 +251,19 @@ export const TextEditorOverlay = ({
                 }
                 e.stopPropagation();
             }}
-            onInput={(e) => fitHeight(e.currentTarget)}
+            onInput={(e) => {
+                undoEarlySpaceOnScoreDrag.current = null;
+                fitHeight(e.currentTarget);
+            }}
             onKeyUp={(e) => {
                 if (e.key === ' ') {
-                    beforeHeldSpace.current = null;
+                    undoEarlySpaceOnScoreDrag.current = null;
                     typePendingSpace(e.currentTarget);
                 }
             }}
             onBlur={(e) => {
                 spacePending.current = false;
-                beforeHeldSpace.current = null;
+                undoEarlySpaceOnScoreDrag.current = null;
                 commit(e.currentTarget.value);
             }}
             onPointerDown={(e) => e.stopPropagation()}
