@@ -358,7 +358,7 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
         });
         expect(fill).toEqual({
             rest: 'rgb(79, 70, 229)',
-            hovered: { background: 'rgb(55, 48, 163)', border: 'rgb(55, 48, 163)' },
+            hovered: { background: 'rgb(55, 48, 163)', border: 'rgb(79, 70, 229)' },
         });
     });
 
