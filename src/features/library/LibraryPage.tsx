@@ -72,11 +72,9 @@ import { TextField } from '@/ui/TextField';
 import { toast } from '@/ui/toast';
 import { Segmented, type SegmentedOption } from '@/ui/Segmented';
 import { ViewToggle } from '@/ui/ViewToggle';
-import { buttonClassName, chipClassName, chipRowClassName, fieldClassName } from '@/ui/classNames';
+import { buttonClassName, chipClassName, chipRowClassName } from '@/ui/classNames';
 import { PlusIcon, SearchIcon, SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
 
-/** Above this count, tag filters switch from chips to a select. */
-const TAG_CHIP_LIMIT = 8;
 /** Max assigned tag names shown under a score title before “+N”. */
 const INLINE_TAG_LIMIT = 3;
 /** Quiet time after the last keystroke before the search goes to the server. */
@@ -678,7 +676,6 @@ export const LibraryPage = () => {
         };
     }, [hasScores]);
     const statusError = error;
-    const useTagSelect = tags.length > TAG_CHIP_LIMIT;
     /**
      * The upload tile is the last cell of the shelf, so it only makes sense
      * when the shelf is the whole library: under a filter it would look like a
@@ -1030,6 +1027,7 @@ export const LibraryPage = () => {
                     upgradeHint={quotaUpgradeHint}
                     onUpgrade={openPricing}
                     className="mt-5"
+                    surface="panel"
                 />
                 {statusError ? (
                     isCachedListNotice ? (
@@ -1104,32 +1102,16 @@ export const LibraryPage = () => {
                                     Favorites
                                 </FilterChip>
                                 <span className="sr-only">Tags</span>
-                                {useTagSelect ? (
-                                    <select
-                                        aria-label="Filter by tag"
-                                        value={activeTagId ?? ''}
-                                        onChange={(e) => setActiveTagId(e.target.value || null)}
-                                        className={fieldClassName('xs', 'h-[34px] max-w-[10rem]', { width: 'auto' })}
+                                {tags.map((tag) => (
+                                    <FilterChip
+                                        key={tag.id}
+                                        active={activeTagId === tag.id}
+                                        icon={<TagIcon size={14} />}
+                                        onClick={() => setActiveTagId((id) => (id === tag.id ? null : tag.id))}
                                     >
-                                        <option value="">All tags</option>
-                                        {tags.map((tag) => (
-                                            <option key={tag.id} value={tag.id}>
-                                                {tag.name}
-                                            </option>
-                                        ))}
-                                    </select>
-                                ) : (
-                                    tags.map((tag) => (
-                                        <FilterChip
-                                            key={tag.id}
-                                            active={activeTagId === tag.id}
-                                            icon={<TagIcon size={14} />}
-                                            onClick={() => setActiveTagId((id) => (id === tag.id ? null : tag.id))}
-                                        >
-                                            {tag.name}
-                                        </FilterChip>
-                                    ))
-                                )}
+                                        {tag.name}
+                                    </FilterChip>
+                                ))}
                                 <button
                                     type="button"
                                     onClick={() => setManageTagsOpen(true)}
@@ -1197,7 +1179,7 @@ export const LibraryPage = () => {
                                             {group.label}
                                         </h3>
                                     ) : null}
-                                    {view === 'grid' ? (
+                                    {view === 'grid' && !groupComposer ? (
                                         <div className={`${group.label ? 'mt-4' : 'mt-[30px]'} ${SHELF_GRID}`}>
                                             {group.documents.map((doc) => (
                                                 <ScoreCard
@@ -1419,7 +1401,7 @@ interface ScoreRowProps {
 }
 
 /** The list view's row. Memoized like ScoreCard, for the same reason. */
-const ScoreRow = memo(
+export const ScoreRow = memo(
     ({ doc, index, stripComposer, assignedTags, isFavorite, isOwner, actions }: ScoreRowProps) => {
         const hasTags = assignedTags.length > 0;
         const visibleTags = assignedTags.slice(0, INLINE_TAG_LIMIT);
@@ -1432,7 +1414,7 @@ const ScoreRow = memo(
                 className={`library-list-item${entranceDelay === null ? ' library-card-settled' : ''}`}
                 style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
             >
-                <div className="group relative flex items-center gap-0.5 border-t border-hairline px-1 transition-colors hover:bg-ink/[0.03]">
+                <div className="group relative flex items-center gap-0.5 border-t border-hairline px-1 transition-colors pointer-coarse:pr-2 hover:bg-ink/[0.03]">
                     {/*
                       Sibling of the text block, not a child of it: that block turns
                       into a column on phones, which would stack the thumbnail above
@@ -1506,9 +1488,9 @@ const ScoreRow = memo(
                     </div>
                     {/*
                       On touch the icons stay 32px (no sm: shrink) and each gets an
-                      invisible 40x44 hit area over itself and the gap to its right;
-                      the gaps widen just enough for that. Growing the buttons
-                      instead cost the title ~40px on phones.
+                      invisible 44x44 hit area centred on itself; the gaps widen
+                      just enough that neighbouring areas never overlap. Growing
+                      the buttons instead cost the title ~40px on phones.
                     */}
                     <button
                         type="button"
@@ -1516,7 +1498,7 @@ const ScoreRow = memo(
                         aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                         title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                         onClick={() => actions.toggleFavorite(doc, !isFavorite)}
-                        className={`relative grid place-items-center rounded-lg p-2 transition-colors hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
+                        className={`relative grid place-items-center rounded-lg p-2 transition-colors hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:mr-2.5 pointer-coarse:hit-44 ${
                             isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
                         }`}
                     >
@@ -1527,7 +1509,7 @@ const ScoreRow = memo(
                         aria-label={hasTags ? 'Edit tags' : 'Add tags'}
                         title={hasTags ? 'Edit tags' : 'Add tags'}
                         onClick={onTags}
-                        className={`relative grid place-items-center rounded-lg p-2 transition-colors hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:mx-1.5 pointer-coarse:before:absolute pointer-coarse:before:left-0 pointer-coarse:before:-right-2 pointer-coarse:before:-inset-y-1.5 ${
+                        className={`relative grid place-items-center rounded-lg p-2 transition-colors hover:bg-ink/5 sm:p-1.5 sm:pointer-coarse:p-2 pointer-coarse:mr-2.5 pointer-coarse:hit-44 ${
                             hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
                         }`}
                     >

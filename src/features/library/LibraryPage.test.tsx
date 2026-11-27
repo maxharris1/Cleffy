@@ -1660,6 +1660,31 @@ describe('grid view', () => {
         expect(screen.queryByText('Add a score')).not.toBeInTheDocument();
     });
 
+    it('lists each composer group as ruled rows, not cards, from the shelf', async () => {
+        const user = userEvent.setup();
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        await user.click(screen.getByRole('button', { name: 'Group by composer' }));
+
+        const mozart = screen.getByRole('heading', { name: 'Mozart, Wolfgang Amadeus' }).closest('section')!;
+        expect(within(mozart).getAllByRole('listitem')).toHaveLength(1);
+        expect(mozart.querySelector('.library-card')).toBeNull();
+        expect(screen.getByRole('button', { name: 'Grid view' })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('renders one filter chip per tag, however many tags there are', async () => {
+        const tags = Array.from({ length: 9 }, (_, i) => tag(`t-${i}`, `Tag ${i + 1}`));
+        listLibraryTags.mockResolvedValue(tags);
+        mockBootstrap({ tags, documentTags: new Map() });
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+        for (const t of tags) {
+            expect(await screen.findByRole('button', { name: t.name, pressed: false })).toBeInTheDocument();
+        }
+        expect(screen.queryByRole('combobox', { name: 'Filter by tag' })).not.toBeInTheDocument();
+    });
+
     it('hides the tile under a grouping, where it would have to pick a group', async () => {
         const user = userEvent.setup();
         renderLibrary();

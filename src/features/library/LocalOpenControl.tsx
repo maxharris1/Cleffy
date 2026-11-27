@@ -10,7 +10,7 @@ const LANDING_CTA_CLASS =
     'landing-cta inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-xl px-5 py-3 font-medium text-white transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97]';
 
 const PAGE_LINK_CLASS =
-    'cursor-pointer font-medium text-ink-muted underline underline-offset-[3px] transition-colors hover:text-accent';
+    'cursor-pointer font-medium text-ink-muted underline underline-offset-[3px] transition-colors hover:text-accent pointer-coarse:hit-44';
 
 export const LocalOpenControl = ({
     label,
