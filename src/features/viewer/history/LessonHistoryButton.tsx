@@ -9,8 +9,7 @@ import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { toast } from '@/ui/toast';
-import { useGhostVariant } from '@/ui/onInk';
-import { buttonClassName } from '@/ui/classNames';
+import { useGhostActionClassName } from '@/ui/onInk';
 
 interface LessonHistoryButtonProps {
     store: AnnotationStore;
@@ -19,7 +18,7 @@ interface LessonHistoryButtonProps {
 
 export const LessonHistoryButton = ({ store, canRestore }: LessonHistoryButtonProps) => {
     const [open, setOpen] = useState(false);
-    const ghost = useGhostVariant();
+    const ghostClassName = useGhostActionClassName();
 
     return (
         <>
@@ -27,7 +26,7 @@ export const LessonHistoryButton = ({ store, canRestore }: LessonHistoryButtonPr
                 type="button"
                 title="Lesson history — starting points by day"
                 onClick={() => setOpen(true)}
-                className={buttonClassName(ghost, 'sm')}
+                className={ghostClassName}
             >
                 History
             </button>

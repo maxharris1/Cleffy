@@ -7,8 +7,8 @@ import {
     type ProvenanceFields,
 } from '@/features/viewer/scoreSource';
 import { Dialog } from '@/ui/Dialog';
-import { useGhostVariant } from '@/ui/onInk';
-import { buttonClassName, linkClassName } from '@/ui/classNames';
+import { useGhostActionClassName } from '@/ui/onInk';
+import { linkClassName } from '@/ui/classNames';
 
 /**
  * "Source" in the viewer header: where an imported score came from, its
@@ -19,7 +19,7 @@ import { buttonClassName, linkClassName } from '@/ui/classNames';
  */
 export const ScoreSourceButton = ({ doc }: { doc: ProvenanceFields }) => {
     const [open, setOpen] = useState(false);
-    const ghost = useGhostVariant();
+    const ghostClassName = useGhostActionClassName();
     if (!hasScoreSource(doc)) {
         return null;
     }
@@ -29,7 +29,7 @@ export const ScoreSourceButton = ({ doc }: { doc: ProvenanceFields }) => {
                 type="button"
                 title="Source and license of this score"
                 onClick={() => setOpen(true)}
-                className={buttonClassName(ghost, 'sm')}
+                className={ghostClassName}
             >
                 Source
             </button>

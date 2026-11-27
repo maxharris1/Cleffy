@@ -535,9 +535,11 @@ describe('PdfViewport page turns under a tall notice stack', () => {
     it.each(Object.entries(turners))(
         'pages through every page at fit width when the stack reaches past the viewport middle (%s)',
         async (_, turn) => {
-            viewport = { width: 390, height: 340 };
+            // 176 px of notices and the 56 px pager strip over a 400 px viewport:
+            // less than half of it is left for the score.
+            viewport = { width: 390, height: 400 };
             await openUnderStack();
-            expect(STACK).toBeGreaterThan(340 / 2);
+            expect(STACK + PHONE_CONTROLS_PX).toBeGreaterThan(400 / 2);
             expectPager(1, false, true);
 
             for (const page of [2, 3]) {
@@ -550,7 +552,7 @@ describe('PdfViewport page turns under a tall notice stack', () => {
             }
             // The rest of page 3 is still below: Next goes on to its end, then stops.
             act(() => turn(1));
-            expect(pageEdges(2).bottom).toBeCloseTo(340 - PHONE_CONTROLS_PX - 16 * view().scale);
+            expect(pageEdges(2).bottom).toBeCloseTo(400 - PHONE_CONTROLS_PX - 16 * view().scale);
             expectPager(3, true, false);
             act(() => turn(-1));
             expect(pageEdges(1).top).toBeCloseTo(STACK + 16 * view().scale);

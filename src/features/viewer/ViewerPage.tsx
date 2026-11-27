@@ -63,6 +63,7 @@ import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { SwapLabel } from '@/ui/SwapLabel';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
+import { INK_TEXT_ACTION } from '@/ui/onInk';
 import { MusicIcon } from '@/ui/icons';
 
 /**
@@ -956,6 +957,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         <Button
                             variant="inkPrimary"
                             size="sm"
+                            className="lg:rounded-xl lg:px-[18px] lg:text-[15px]"
                             title="Share this score — links, and who has access"
                             onClick={() => setShareOpen(true)}
                         >
@@ -1013,7 +1015,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     type="button"
                     title="Practice notes — a journal by lesson day"
                     onClick={() => setNotesOpen(true)}
-                    className={buttonClassName('inkGhost', 'sm')}
+                    className={buttonClassName('inkGhost', 'sm', INK_TEXT_ACTION)}
                 >
                     Notes
                 </button>
@@ -1032,7 +1034,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         className={buttonClassName(
                             'inkGhost',
                             'sm',
-                            'relative aria-expanded:bg-paper/10 aria-expanded:text-paper',
+                            `relative aria-expanded:bg-paper/10 aria-expanded:text-paper ${INK_TEXT_ACTION}`,
                         )}
                     >
                         <MusicIcon size={16} />
@@ -1068,7 +1070,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         type="button"
                         title="Who this score is shared with, and leaving it"
                         onClick={() => setShareOpen(true)}
-                        className={buttonClassName('inkGhost', 'sm')}
+                        className={buttonClassName('inkGhost', 'sm', INK_TEXT_ACTION)}
                     >
                         Sharing
                     </button>
@@ -1263,7 +1265,7 @@ export const SyncDot = ({ status }: { status: SyncDotStatus }) => {
     return (
         <span
             title={SYNC_DOT_STYLES[shown].label}
-            className="flex items-center gap-[7px] text-[13px] text-on-ink-faint lg:mx-2.5"
+            className="flex items-center gap-[7px] text-[13px] text-on-ink-faint lg:-order-1 lg:mx-2.5"
         >
             <span aria-hidden="true" className="grid h-2 w-2">
                 {SYNC_DOT_ORDER.map((key) => (

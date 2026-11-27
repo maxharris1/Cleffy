@@ -137,6 +137,7 @@ export const turnFromPageIndex = (
     viewportHeight: number,
     layouts: readonly PageLayout[],
     obscured: ObscuredEdges = NO_OBSCURED,
+    viewportWidth = 0,
 ): number => {
     const top = Math.max(0, obscured.top);
     const bottom = viewportHeight - Math.max(0, obscured.bottom);
@@ -147,7 +148,7 @@ export const turnFromPageIndex = (
         const inView = Math.min(rowTop + rowHeight, bottom) - Math.max(rowTop, top);
         return inView > 0 && inView >= Math.min(rowHeight, uncovered) / 2;
     });
-    return index >= 0 ? index : focusedPageIndex(view, viewportHeight, layouts, obscured);
+    return index >= 0 ? index : focusedPageIndex(view, viewportHeight, layouts, obscured, viewportWidth);
 };
 
 /**
@@ -277,17 +278,17 @@ export const focusedPageIndex = (
     viewportHeight: number,
     layouts: readonly PageLayout[],
     obscured: ObscuredEdges = NO_OBSCURED,
+    viewportWidth = 0,
 ): number => {
     if (layouts.length === 0) {
         return 0;
     }
-    const top = Math.max(0, obscured.top);
     const bottom = Math.max(0, obscured.bottom);
     // Scrolled to the very top (which sits above 0 by a strip at the top, as
     // clampScroll allows), page 1 is the page being read — even when the
     // viewport is tall enough that a later row sits nearer its centre (a whole
     // short score fits). Otherwise the pager read "p. 3 / 4" and Next was off.
-    const minY = top > 0 ? -top : 0;
+    const minY = minScrollY(view.scale, viewportWidth, obscured);
     if (view.scrollY <= minY + BOUND_EPSILON_PX) {
         return 0;
     }

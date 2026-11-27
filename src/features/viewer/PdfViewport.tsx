@@ -629,7 +629,7 @@ export const PdfViewport = ({
             // page that was being read starts the view, as a layout switch
             // does, at the same multiple of fit-width.
             const prevLayout = computeDocumentLayout(pageSizes, prevColumns, spreadCover);
-            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts, obscuredRef.current);
+            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts, obscuredRef.current, prev.width);
             const relative = v.scale / fitPageWidthScale(prevLayout, prev.width);
             const scale = Math.min(
                 MAX_SCALE,
@@ -666,7 +666,7 @@ export const PdfViewport = ({
             const v = useViewerStore.getState().view;
             const before = layoutRef.current;
             const size = viewportSizeRef.current;
-            const page = focusedPageIndex(v, size.height, before.layouts, obscuredRef.current);
+            const page = focusedPageIndex(v, size.height, before.layouts, obscuredRef.current, size.width);
             standEntryRef.current = { view: v, page, relative: v.scale / fitPageWidthScale(before, size.width), size };
             standReturnRef.current = null;
             // Nothing else moves the view while stand mode has it: a settle
@@ -814,7 +814,7 @@ export const PdfViewport = ({
         standReturnRef.current = null;
         const { view: v, setView } = useViewerStore.getState();
         const { width, height } = viewportSizeRef.current;
-        const current = turnFromPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current);
+        const current = turnFromPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current, width);
         const next = pageTurnView(v, layoutRef.current, current, direction, width, height, obscuredRef.current);
         if (!next) {
             return;
@@ -833,7 +833,7 @@ export const PdfViewport = ({
         const { view: v, setView, setPageColumns, setSpreadCover } = useViewerStore.getState();
         const { width, height } = viewportSize;
         const nextLayout = computeDocumentLayout(pageSizes, columns, coverPage);
-        const focused = focusedPageIndex(v, height, layout.layouts, obscured);
+        const focused = focusedPageIndex(v, height, layout.layouts, obscured, width);
         const scale = fitPageWidthScale(nextLayout, width);
         const top = nextLayout.layouts[focused]?.top ?? PAGE_GAP;
         fittedViewportRef.current = viewportSize;
@@ -1180,10 +1180,12 @@ export const PdfViewport = ({
             channelRef.current?.setPage(Math.max(0, range.start));
             useViewerStore
                 .getState()
-                .setFocusedPageIndex(focusedPageIndex(view, viewportSize.height, layout.layouts, obscured));
+                .setFocusedPageIndex(
+                    focusedPageIndex(view, viewportSize.height, layout.layouts, obscured, viewportSize.width),
+                );
         }, 400);
         return () => clearTimeout(timer);
-    }, [view, viewportSize.height, layout, obscured]);
+    }, [view, viewportSize.height, viewportSize.width, layout, obscured]);
 
     // Keyboard: page turns (any role — pedals send these keys) and undo/redo.
     // None while a dialog is open, wherever its keys land: a page turned or a
@@ -1562,10 +1564,10 @@ const Pager = ({
     onTurn: (direction: -1 | 1) => void;
 }) => {
     const view = useViewerStore((s) => s.view);
-    const pageIndex = focusedPageIndex(view, viewportSize.height, layout.layouts, obscured);
+    const pageIndex = focusedPageIndex(view, viewportSize.height, layout.layouts, obscured, viewportSize.width);
     const pageCount = layout.layouts.length;
     // Turns step from the row at the top (see turnPage), not the labelled one.
-    const turnFrom = turnFromPageIndex(view, viewportSize.height, layout.layouts, obscured);
+    const turnFrom = turnFromPageIndex(view, viewportSize.height, layout.layouts, obscured, viewportSize.width);
     const canTurn = (direction: -1 | 1) =>
         pageTurnView(view, layout, turnFrom, direction, viewportSize.width, viewportSize.height, obscured) !== null;
     return (

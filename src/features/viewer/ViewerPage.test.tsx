@@ -1182,6 +1182,23 @@ describe('CloudViewer membership changes', () => {
         expect(at('Ada, on page 1')).toBeLessThan(at('Share'));
     });
 
+    it('lays the owner header out as Flow-Viewer on desktop: sync before Full screen, 15px actions and Share', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        expect(document.querySelector('[data-sync-dot]')?.closest('[title]')).toHaveClass('lg:-order-1');
+        expect(screen.getByRole('button', { name: 'Full screen' })).not.toHaveClass('lg:-order-1');
+        expect(screen.getByRole('button', { name: 'Notes' })).toHaveClass('lg:text-[15px]', 'lg:font-medium');
+        expect(screen.getByRole('button', { name: 'Share' })).toHaveClass(
+            'lg:text-[15px]',
+            'lg:px-[18px]',
+            'lg:rounded-xl',
+        );
+    });
+
     it('offers the owner no smart import while the feature is off, even on the post-upload ?import=1', async () => {
         loadDocumentOffline.mockResolvedValue(null);
         fetchDocument.mockResolvedValue(serverDoc());

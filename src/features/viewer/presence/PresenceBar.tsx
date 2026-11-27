@@ -14,9 +14,11 @@ const CHIP =
     'inline-flex h-[30px] min-w-11 items-center gap-2 whitespace-nowrap rounded-full bg-paper/10 pl-2.5 pr-3 text-[13px] font-semibold text-paper ring-1 ring-paper/24';
 
 /**
- * Who's here: one named chip per person, a dot in their ink colour. Each chip is a button that opens a small
- * popover with the name and the page they are on — on hover with a mouse, on
- * a tap on touch, where a title tooltip never appeared.
+ * Who's here: one named chip per person, a dot in their ink colour. Past three
+ * rows the chips scroll, so a full studio never pushes the score off a phone.
+ * Each chip is a button that opens a small popover with the name and the
+ * page they are on — on hover with a mouse, on a tap on touch, where a title
+ * tooltip never appeared.
  */
 export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }: PresenceBarProps) => {
     const others = peers.filter((p) => p.userId !== selfUserId);
@@ -25,7 +27,7 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
     }
     return (
         <div
-            className="flex min-w-0 max-w-full flex-wrap items-center gap-x-1.5 gap-y-1.5 pointer-coarse:gap-y-3.5"
+            className="-m-1 flex max-h-[110px] min-w-0 max-w-full flex-wrap items-center gap-x-1.5 gap-y-1.5 overflow-y-auto p-1 pointer-coarse:-my-[7px] pointer-coarse:max-h-[132px] pointer-coarse:gap-y-3.5 pointer-coarse:py-[7px] lg:-order-1"
             aria-label={`${others.length} collaborators viewing`}
         >
             {others.map((peer) => {
@@ -71,7 +73,7 @@ export const LinkViewerCount = ({ peers }: LinkViewerCountProps) => {
         return null;
     }
     return (
-        <span className={CHIP} title="People watching through your view link">
+        <span className={`${CHIP} lg:-order-1`} title="People watching through your view link">
             <span aria-hidden="true" className="h-2.5 w-2.5 rounded-full bg-ink-rule" />
             {count} viewing
         </span>

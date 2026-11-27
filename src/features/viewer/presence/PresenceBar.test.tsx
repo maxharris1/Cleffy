@@ -60,6 +60,22 @@ describe('PresenceBar', () => {
         expect(group).toHaveClass('max-w-full');
     });
 
+    it('sits before the sync status and Full screen on desktop', () => {
+        render(<PresenceBar peers={[peer('a', 'Ms. Davis'), peer('b', 'Leo')]} selfUserId="me" />);
+        expect(screen.getByLabelText('2 collaborators viewing')).toHaveClass('lg:-order-1');
+    });
+
+    it.each([16, 24])(
+        'keeps all %i long-named collaborators named, in a group capped at three rows that scrolls',
+        (count) => {
+            const peers = Array.from({ length: count }, (_, i) => peer(`p${i}`, `Alexandria Williamson ${i}`));
+            render(<PresenceBar peers={peers} selfUserId="me" />);
+            const group = screen.getByLabelText(`${count} collaborators viewing`);
+            expect(group).toHaveClass('max-h-[110px]', 'pointer-coarse:max-h-[132px]', 'overflow-y-auto');
+            expect(screen.getAllByRole('button')).toHaveLength(count);
+        },
+    );
+
     it('labels a non-member Anonymous <animal> through presenceLabel, whatever it claims (R4)', () => {
         const members = new Set(['me', 'a']);
         render(
