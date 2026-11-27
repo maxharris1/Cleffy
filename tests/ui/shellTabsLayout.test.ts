@@ -101,7 +101,7 @@ const shellMarkup = (path: string, page: () => unknown) =>
         ),
     );
 
-type Setup = { width: number; height?: number; rootFont?: string; safeBottom?: string };
+type Setup = { width: number; height?: number; rootFont?: string; safeBottom?: string; touch?: boolean };
 
 describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
     let browser: Browser;
@@ -128,7 +128,10 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
             file,
             `<!doctype html><html style="${rootStyle}"><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="${stylesheet}"><style>*,*::before,*::after{animation:none!important;transition:none!important}</style></head><body><div id="root">${markup}</div></body></html>`,
         );
-        const page = await browser.newPage({ viewport: { width: setup.width, height: setup.height ?? 844 } });
+        const page = await browser.newPage({
+            viewport: { width: setup.width, height: setup.height ?? 844 },
+            hasTouch: setup.touch ?? false,
+        });
         try {
             await page.goto(pathToFileURL(file).href);
             await page.evaluate(() => document.fonts.ready);
@@ -250,18 +253,40 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
         },
     );
 
-    it.each(['16px', '12px', '9px'])(
-        "lands a touch 43 px from the upload button's left edge on Upload score at 320 px with a %s default font",
-        async (rootFont) => {
-            const hit = await withPage(shellMarkup('/library', rows), { width: 320, rootFont }, (page) =>
-                page.evaluate(() => {
-                    const label = document.querySelector('label.shell-upload')!;
-                    const rect = label.getBoundingClientRect();
-                    const target = document.elementFromPoint(rect.left + 43, rect.top + rect.height / 2);
-                    return target !== null && label.contains(target)
-                        ? label.querySelector('input')!.getAttribute('aria-label')
-                        : null;
-                }),
+    it.each([
+        [320, '16px'],
+        [320, '12px'],
+        [320, '9px'],
+        [390, '16px'],
+        [390, '12px'],
+        [390, '9px'],
+    ] as const)(
+        "lands a touch 43 px from the upload button's left edge on Upload score at %i px with a %s default font",
+        async (width, rootFont) => {
+            const hit = await withPage(
+                shellMarkup('/library', rows),
+                { width, rootFont, touch: true },
+                async (page) => {
+                    const point = await page.evaluate(() => {
+                        const rect = document.querySelector('label.shell-upload')!.getBoundingClientRect();
+                        return { x: rect.left + 43, y: rect.top + rect.height / 2 };
+                    });
+                    await page.evaluate(() => {
+                        document.addEventListener(
+                            'touchstart',
+                            (event) => {
+                                const target = event.target as Element;
+                                const label = target.closest('label.shell-upload');
+                                document.body.dataset.touched = label
+                                    ? label.querySelector('input')!.getAttribute('aria-label')!
+                                    : (target.closest('[aria-label]')?.getAttribute('aria-label') ?? target.tagName);
+                            },
+                            { once: true },
+                        );
+                    });
+                    await page.touchscreen.tap(point.x, point.y);
+                    return page.evaluate(() => document.body.dataset.touched);
+                },
             );
             expect(hit).toBe('Upload score');
         },

@@ -594,7 +594,7 @@ const LibraryFrame = ({
                         ))}
                     </nav>
 
-                    <div className="ml-auto flex shrink-0 items-center gap-2 lg:gap-3.5">
+                    <div className="ml-auto flex shrink-0 items-center gap-2 max-sm:gap-[8px] lg:gap-3.5">
                         <ShellUploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
                         {/* The menu closes on click, and the upload before sign-out can
                             take seconds on a slow connection: say what is happening
@@ -770,12 +770,12 @@ const AccountMenu = ({
             popupClassName="w-64"
             open={open}
             onOpenChange={(next) => setOpenedAt(next ? pathname : null)}
-            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-paper/10 max-sm:pointer-coarse:hit-44 sm:pr-1.5"
+            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-paper/10 max-sm:p-[2px] max-sm:pointer-coarse:hit-44 sm:pr-1.5"
             triggerContent={
                 <>
                     <span
                         aria-hidden="true"
-                        className="grid h-9 w-9 place-items-center rounded-full bg-red-600 text-xs font-semibold text-white shadow-[0_0_0_2px_var(--color-ink)]"
+                        className="grid h-9 w-9 place-items-center rounded-full bg-red-600 max-sm:size-[36px] text-xs font-semibold text-white shadow-[0_0_0_2px_var(--color-ink)]"
                     >
                         {initialsOf(userLabel)}
                     </span>
