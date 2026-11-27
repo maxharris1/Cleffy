@@ -4,6 +4,7 @@ import { createCheckoutSession, createPortalSession, redirectTo } from '@/featur
 import { useBillingCountry } from '@/features/billing/billingRegion';
 import { CheckoutReview } from '@/features/billing/CheckoutReview';
 import { CountryPicker } from '@/features/billing/CountryPicker';
+import { PlanCard } from '@/features/billing/PlanCard';
 import { formatPlanDate, type OwnSubscription } from '@/features/billing/planStatus';
 import {
     TIER_CARDS,
@@ -139,11 +140,11 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                     </span>
                 </div>
 
+                <h2 className="font-display text-[34px] leading-[1.05] font-semibold tracking-[-0.02em] text-balance text-ink sm:pr-12 sm:text-[48px] sm:leading-[1.02]">
+                    Free to start. <em>Students never pay.</em>
+                </h2>
                 <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-5">
                     <div className="min-w-0 flex-1 basis-[420px]">
-                        <h2 className="font-display text-[34px] leading-[1.05] font-semibold tracking-[-0.02em] text-balance text-ink sm:text-[48px] sm:leading-[1.02]">
-                            Free to start. <em>Students never pay.</em>
-                        </h2>
                         {reason ? <p className="mt-3 text-sm text-ink-muted">{reason}</p> : null}
                         <p className="mt-3 max-w-[560px] text-base text-ink-muted">
                             Personal is the practice tool. Teacher adds your students. Academy covers a team of
@@ -173,115 +174,82 @@ export const PricingDialog = ({ onClose, currentTier, reason, subscription = nul
                         const price = priceFor(card.tier, interval, currency);
                         const isCurrent = card.tier === currentTier;
                         return (
-                            <section
+                            <PlanCard
                                 key={card.tier}
-                                className={[
-                                    'flex min-w-0 flex-1 basis-full flex-col sm:basis-[calc(50%-7px)] lg:basis-[210px] rounded-2xl border p-4 transition-colors',
-                                    isCurrent ? 'border-accent/40 bg-accent-soft/30' : 'border-stone-200 bg-white',
-                                ].join(' ')}
-                            >
-                                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                                    <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
-                                        {card.name}
-                                        {isCurrent ? (
-                                            <Badge tone="accent" className="ml-2 align-middle">
-                                                Current plan
-                                            </Badge>
-                                        ) : null}
-                                    </h3>
-                                    {price ? (
-                                        <p className="ml-auto text-right">
-                                            <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
-                                                {price.amount}
-                                            </span>
-                                            <span className="block text-xs tabular-nums text-stone-500">
-                                                {price.caption}
-                                            </span>
-                                        </p>
-                                    ) : null}
-                                </div>
-
-                                <p className="mt-1 text-sm text-stone-600">{card.tagline}</p>
-                                {price?.note ? <p className="mt-1 text-xs text-ok">{price.note}</p> : null}
-                                {isCurrent && subscription?.cancelling ? (
-                                    <p className="mt-1 text-sm text-amber-800">
-                                        {subscription.endsAt
+                                name={card.name}
+                                price={price}
+                                description={card.tagline}
+                                note={price?.note}
+                                status={
+                                    isCurrent && subscription?.cancelling
+                                        ? subscription.endsAt
                                             ? `Ends ${formatPlanDate(subscription.endsAt)} — it won’t renew.`
-                                            : 'Cancelled — it won’t renew.'}
-                                    </p>
-                                ) : null}
-
-                                <ul className="mt-3 flex grow flex-col gap-1 text-sm text-stone-700">
-                                    {card.features.map((feature) => (
-                                        <li key={feature}>{feature}</li>
-                                    ))}
-                                </ul>
-
-                                {isCurrent && subscription?.cancelling ? (
-                                    <Button
-                                        size="sm"
-                                        className="mt-4 w-full"
-                                        disabled={busyPrice !== null}
-                                        onClick={() => void openPortal(`resume:${card.tier}`)}
-                                    >
-                                        {busyPrice === `resume:${card.tier}`
-                                            ? 'Opening billing portal…'
-                                            : 'Resume subscription'}
-                                    </Button>
-                                ) : price?.priceId && !isCurrent && subscription ? (
-                                    // Free has no price, so no card ever offers a
-                                    // portal "switch" down to it: cancelling is.
-                                    <Button
-                                        size="sm"
-                                        variant="secondary"
-                                        className="mt-4 w-full"
-                                        disabled={busyPrice !== null}
-                                        onClick={() => void openPortal(`switch:${card.tier}`)}
-                                    >
-                                        {busyPrice === `switch:${card.tier}`
-                                            ? 'Opening billing portal…'
-                                            : `Switch to ${card.name}`}
-                                    </Button>
-                                ) : price?.priceId && !isCurrent ? (
-                                    <Button
-                                        size="sm"
-                                        className="mt-4 w-full"
-                                        disabled={busyPrice !== null}
-                                        onClick={() => reviewPlan(price.slot, price.priceId)}
-                                    >
-                                        {`Choose ${card.name}`}
-                                    </Button>
-                                ) : null}
-                            </section>
+                                            : 'Cancelled — it won’t renew.'
+                                        : undefined
+                                }
+                                features={card.features}
+                                current={isCurrent}
+                                action={
+                                    isCurrent && subscription?.cancelling ? (
+                                        <Button
+                                            variant="inkPrimary"
+                                            className="mt-2 w-full"
+                                            disabled={busyPrice !== null}
+                                            onClick={() => void openPortal(`resume:${card.tier}`)}
+                                        >
+                                            {busyPrice === `resume:${card.tier}`
+                                                ? 'Opening billing portal…'
+                                                : 'Resume subscription'}
+                                        </Button>
+                                    ) : price?.priceId && !isCurrent && subscription ? (
+                                        // Free has no price, so no card ever offers a
+                                        // portal "switch" down to it: cancelling is.
+                                        <Button
+                                            variant="secondary"
+                                            className="w-full"
+                                            disabled={busyPrice !== null}
+                                            onClick={() => void openPortal(`switch:${card.tier}`)}
+                                        >
+                                            {busyPrice === `switch:${card.tier}`
+                                                ? 'Opening billing portal…'
+                                                : `Switch to ${card.name}`}
+                                        </Button>
+                                    ) : price?.priceId && !isCurrent ? (
+                                        <Button
+                                            variant="secondary"
+                                            className="w-full"
+                                            disabled={busyPrice !== null}
+                                            onClick={() => reviewPlan(price.slot, price.priceId)}
+                                        >
+                                            {`Choose ${card.name}`}
+                                        </Button>
+                                    ) : null
+                                }
+                            />
                         );
                     })}
 
                     {founding?.priceId ? (
-                        <section className="flex min-w-0 flex-1 basis-full flex-col sm:basis-[calc(50%-7px)] lg:basis-[210px] rounded-2xl border border-amber-300/70 bg-amber-50/60 p-4">
-                            <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                                <h3 className="min-w-0 font-display text-lg font-semibold text-stone-900 [overflow-wrap:anywhere]">
-                                    Founding Teacher
-                                    <Badge tone="warn" className="ml-2 align-middle">
-                                        Limited
-                                    </Badge>
-                                </h3>
-                                <p className="ml-auto text-right">
-                                    <span className="font-display text-xl font-semibold tabular-nums text-stone-900">
-                                        {founding.amount}
-                                    </span>
-                                    <span className="block text-xs text-stone-500">{founding.caption}</span>
-                                </p>
-                            </div>
-                            <p className="mt-1 grow text-sm text-stone-700">{founding.note}</p>
-                            <Button
-                                size="sm"
-                                className="mt-4 w-full"
-                                disabled={busyPrice !== null}
-                                onClick={() => reviewPlan(founding.slot, founding.priceId)}
-                            >
-                                Become a Founding Teacher
-                            </Button>
-                        </section>
+                        <PlanCard
+                            name="Founding Teacher"
+                            badge={
+                                <Badge tone="warn" className="ml-2 align-middle">
+                                    Limited
+                                </Badge>
+                            }
+                            price={founding}
+                            description={founding.note}
+                            action={
+                                <Button
+                                    variant="secondary"
+                                    className="w-full"
+                                    disabled={busyPrice !== null}
+                                    onClick={() => reviewPlan(founding.slot, founding.priceId)}
+                                >
+                                    Become a Founding Teacher
+                                </Button>
+                            }
+                        />
                     ) : null}
                 </div>
 

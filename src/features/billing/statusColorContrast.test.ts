@@ -85,7 +85,7 @@ describe('status text colours', () => {
     });
 
     it('the pricing note still uses the token', () => {
-        expect(read('src/features/billing/PricingDialog.tsx')).toMatch(/text-xs text-ok/);
+        expect(read('src/features/billing/PlanCard.tsx')).toMatch(/note: 'text-ok'/);
     });
 });
 

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -373,6 +373,51 @@ describe('PricingDialog for an existing subscriber', () => {
 
         expect(await screen.findByText('Portal is down')).toBeInTheDocument();
         expect(redirectTo).not.toHaveBeenCalled();
+    });
+
+    describe('plan cards', () => {
+        /** The card a plan heading sits in. */
+        const cardOf = (name: RegExp) => {
+            const card = screen.getByRole('heading', { name, level: 3 }).closest('section');
+            expect(card).not.toBeNull();
+            return card as HTMLElement;
+        };
+
+        it('sets the current plan as the one dark card, labelled and with nothing to buy', async () => {
+            await renderPricing(
+                <PricingDialog
+                    currentTier="teacher"
+                    subscription={{ endsAt: null, cancelling: false }}
+                    onClose={vi.fn()}
+                />,
+            );
+            const current = cardOf(/^Teacher/);
+            expect(within(current).getAllByText(/Current plan/).length).toBeGreaterThan(0);
+            expect(within(current).queryByRole('button')).not.toBeInTheDocument();
+            expect(await utilityStyleAt(current, 'background-color', 1280)).toBe('var(--color-ink)');
+            for (const other of [/^Free/, /^Personal/, /^Academy/]) {
+                expect(await utilityStyleAt(cardOf(other), 'background-color', 1280)).not.toBe('var(--color-ink)');
+            }
+        });
+
+        it('keeps Resume subscription on a cancelling current card', async () => {
+            await renderPricing(
+                <PricingDialog
+                    currentTier="personal"
+                    subscription={{ endsAt: null, cancelling: true }}
+                    onClose={vi.fn()}
+                />,
+            );
+            const current = cardOf(/^Personal/);
+            expect(within(current).getByRole('button', { name: 'Resume subscription' })).toBeInTheDocument();
+            expect(within(current).queryByRole('button', { name: /Switch to|Choose/ })).not.toBeInTheDocument();
+        });
+
+        it('offers Choose on every other card', async () => {
+            await renderPricing(<PricingDialog currentTier="personal" onClose={vi.fn()} />);
+            expect(within(cardOf(/^Teacher/)).getByRole('button', { name: 'Choose Teacher' })).toBeInTheDocument();
+            expect(within(cardOf(/^Academy/)).getByRole('button', { name: 'Choose Academy' })).toBeInTheDocument();
+        });
     });
 
     it('still sells through Checkout to a seated teacher, whose Academy is not theirs to switch', async () => {
