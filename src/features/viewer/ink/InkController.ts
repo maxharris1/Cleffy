@@ -175,6 +175,7 @@ export class InkController {
             store: AnnotationStore;
             registry: CanvasRegistry;
             isReadOnly: () => boolean;
+            panKeyHeld: () => boolean;
             getView: () => ViewState;
             getLayout: () => DocumentLayout;
             /** Viewport-local coords for a pointer event. */
@@ -418,7 +419,7 @@ export class InkController {
 
     private shouldInk(e: PointerEvent): boolean {
         const { tool, fingerDraws, penSeen } = useViewerStore.getState();
-        if (tool === null) {
+        if (tool === null || this.opts.panKeyHeld()) {
             return false;
         }
         // The fingering tool only selects a region (never writes), so view-only

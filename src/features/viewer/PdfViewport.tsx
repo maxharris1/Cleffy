@@ -148,12 +148,13 @@ const pageTurnDirection = (e: KeyboardEvent): -1 | 1 | null => {
         case 'ArrowUp':
         case 'PageUp':
             return e.shiftKey ? null : -1;
-        case ' ':
-            return e.shiftKey ? -1 : 1;
         default:
             return null;
     }
 };
+
+const spaceTurnDirection = (e: KeyboardEvent): -1 | 1 | null =>
+    e.key !== ' ' || e.ctrlKey || e.metaKey || e.altKey ? null : e.shiftKey ? -1 : 1;
 
 /** A horizontal drag this far (px), and mostly sideways, turns the page in stand mode. */
 const STAND_SWIPE_PX = 60;
@@ -312,6 +313,11 @@ export const PdfViewport = ({
     const viewportSizeRef = useRef(viewportSize);
     const obscuredRef = useRef(obscured);
     const readOnlyRef = useRef(effectiveReadOnly);
+    const spaceRef = useRef<{ held: boolean; turnOnRelease: -1 | 1 | null; panGesture: boolean }>({
+        held: false,
+        turnOnRelease: null,
+        panGesture: false,
+    });
     const renderScaleRef = useRef(renderScale);
     const playbackRef = useRef(playback);
     const textIntentRef = useRef(textIntent);
@@ -932,6 +938,7 @@ export const PdfViewport = ({
             store: annotationStore,
             registry,
             isReadOnly: () => readOnlyRef.current,
+            panKeyHeld: () => spaceRef.current.held && !standModeRef.current,
             getView: () => useViewerStore.getState().view,
             getLayout: () => layoutRef.current,
             toLocal,
@@ -1024,6 +1031,9 @@ export const PdfViewport = ({
                     } else {
                         standTurn(zone === 'next' ? 1 : -1);
                     }
+                    return;
+                }
+                if (spaceRef.current.panGesture) {
                     return;
                 }
                 // A tap in the margin strip turns the page, whatever the tool:
@@ -1211,6 +1221,12 @@ export const PdfViewport = ({
             if (keyTargetsControl(e.target)) {
                 return;
             }
+            const spaceTurn = spaceTurnDirection(e);
+            if (spaceTurn !== null) {
+                e.preventDefault();
+                spaceRef.current.turnOnRelease = spaceTurn;
+                return;
+            }
             const direction = pageTurnDirection(e);
             if (direction !== null) {
                 e.preventDefault();
@@ -1229,8 +1245,43 @@ export const PdfViewport = ({
                 settleEdit(annotationStore.redoLast());
             }
         };
+        const onSpaceDownBeforeTextNote = (e: KeyboardEvent) => {
+            if (e.key === ' ' && !e.repeat) {
+                const panGesture = spaceRef.current.panGesture && gestureRef.current?.pointerActive === true;
+                spaceRef.current = { held: true, turnOnRelease: null, panGesture };
+            }
+        };
+        const onKeyUp = (e: KeyboardEvent) => {
+            if (e.key !== ' ') {
+                return;
+            }
+            const { turnOnRelease, panGesture } = spaceRef.current;
+            spaceRef.current = { held: false, turnOnRelease: null, panGesture };
+            if (turnOnRelease !== null && !panGesture && !isDialogOpen()) {
+                turnPage(turnOnRelease);
+            }
+        };
+        const onBlur = () => {
+            spaceRef.current = { held: false, turnOnRelease: null, panGesture: false };
+        };
+        const onScorePointerDown = (e: PointerEvent) => {
+            if (!(e.target instanceof Element && e.target.closest('[data-ui-overlay]'))) {
+                spaceRef.current.panGesture = spaceRef.current.held;
+            }
+        };
+        const container = containerRef.current;
+        window.addEventListener('keydown', onSpaceDownBeforeTextNote, true);
         window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
+        window.addEventListener('keyup', onKeyUp);
+        window.addEventListener('blur', onBlur);
+        container?.addEventListener('pointerdown', onScorePointerDown, true);
+        return () => {
+            window.removeEventListener('keydown', onSpaceDownBeforeTextNote, true);
+            window.removeEventListener('keydown', onKeyDown);
+            window.removeEventListener('keyup', onKeyUp);
+            window.removeEventListener('blur', onBlur);
+            container?.removeEventListener('pointerdown', onScorePointerDown, true);
+        };
     }, [annotationStore, turnPage, standTurn]);
 
     const commitText = (text: string, at?: { nx: number; ny: number }) => {
