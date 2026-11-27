@@ -137,6 +137,10 @@ const NAV_ITEMS: { to: string; label: string; end: boolean; needsStudents?: bool
 const SHELL_CONTAINER = 'mx-auto w-full max-w-[100rem] px-4 sm:px-6 lg:px-10';
 const BAR_CONTAINER = 'mx-auto w-full max-w-[85rem] px-4 sm:px-6 lg:px-10';
 
+// From sm up the bar hangs below the header so the current tab's underline on
+// the bar's bottom edge stays visible.
+const SHELL_PROGRESS = 'shell-progress absolute inset-x-0 bottom-0 sm:top-full sm:bottom-auto';
+
 const NAV_LINK_BASE =
     'shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors sm:flex sm:min-h-16 sm:items-center sm:rounded-none sm:border-b-2 sm:px-0.5 sm:py-0 sm:text-[15px] sm:focus-visible:-outline-offset-4';
 const NAV_LINK_ACTIVE =
@@ -544,7 +548,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 className="chrome-paper shell-bar sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur sm:border-b-0"
             >
                 <div
-                    className={`${BAR_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-3 sm:py-0 md:gap-x-6 lg:gap-x-10`}
+                    className={`${BAR_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:relative sm:h-16 sm:flex-nowrap sm:gap-x-3 sm:py-0 md:gap-x-6 lg:gap-x-10`}
                 >
                     <Link to="/library" className="shrink-0">
                         <Wordmark className="text-[26px] sm:text-[28px] sm:text-paper sm:[&>span]:bg-ink-rule" />
@@ -577,9 +581,14 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         <ShellUploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
                         {/* The menu closes on click, and the upload before sign-out can
                             take seconds on a slow connection: say what is happening
-                            where the menu was, or the click looks like it did nothing. */}
+                            where the menu was, or the click looks like it did nothing.
+                            From sm up it hangs below the bar instead: inline, it pushed
+                            the row past the viewport at 640-700px. */}
                         {savingBeforeSignOut ? (
-                            <span role="status" className="text-sm text-stone-600 sm:text-on-ink-muted">
+                            <span
+                                role="status"
+                                className="text-sm text-stone-600 sm:pointer-events-none sm:absolute sm:top-full sm:right-6 sm:mt-3 sm:rounded-lg sm:bg-ink sm:px-3 sm:py-1.5 sm:text-on-ink-muted sm:shadow-md lg:right-10"
+                            >
                                 Saving changes…
                             </span>
                         ) : null}
@@ -597,7 +606,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         value={uploadPct}
                         label="Uploading score"
                         done={barFading}
-                        className="shell-progress absolute inset-x-0 bottom-0"
+                        className={SHELL_PROGRESS}
                     />
                 ) : importingImslp ? (
                     <ProgressBar
@@ -605,14 +614,10 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         value={100}
                         label="Importing score"
                         done={barFading}
-                        className="shell-progress absolute inset-x-0 bottom-0"
+                        className={SHELL_PROGRESS}
                     />
                 ) : savingBeforeSignOut ? (
-                    <ProgressBar
-                        indeterminate
-                        label="Saving changes before signing out"
-                        className="shell-progress absolute inset-x-0 bottom-0"
-                    />
+                    <ProgressBar indeterminate label="Saving changes before signing out" className={SHELL_PROGRESS} />
                 ) : null}
             </header>
 

@@ -384,6 +384,23 @@ describe('LibraryShell', () => {
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
+    it('hangs the saving status and its progress below the bar from sm up, out of the row', async () => {
+        const user = userEvent.setup();
+        sessionMocks.syncBeforeSignOut.mockReturnValue(new Promise(() => undefined));
+        renderShell();
+
+        await user.click(await screen.findByRole('button', { name: /Account menu/ }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Sign out' }));
+
+        const status = screen.getByRole('status');
+        expect(status).toHaveClass('sm:absolute', 'sm:top-full');
+        expect(status.closest('.sm\\:relative')).not.toBeNull();
+        expect(screen.getByRole('progressbar', { name: 'Saving changes before signing out' })).toHaveClass(
+            'sm:top-full',
+            'sm:bottom-auto',
+        );
+    });
+
     it('offers help and the legal pages from the account menu', async () => {
         const user = userEvent.setup();
         renderShell();
@@ -778,6 +795,22 @@ describe('LibraryShell upload bar', () => {
             expect(offer()).not.toBeInTheDocument();
             expect(screen.getByText('search page')).toBeInTheDocument();
         });
+    });
+
+    it('hangs the upload bar below the top bar from sm up, off the current tab underline', async () => {
+        uploadReaching(40);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        expect(bar()).toHaveClass('sm:top-full', 'sm:bottom-auto');
+    });
+
+    it('hangs the IMSLP import bar below the top bar from sm up, off the current tab underline', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        expect(bar('Importing score')).toHaveClass('sm:top-full', 'sm:bottom-auto');
     });
 
     it('turns the IMSLP sweep into a full bar for the same beat before opening the score', async () => {
