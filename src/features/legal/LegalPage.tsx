@@ -41,7 +41,9 @@ const Block = ({ block }: { block: LegalBlock }) => {
     switch (block.kind) {
         case 'h':
             return (
-                <h3 className="mt-6 text-xs font-semibold uppercase tracking-[0.08em] text-ink-muted">{block.text}</h3>
+                <h3 className="display-opsz mt-6 font-display text-[19px] leading-[1.2] font-semibold text-ink">
+                    {block.text}
+                </h3>
             );
         case 'p':
             return <p className={`mt-3 ${BODY}`}>{withLinks(block.text)}</p>;

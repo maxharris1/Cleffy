@@ -30,7 +30,7 @@ export const NotFoundPage = () => (
             >
                 <span className="absolute top-[26px] left-1/2 -ml-[22px] h-3 w-11 bg-paper" />
             </div>
-            <h1 className="display-opsz mt-11 font-display text-[clamp(80px,28vw,116px)] leading-none font-semibold tracking-[-0.02em] text-paper">
+            <h1 className="display-opsz mt-11 font-display text-[clamp(80px,30vw,116px)] leading-none font-semibold tracking-[-0.02em] text-paper">
                 <em className="shadow-[inset_0_-0.09em_0_var(--color-ink),inset_0_-0.15em_0_var(--color-ink-hand)]">
                     Tacet.
                 </em>

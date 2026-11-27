@@ -47,4 +47,16 @@ describe('NotFoundPage', () => {
             'Report content',
         ]);
     });
+
+    it('sets Tacet. at 116px on a 390px-wide phone, as Flow-NotFound does', () => {
+        renderPage();
+
+        const heading = screen.getByRole('heading', { level: 1 });
+        const match = heading.className.match(/text-\[clamp\((\d+)px,(\d+(?:\.\d+)?)vw,(\d+)px\)\]/);
+        if (!match) {
+            throw new Error(`no clamp() size in "${heading.className}"`);
+        }
+        const fluid = (Number(match[2]) * 390) / 100;
+        expect(Math.min(Math.max(Number(match[1]), fluid), Number(match[3]))).toBe(116);
+    });
 });
