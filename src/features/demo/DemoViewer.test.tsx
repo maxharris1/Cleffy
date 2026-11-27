@@ -437,10 +437,12 @@ describe('DemoViewer, a stylus seen before the score', () => {
             expect(screen.getByText('Loading demo…')).toBeInTheDocument();
             expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
 
+            act(() => useViewerStore.getState().setFingerDraws(fingerDraws));
+            expect(useViewerStore.getState().fingerDraws).toBe(fingerDraws);
+
             penTapTitle();
 
             expect(useViewerStore.getState().penSeen).toBe(true);
-            act(() => useViewerStore.getState().setFingerDraws(fingerDraws));
             gate.resolve();
             await expectScoreWithoutSwitch(fingerDraws);
         },
@@ -458,10 +460,12 @@ describe('DemoViewer, a stylus seen before the score', () => {
             expect(await screen.findByText('Clearing your markings…')).toBeInTheDocument();
             expect(screen.queryByTestId('viewport')).not.toBeInTheDocument();
 
+            act(() => useViewerStore.getState().setFingerDraws(fingerDraws));
+            expect(useViewerStore.getState().fingerDraws).toBe(fingerDraws);
+
             penTapTitle();
 
             expect(useViewerStore.getState().penSeen).toBe(true);
-            act(() => useViewerStore.getState().setFingerDraws(fingerDraws));
             gate.resolve();
             await expectScoreWithoutSwitch(fingerDraws);
         },

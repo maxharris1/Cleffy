@@ -1,7 +1,7 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 
-import { useViewerStore } from '@/state/store';
+import { useRecordPointerKinds } from '@/features/viewer/useRecordPointerKinds';
 import { ArrowLeftIcon } from '@/ui/icons';
 
 interface ViewerHeaderProps {
@@ -16,14 +16,6 @@ interface ViewerHeaderProps {
     /** Right-side chrome: presence, sync status, badges, actions. */
     children?: ReactNode;
 }
-
-const useRecordPointerKinds = () => {
-    useEffect(() => {
-        const onPointerDown = (e: PointerEvent) => useViewerStore.getState().notePointer(e.pointerType);
-        document.addEventListener('pointerdown', onPointerDown, { capture: true });
-        return () => document.removeEventListener('pointerdown', onPointerDown, { capture: true });
-    }, []);
-};
 
 /**
  * Slim score-viewer top bar, shared by cloud and local viewers; safe-area aware.

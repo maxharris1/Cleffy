@@ -12,6 +12,7 @@ import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
+import { useViewport } from '@/test/touchLayout';
 
 const PAGE_W = 1000;
 const PAGE_H = 1300;
@@ -171,15 +172,21 @@ describe('a finger once a stylus has been seen', () => {
 });
 
 describe('a stylus seen before the viewport mounts', () => {
+    beforeEach(() => useViewport({ width: 1024, coarse: true }));
+
     it.each([true, false])(
         'scrolls after a stylus tapped the viewer header before the viewport mounted, Finger-draw %s',
         async (fingerDraws) => {
+            useViewerStore.setState({ fingerDraws });
+            expect(useViewerStore.getState().fingerDraws).toBe(fingerDraws);
+
             const title = screen.getByRole('button', { name: 'Nocturne' });
             fireEvent.pointerDown(title, { pointerType: 'pen' });
             fireEvent.pointerUp(title, { pointerType: 'pen' });
+            expect(useViewerStore.getState().penSeen).toBe(true);
 
             await mountViewport();
-            useViewerStore.setState({ fingerDraws });
+            expect(useViewerStore.getState().fingerDraws).toBe(fingerDraws);
             swipe('touch');
             await settle();
             expect(page.shown).toHaveLength(0);

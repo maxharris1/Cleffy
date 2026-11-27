@@ -5,6 +5,7 @@ import { demoViewerModule } from '@/features/demo/demoPreload';
 import { DEMO_DOC_ID } from '@/features/demo/demoScore';
 import { sendDemoVisitOnce } from '@/features/demo/demoVisit';
 import { DemoScoreUnavailableError, loadDemoScore } from '@/features/demo/loadDemoScore';
+import { useRecordPointerKinds } from '@/features/viewer/useRecordPointerKinds';
 import { getLocalDoc } from '@/lib/localDocs';
 import { isChunkLoadError, reloadForStaleChunk } from '@/lib/staleChunk';
 import { Button } from '@/ui/Button';
@@ -56,6 +57,7 @@ export const DemoPage = () => {
     const [viewerFailed, setViewerFailed] = useState(false);
     /** Bumped by Try again. */
     const [attempt, setAttempt] = useState(0);
+    useRecordPointerKinds();
 
     useEffect(() => {
         sendDemoVisitOnce();
