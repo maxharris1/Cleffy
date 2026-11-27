@@ -1,7 +1,7 @@
 import '@/features/marketing/handwriting.css';
 
 import { ScoreInk } from '@/features/marketing/ScoreInk';
-import { useHandwritingReady } from '@/features/marketing/useHandwritingReady';
+import { useHandwritingFont } from '@/features/marketing/useHandwritingFont';
 
 const SENTENCE = {
     register: 'Free for 3 cloud scores. Annotation is unlimited on every plan.',
@@ -18,9 +18,9 @@ const Presence = ({ name, color }: { name: string; color: string }) => (
 );
 
 export const SignInArt = ({ sentence = 'default' }: { sentence?: SignInArtSentence }) => {
-    const handwritingReady = useHandwritingReady();
+    const handwritingLoaded = useHandwritingFont() === 'loaded';
     return (
-        <div className={`score-ink-still w-[min(560px,100%)]${handwritingReady ? '' : ' score-ink-pending'}`}>
+        <div className={`score-ink-still w-[min(560px,100%)]${handwritingLoaded ? '' : ' score-ink-pending'}`}>
             <div className="-rotate-[1.4deg] rounded-[8px] bg-white px-[26px] pt-[26px] pb-5 shadow-[0_40px_80px_-30px_rgb(0_0_0/0.8)]">
                 <ScoreInk alt="" size="hero" />
             </div>

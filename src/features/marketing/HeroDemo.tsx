@@ -1,6 +1,6 @@
 import { TryLink } from '@/features/marketing/landingLinks';
 import { ScoreInk } from '@/features/marketing/ScoreInk';
-import { useHandwritingReady } from '@/features/marketing/useHandwritingReady';
+import { useHandwritingFont } from '@/features/marketing/useHandwritingFont';
 import { useInViewOnce } from '@/features/marketing/useInViewOnce';
 
 const PEN_PATH = 'M15.5 4.5 19.5 8.5 9 19H5v-4L15.5 4.5z';
@@ -42,13 +42,13 @@ const ToolbarHint = () => (
  */
 export const HeroDemo = () => {
     const { ref, inView } = useInViewOnce<HTMLDivElement>(0.2);
-    const handwritingReady = useHandwritingReady();
+    const fontSettled = useHandwritingFont() !== 'pending';
     return (
         <TryLink
             aria-label="Open the live Für Elise demo"
             className="ink-score-card block overflow-hidden rounded-xl bg-white text-ink no-underline sm:rounded-[14px]"
         >
-            <div ref={ref} className={`mx-3.5 mt-3.5 sm:mx-7 sm:mt-7${inView && handwritingReady ? ' is-inview' : ''}`}>
+            <div ref={ref} className={`mx-3.5 mt-3.5 sm:mx-7 sm:mt-7${inView && fontSettled ? ' is-inview' : ''}`}>
                 <ScoreInk alt="The opening of Für Elise, marked up live by a teacher and a student" size="hero" chips />
             </div>
             <span className="flex items-center justify-between gap-2.5 border-t border-ink/7 px-3.5 pb-2.5 pt-2 sm:gap-3 sm:px-5 sm:pb-4 sm:pt-3.5">

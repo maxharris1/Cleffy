@@ -36,27 +36,29 @@ const INVITE_STEPS: ReadonlyArray<[string, () => string]> = [
 ];
 
 describe.skipIf(!CHROMIUM || !CSS)('SplitBrandShell layout', () => {
-    let browser: Browser;
-    let dir: string;
+    let browser: Browser | undefined;
+    let dir: string | undefined;
 
     beforeAll(async () => {
-        browser = await chromium.launch({ executablePath: CHROMIUM });
         dir = mkdtempSync(join(tmpdir(), 'split-shell-'));
+        browser = await chromium.launch({ executablePath: CHROMIUM });
     }, 60_000);
 
     afterAll(async () => {
         await browser?.close();
-        rmSync(dir, { recursive: true, force: true });
+        if (dir) {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     const measure = async (markup: string, width: number) => {
-        const file = join(dir, `${Math.random().toString(36).slice(2)}.html`);
+        const file = join(dir!, `${Math.random().toString(36).slice(2)}.html`);
         const stylesheet = pathToFileURL(join(ASSETS, CSS!)).href;
         writeFileSync(
             file,
             `<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="${stylesheet}"></head><body>${markup}</body></html>`,
         );
-        const page = await browser.newPage({ viewport: { width, height: 900 } });
+        const page = await browser!.newPage({ viewport: { width, height: 900 } });
         try {
             await page.goto(pathToFileURL(file).href);
             await page.evaluate(() => document.fonts.ready);
