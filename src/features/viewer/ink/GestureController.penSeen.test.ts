@@ -142,6 +142,7 @@ const mountViewport = async () => {
 };
 
 afterEach(() => {
+    vi.useRealTimers();
     if (gestures) {
         stopTracking();
         gestures.destroy();
@@ -219,12 +220,14 @@ describe('a stylus seen before the viewport mounts', () => {
 describe('a touch observed in the viewer', () => {
     beforeEach(mountViewport);
 
-    it('is recorded on the first finger, before any stylus', () => {
+    it('is recorded on the first finger, before any stylus, once the swipe is over', () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
         useViewerStore.setState({ fingerDraws: false });
         expect(useViewerStore.getState().touchSeen).toBe(false);
         swipe('touch');
-        expect(useViewerStore.getState().touchSeen).toBe(true);
         expect(onPan).toHaveBeenCalled();
+        vi.advanceTimersByTime(500);
+        expect(useViewerStore.getState().touchSeen).toBe(true);
     });
 });
 

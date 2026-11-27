@@ -212,9 +212,54 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
     resetPlayback: () => set({ ...INITIAL_PLAYBACK }),
 }));
 
-/** Notes the kind of every press in the session, wherever on the page it lands. */
+/* Chromium hit-tests a tap again for its click, after the press. */
+const TOUCH_PRESS_SETTLE_MS = 500;
+
+/**
+ * Notes the kind of every press in the session, wherever on the page it lands.
+ * A touch counts once its press is over (its click, a cancel, or a beat after
+ * the finger lifts), so the toolbar it reshapes cannot move under the tap.
+ */
 export const trackPointerKinds = (doc: Document): (() => void) => {
-    const onPointerDown = (e: PointerEvent) => useViewerStore.getState().notePointer(e.pointerType);
-    doc.addEventListener('pointerdown', onPointerDown, { capture: true });
-    return () => doc.removeEventListener('pointerdown', onPointerDown, { capture: true });
+    let touchPressed = false;
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const endTouchPress = () => {
+        clearTimeout(settle);
+        if (touchPressed) {
+            touchPressed = false;
+            useViewerStore.getState().notePointer('touch');
+        }
+    };
+    const listeners: [string, (e: Event) => void, boolean][] = [
+        [
+            'pointerdown',
+            (e) => {
+                const { pointerType } = e as PointerEvent;
+                if (pointerType === 'touch') {
+                    clearTimeout(settle);
+                    touchPressed = true;
+                } else {
+                    useViewerStore.getState().notePointer(pointerType);
+                }
+            },
+            true,
+        ],
+        [
+            'pointerup',
+            () => {
+                if (touchPressed) {
+                    clearTimeout(settle);
+                    settle = setTimeout(endTouchPress, TOUCH_PRESS_SETTLE_MS);
+                }
+            },
+            true,
+        ],
+        ['pointercancel', endTouchPress, true],
+        ['click', endTouchPress, false],
+    ];
+    for (const [type, listener, capture] of listeners) doc.addEventListener(type, listener, { capture });
+    return () => {
+        clearTimeout(settle);
+        for (const [type, listener, capture] of listeners) doc.removeEventListener(type, listener, { capture });
+    };
 };

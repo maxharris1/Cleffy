@@ -1,6 +1,6 @@
 import { useLayoutEffect } from 'react';
 
-import { useViewerStore } from '@/state/store';
+import { trackPointerKinds } from '@/state/store';
 
 /**
  * Records the kind of every pointer pressed anywhere on the page while mounted,
@@ -8,9 +8,5 @@ import { useViewerStore } from '@/state/store';
  * still counts once the score opens.
  */
 export const useRecordPointerKinds = () => {
-    useLayoutEffect(() => {
-        const onPointerDown = (e: PointerEvent) => useViewerStore.getState().notePointer(e.pointerType);
-        document.addEventListener('pointerdown', onPointerDown, { capture: true });
-        return () => document.removeEventListener('pointerdown', onPointerDown, { capture: true });
-    }, []);
+    useLayoutEffect(() => trackPointerKinds(document), []);
 };
