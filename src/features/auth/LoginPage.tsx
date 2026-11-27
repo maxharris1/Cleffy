@@ -9,6 +9,7 @@ import { ResendConfirmation } from '@/features/auth/ResendConfirmation';
 import { signInWithPassword } from '@/features/auth/session';
 import { CancelSubscriptionLink } from '@/features/billing/CancelSubscriptionLink';
 import { LegalLinks } from '@/features/legal/LegalLinks';
+import { SignInArt } from '@/features/marketing/SignInArt';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
@@ -34,7 +35,17 @@ const LoginForm = () => {
     const [unconfirmed, setUnconfirmed] = useState<string | null>(null);
 
     return (
-        <BrandShell title="Log in" subtitle="Upload and share scores with your account.">
+        <BrandShell
+            art={<SignInArt />}
+            title="Log in"
+            subtitle="Upload and share scores with your account."
+            footer={
+                <>
+                    <LegalLinks className="justify-center lg:justify-start" />
+                    <CancelSubscriptionLink className="mt-3 text-center lg:text-left" />
+                </>
+            }
+        >
             <AuthCredentialsForm
                 email
                 password
@@ -67,8 +78,12 @@ const LoginForm = () => {
                                 Create one
                             </Link>
                         </p>
-                        <LegalLinks className="mt-6 justify-center" />
-                        <CancelSubscriptionLink className="mt-3 text-center" />
+                        <p className="mt-4 border-t border-[#e3dfd3] pt-[18px] text-center text-sm text-stone-600">
+                            Here for a lesson?{' '}
+                            <Link to="/student" className={linkClassName}>
+                                Student sign in
+                            </Link>
+                        </p>
                     </>
                 }
                 onSubmit={async ({ email, password, captchaToken }) => {

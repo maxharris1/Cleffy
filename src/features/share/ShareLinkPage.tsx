@@ -7,6 +7,7 @@ import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/fe
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { AgreementNote } from '@/features/legal/AgreementNote';
+import { SignInArt } from '@/features/marketing/SignInArt';
 import { BusyCountdown } from '@/features/share/BusyCountdown';
 import { requestShareSession, type DeadAnswer, type ShareSessionAnswer } from '@/features/share/linkSession';
 import { peekShareLink, redeemShareLink } from '@/features/share/shareService';
@@ -25,7 +26,7 @@ const LinkViewerPage = lazy(() =>
 
 /** /s and /invite while Share v2 is off. */
 export const LinkUnavailable = () => (
-    <BrandShell title="This link isn't available.">
+    <BrandShell art={<SignInArt />} title="This link isn't available.">
         <div className="text-center">
             <Link to="/" className={linkClassName}>
                 Back to home
@@ -37,7 +38,7 @@ export const LinkUnavailable = () => (
 type Phase = { kind: 'checking' } | ShareSessionAnswer | { kind: 'join'; role: ShareRole };
 
 const DeadLink = ({ answer, registered }: { answer: Pick<DeadAnswer, 'state' | 'expiredAt'>; registered: boolean }) => (
-    <BrandShell title="This link can't open the score">
+    <BrandShell art={<SignInArt />} title="This link can't open the score">
         <div className="text-center">
             <ErrorText>{deadLinkMessage(answer.state, answer.expiredAt)}</ErrorText>
             <Link to={registered ? '/library' : '/'} className={`mt-3 inline-block ${linkClassName}`}>
@@ -143,7 +144,7 @@ export const ShareLinkPage = () => {
     }
     if (phase.kind === 'dead') {
         return guestDiscarded ? (
-            <BrandShell title="This link can't open the score">
+            <BrandShell art={<SignInArt />} title="This link can't open the score">
                 <div className="text-center">
                     <ErrorText>{deadLinkMessage(phase.state, phase.expiredAt)}</ErrorText>
                     {/* The deleted guest's session is still in memory; a full load drops it. */}
@@ -158,7 +159,7 @@ export const ShareLinkPage = () => {
     }
     if (loading || session) {
         return (
-            <BrandShell title="Opening the score">
+            <BrandShell art={<SignInArt />} title="Opening the score">
                 {joinError ? (
                     <ErrorText className="text-center">{joinError}</ErrorText>
                 ) : (
@@ -170,19 +171,19 @@ export const ShareLinkPage = () => {
     switch (phase.kind) {
         case 'checking':
             return (
-                <BrandShell title="Opening the score">
+                <BrandShell art={<SignInArt />} title="Opening the score">
                     <LoadingText className="text-center">Checking the link…</LoadingText>
                 </BrandShell>
             );
         case 'busy':
             return (
-                <BrandShell title="Opening the score">
+                <BrandShell art={<SignInArt />} title="Opening the score">
                     <BusyCountdown retryAfterSec={phase.retryAfterSec} onRetry={retry} className="text-sm" />
                 </BrandShell>
             );
         case 'failed':
             return (
-                <BrandShell title="This link can't open the score">
+                <BrandShell art={<SignInArt />} title="This link can't open the score">
                     <div className="text-center">
                         <ErrorText>{deadLinkMessage('unavailable')}</ErrorText>
                         <Button size="sm" variant="secondary" className="mt-3" onClick={retry}>
@@ -195,7 +196,7 @@ export const ShareLinkPage = () => {
             return (
                 <Suspense
                     fallback={
-                        <BrandShell title="Opening the score">
+                        <BrandShell art={<SignInArt />} title="Opening the score">
                             <LoadingText className="text-center">Opening the score…</LoadingText>
                         </BrandShell>
                     }
@@ -275,7 +276,7 @@ export const JoinCard = ({
     };
 
     return (
-        <BrandShell title={role === 'editor' ? 'Join to edit' : 'Join to view'}>
+        <BrandShell art={<SignInArt />} title={role === 'editor' ? 'Join to edit' : 'Join to view'}>
             {submitting ? (
                 <LoadingText className="text-center">Joining…</LoadingText>
             ) : (

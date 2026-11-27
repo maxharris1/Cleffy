@@ -1,0 +1,14 @@
+/*
+ * Caveat (SIL OFL 1.1, src/assets/fonts/Caveat-OFL.txt), subset to Basic
+ * Latin and typographic punctuation, weights 500 to 700: the landing
+ * page's handwritten phrases, the notes on the score and the sign-in art.
+ * Kept out of the service worker's precache (vite.config.ts globIgnores):
+ * guests do not need it offline. The notes on the score wait for it (useHandwritingReady).
+ */
+@font-face {
+    font-family: 'Caveat';
+    font-style: normal;
+    font-weight: 500 700;
+    font-display: swap;
+    src: url('../../assets/fonts/caveat-latin-wght.woff2') format('woff2-variations');
+}

@@ -4,6 +4,7 @@ import { Link } from 'react-router';
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { passwordResetProblem } from '@/features/auth/authErrors';
 import { requestPasswordReset } from '@/features/auth/session';
+import { SignInArt } from '@/features/marketing/SignInArt';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
@@ -23,6 +24,7 @@ export const ForgotPasswordPage = () => {
     if (sentTo) {
         return (
             <BrandShell
+                art={<SignInArt />}
                 title="Check your email"
                 subtitle={`If an account exists for ${sentTo}, we’ve sent it a link to reset the password.`}
             >
@@ -39,7 +41,11 @@ export const ForgotPasswordPage = () => {
     }
 
     return (
-        <BrandShell title="Forgot password" subtitle="Enter your email and we'll send a reset link.">
+        <BrandShell
+            art={<SignInArt />}
+            title="Forgot password"
+            subtitle="Enter your email and we'll send a reset link."
+        >
             <AuthCredentialsForm
                 email
                 emailId="forgot-email"

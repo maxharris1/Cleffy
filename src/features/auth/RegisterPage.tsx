@@ -8,6 +8,7 @@ import { RequireGuest } from '@/features/auth/AuthGates';
 import { ResendConfirmation } from '@/features/auth/ResendConfirmation';
 import { signUpWithPassword } from '@/features/auth/session';
 import { AgreementNote } from '@/features/legal/AgreementNote';
+import { SignInArt } from '@/features/marketing/SignInArt';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
@@ -26,7 +27,11 @@ const RegisterForm = () => {
 
     if (needsConfirm) {
         return (
-            <BrandShell title="Check your email" subtitle={`We sent a confirmation link to ${email}.`}>
+            <BrandShell
+                art={<SignInArt sentence="register" />}
+                title="Check your email"
+                subtitle={`We sent a confirmation link to ${email}.`}
+            >
                 <p className="text-center text-sm text-stone-600">
                     After confirming, you can{' '}
                     <Link to="/login" className={linkClassName}>
@@ -44,11 +49,22 @@ const RegisterForm = () => {
     }
 
     if (!ageGate) {
-        return <AgeScreen purpose="register" onPass={setAgeGate} footer={<SignInInstead />} />;
+        return (
+            <AgeScreen
+                art={<SignInArt sentence="register" />}
+                purpose="register"
+                onPass={setAgeGate}
+                footer={<SignInInstead />}
+            />
+        );
     }
 
     return (
-        <BrandShell title="Create account" subtitle="Upload scores, annotate, and share with your class.">
+        <BrandShell
+            art={<SignInArt sentence="register" />}
+            title="Create account"
+            subtitle="Upload scores, annotate, and share with your class."
+        >
             <AuthCredentialsForm
                 email
                 password

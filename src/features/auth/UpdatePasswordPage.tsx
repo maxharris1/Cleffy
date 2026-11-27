@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router';
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { updatePassword } from '@/features/auth/session';
+import { SignInArt } from '@/features/marketing/SignInArt';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
@@ -18,7 +19,11 @@ const UpdatePasswordForm = () => {
     const navigate = useNavigate();
 
     return (
-        <BrandShell title="Set a new password" subtitle="Choose a password for your Cleffy account.">
+        <BrandShell
+            art={<SignInArt />}
+            title="Set a new password"
+            subtitle="Choose a password for your Cleffy account."
+        >
             <AuthCredentialsForm
                 password
                 confirm

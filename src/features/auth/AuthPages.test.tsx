@@ -54,7 +54,12 @@ describe('Auth pages', () => {
         expect(screen.getByRole('button', { name: 'Log in' })).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Forgot password?' })).toHaveAttribute('href', '/forgot-password');
         expect(screen.getByRole('link', { name: 'Create one' })).toHaveAttribute('href', '/register');
-        expect(screen.getByRole('main')).toHaveClass('safe-brand-shell');
+        expect(screen.getByRole('link', { name: 'Student sign in' })).toHaveAttribute('href', '/student');
+        expect(screen.getByRole('main')).toHaveClass('safe-split-pane');
+        const art = screen.getByText('both on this page, right now').closest('aside');
+        expect(art).toHaveAttribute('aria-hidden', 'true');
+        expect(art).toHaveAttribute('inert');
+        expect(art).toHaveTextContent('Your teacher, your section and your own devices all open the same page.');
     });
 
     it('honors next=/library after a successful sign-in', async () => {
@@ -149,7 +154,7 @@ describe('Auth pages', () => {
         expect(screen.getByRole('heading', { name: 'Create account' })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Create account' })).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', '/login');
-        expect(screen.getByRole('main')).toHaveClass('safe-brand-shell');
+        expect(screen.getByRole('main')).toHaveClass('safe-split-pane');
         expect(screen.getByText(/By creating an account you agree to the/)).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Terms of Service' })).toHaveAttribute('href', '/terms');
         expect(screen.getByRole('link', { name: 'Privacy Policy' })).toHaveAttribute('href', '/privacy');

@@ -8,6 +8,7 @@ import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/fe
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { AgreementNote } from '@/features/legal/AgreementNote';
+import { SignInArt } from '@/features/marketing/SignInArt';
 import { peekShareLink, redeemShareLink } from '@/features/share/shareService';
 import { BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
@@ -176,11 +177,12 @@ export const JoinPage = () => {
 
     // After the link check, so a dead link is reported without asking anyone's age.
     if (!shownError && !busy && !ageGate) {
-        return <AgeScreen purpose="join" onPass={setAgeGate} />;
+        return <AgeScreen art={<SignInArt />} purpose="join" onPass={setAgeGate} />;
     }
 
     return (
         <BrandShell
+            art={<SignInArt />}
             title="Join a shared score"
             subtitle={shownError || busy ? undefined : 'Enter your name so collaborators know who you are.'}
         >

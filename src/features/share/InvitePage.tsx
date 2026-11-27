@@ -12,6 +12,7 @@ import {
     type AcceptResult,
     type InvitePeek,
 } from '@/features/share/inviteApi';
+import { SignInArt } from '@/features/marketing/SignInArt';
 import { tokenFromHash } from '@/features/share/shareLinkText';
 import { BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
@@ -119,14 +120,14 @@ export const InvitePage = () => {
     }
     if (step.kind === 'failed') {
         return (
-            <BrandShell title="Invite">
+            <BrandShell art={<SignInArt />} title="Invite">
                 <ErrorText className="text-center">Could not open this invite. Try again in a moment.</ErrorText>
             </BrandShell>
         );
     }
     if (step.kind === 'loading' || loading || !invite) {
         return (
-            <BrandShell title="Invite">
+            <BrandShell art={<SignInArt />} title="Invite">
                 <LoadingText className="text-center">Opening the invite…</LoadingText>
             </BrandShell>
         );
@@ -134,6 +135,7 @@ export const InvitePage = () => {
     if (step.kind === 'age') {
         return (
             <AgeScreen
+                art={<SignInArt />}
                 purpose="join"
                 onPass={(ageGate) => {
                     setError(null);
@@ -149,7 +151,7 @@ export const InvitePage = () => {
 
     if (step.kind === 'refused') {
         return (
-            <BrandShell title={headline}>
+            <BrandShell art={<SignInArt />} title={headline}>
                 <p className="text-center text-sm text-stone-700">
                     Sorry, you can't make an account here. Nothing was saved.
                 </p>
@@ -158,7 +160,7 @@ export const InvitePage = () => {
     }
     if (step.kind === 'mismatch') {
         return (
-            <BrandShell title={headline}>
+            <BrandShell art={<SignInArt />} title={headline}>
                 <div className="text-center">
                     <p className="text-sm text-stone-700">
                         This invite is for {invite.emailMasked}. Sign out to accept it.
@@ -178,6 +180,7 @@ export const InvitePage = () => {
     if (step.kind === 'signIn') {
         return (
             <BrandShell
+                art={<SignInArt />}
                 title={headline}
                 subtitle={`You already have an account. Sign in as ${invite.emailMasked} to accept.`}
             >
@@ -197,7 +200,7 @@ export const InvitePage = () => {
     }
     if (step.kind === 'password') {
         return (
-            <BrandShell title="Choose a password" subtitle={headline}>
+            <BrandShell art={<SignInArt />} title="Choose a password" subtitle={headline}>
                 <TextField
                     id="invite-email"
                     label="Email"
@@ -234,7 +237,7 @@ export const InvitePage = () => {
     }
 
     return (
-        <BrandShell title={headline}>
+        <BrandShell art={<SignInArt />} title={headline}>
             <Button className="w-full" disabled={busy} onClick={() => void accept()}>
                 {registered ? (busy ? 'Accepting…' : 'Accept and open') : busy ? 'Checking…' : 'Continue'}
             </Button>
@@ -244,7 +247,7 @@ export const InvitePage = () => {
 };
 
 const DeadInvite = ({ state }: { state: string }) => (
-    <BrandShell title="This invite can't be used">
+    <BrandShell art={<SignInArt />} title="This invite can't be used">
         <div className="text-center">
             <ErrorText>{deadInviteMessage(state)}</ErrorText>
             <Link to="/" className={`mt-3 inline-block ${linkClassName}`}>

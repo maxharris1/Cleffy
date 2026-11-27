@@ -29,6 +29,8 @@ export interface AgeScreenProps {
     onPass: (gate: AgeGate) => void;
     /** Under the form, e.g. the sign-up page's "Already have an account?". */
     footer?: ReactNode;
+    /** The sign-in pages' ink half (BrandShell). */
+    art?: ReactNode;
 }
 
 /**
@@ -44,7 +46,7 @@ export interface AgeScreenProps {
  * Only the outcome leaves this component: `{ country, min_age }`. The month
  * and year live in its state until it unmounts, and are never sent anywhere.
  */
-export const AgeScreen = ({ purpose, onPass, footer }: AgeScreenProps) => {
+export const AgeScreen = ({ purpose, onPass, footer, art }: AgeScreenProps) => {
     const [blocked, setBlocked] = useState(() => ageCheckBlocked());
     const [country, setCountry] = useState('');
     const [month, setMonth] = useState('');
@@ -67,6 +69,7 @@ export const AgeScreen = ({ purpose, onPass, footer }: AgeScreenProps) => {
     if (blocked) {
         return (
             <BrandShell
+                art={art}
                 title="Sorry"
                 subtitle="Cleffy accounts are for people who meet the minimum age where they live."
             >
@@ -103,7 +106,7 @@ export const AgeScreen = ({ purpose, onPass, footer }: AgeScreenProps) => {
     const selectClass = fieldClassName('md', 'mt-1.5');
 
     return (
-        <BrandShell title={title} subtitle={subtitle}>
+        <BrandShell art={art} title={title} subtitle={subtitle}>
             <form noValidate onSubmit={submit}>
                 <label htmlFor="age-country" className={fieldLabelClassName}>
                     Where do you live?
