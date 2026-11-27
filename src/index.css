@@ -942,6 +942,23 @@ body {
 }
 
 /*
+ * Below sm the shell bar's 44px upload button outgrows the 3.5rem lane toasts
+ * drop into (ui/AppToaster) when the browser font is small. While the bar is on
+ * the page, the lane starts below the button, and the stack is clipped at its
+ * top edge so a toast sliding in from above never covers or takes a touch
+ * meant for the bar.
+ */
+@media (max-width: 39.99rem) {
+    :root:has(.shell-bar) {
+        --toast-top: calc(var(--safe-top) + max(3.5rem, 0.625rem + 44px));
+    }
+
+    :root:has(.shell-bar) [data-sonner-toaster][data-y-position='top'] {
+        clip-path: inset(0 -100vmax -100vmax);
+    }
+}
+
+/*
  * Toasts keep Sonner's own motion (ui/AppToaster). Under reduced motion Sonner
  * drops every transition, so a toast would pop in and out: keep the fade, drop
  * the travel. Transforms (which also lay the stack out) land at once, opacity
