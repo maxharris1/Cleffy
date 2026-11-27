@@ -1,4 +1,7 @@
+import { setImmediate as queueInputTask } from 'node:timers';
+
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -310,5 +313,68 @@ describe("/try, a pen pressed on the demo's own loading screen", () => {
         expect(h.shown).toHaveLength(1);
         expect(h.onPan).not.toHaveBeenCalled();
         expect(useViewerStore.getState().penSeen).toBe(false);
+    });
+});
+
+describe("the first queued pen press on the router's loading screen, before passive effects run", () => {
+    const pressOnceFallbackPaints = async (path: string, label: string) => {
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', false);
+        const mount = document.body.appendChild(document.createElement('div'));
+        const root = createRoot(mount);
+        const pressed = new Promise<void>((resolve) => {
+            const poll = () => {
+                const fallback = mount.querySelector('main');
+                if (fallback?.textContent !== label) {
+                    queueInputTask(poll);
+                    return;
+                }
+                fallback.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'pen', bubbles: true }));
+                resolve();
+            };
+            queueInputTask(poll);
+        });
+        root.render(
+            <MemoryRouter initialEntries={[path]}>
+                <AppRoutes />
+            </MemoryRouter>,
+        );
+        await pressed;
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+        return () => {
+            act(() => root.unmount());
+            mount.remove();
+        };
+    };
+
+    it('on /try, hides Draw with finger and a finger drag pans without ink', async () => {
+        holdImport();
+        setFingerDraws(true);
+        const unmount = await pressOnceFallbackPaints('/try', 'Loading demo…');
+        try {
+            act(() => h.releaseImport());
+            const viewport = await openScore();
+            fingerSwipe(viewport);
+            await settle();
+            expect({
+                penSeen: useViewerStore.getState().penSeen,
+                switchVisible: screen.queryByRole('button', { name: 'Draw with finger' }) !== null,
+                panned: h.onPan?.mock.calls.length !== 0,
+                committed: h.shown.length,
+            }).toEqual({ penSeen: true, switchVisible: false, panned: true, committed: 0 });
+        } finally {
+            unmount();
+        }
+    });
+
+    it('on /doc, counts once the viewer page mounts', async () => {
+        holdImport();
+        const unmount = await pressOnceFallbackPaints('/doc/local-score', 'Loading viewer…');
+        try {
+            act(() => h.releaseImport());
+            await screen.findByText('viewer-page');
+            expect(useViewerStore.getState().penSeen).toBe(true);
+        } finally {
+            unmount();
+        }
     });
 });
