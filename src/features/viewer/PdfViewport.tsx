@@ -521,19 +521,14 @@ export const PdfViewport = ({
             cancelSettleGlide();
         };
     }, [settleIntoBounds, cancelSettleGlide]);
-    // A notice coming moves only the edge: the view stays where it is, and the
-    // next follow step or page turn lands clear of the stack. One going (or
-    // shrinking) frees the room it took, and a view resting in it settles up.
     useLayoutEffect(() => {
         noticeInsetRef.current = Math.max(0, noticeInset);
         applyObscured();
-        settleIntoBounds();
-    }, [noticeInset, applyObscured, settleIntoBounds]);
+    }, [noticeInset, applyObscured]);
     useLayoutEffect(() => {
         bottomDockRef.current = bottomDock;
         applyObscured();
-        settleIntoBounds();
-    }, [bottomDock, applyObscured, settleIntoBounds]);
+    }, [bottomDock, applyObscured]);
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
     // These live in state, not refs: the overlay divs only exist once the PDF
@@ -596,16 +591,8 @@ export const PdfViewport = ({
             // Before the size reaches state, so the first fit already sees it.
             // Stand mode hides the pager and zoom row.
             controlsStripRef.current = standModeRef.current ? 0 : controlsStripFor(width);
-            const safeBottom = safeBottomProbeRef.current?.offsetHeight ?? 0;
-            const safeBottomChanged = safeBottom !== safeBottomRef.current;
-            safeBottomRef.current = safeBottom;
+            safeBottomRef.current = safeBottomProbeRef.current?.offsetHeight ?? 0;
             applyObscured();
-            // A resize in the same delivery clamps against the new size (below);
-            // settling now would clamp against the old one first.
-            const sized = viewportSizeRef.current;
-            if (safeBottomChanged && sized.width === width && sized.height === height) {
-                settleIntoBounds();
-            }
             setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
         };
         const observer = new ResizeObserver(measure);
@@ -615,7 +602,7 @@ export const PdfViewport = ({
         }
         measure();
         return () => observer.disconnect();
-    }, [applyObscured, settleIntoBounds]);
+    }, [applyObscured]);
 
     // Fit the widest page to the viewport width once the document is ready.
     useEffect(() => {
@@ -694,6 +681,28 @@ export const PdfViewport = ({
         setView(next);
         setRenderScale(next.scale);
     }, [viewportSize, layout, pageColumns, pageSizes, spreadCover, standMode, obscuredWithStrip]);
+
+    // Edges arrive from separate observers in either order, so the view settles
+    // on each committed change; a resize in the same commit clamps above instead.
+    const settledEdgesRef = useRef(obscured);
+    useLayoutEffect(() => {
+        const before = settledEdgesRef.current;
+        settledEdgesRef.current = obscured;
+        if (viewportSize !== fittedViewportRef.current || standReturnRef.current) {
+            return;
+        }
+        const { width, height } = viewportSize;
+        const { view: v, setView } = useViewerStore.getState();
+        const atEnd = (edges: ObscuredEdges) => clampScroll({ ...v, scrollY: Infinity }, layout, width, height, edges);
+        if (obscured.bottom > before.bottom && Math.abs(v.scrollY - atEnd(before).scrollY) < 0.5) {
+            if (!gestureRef.current?.pointerActive) {
+                cancelSettleGlide();
+                setView(atEnd(obscured));
+            }
+            return;
+        }
+        settleIntoBounds();
+    }, [obscured, viewportSize, layout, settleIntoBounds, cancelSettleGlide]);
 
     // Entering stand mode starts on the page being read; leaving it comes
     // back to the page it was showing. Before paint, and before the refs
