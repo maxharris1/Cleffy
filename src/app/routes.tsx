@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 
 import { RequireGuest } from '@/features/auth/AuthGates';
@@ -7,6 +7,7 @@ import { LibraryPage } from '@/features/library/LibraryPage';
 import { LibraryShell } from '@/features/library/LibraryShell';
 import { NotFoundPage } from '@/features/marketing/NotFoundPage';
 import { features } from '@/lib/features';
+import { trackPointerKinds } from '@/state/store';
 import { BrandLoading } from '@/ui/BrandShell';
 import { LoadingText } from '@/ui/Loading';
 
@@ -106,6 +107,7 @@ const PageFallback = ({ label }: { label: string }) => (
 );
 
 export const AppRoutes = () => {
+    useEffect(() => trackPointerKinds(document), []);
     return (
         <Routes>
             {/* Gate before the lazy chunk: a registered knownSession redirects

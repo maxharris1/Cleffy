@@ -93,6 +93,7 @@ vi.mock('@/features/demo/DemoViewer', async () => {
                     store,
                     registry,
                     isReadOnly: () => false,
+                    panKeyHeld: () => false,
                     getView: () => ({ scale: 1, scrollX: 0, scrollY: 0 }),
                     getLayout: () => layout,
                     toLocal: (e) => ({ x: e.clientX, y: e.clientY }),
@@ -194,7 +195,7 @@ const renderTry = async () => {
 
 describe('DemoPage, a pen pressed on the first loading screen', () => {
     it.each([true, false])(
-        'hides Draw with finger and a finger drag scrolls without ink, Finger-draw %s',
+        'hides the Scroll | Draw switch and a finger drag scrolls without ink, Finger-draw %s',
         async (fingerDraws) => {
             const loading = await renderTry();
             setFingerDraws(fingerDraws);
@@ -204,7 +205,7 @@ describe('DemoPage, a pen pressed on the first loading screen', () => {
             expect(useViewerStore.getState().penSeen).toBe(true);
 
             const viewport = await openScore();
-            expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+            expect(screen.queryByRole('group', { name: 'What a finger does' })).not.toBeInTheDocument();
 
             setFingerDraws(fingerDraws);
             fingerSwipe(viewport);
@@ -214,11 +215,11 @@ describe('DemoPage, a pen pressed on the first loading screen', () => {
         },
     );
 
-    it('without a pen, shows Draw with finger and a finger drag inks with it on', async () => {
+    it('without a pen, shows the Scroll | Draw switch and a finger drag inks with it on', async () => {
         await renderTry();
 
         const viewport = await openScore();
-        expect(screen.getByRole('button', { name: 'Draw with finger' })).toBeInTheDocument();
+        expect(screen.getByRole('group', { name: 'What a finger does' })).toBeInTheDocument();
 
         setFingerDraws(true);
         fingerSwipe(viewport);

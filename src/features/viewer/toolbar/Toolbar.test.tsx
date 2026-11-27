@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AnnotationStore } from '@/sync/annotationStore';
-import { useViewport } from '@/test/touchLayout';
+import { effectiveBox, useViewport } from '@/test/touchLayout';
 
 /**
  * The markup toolbar is the release's one annotation surface. Its tool list is
@@ -41,6 +41,8 @@ afterEach(() => {
     vi.unstubAllGlobals();
 });
 
+const fingerSwitch = () => screen.queryByRole('group', { name: 'What a finger does' });
+
 describe('Toolbar', () => {
     it('offers only the core markup tools with fingering switched off', async () => {
         await renderToolbar();
@@ -65,7 +67,7 @@ describe('Toolbar', () => {
         const user = userEvent.setup();
 
         // The phone bar: no tool added or removed, only the style controls folded.
-        for (const name of ['Undo', 'Redo', 'Draw with finger']) {
+        for (const name of ['Finger scrolls', 'Finger draws', 'Undo', 'Redo']) {
             expect(screen.getByRole('button', { name })).toBeInTheDocument();
         }
         const style = screen.getByRole('button', { name: 'Pen colour and size' });
@@ -95,38 +97,149 @@ describe('Toolbar', () => {
         useViewport({ width: 1280, coarse: false });
         await renderToolbar();
 
+        expect(fingerSwitch()).toBeNull();
         expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
     });
 
     it('shows the finger switch on a fine-pointer device once a touch is observed', async () => {
         useViewport({ width: 1280, coarse: false });
         const { useViewerStore } = await renderToolbar();
-        expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+        expect(fingerSwitch()).toBeNull();
 
         act(() => useViewerStore.getState().notePointer('touch'));
-        expect(screen.getByRole('button', { name: 'Draw with finger' })).toBeInTheDocument();
+        expect(fingerSwitch()).toBeInTheDocument();
 
         act(() => useViewerStore.getState().notePointer('pen'));
-        expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
-    });
-
-    it('lets a finger choose between drawing and scrolling on a touch screen with no stylus yet', async () => {
-        useViewport({ width: 1024, coarse: true });
-        const { useViewerStore } = await renderToolbar();
-        const user = userEvent.setup();
-
-        await user.click(screen.getByRole('button', { name: 'Draw with finger' }));
-        expect(useViewerStore.getState().fingerDraws).toBe(true);
+        expect(fingerSwitch()).toBeNull();
     });
 
     it('drops the finger switch once a stylus has been seen, even with finger drawing on', async () => {
         useViewport({ width: 1024, coarse: true });
         const { useViewerStore } = await renderToolbar();
         act(() => useViewerStore.setState({ fingerDraws: true }));
-        expect(screen.getByRole('button', { name: 'Draw with finger' })).toBeInTheDocument();
+        expect(fingerSwitch()).toBeInTheDocument();
 
         act(() => useViewerStore.getState().notePointer('pen'));
+        expect(fingerSwitch()).toBeNull();
+    });
+
+    it('leads the bar with a Scroll | Draw switch that holds fingerDraws, in place of the Finger toggle', async () => {
+        useViewport({ width: 1024, coarse: true });
+        const { useViewerStore } = await renderToolbar();
+        const user = userEvent.setup();
+        const group = fingerSwitch() as HTMLElement;
+        const scroll = within(group).getByRole('button', { name: 'Finger scrolls' });
+        const draw = within(group).getByRole('button', { name: 'Finger draws' });
         expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+        expect(group.compareDocumentPosition(screen.getByRole('button', { name: 'Pen' }))).toBe(
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+        expect(group.querySelector('[data-segmented-indicator]')).not.toBeNull();
+        expect(scroll).toHaveAttribute('aria-pressed', 'true');
+        expect(draw).toHaveAttribute('aria-pressed', 'false');
+
+        await user.click(draw);
+        expect(useViewerStore.getState().fingerDraws).toBe(true);
+        expect(draw).toHaveAttribute('aria-pressed', 'true');
+        expect(scroll).toHaveAttribute('aria-pressed', 'false');
+
+        await user.click(scroll);
+        expect(useViewerStore.getState().fingerDraws).toBe(false);
+        expect(scroll).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('labels the switch Scroll and Draw from sm, and keeps it icon-only on a phone', async () => {
+        useViewport({ width: 390, coarse: true });
+        await renderToolbar();
+
+        for (const [name, text] of [
+            ['Finger scrolls', 'Scroll'],
+            ['Finger draws', 'Draw'],
+        ] as const) {
+            const key = screen.getByRole('button', { name });
+            expect(key.querySelector('svg')).not.toBeNull();
+            expect(within(key).getByText(text)).toHaveClass('hidden', 'sm:inline');
+        }
+    });
+
+    it('dims the tools while a finger scrolls, and choosing one turns Draw on', async () => {
+        useViewport({ width: 1024, coarse: true });
+        const { useViewerStore } = await renderToolbar();
+        const user = userEvent.setup();
+        const tools = ['Pen', 'Highlighter', 'Eraser', 'Text note'].map((name) => screen.getByRole('button', { name }));
+        for (const button of tools) {
+            expect(button).toHaveClass('opacity-[0.45]');
+            expect(button).toBeEnabled();
+        }
+
+        await user.click(screen.getByRole('button', { name: 'Eraser' }));
+        expect(useViewerStore.getState()).toMatchObject({ tool: 'eraser', fingerDraws: true });
+        for (const button of tools) {
+            expect(button).not.toHaveClass('opacity-[0.45]');
+        }
+    });
+
+    it('keeps the tool in hand when it is chosen while a finger scrolls', async () => {
+        useViewport({ width: 1024, coarse: true });
+        const { useViewerStore } = await renderToolbar();
+        const user = userEvent.setup();
+
+        await user.click(screen.getByRole('button', { name: 'Pen' }));
+        expect(useViewerStore.getState()).toMatchObject({ tool: 'pen', fingerDraws: true });
+
+        await user.click(screen.getByRole('button', { name: 'Pen' }));
+        expect(useViewerStore.getState().tool).toBeNull();
+    });
+
+    it('never dims the tools without the switch: a stylus or a mouse draws', async () => {
+        useViewport({ width: 1280, coarse: false });
+        await renderToolbar();
+
+        expect(screen.getByRole('button', { name: 'Pen' })).not.toHaveClass('opacity-[0.45]');
+    });
+
+    it('keeps every phone control at 44px wide, scrolling the row sideways rather than shrinking them', async () => {
+        useViewport({ width: 390, coarse: true });
+        await renderToolbar();
+        const bar = (fingerSwitch() as HTMLElement).parentElement as HTMLElement;
+
+        expect(bar).toHaveClass('max-sm:overflow-x-auto', 'flex-nowrap');
+        expect(bar).not.toHaveClass('relative');
+        for (const button of Array.from(bar.querySelectorAll<HTMLElement>(':scope > button'))) {
+            expect(effectiveBox(button).minWidth, button.getAttribute('aria-label') ?? '').toBeGreaterThanOrEqual(44);
+        }
+        for (const key of within(fingerSwitch() as HTMLElement).getAllByRole('button')) {
+            expect(effectiveBox(key).minWidth, key.getAttribute('aria-label') ?? '').toBeGreaterThanOrEqual(44);
+        }
+    });
+
+    it('holds 44px phone targets on a fine-pointer device once a finger is seen', async () => {
+        useViewport({ width: 390, coarse: false });
+        const { useViewerStore } = await renderToolbar();
+        act(() => useViewerStore.getState().notePointer('touch'));
+        const group = fingerSwitch() as HTMLElement;
+        const bar = group.parentElement as HTMLElement;
+
+        for (const button of Array.from(bar.querySelectorAll<HTMLElement>(':scope > button'))) {
+            const box = effectiveBox(button);
+            const name = button.getAttribute('aria-label') ?? '';
+            expect(box.minWidth, name).toBeGreaterThanOrEqual(44);
+            expect(box.hit44y, name).toBe(true);
+        }
+        const trough = effectiveBox(group);
+        const keyHeight = trough.height - trough.paddingTop - trough.paddingBottom;
+        for (const key of within(group).getAllByRole('button')) {
+            const box = effectiveBox(key);
+            const name = key.getAttribute('aria-label') ?? '';
+            expect(box.minWidth, name).toBeGreaterThanOrEqual(44);
+            expect(keyHeight + 2 * box.overhangY, name).toBeGreaterThanOrEqual(44);
+        }
+
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Pen colour and size' }));
+        const popover = screen.getByRole('group', { name: 'Pen colour and size' });
+        for (const button of within(popover).getAllByRole('button')) {
+            expect(effectiveBox(button).hit44, button.getAttribute('aria-label') ?? '').toBe(true);
+        }
     });
 
     it('folds colours and sizes below lg: inline, they wrapped a portrait iPad bar to two rows', async () => {

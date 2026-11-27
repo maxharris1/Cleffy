@@ -211,3 +211,10 @@ export const useViewerStore = create<ViewerStore>((set, get) => ({
     notePlayheadJump: () => set((state) => ({ playheadEpoch: state.playheadEpoch + 1 })),
     resetPlayback: () => set({ ...INITIAL_PLAYBACK }),
 }));
+
+/** Notes the kind of every press in the session, wherever on the page it lands. */
+export const trackPointerKinds = (doc: Document): (() => void) => {
+    const onPointerDown = (e: PointerEvent) => useViewerStore.getState().notePointer(e.pointerType);
+    doc.addEventListener('pointerdown', onPointerDown, { capture: true });
+    return () => doc.removeEventListener('pointerdown', onPointerDown, { capture: true });
+};

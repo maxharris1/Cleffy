@@ -406,6 +406,23 @@ describe('DemoViewer, finger drawing', () => {
     });
 });
 
+describe('DemoViewer, toolbar', () => {
+    it('offers the Scroll | Draw switch on a touch screen, set to Draw, with no Pan or Finger button', async () => {
+        useViewport({ width: 390, coarse: true });
+        h.withToolbar = true;
+        renderDemo();
+        await screen.findByTestId('viewport');
+
+        const group = screen.getByRole('group', { name: 'What a finger does' });
+        expect(within(group).getByRole('button', { name: 'Finger draws' })).toHaveAttribute('aria-pressed', 'true');
+        expect(within(group).getByRole('button', { name: 'Finger scrolls' })).toHaveAttribute('aria-pressed', 'false');
+        for (const name of ['Pan', 'Draw with finger']) {
+            expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+        }
+        vi.unstubAllGlobals();
+    });
+});
+
 describe('DemoViewer, a stylus seen before the score', () => {
     beforeEach(() => {
         h.withToolbar = true;
@@ -424,7 +441,7 @@ describe('DemoViewer, a stylus seen before the score', () => {
 
     const expectScoreWithoutSwitch = async (fingerDraws: boolean) => {
         expect(await screen.findByTestId('viewport')).toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('group', { name: 'What a finger does' })).not.toBeInTheDocument();
         expect(useViewerStore.getState().fingerDraws).toBe(fingerDraws);
     };
 
@@ -480,7 +497,7 @@ describe('DemoViewer, a stylus seen before the score', () => {
         gate.resolve();
 
         expect(await screen.findByTestId('viewport')).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Draw with finger' })).toBeInTheDocument();
+        expect(screen.getByRole('group', { name: 'What a finger does' })).toBeInTheDocument();
         expect(useViewerStore.getState().penSeen).toBe(false);
     });
 });
