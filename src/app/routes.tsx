@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 
 import { RequireGuest } from '@/features/auth/AuthGates';
@@ -6,6 +6,7 @@ import { AuthCallbackPage } from '@/features/auth/AuthCallbackPage';
 import { LibraryPage } from '@/features/library/LibraryPage';
 import { LibraryShell } from '@/features/library/LibraryShell';
 import { NotFoundPage } from '@/features/marketing/NotFoundPage';
+import { useRecordPointerKinds } from '@/features/viewer/useRecordPointerKinds';
 import { features } from '@/lib/features';
 import { BrandLoading } from '@/ui/BrandShell';
 import { LoadingText } from '@/ui/Loading';
@@ -104,6 +105,11 @@ const PageFallback = ({ label }: { label: string }) => (
         <LoadingText>{label}</LoadingText>
     </main>
 );
+
+const ViewerRoute = ({ label, children }: { label: string; children: ReactNode }) => {
+    useRecordPointerKinds();
+    return <Suspense fallback={<PageFallback label={label} />}>{children}</Suspense>;
+};
 
 export const AppRoutes = () => {
     return (
@@ -233,9 +239,9 @@ export const AppRoutes = () => {
             <Route
                 path="/doc/:documentId"
                 element={
-                    <Suspense fallback={<PageFallback label="Loading viewer…" />}>
+                    <ViewerRoute label="Loading viewer…">
                         <ViewerPage />
-                    </Suspense>
+                    </ViewerRoute>
                 }
             />
             {/* Public and not behind RequireGuest: a signed-in teacher who taps
@@ -244,9 +250,9 @@ export const AppRoutes = () => {
             <Route
                 path="/try"
                 element={
-                    <Suspense fallback={<PageFallback label="Loading demo…" />}>
+                    <ViewerRoute label="Loading demo…">
                         <DemoPage />
-                    </Suspense>
+                    </ViewerRoute>
                 }
             />
             <Route
