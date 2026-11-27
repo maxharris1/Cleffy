@@ -137,7 +137,8 @@ const NAV_ITEMS: { to: string; label: string; end: boolean; needsStudents?: bool
  * 896px of dead space a max-w-5xl column left behind.
  */
 const SHELL_CONTAINER = 'mx-auto w-full max-w-[100rem] px-4 sm:px-6 lg:px-10';
-const BAR_CONTAINER = 'mx-auto w-full max-w-[85rem] px-4 sm:px-6 lg:px-10';
+const BAR_CONTAINER =
+    'mx-auto w-full max-w-[85rem] px-4 sm:pl-[max(1.5rem,var(--safe-left))] sm:pr-[max(1.5rem,var(--safe-right))] lg:pl-[max(2.5rem,var(--safe-left))] lg:pr-[max(2.5rem,var(--safe-right))]';
 
 // From sm up the strip runs along the top of the bar's row: the current tab's
 // underline owns the bottom edge, and below the bar it would sit over the page.
@@ -560,7 +561,7 @@ const LibraryFrame = ({
                 progress and the account menu stay reachable from any page. */}
             <header
                 ref={headerRef}
-                className="chrome-paper shell-bar sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur sm:border-b-0"
+                className="chrome-paper shell-bar sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur sm:pl-0 sm:pr-0 sm:border-b-0"
             >
                 <div
                     className={`${BAR_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:relative sm:h-16 sm:flex-nowrap sm:gap-x-3 sm:py-0 md:gap-x-6 lg:gap-x-10`}
@@ -603,7 +604,7 @@ const LibraryFrame = ({
                         {savingBeforeSignOut ? (
                             <span
                                 role="status"
-                                className="text-sm text-stone-600 sm:pointer-events-none sm:absolute sm:right-6 sm:bottom-px sm:text-[10px] sm:leading-none sm:text-on-ink-muted lg:right-10"
+                                className="text-sm text-stone-600 sm:pointer-events-none sm:absolute sm:right-[max(1.5rem,var(--safe-right))] sm:bottom-px sm:text-[10px] sm:leading-none sm:text-on-ink-muted lg:right-[max(2.5rem,var(--safe-right))]"
                             >
                                 Saving changes…
                             </span>
