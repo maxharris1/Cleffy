@@ -268,6 +268,7 @@ describe('LibraryPage', () => {
             'Favorites',
             'i',
             'l',
+            'Add a tag…',
             'Manage',
         ]);
         expectOwnTouchTargets(row);

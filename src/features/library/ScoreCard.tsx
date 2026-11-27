@@ -13,11 +13,12 @@ import { StarIcon } from '@/ui/icons';
 import { TypesetCover } from '@/ui/TypesetCover';
 
 /**
- * Overlay controls on a cover: always in the DOM and always focusable, faded
- * out until the card is hovered or something inside it takes focus.
+ * The star on a cover: always in the DOM and always focusable, faded out until
+ * the card is hovered or something inside it takes focus. A favourite's star
+ * stays lit, as its badge.
  *
  * Never `hidden` and never conditionally rendered — a keyboard user tabbing the
- * shelf has to reach the star and the menu, and the tests find them by role.
+ * shelf has to reach it, and the tests find it by role.
  * They appear at once, no fade: a control that is still fading in when the
  * pointer arrives reads as lag. Touch has no hover at all, so there they stay
  * visible rather than sitting over the cover as invisible tap targets — and
@@ -74,14 +75,13 @@ export const ScoreCard = memo(
                 style={entranceDelay === null ? undefined : { animationDelay: `${entranceDelay}ms` }}
             >
                 {/*
-                  The clipped cover and the controls are siblings on purpose: the
-                  action menu opens downward past the cover's bottom edge, and
-                  `overflow-hidden` would slice it in half.
+                  The clipped cover and the star are siblings on purpose: the
+                  cover's `overflow-hidden` would clip the star's touch ring.
                 */}
                 <div className="relative">
                     <div
                         aria-hidden="true"
-                        className="library-card-cover relative aspect-[1/1.414] overflow-hidden rounded-md border border-stone-200/80 bg-white shadow-sm"
+                        className="library-card-cover relative aspect-[1275/1650] overflow-hidden rounded-[4px] bg-white shadow-[0_0_0_1px_rgba(28,25,23,0.1),0_16px_30px_-20px_rgba(28,25,23,0.5)]"
                     >
                         {url ? (
                             <CoverImage
@@ -101,28 +101,34 @@ export const ScoreCard = memo(
                         ) : null}
                     </div>
 
-                    <div className={`absolute right-1.5 top-1.5 z-10 ${isFavorite ? '' : REVEAL}`}>
+                    <div className={`absolute right-2 top-2 z-10 ${isFavorite ? '' : REVEAL}`}>
                         <button
                             type="button"
                             aria-pressed={isFavorite}
                             aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                             title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                             onClick={() => actions.toggleFavorite(doc, !isFavorite)}
-                            // The pill stays small on touch; an invisible ring takes the hit area to 44px.
-                            className={`chrome-glass relative grid place-items-center rounded-full bg-white/90 p-1.5 transition-colors hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2 ${
-                                isFavorite ? 'text-amber-500' : 'text-stone-500 hover:text-stone-700'
+                            // The badge stays small on touch; an invisible ring takes the hit area to 44px.
+                            className={`relative grid place-items-center rounded-full bg-white/92 p-1 transition-colors hover:bg-white pointer-coarse:before:absolute pointer-coarse:before:-inset-2.5 ${
+                                isFavorite ? 'text-amber-500' : 'text-ink-muted hover:text-ink'
                             }`}
                         >
                             <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
                         </button>
                     </div>
 
-                    {/* `has-[[aria-expanded=true]]` keeps the pill lit while its
-                        own menu is open — otherwise moving the pointer onto the
-                        menu fades out the menu with it. */}
-                    <div
-                        className={`chrome-glass absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/90 has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
-                    >
+                    {/* Past the free cap: still readable and exportable, just not writable. */}
+                    {doc.archived_at ? (
+                        <span className="absolute bottom-2 left-2 z-10">
+                            <Badge tone="warn">Archived</Badge>
+                        </span>
+                    ) : null}
+                </div>
+
+                <div className="mt-3 flex items-start justify-between gap-1.5">
+                    {/* Before the title in the DOM, after it on screen: the tab
+                        order stays star, actions, title. */}
+                    <div className="relative z-10 -mt-2.5 -mr-3 shrink-0 order-last">
                         {isOwner ? (
                             <RowMenu
                                 onRename={() => actions.rename(doc)}
@@ -134,43 +140,37 @@ export const ScoreCard = memo(
                             <SharedScoreMenu onLeave={() => actions.leave(doc)} />
                         )}
                     </div>
-
-                    {/* Past the free cap: still readable and exportable, just not writable. */}
-                    {doc.archived_at ? (
-                        <span className="absolute bottom-1.5 left-1.5 z-10">
-                            <Badge tone="warn">Archived</Badge>
-                        </span>
-                    ) : null}
-                </div>
-
-                <div className="mt-2.5">
-                    {/*
-                      No `block` here: line-clamp-2 needs `display: -webkit-box`,
-                      and the two utilities set the same property — whichever
-                      Tailwind emits last wins, which is how a three-line title got
-                      through.
-                    */}
-                    <Link
-                        to={`/doc/${doc.id}`}
-                        // Ungrouped, the visible title drops its "(Chopin)" because
-                        // the composer has its own line — but the link still has to
-                        // name the score in full for anyone reading it out of
-                        // context. Under a composer heading there is nothing to
-                        // restore, so the visible text stands on its own.
-                        aria-label={!stripComposer && composer ? doc.title : undefined}
-                        className="text-sm font-medium text-stone-800 transition-colors line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
-                    >
-                        {title}
-                    </Link>
-                    {composer ? <p className="mt-0.5 truncate text-xs text-stone-500">{composer}</p> : null}
-                    <p className="mt-0.5 text-xs text-stone-400">
-                        {pages}
-                        {formatUpdated(doc.updated_at)}
-                    </p>
-                    {/* The reason, in words: a title tooltip never shows on touch. */}
-                    {doc.archived_at ? (
-                        <p className="mt-0.5 text-xs text-amber-700">Read-only: over your plan’s score limit</p>
-                    ) : null}
+                    <div className="min-w-0">
+                        {/*
+                          No `block` here: line-clamp-2 needs `display: -webkit-box`,
+                          and the two utilities set the same property — whichever
+                          Tailwind emits last wins, which is how a three-line title got
+                          through.
+                        */}
+                        <Link
+                            to={`/doc/${doc.id}`}
+                            // Ungrouped, the visible title drops its "(Chopin)" because
+                            // the composer has its own line — but the link still has to
+                            // name the score in full for anyone reading it out of
+                            // context. Under a composer heading there is nothing to
+                            // restore, so the visible text stands on its own.
+                            aria-label={!stripComposer && composer ? doc.title : undefined}
+                            className="text-[15px] font-semibold leading-[1.3] text-ink transition-colors line-clamp-2 [overflow-wrap:anywhere] group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
+                        >
+                            {title}
+                        </Link>
+                        {composer ? <p className="mt-[3px] truncate text-[13px] text-ink-muted">{composer}</p> : null}
+                        <p className="mt-[3px] text-[13px] text-ink-muted">
+                            {pages}
+                            {formatUpdated(doc.updated_at)}
+                        </p>
+                        {/* The reason, in words: a title tooltip never shows on touch. */}
+                        {doc.archived_at ? (
+                            <p className="mt-[3px] text-[13px] text-amber-800">
+                                Read-only: over your plan’s score limit
+                            </p>
+                        ) : null}
+                    </div>
                 </div>
             </div>
         );

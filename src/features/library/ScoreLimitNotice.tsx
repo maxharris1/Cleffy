@@ -13,7 +13,7 @@ export interface ScoreLimitNoticeProps {
 /**
  * Why adding a score is off, for the library and the IMSLP pages alike: the
  * plan notice with its way to the plans, or -- for an account that has no cloud
- * scores to buy -- the plain sentence, in the same amber status treatment.
+ * scores to buy -- the plain sentence, in the same outlined panel.
  */
 export const ScoreLimitNotice = ({ limit, upgradeHint, onUpgrade, className = '' }: ScoreLimitNoticeProps) => {
     if (!limit) {
@@ -23,11 +23,11 @@ export const ScoreLimitNotice = ({ limit, upgradeHint, onUpgrade, className = ''
         return (
             <p
                 role="status"
-                className={`rounded-xl border border-amber-300/70 bg-amber-50/70 px-4 py-3 text-sm text-amber-900${className ? ` ${className}` : ''}`}
+                className={`rounded-[14px] border border-panel-line px-4 py-3 text-sm text-ink${className ? ` ${className}` : ''}`}
             >
                 {NO_CLOUD_SCORES_MESSAGE}
             </p>
         );
     }
-    return <LimitReachedNotice limit={limit} onUpgrade={onUpgrade} className={className} />;
+    return <LimitReachedNotice limit={limit} onUpgrade={onUpgrade} className={className} surface="panel" />;
 };

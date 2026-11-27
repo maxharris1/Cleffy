@@ -9,7 +9,20 @@ import { ErrorText } from '@/ui/ErrorText';
 const LANDING_CTA_CLASS =
     'landing-cta inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-xl px-5 py-3 font-medium text-white transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97]';
 
-export const LocalOpenControl = ({ label, subtle = false }: { label: string; subtle?: boolean }) => {
+/** The app's quiet link on paper: muted, at the surrounding text's size. */
+const PAGE_LINK_CLASS =
+    'cursor-pointer font-medium text-ink-muted underline underline-offset-[3px] transition-colors hover:text-accent';
+
+/** subtle: the landing page's small link. page: the same link inside the app's pages. */
+export const LocalOpenControl = ({
+    label,
+    subtle = false,
+    page = false,
+}: {
+    label: string;
+    subtle?: boolean;
+    page?: boolean;
+}) => {
     const navigate = useNavigate();
     const [openError, setOpenError] = useState<string | null>(null);
 
@@ -34,9 +47,11 @@ export const LocalOpenControl = ({ label, subtle = false }: { label: string; sub
         <div className="flex flex-col items-center gap-1">
             <label
                 className={
-                    subtle
-                        ? 'cursor-pointer text-sm text-stone-500 underline decoration-stone-300 underline-offset-2 transition-colors hover:text-accent hover:decoration-accent/40'
-                        : LANDING_CTA_CLASS
+                    page
+                        ? PAGE_LINK_CLASS
+                        : subtle
+                          ? 'cursor-pointer text-sm text-stone-500 underline decoration-stone-300 underline-offset-2 transition-colors hover:text-accent hover:decoration-accent/40'
+                          : LANDING_CTA_CLASS
                 }
             >
                 {label}
