@@ -1061,7 +1061,7 @@ export const LibraryPage = () => {
                                     value={query}
                                     onChange={(e) => setQuery(e.target.value)}
                                     placeholder="Search by title…"
-                                    className={fieldClassName('md', 'h-[46px] min-h-0 py-0 pl-[42px] text-base')}
+                                    className={SEARCH_FIELD_CLASS}
                                 />
                             </div>
                             <div className="flex items-center gap-3.5 max-sm:justify-between">
@@ -1349,16 +1349,17 @@ const FilterChip = ({
     </button>
 );
 
+const SEARCH_FIELD_CLASS =
+    'landing-input h-[46px] w-full rounded-xl border-[1.5px] border-field-line bg-white pr-3.5 pl-[42px] text-base text-ink outline-none transition-colors placeholder:text-ink-muted';
+
 const SORT_OPTIONS = [
     { value: 'recent', label: 'Recent' },
     { value: 'title', label: 'A–Z' },
 ] as const satisfies readonly SegmentedOption<LibrarySort>[];
 
-/** The tag strip's text actions, after the chips: on touch a ring takes them to 44px. */
 const TAG_LINK_CLASS =
     'relative inline-flex h-[34px] shrink-0 items-center justify-center gap-1.5 px-1 text-[13px] font-medium whitespace-nowrap text-ink-muted underline underline-offset-[3px] transition-colors hover:text-ink pointer-coarse:hit-44 max-sm:pointer-coarse:min-w-11';
 
-/** Phones keep two columns, as Flow-Phone-Library does; wider screens fit as many 190px tiles as they can. */
 const SHELF_GRID =
     'grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-[repeat(auto-fill,minmax(190px,1fr))] sm:gap-x-7 sm:gap-y-9';
 
@@ -1714,7 +1715,6 @@ export const LibraryUnavailable = ({ reason, onRetry }: { reason: LoadFailure; o
     </div>
 );
 
-/** An outlined paper panel, the README's container for a group that reads as one object. */
 const EMPTY_PANEL = 'library-empty mt-8 rounded-2xl border border-panel-line px-6 py-12 md:py-16';
 
 export const EmptyLibrary = ({

@@ -19,9 +19,9 @@ import { TypesetCover } from '@/ui/TypesetCover';
  *
  * Never `hidden` and never conditionally rendered — a keyboard user tabbing the
  * shelf has to reach it, and the tests find it by role.
- * They appear at once, no fade: a control that is still fading in when the
- * pointer arrives reads as lag. Touch has no hover at all, so there they stay
- * visible rather than sitting over the cover as invisible tap targets — and
+ * It appears at once, no fade: a control that is still fading in when the
+ * pointer arrives reads as lag. Touch has no hover at all, so there it stays
+ * visible rather than sitting over the cover as an invisible tap target — and
  * so does any coarse pointer, since hover only counts with a fine one (the
  * hover variant in index.css).
  */

@@ -9,11 +9,9 @@ import { ErrorText } from '@/ui/ErrorText';
 const LANDING_CTA_CLASS =
     'landing-cta inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-xl px-5 py-3 font-medium text-white transition-[color,background-color,border-color,scale] duration-(--duration-press) ease-out active:scale-[0.97]';
 
-/** The app's quiet link on paper: muted, at the surrounding text's size. */
 const PAGE_LINK_CLASS =
     'cursor-pointer font-medium text-ink-muted underline underline-offset-[3px] transition-colors hover:text-accent';
 
-/** subtle: the landing page's small link. page: the same link inside the app's pages. */
 export const LocalOpenControl = ({
     label,
     subtle = false,
