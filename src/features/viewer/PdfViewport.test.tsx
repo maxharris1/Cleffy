@@ -993,7 +993,7 @@ describe('PdfViewport with no tool in hand', () => {
         viewport = { width: 390, height: 664 };
         let store: AnnotationStore | null = null;
         render(<ViewerUnderNotices readOnly={false} onStore={(s) => (store = s)} />);
-        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+        await waitFor(() => expect(view().scrollY).toBe(phoneTopBound(3)));
         await waitFor(() => expect(store).not.toBeNull());
         const create = vi.spyOn(store as unknown as AnnotationStore, 'create');
         // Finger drawing on: with nothing in hand a finger still scrolls.
