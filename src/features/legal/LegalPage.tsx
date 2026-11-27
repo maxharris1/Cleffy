@@ -10,6 +10,7 @@ import {
     type LegalBlock,
     type LegalDocument,
 } from '@/features/legal/legalContent';
+import { DocumentHeader } from '@/features/legal/DocumentHeader';
 import { LEGAL_DOCUMENT_IDS, type LegalDocumentId } from '@/features/legal/legalVersions';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 
@@ -34,19 +35,19 @@ const withLinks = (text: string): ReactNode =>
         ),
     );
 
-const BODY = 'text-[0.95rem] leading-relaxed text-stone-700';
+const BODY = 'text-[15px] leading-relaxed text-ink-soft';
 
 const Block = ({ block }: { block: LegalBlock }) => {
     switch (block.kind) {
         case 'h':
             return (
-                <h3 className="mt-5 text-sm font-medium uppercase tracking-[0.08em] text-stone-600">{block.text}</h3>
+                <h3 className="mt-6 text-xs font-semibold uppercase tracking-[0.08em] text-ink-muted">{block.text}</h3>
             );
         case 'p':
             return <p className={`mt-3 ${BODY}`}>{withLinks(block.text)}</p>;
         case 'list':
             return (
-                <ul className={`mt-3 list-disc space-y-2 pl-5 ${BODY} marker:text-stone-400`}>
+                <ul className={`mt-3 list-disc space-y-2 pl-5 ${BODY} marker:text-ink-muted`}>
                     {block.items.map((item) => (
                         <li key={item}>{withLinks(item)}</li>
                     ))}
@@ -54,7 +55,7 @@ const Block = ({ block }: { block: LegalBlock }) => {
             );
         case 'form':
             return (
-                <div className={`mt-3 space-y-2 rounded-xl border border-stone-300 bg-white/70 px-4 py-3 ${BODY}`}>
+                <div className={`mt-3 space-y-2 rounded-[14px] border border-panel-line px-4 py-3 ${BODY}`}>
                     {block.lines.map((line) => (
                         <p key={line} className="break-words">
                             {withLinks(line)}
@@ -80,7 +81,7 @@ const DocumentNav = ({ current }: { current: LegalDocumentId }) => (
             {LEGAL_DOCUMENT_IDS.map((id) => (
                 <li key={id}>
                     {id === current ? (
-                        <span aria-current="page" className="font-medium text-stone-800">
+                        <span aria-current="page" className="font-semibold text-ink">
                             {LEGAL_DOCUMENTS[id].shortTitle}
                         </span>
                     ) : (
@@ -99,22 +100,20 @@ const DocumentNav = ({ current }: { current: LegalDocumentId }) => (
  * sign-up form and the footer link here, so it must render for someone with
  * no session.
  *
- * Same paper surface and reading column as the student and account pages, with
- * the wordmark linking home and the sibling documents one click away.
+ * Flat paper and a reading column, with the wordmark linking home and the sibling documents one click away.
  */
 const LegalPage = ({ document: doc }: { document: LegalDocument }) => (
     <main className="paper-page safe-page min-h-full">
         <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6 sm:py-10">
-            <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-                <Link to="/" className="landing-brand font-display text-2xl font-semibold sm:text-3xl">
-                    Cleffy
-                </Link>
+            <DocumentHeader>
                 <DocumentNav current={doc.id} />
-            </header>
+            </DocumentHeader>
 
             <article className="mt-8 sm:mt-10">
-                <h1 className="font-display text-3xl font-semibold tracking-tight text-stone-800">{doc.title}</h1>
-                <p className="mt-2 text-sm text-stone-500">
+                <h1 className="display-opsz font-display text-[44px] leading-[1.02] font-semibold tracking-[-0.02em] text-balance text-ink [overflow-wrap:anywhere] sm:text-[60px]">
+                    {doc.title}
+                </h1>
+                <p className="mt-3.5 text-[13px] text-ink-muted tabular-nums">
                     Last updated {LEGAL_LAST_UPDATED[doc.id]} · Version {LEGAL_VERSIONS[doc.id]}
                 </p>
                 {LEGAL_DOCUMENTS_ARE_DRAFTS ? (
@@ -126,20 +125,20 @@ const LegalPage = ({ document: doc }: { document: LegalDocument }) => (
                         replaced before it takes effect.
                     </p>
                 ) : null}
-                <p className="mt-4 text-[0.95rem] leading-relaxed text-stone-600">{doc.summary}</p>
+                <p className="mt-4 text-[17px] leading-normal text-pretty text-ink-muted">{doc.summary}</p>
                 {doc.action ? (
                     <Link to={doc.action.to} className={buttonClassName('secondary', 'sm', 'mt-4')}>
                         {doc.action.label}
                     </Link>
                 ) : null}
 
-                <nav aria-label="Contents" className="mt-6 rounded-xl border border-stone-200/80 bg-white/60 px-4 py-3">
+                <nav aria-label="Contents" className="mt-8 border-y border-hairline px-1 py-4">
                     <ol className="grid gap-1 text-sm sm:grid-cols-2">
                         {doc.sections.map((section) => (
                             <li key={section.id}>
                                 <a
                                     href={`#${section.id}`}
-                                    className="text-stone-600 transition-colors hover:text-accent"
+                                    className="text-ink-soft transition-colors hover:text-accent"
                                 >
                                     {section.heading}
                                 </a>
@@ -149,8 +148,10 @@ const LegalPage = ({ document: doc }: { document: LegalDocument }) => (
                 </nav>
 
                 {doc.sections.map((section) => (
-                    <section key={section.id} id={section.id} className="mt-8 scroll-mt-6">
-                        <h2 className="font-display text-xl font-semibold text-stone-800">{section.heading}</h2>
+                    <section key={section.id} id={section.id} className="mt-10 scroll-mt-6">
+                        <h2 className="display-opsz font-display text-[26px] leading-[1.1] font-semibold tracking-[-0.01em] text-balance text-ink">
+                            {section.heading}
+                        </h2>
                         {section.blocks.map((block, index) => (
                             <Block key={index} block={block} />
                         ))}
