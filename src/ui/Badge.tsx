@@ -18,7 +18,7 @@ export interface BadgeProps {
 /** Small status pill ("view only", "edit", "this device only"). */
 export const Badge = ({ tone = 'neutral', className = '', children }: BadgeProps) => (
     <span
-        className={`inline-flex h-[22px] shrink-0 items-center whitespace-nowrap rounded-full px-[9px] text-[11px] font-semibold tracking-[0.02em] ${TONE_CLASSES[tone]}${className ? ` ${className}` : ''}`}
+        className={`inline-flex h-[22px] items-center rounded-full px-[9px] text-[11px] font-semibold tracking-[0.02em] ${TONE_CLASSES[tone]}${className ? ` ${className}` : ''}`}
     >
         {children}
     </span>

@@ -317,7 +317,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                                         </Badge>
                                         <LinkUrl
                                             url={shareUrlFor(link.token)}
-                                            className="min-w-0 flex-[1_1_96px] text-[13px] text-ink-soft"
+                                            className="flex-[1_1_96px] text-[13px] text-ink-soft"
                                         />
                                         <Button
                                             variant="accentGhost"

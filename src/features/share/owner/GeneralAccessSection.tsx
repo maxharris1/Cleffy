@@ -138,7 +138,7 @@ export const GeneralAccessSection = ({ docId, link, linkViewers, onChanged }: Ge
             {link ? (
                 <div className="mt-2 rounded-lg border border-stone-200 px-3 py-2">
                     <div className="flex items-center gap-2">
-                        <LinkUrl url={shareUrlFor(link.token)} className="min-w-0 flex-1 text-xs text-stone-500" />
+                        <LinkUrl url={shareUrlFor(link.token)} className="flex-1 text-xs text-stone-500" />
                         <button
                             type="button"
                             disabled={busy}

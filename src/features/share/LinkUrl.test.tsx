@@ -17,4 +17,10 @@ describe('LinkUrl', () => {
         expect(tail).not.toHaveClass('truncate');
         expect(screen.getByText('https://cleffy.io/join/7f3a9c2e4b1d48e6')).toHaveClass('truncate');
     });
+
+    it('never shrinks below the kept ending, so the ending cannot spill onto the next control', () => {
+        render(<LinkUrl url={URL} className="flex-1" />);
+        expect(screen.getByTitle(URL)).not.toHaveClass('min-w-0');
+        expect(screen.getByText('https://cleffy.io/join/7f3a9c2e4b1d48e6')).toHaveClass('w-0', 'grow');
+    });
 });

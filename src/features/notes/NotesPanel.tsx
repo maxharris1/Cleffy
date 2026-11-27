@@ -314,7 +314,9 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                 <div className="mt-2.5 flex items-center gap-1.5">
                                                     {note.shared ? (
                                                         <>
-                                                            <Badge tone="ok">Visible to student</Badge>
+                                                            <Badge tone="ok" className="shrink-0 whitespace-nowrap">
+                                                                Visible to student
+                                                            </Badge>
                                                             {recipientLabel(note.student_user_id) ? (
                                                                 <span className="min-w-0 flex-1 text-[13px] text-ink-muted [overflow-wrap:anywhere]">
                                                                     {recipientLabel(note.student_user_id)}
@@ -322,7 +324,7 @@ export const NotesPanel = ({ documentId, role, onClose }: NotesPanelProps) => {
                                                             ) : null}
                                                         </>
                                                     ) : (
-                                                        <Badge>Only you</Badge>
+                                                        <Badge className="shrink-0 whitespace-nowrap">Only you</Badge>
                                                     )}
                                                 </div>
                                             </div>

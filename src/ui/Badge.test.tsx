@@ -16,8 +16,11 @@ describe('Badge', () => {
         expect(screen.getByText('edit')).toHaveClass('bg-tick/10', 'text-done');
     });
 
-    it('never wraps or shrinks beside a long neighbour', () => {
-        render(<Badge tone="ok">Visible to student</Badge>);
-        expect(screen.getByText('Visible to student')).toHaveClass('whitespace-nowrap', 'shrink-0');
+    it('lets a long label wrap and shrink so it never widens the page', () => {
+        const label = 'Arrangement for two violins, viola, violoncello and double bass.';
+        render(<Badge>{label}</Badge>);
+        const badge = screen.getByText(label);
+        expect(badge).not.toHaveClass('whitespace-nowrap');
+        expect(badge).not.toHaveClass('shrink-0');
     });
 });
