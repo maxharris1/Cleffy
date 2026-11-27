@@ -120,6 +120,7 @@ const DEFAULT_TEXT_SIZE = 0.018;
  * left to page 1.
  */
 const PHONE_CONTROLS_STRIP = 56;
+const controlsStripFor = (width: number) => (width > 0 && width < SM_BREAKPOINT ? PHONE_CONTROLS_STRIP : 0);
 
 /** Larger screens: the strip (px) the pager and zoom row cover above the bottom safe area. */
 const FLOATING_CONTROLS_STRIP = 66;
@@ -366,18 +367,21 @@ export const PdfViewport = ({
     const noticeInsetRef = useRef(noticeInset);
     const bottomDock = useBottomDockHeight();
     const bottomDockRef = useRef(bottomDock);
-    const applyObscured = useCallback(() => {
+    const obscuredWithStrip = useCallback((strip: number): ObscuredEdges => {
         const toolbar = toolbarEdgesRef.current;
-        const edges = {
+        return {
             top: Math.max(toolbar.top, noticeInsetRef.current),
             bottom:
-                controlsStripRef.current > 0
-                    ? Math.max(toolbar.bottom, safeBottomRef.current) + bottomDockRef.current + controlsStripRef.current
+                strip > 0
+                    ? Math.max(toolbar.bottom, safeBottomRef.current) + bottomDockRef.current + strip
                     : toolbar.bottom,
         };
+    }, []);
+    const applyObscured = useCallback(() => {
+        const edges = obscuredWithStrip(controlsStripRef.current);
         obscuredRef.current = edges;
         setObscured((prev) => (prev.top === edges.top && prev.bottom === edges.bottom ? prev : edges));
-    }, []);
+    }, [obscuredWithStrip]);
     const reportObscured = useCallback(
         (edges: ObscuredEdges) => {
             toolbarEdgesRef.current = edges;
@@ -585,8 +589,7 @@ export const PdfViewport = ({
             const height = el.clientHeight;
             // Before the size reaches state, so the first fit already sees it.
             // Stand mode hides the pager and zoom row.
-            controlsStripRef.current =
-                width > 0 && width < SM_BREAKPOINT && !standModeRef.current ? PHONE_CONTROLS_STRIP : 0;
+            controlsStripRef.current = standModeRef.current ? 0 : controlsStripFor(width);
             safeBottomRef.current = safeBottomProbeRef.current?.offsetHeight ?? 0;
             applyObscured();
             setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
@@ -646,7 +649,8 @@ export const PdfViewport = ({
             // page that was being read starts the view, as a layout switch
             // does, at the same multiple of fit-width.
             const prevLayout = computeDocumentLayout(pageSizes, prevColumns, spreadCover);
-            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts, obscuredRef.current, prev.width);
+            const prevEdges = obscuredWithStrip(controlsStripFor(prev.width));
+            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts, prevEdges, prev.width);
             const relative = v.scale / fitPageWidthScale(prevLayout, prev.width);
             const scale = Math.min(
                 MAX_SCALE,
@@ -672,7 +676,7 @@ export const PdfViewport = ({
         next = clampScroll(next, layout, viewportSize.width, viewportSize.height, obscuredRef.current);
         setView(next);
         setRenderScale(next.scale);
-    }, [viewportSize, layout, pageColumns, pageSizes, spreadCover, standMode]);
+    }, [viewportSize, layout, pageColumns, pageSizes, spreadCover, standMode, obscuredWithStrip]);
 
     // Entering stand mode starts on the page being read; leaving it comes
     // back to the page it was showing. Before paint, and before the refs
