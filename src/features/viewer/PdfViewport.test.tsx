@@ -655,6 +655,25 @@ describe('PdfViewport when a notice goes away', () => {
         expect(view().scrollY).toBe(phoneTopBound(2));
     });
 
+    it('holds the new top bound when a drag that came back inside it reverses', async () => {
+        vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), media: query }));
+        await openUnderStack();
+        const surface = document.querySelector('.ink-surface')!;
+        const touch = (type: string, y: number) =>
+            surface.dispatchEvent(
+                new PointerEvent(type, { pointerId: 1, pointerType: 'touch', clientX: 200, clientY: y, bubbles: true }),
+            );
+        const room = phoneTopBound(2) - phoneTopBound(3);
+        touch('pointerdown', 400);
+        dismiss();
+        act(() => touch('pointermove', 400 - room - 20));
+        expect(view().scrollY).toBeCloseTo(phoneTopBound(2) + 20);
+        act(() => touch('pointermove', 400));
+        expect(view().scrollY).toBe(phoneTopBound(2));
+        act(() => touch('pointerup', 400));
+        expect(view().scrollY).toBe(phoneTopBound(2));
+    });
+
     it('leaves a view already clear of the room alone', async () => {
         vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), media: query }));
         await openUnderStack();

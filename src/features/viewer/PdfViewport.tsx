@@ -983,8 +983,12 @@ export const PdfViewport = ({
                 obscuredRef.current,
             );
             const slack = slackRef.current;
+            if (slack === null) {
+                return clamped;
+            }
             const past = Math.sign(v.scrollY - clamped.scrollY);
-            if (slack === null || past === 0 || past !== Math.sign(slack - clamped.scrollY)) {
+            if (past === 0 || past !== Math.sign(slack - clamped.scrollY)) {
+                slackRef.current = null;
                 return clamped;
             }
             // Past a bound that tightened mid-gesture: free to move back in,

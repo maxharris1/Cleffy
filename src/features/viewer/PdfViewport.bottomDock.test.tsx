@@ -97,37 +97,40 @@ describe('PdfViewport on a phone with a bottom dock (the signed-out ink notice) 
     });
 });
 
-describe('PdfViewport when the bottom dock goes with the score at its end', () => {
-    it('moves the score with a finger that interrupts the settle, not to the new bound', async () => {
-        PAGE_SIZES = [LETTER, LETTER, LETTER];
-        const frames = new Map<number, FrameRequestCallback>();
-        let nextFrame = 0;
-        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-            frames.set(++nextFrame, callback);
-            return nextFrame;
+const controlFrames = () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback);
+        return nextFrame;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+    let now = 10_000;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    return (ms: number) => {
+        now += ms;
+        act(() => {
+            const due = [...frames.values()];
+            frames.clear();
+            for (const callback of due) {
+                callback(now);
+            }
         });
-        vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
-        let now = 10_000;
-        vi.spyOn(performance, 'now').mockImplementation(() => now);
-        const advance = (ms: number) => {
-            now += ms;
-            act(() => {
-                const due = [...frames.values()];
-                frames.clear();
-                for (const callback of due) {
-                    callback(now);
-                }
-            });
-        };
-        const touch = (type: string, y: number) =>
-            act(() => {
-                document
-                    .querySelector('.ink-surface')!
-                    .dispatchEvent(
-                        new PointerEvent(type, { pointerId: 1, pointerType: 'touch', clientX: 195, clientY: y, bubbles: true }),
-                    );
-            });
+    };
+};
 
+const touch = (type: string, y: number) =>
+    act(() => {
+        document
+            .querySelector('.ink-surface')!
+            .dispatchEvent(
+                new PointerEvent(type, { pointerId: 1, pointerType: 'touch', clientX: 195, clientY: y, bubbles: true }),
+            );
+    });
+
+describe('PdfViewport when the bottom dock goes with the score at its end', () => {
+    const dismissDockAtEnd = async (advance: (ms: number) => void) => {
+        PAGE_SIZES = [LETTER, LETTER, LETTER];
         const { container, rerender } = render(
             <>
                 <PdfViewport docId="doc-dock-settle" readOnly />
@@ -143,6 +146,12 @@ describe('PdfViewport when the bottom dock goes with the score at its end', () =
         advance(20);
         const settling = useViewerStore.getState().view.scrollY;
         expect(settling).toBeLessThan(atEnd);
+        return settling;
+    };
+
+    it('moves the score with a finger that interrupts the settle, not to the new bound', async () => {
+        const advance = controlFrames();
+        const settling = await dismissDockAtEnd(advance);
 
         touch('pointerdown', 300);
         advance(40);
@@ -159,5 +168,33 @@ describe('PdfViewport when the bottom dock goes with the score at its end', () =
         advance(1000);
         expect(pageBottomOnScreen(2)).toBeLessThanOrEqual(VIEWPORT.height - CONTROLS_STRIP_PX);
         expect(useViewerStore.getState().view.scrollY).toBeLessThan(settling);
+    });
+
+    it('holds the new bottom bound when a drag that came back inside it reverses', async () => {
+        const advance = controlFrames();
+        const settling = await dismissDockAtEnd(advance);
+
+        touch('pointerdown', 300);
+        for (let y = 325; y <= 500; y += 25) {
+            advance(16);
+            touch('pointermove', y);
+        }
+        const inside = useViewerStore.getState().view.scrollY;
+        advance(60);
+        let furthest = inside;
+        for (let y = 475; y >= 300; y -= 25) {
+            advance(16);
+            touch('pointermove', y);
+            furthest = Math.max(furthest, useViewerStore.getState().view.scrollY);
+        }
+        touch('pointerup', 300);
+        advance(0);
+        advance(1000);
+        const limit = useViewerStore.getState().view.scrollY;
+
+        expect(inside).toBeLessThan(limit);
+        expect(limit).toBeLessThan(settling);
+        expect(furthest).toBeLessThanOrEqual(limit + 0.5);
+        expect(pageBottomOnScreen(2)).toBeLessThanOrEqual(VIEWPORT.height - CONTROLS_STRIP_PX);
     });
 });
