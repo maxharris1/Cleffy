@@ -12,6 +12,7 @@ export type ButtonVariant =
     | 'accentGhost'
     | 'danger'
     | 'dangerGhost'
+    | 'dangerOutline'
     | 'inkPrimary'
     | 'inkOutline'
     | 'inkGhost';
@@ -38,6 +39,7 @@ const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
     accentGhost: 'border-transparent bg-transparent text-accent hover:bg-accent/5',
     danger: 'border-danger bg-danger text-white hover:border-red-800 hover:bg-red-800',
     dangerGhost: 'border-transparent bg-transparent text-destructive hover:bg-red-50',
+    dangerOutline: 'border-destructive bg-transparent text-destructive hover:bg-red-50',
     inkPrimary:
         'border-ink-cta bg-ink-cta text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_22px_-12px_rgba(79,70,229,0.95)]',
     inkOutline: 'border-paper/42 bg-transparent text-paper hover:bg-paper/10',

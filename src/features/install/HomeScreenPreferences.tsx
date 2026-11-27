@@ -1,11 +1,10 @@
 import { useState } from 'react';
 
+import { ACCOUNT_BODY, ACCOUNT_SUB_HEADING } from '@/features/account/AccountSection';
 import { AddToHomeScreenDialog } from '@/features/install/AddToHomeScreenDialog';
 import { resolveInstallSurface, type InstallSurface } from '@/features/install/installSurface';
 import { useInstallPrompt } from '@/features/install/useInstallPrompt';
 import { Button } from '@/ui/Button';
-
-const SUB_HEADING = 'text-sm font-medium text-stone-800';
 
 const actionsCopy = (surface: InstallSurface): string => {
     switch (surface) {
@@ -31,15 +30,15 @@ export const HomeScreenPreferences = () => {
 
     return (
         <>
-            <h3 className={`${SUB_HEADING} mt-4`}>Home screen</h3>
-            <p className="mt-1.5 text-sm text-stone-600">{actionsCopy(surface)}</p>
+            <h3 className={ACCOUNT_SUB_HEADING}>Home screen</h3>
+            <p className={`${ACCOUNT_BODY} mt-1`}>{actionsCopy(surface)}</p>
             {surface === 'standalone' ? null : (
                 <div className="mt-3 flex flex-wrap items-center gap-3">
-                    <Button size="sm" onClick={() => setOpen(true)}>
+                    <Button variant="secondary" onClick={() => setOpen(true)}>
                         Add to Home Screen
                     </Button>
                     {canPromptInstall ? (
-                        <Button size="sm" variant="secondary" onClick={() => void promptInstall()}>
+                        <Button variant="secondary" onClick={() => void promptInstall()}>
                             Add to this device
                         </Button>
                     ) : null}
