@@ -38,7 +38,7 @@ const ScoreTitle = ({ title }: { title: string }) => {
 export const ViewerHeader = ({ backTo, backLabel, title, children, primary }: ViewerHeaderProps) => {
     const [titleOpen, setTitleOpen] = useState(false);
     return (
-        <header className="bg-ink pb-1.5 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] pt-[max(0.25rem,var(--safe-top))] text-paper sm:pl-[max(1rem,var(--safe-left))] sm:pr-[max(1rem,var(--safe-right))] sm:pt-[max(0.375rem,var(--safe-top))] [&_:focus-visible]:outline-ink-rule">
+        <header className="chrome-ink bg-ink pb-1.5 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] pt-[max(0.25rem,var(--safe-top))] text-paper sm:pl-[max(1rem,var(--safe-left))] sm:pr-[max(1rem,var(--safe-right))] sm:pt-[max(0.375rem,var(--safe-top))]">
             <OnInkContext.Provider value>
                 <div className="flex min-h-[3.25rem] flex-wrap items-center gap-x-4 gap-y-0.5">
                     <div className="flex min-w-[12rem] flex-1 items-center gap-0.5 sm:gap-1.5">

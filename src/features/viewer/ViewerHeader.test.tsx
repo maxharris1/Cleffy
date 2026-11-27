@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -98,5 +100,26 @@ describe('ViewerHeader', () => {
         );
         expect(screen.getByText('ghost')).toBeInTheDocument();
         expect(screen.getByText('inkGhost')).toBeInTheDocument();
+    });
+
+    it('gives its controls the shared on-ink focus ring the ink top bar uses', () => {
+        const style = document.createElement('style');
+        style.textContent = readFileSync(`${process.cwd()}/src/index.css`, 'utf8');
+        document.head.append(style);
+        try {
+            const shellBarRing = [...style.sheet!.cssRules]
+                .flatMap((rule) => (rule instanceof CSSMediaRule ? [...rule.cssRules] : [rule]))
+                .filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule && rule.selectorText === '.shell-bar')
+                .map((rule) => rule.style.getPropertyValue('--focus-ring').trim())
+                .find(Boolean);
+            expect(shellBarRing).toBe('var(--color-ink-rule)');
+
+            renderHeader();
+            const notes = screen.getByRole('button', { name: 'Notes' });
+            notes.focus();
+            expect(getComputedStyle(notes).getPropertyValue('--focus-ring').trim()).toBe(shellBarRing);
+        } finally {
+            style.remove();
+        }
     });
 });

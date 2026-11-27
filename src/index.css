@@ -847,6 +847,11 @@ body {
     }
 }
 
+/* Chrome that is always ink. The accent is under 3:1 on ink, so focus rings use the ink rule. */
+.chrome-ink {
+    --focus-ring: var(--color-ink-rule);
+}
+
 /*
  * From sm up the top bar is ink. Unlayered and after the block above so the
  * opaque-paper fallback for .chrome-paper cannot put paper text on paper. The
