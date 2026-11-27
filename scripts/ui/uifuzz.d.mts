@@ -3,10 +3,48 @@ import type { Browser, BrowserContext, BrowserContextOptions, Page } from 'playw
 export const BASE: string;
 export const API: string;
 export const SHOTS: string;
-export const VIEWPORTS: Record<string, BrowserContextOptions>;
+export interface ViewportOptions {
+    viewport: { width: number; height: number };
+    isMobile?: boolean;
+    hasTouch?: boolean;
+    deviceScaleFactor?: number;
+}
+export type ViewportName =
+    | 'desktop-1440'
+    | 'laptop-1280'
+    | 'ipad-landscape'
+    | 'ipad-portrait'
+    | 'ipad-mini-portrait'
+    | 'iphone-14'
+    | 'iphone-se'
+    | 'android-small'
+    | 'iphone-landscape';
+export const VIEWPORTS: Record<ViewportName, ViewportOptions>;
 export const ACCOUNTS: Record<'teacher' | 'student', { email: string; password: string }>;
-export const STUB_USER: { id: string; email: string; [field: string]: unknown };
-export const STUB_ENTITLEMENTS: { tier: string; [field: string]: unknown };
+export const STUB_USER: {
+    id: string;
+    aud: string;
+    role: string;
+    email: string;
+    created_at: string;
+    app_metadata: { provider: string };
+    user_metadata: { display_name: string };
+};
+export const STUB_ENTITLEMENTS: {
+    tier: string;
+    status: string;
+    source: string;
+    current_period_end: string;
+    cancel_at_period_end: boolean;
+    limits: {
+        cloud_scores: number;
+        omr_runs: number;
+        vision_reads: number;
+        smart_imports: number;
+        pdf_exports: number;
+        students: number;
+    };
+};
 export interface StubReply {
     status: number;
     body: unknown;
