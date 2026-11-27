@@ -233,6 +233,40 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
         expect(heights).toEqual([95, 95, 95]);
     });
 
+    it.each([
+        [390, '16px'],
+        [390, '12px'],
+        [320, '9px'],
+    ] as const)(
+        'keeps the phone upload button 44 by 44 px at %i px with a %s default font',
+        async (width, rootFont) => {
+            const size = await withPage(shellMarkup('/library', rows), { width, rootFont }, (page) =>
+                page.evaluate(() => {
+                    const rect = document.querySelector('label.shell-upload')!.getBoundingClientRect();
+                    return { width: rect.width, height: rect.height };
+                }),
+            );
+            expect(size).toEqual({ width: 44, height: 44 });
+        },
+    );
+
+    it.each(['16px', '12px', '9px'])(
+        "lands a touch 43 px from the upload button's left edge on Upload score at 320 px with a %s default font",
+        async (rootFont) => {
+            const hit = await withPage(shellMarkup('/library', rows), { width: 320, rootFont }, (page) =>
+                page.evaluate(() => {
+                    const label = document.querySelector('label.shell-upload')!;
+                    const rect = label.getBoundingClientRect();
+                    const target = document.elementFromPoint(rect.left + 43, rect.top + rect.height / 2);
+                    return target !== null && label.contains(target)
+                        ? label.querySelector('input')!.getAttribute('aria-label')
+                        : null;
+                }),
+            );
+            expect(hit).toBe('Upload score');
+        },
+    );
+
     it.each([640, 768, 1280])(
         'sets every top-bar tab at %i px in the 15 px type and line height it had before the phone shell',
         async (width) => {
