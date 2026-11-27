@@ -697,9 +697,26 @@ body {
     border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 8%, transparent);
 }
 
+/*
+ * Below sm the tab bar owns the bottom of the viewport. Its height is set here
+ * in px, never rem, so the bar and the room kept for it stay equal under any
+ * browser default font size: page padding, sticky footers and focus scrolling
+ * all clear it.
+ */
 @media (max-width: 39.99rem) {
+    :root {
+        --shell-tabs-height: calc(61px + var(--safe-bottom));
+    }
+
+    html {
+        scroll-padding-bottom: var(--shell-tabs-height);
+    }
+
+    .shell-tabs {
+        height: var(--shell-tabs-height);
+    }
+
     .shell-content {
-        --shell-tabs-height: calc(3.8125rem + var(--safe-bottom));
         padding-bottom: calc(2rem + var(--shell-tabs-height));
     }
 

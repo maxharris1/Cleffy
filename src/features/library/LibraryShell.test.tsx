@@ -449,16 +449,18 @@ describe('LibraryShell', () => {
     it('tabs through the wordmark, the nav, the upload and the account menu in that order', async () => {
         const user = userEvent.setup();
         renderShell('/search');
-        const nav = screen.getByRole('navigation', { name: 'Main' });
+        const nav = () => screen.getByRole('navigation', { name: 'Main' });
         const expected = [
-            screen.getByRole('link', { name: 'Cleffy' }),
-            ...within(nav).getAllByRole('link'),
-            screen.getByLabelText('Upload score'),
-            screen.getByRole('button', { name: /Account menu/ }),
+            () => screen.getByRole('link', { name: 'Cleffy' }),
+            () => within(nav()).getByRole('link', { name: 'Library' }),
+            () => within(nav()).getByRole('link', { name: 'Students' }),
+            () => within(nav()).getByRole('link', { name: 'Find a score' }),
+            () => screen.getByLabelText('Upload score'),
+            () => screen.getByRole('button', { name: /Account menu/ }),
         ];
         for (const element of expected) {
             await user.tab();
-            expect(document.activeElement).toBe(element);
+            expect(document.activeElement).toBe(element());
         }
     });
 

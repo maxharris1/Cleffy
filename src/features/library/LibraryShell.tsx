@@ -152,7 +152,7 @@ const SHELL_PROGRESS =
     'shell-progress absolute inset-x-0 bottom-0 sm:pointer-events-none sm:top-[var(--safe-top)] sm:bottom-auto';
 
 const NAV_LINK_BASE =
-    'flex min-h-[60px] flex-1 flex-col items-center justify-center gap-1 border-t-2 text-[11px] font-semibold transition-colors focus-visible:-outline-offset-4 sm:min-h-16 sm:flex-none sm:flex-row sm:gap-0 sm:border-t-0 sm:border-b-2 sm:px-0.5 sm:text-[15px]';
+    'flex flex-1 flex-col items-center justify-center gap-1 border-t-2 text-[11px] font-semibold transition-colors focus-visible:-outline-offset-4 sm:min-h-16 sm:flex-none sm:flex-row sm:gap-0 sm:border-t-0 sm:border-b-2 sm:px-0.5 sm:text-[15px] sm:leading-[calc(1.25/0.875)]';
 const NAV_LINK_ACTIVE = 'border-accent text-ink sm:border-ink-hand sm:font-semibold sm:text-paper';
 const NAV_LINK_IDLE =
     'border-transparent text-ink-muted hover:text-ink sm:border-transparent sm:font-medium sm:text-on-ink-muted sm:hover:text-paper';
@@ -569,7 +569,7 @@ const LibraryFrame = ({
                 className="shell-bar sticky top-0 z-30 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] sm:pl-0 sm:pr-0"
             >
                 <div
-                    className={`${BAR_CONTAINER} relative flex items-center gap-x-4 pt-2.5 pb-2 sm:h-16 sm:gap-x-3 sm:py-0 md:gap-x-6 lg:gap-x-10`}
+                    className={`${BAR_CONTAINER} relative flex items-center gap-x-4 pt-2.5 pb-2 max-sm:pl-[18px] sm:h-16 sm:gap-x-3 sm:py-0 md:gap-x-6 lg:gap-x-10`}
                 >
                     <Link to="/library" className="shrink-0">
                         <Wordmark tone="ink" className="text-[26px] sm:text-[28px]" />
