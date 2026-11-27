@@ -344,6 +344,16 @@ describe('PricingDialog', () => {
                 expect(await utilityStyleAt(review, 'font-size', width)).toBe('28px');
             }
         });
+
+        it('keeps the Plans heading out from under Close from tablet width up', async () => {
+            await renderPricing(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+            const heading = screen.getByRole('heading', { level: 2 });
+            for (const width of [640, 780, 820, 1440]) {
+                expect(await utilityStyleAt(heading, 'padding-right', width), `padding-right at ${width}px`).toBe(
+                    'calc(var(--spacing) * 12)',
+                );
+            }
+        });
     });
 });
 
