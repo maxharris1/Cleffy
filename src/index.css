@@ -702,7 +702,7 @@ body {
         --shell-tabs-height: calc(61px + var(--safe-bottom));
     }
 
-    html {
+    html:has(.shell-tabs) {
         scroll-padding-bottom: var(--shell-tabs-height);
     }
 

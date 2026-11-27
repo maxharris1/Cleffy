@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { TermsPage } from '@/features/legal/LegalPage';
 import { LibraryShell } from '@/features/library/LibraryShell';
 
 /**
@@ -101,6 +102,9 @@ const shellMarkup = (path: string, page: () => unknown) =>
         ),
     );
 
+const termsMarkup = () =>
+    renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/terms'] }, createElement(TermsPage)));
+
 type Setup = { width: number; height?: number; rootFont?: string; safeBottom?: string; touch?: boolean };
 
 describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
@@ -175,6 +179,30 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
             expect(covered).toEqual([]);
         },
     );
+
+    it('leaves the scroll alone when Tab focuses a link already in view on a page without the tab bar', async () => {
+        const scroll = await withPage(termsMarkup(), { width: 390, height: 600 }, async (page) => {
+            const contents = 'nav[aria-label="Contents"] a';
+            const before = await page.evaluate((selector) => {
+                const links = [...document.querySelectorAll<HTMLElement>(selector)];
+                window.scrollBy(0, links.at(-1)!.getBoundingClientRect().bottom - (window.innerHeight - 20));
+                links.at(-2)!.focus({ preventScroll: true });
+                return window.scrollY;
+            }, contents);
+            await page.keyboard.press('Tab');
+            return page.evaluate(
+                ({ selector, before }) => ({
+                    before,
+                    after: window.scrollY,
+                    focused: document.activeElement === [...document.querySelectorAll(selector)].at(-1),
+                }),
+                { selector: contents, before },
+            );
+        });
+        expect(scroll.before).toBeGreaterThan(0);
+        expect(scroll.focused).toBe(true);
+        expect(scroll.after).toBe(scroll.before);
+    });
 
     it.each([
         [390, '12px'],
