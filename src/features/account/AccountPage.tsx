@@ -323,20 +323,27 @@ export const AccountPage = () => {
     const nothingCached = storage !== null && storage.scoreCount === 0 && storage.bytes === 0;
 
     return (
-        <div className="mx-auto w-full max-w-[1100px]">
+        <div className="mx-auto w-full max-w-[1100px] sm:px-4 lg:px-0">
             <PageHead
                 width="narrow"
                 eyebrow={`${label} · ${PLAN_LABELS[tier]} plan`}
                 title="Account"
                 subtitle="Your profile, plan, and what this device is holding."
                 action={
-                    <Button
-                        variant="secondary"
-                        disabled={signingOut || guardedSignOut.checking}
-                        onClick={() => void guardedSignOut.requestSignOut()}
-                    >
-                        {guardedSignOut.checking ? 'Saving changes…' : signingOut ? 'Signing out…' : 'Sign out'}
-                    </Button>
+                    <div className="flex max-w-[320px] flex-col items-start gap-2 sm:items-end">
+                        <Button
+                            variant="secondary"
+                            disabled={signingOut || guardedSignOut.checking}
+                            onClick={() => void guardedSignOut.requestSignOut()}
+                        >
+                            {guardedSignOut.checking ? 'Saving changes…' : signingOut ? 'Signing out…' : 'Sign out'}
+                        </Button>
+                        <p className={`${ACCOUNT_NOTE} sm:text-right`}>
+                            Signing out removes your cached plan, downloaded scores and the offline copy of your marks
+                            from this device. Everything stays in your account; changes not yet saved to it are uploaded
+                            first.
+                        </p>
+                    </div>
                 }
             />
             {signOutError ? <ErrorText className="-mt-4 mb-4">{signOutError}</ErrorText> : null}
@@ -360,7 +367,7 @@ export const AccountPage = () => {
                     <div className="flex items-center gap-4">
                         <span
                             aria-hidden="true"
-                            className="grid size-[60px] shrink-0 place-items-center rounded-full bg-accent-soft text-[21px] font-semibold text-accent"
+                            className="grid size-[60px] shrink-0 place-items-center rounded-full bg-[#dc2626] text-[21px] font-semibold text-white shadow-[0_0_0_2px_var(--color-paper)]"
                         >
                             {initialsOf(label)}
                         </span>
