@@ -37,6 +37,10 @@ export interface StudentCodeCardProps {
     username?: string | null;
     /** The teacher's own display name; the "From" line is left off without one. */
     teacherName?: string;
+    /** Where the claim page lives; this deployment's origin by default. */
+    site?: string;
+    /** Off for a card drawn as decoration, so printing that page does not print only the card. */
+    printable?: boolean;
     className?: string;
 }
 
@@ -57,10 +61,12 @@ export const StudentCodeCard = ({
     loginCode,
     username = null,
     teacherName = '',
+    site = window.location.origin,
+    printable = true,
     className = '',
 }: StudentCodeCardProps) => (
     <div
-        className={`student-code-card rounded bg-white p-3 text-left text-ink shadow-[0_0_0_1px_rgba(28,25,23,0.1),0_34px_60px_-30px_rgba(0,0,0,0.6)]${
+        className={`${printable ? 'student-code-card ' : ''}rounded bg-white p-3 text-left text-ink shadow-[0_0_0_1px_rgba(28,25,23,0.1),0_34px_60px_-30px_rgba(0,0,0,0.6)]${
             className ? ` ${className}` : ''
         }`}
     >
@@ -92,7 +98,7 @@ export const StudentCodeCard = ({
             ) : null}
             <ol className="mt-5 flex flex-col gap-3.5">
                 <Step letter="A">
-                    Go to <strong className="[overflow-wrap:anywhere]">{window.location.origin}/student/claim</strong>
+                    Go to <strong className="[overflow-wrap:anywhere]">{site}/student/claim</strong>
                 </Step>
                 <Step letter="B">
                     Type this setup code
