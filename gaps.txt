@@ -1,0 +1,3 @@
+desktop-1440 {"gap":32,"withoutHeadMargin":0,"firstContent":"mx-auto max-w-sm text-center library-empty mt-8 md:mt-16"}
+ipad-portrait {"gap":32,"withoutHeadMargin":0,"firstContent":"mx-auto max-w-sm text-center library-empty mt-8 md:mt-16"}
+iphone-14 {"gap":32,"withoutHeadMargin":0,"firstContent":"mx-auto max-w-sm text-center library-empty mt-8 md:mt-16"}

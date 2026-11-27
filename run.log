@@ -1,0 +1,34 @@
+desktop-1440 {"gap":32,"withoutHeadMargin":0,"firstContent":"mx-auto max-w-sm text-center library-empty mt-8 md:mt-16"} ./library-failed-desktop-1440.png audit: [] main: Cleffy | Library | Find a score | Upload score | Uploading… | AT | ADA TEACHER | Library | Upload, organize, and share the scores you teach from. | Couldn’t load your scores | Something went wrong loading them. Your scores are safe — try again in a moment. | Try again | Or open a PDF locally without uploading
+desktop-1440 console errors: [
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)'
+]
+ipad-portrait {"gap":32,"withoutHeadMargin":0,"firstContent":"mx-auto max-w-sm text-center library-empty mt-8 md:mt-16"} ./library-failed-ipad-portrait.png audit: [] main: Cleffy | Library | Find a score | Upload score | Uploading… | AT | ADA TEACHER | Library | Upload, organize, and share the scores you teach from. | Couldn’t load your scores | Something went wrong loading them. Your scores are safe — try again in a moment. | Try again | Or open a PDF locally without uploading
+ipad-portrait console errors: [
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)'
+]
+iphone-14 {"gap":32,"withoutHeadMargin":0,"firstContent":"mx-auto max-w-sm text-center library-empty mt-8 md:mt-16"} ./library-failed-iphone-14.png audit: [] main: Cleffy | Library | Find a score | Upload score | Uploading… | AT | ADA TEACHER | Library | Upload, organize, and share the scores you teach from. | Couldn’t load your scores | Something went wrong loading them. Your scores are safe — try again in a moment. | Try again | Or open a PDF locally without uploading
+iphone-14 console errors: [
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
+  'Failed to load resource: the server responded with a status of 500 (Internal Server Error)'
+]
