@@ -23,6 +23,7 @@ vi.mock('@/features/viewer/history/snapshotService', () => ({
 }));
 
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
+import { OnInkContext } from '@/ui/onInk';
 
 const SNAPSHOT: LocalAnnotationSnapshot = {
     id: 'snap-1',
@@ -95,5 +96,14 @@ describe('LessonHistoryButton', () => {
 
         expect(await screen.findByText('Restore failed: storage full')).toBeInTheDocument();
         expect(toast.success).not.toHaveBeenCalled();
+    });
+
+    it("uses the header's 15px, weight 500 type when it sits in the ink header", () => {
+        render(
+            <OnInkContext.Provider value>
+                <LessonHistoryButton store={storeWith(vi.fn())} canRestore />
+            </OnInkContext.Provider>,
+        );
+        expect(screen.getByRole('button', { name: 'History' })).toHaveClass('text-[15px]!', 'font-medium!');
     });
 });

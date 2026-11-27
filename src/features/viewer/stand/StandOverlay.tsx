@@ -85,9 +85,8 @@ export const StandOverlay = ({
 
 /**
  * The header's one way in: the score alone, full screen, for the music stand.
- * Sits on the title's row, pulled in vertically so that row keeps its height
- * (ViewerHeader's titleAction). Pressed while stand mode is on (the header is
- * covered then, but a screen reader still reads it).
+ * Pressed while stand mode is on (the header is covered then, but a screen
+ * reader still reads it).
  */
 export const StandModeButton = () => {
     const standMode = useViewerStore((s) => s.standMode);
@@ -98,7 +97,7 @@ export const StandModeButton = () => {
             aria-label="Full screen"
             aria-pressed={standMode}
             onClick={() => (standMode ? exitStandMode() : enterStandMode())}
-            className={buttonClassName('ghost', 'sm', '-my-1 shrink-0 pointer-coarse:hit-44-y')}
+            className={buttonClassName('inkGhost', 'sm', 'text-[15px]! font-medium! pointer-coarse:hit-44')}
         >
             <FullScreenIcon size={16} />
             <span className="hidden sm:inline">Full screen</span>

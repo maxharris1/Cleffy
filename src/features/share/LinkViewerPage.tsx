@@ -202,14 +202,14 @@ export const LinkViewerPage = ({ token, first, onDead }: LinkViewerPageProps) =>
     return (
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo="/" backLabel="Cleffy home" title={first.doc.title}>
-                <Badge>View only</Badge>
+                <Badge tone="ink">View only</Badge>
             </ViewerHeader>
             {busy !== null ? (
                 <BusyCountdown
                     key={busy.attempt}
                     retryAfterSec={busy.sec}
                     onRetry={() => renewRef.current()}
-                    className="bg-amber-50 px-3 py-1.5 text-sm text-stone-700"
+                    className="border-b border-panel-line bg-paper px-3 py-1.5 text-sm text-ink"
                 />
             ) : null}
             <div className="relative min-h-0 flex-1">

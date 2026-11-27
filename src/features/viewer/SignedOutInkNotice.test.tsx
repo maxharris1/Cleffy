@@ -83,6 +83,8 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
         );
         expect(within(notice).getByRole('button', { name: 'Export' })).toBeInTheDocument();
         expect(within(notice).getByRole('button', { name: 'Discard' })).toBeInTheDocument();
+        expect(notice).toHaveClass('bg-paper');
+        expect(notice.outerHTML).not.toMatch(/amber/);
     });
 
     it('Export lists each score, exported for the account that made the marks', async () => {
@@ -132,6 +134,31 @@ describe('SignedOutInkNotice (round 3, items 2–3)', () => {
 
         expect(heldInkForExport(USER, DOC).held).toEqual([]);
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+});
+
+describe('SignedOutInkNotice over the viewer’s phone controls', () => {
+    it('publishes its height as --viewer-bottom-dock while shown, and clears it on discard', async () => {
+        const spy = vi
+            .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+            .mockReturnValue({ top: 0, bottom: 56, height: 56 } as DOMRect);
+        const dock = () => document.documentElement.style.getPropertyValue('--viewer-bottom-dock');
+        holdTwo();
+        render(<SignedOutInkGate />);
+        retireAccountInk(USER);
+
+        await screen.findByRole('status');
+        expect(dock()).toBe('56px');
+
+        await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
+        await userEvent.click(
+            within(await screen.findByRole('dialog', { name: 'Discard your unsaved ink?' })).getByRole('button', {
+                name: 'Discard',
+            }),
+        );
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+        expect(dock()).toBe('');
+        spy.mockRestore();
     });
 });
 

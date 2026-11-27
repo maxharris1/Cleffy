@@ -61,8 +61,9 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
-import { SwapLabel } from '@/ui/SwapLabel';
+import { ACTIVE_LABEL_ONLY, SwapLabel } from '@/ui/SwapLabel';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
+import { INK_TEXT_ACTION } from '@/ui/onInk';
 import { MusicIcon } from '@/ui/icons';
 
 /**
@@ -904,8 +905,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }
     if (!state) {
         return (
-            <main className="flex min-h-full items-center justify-center p-8">
-                <LoadingText>Opening score…</LoadingText>
+            <main className="paper-page flex min-h-full items-center justify-center p-8">
+                <LoadingText className="text-[15px]">Opening score…</LoadingText>
             </main>
         );
     }
@@ -949,8 +950,23 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 backTo={backTo}
                 backLabel={backLabel}
                 title={state.doc.title}
-                titleAction={<StandModeButton />}
+                primary={
+                    confirmed && state.role === 'owner' ? (
+                        // "Share" is sharing the score with people (links, who has
+                        // access); sending a copy of it is "Export", beside it.
+                        <Button
+                            variant="inkPrimary"
+                            size="sm"
+                            className="lg:rounded-xl lg:px-[18px] lg:text-[15px]"
+                            title="Share this score — links, and who has access"
+                            onClick={() => setShareOpen(true)}
+                        >
+                            Share
+                        </Button>
+                    ) : null
+                }
             >
+                <StandModeButton />
                 <PresenceBar
                     peers={peers}
                     selfUserId={resolvedUserId}
@@ -965,10 +981,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     </span>
                 ) : seatReadOnly ? (
                     <span title="View only — your Academy seat is read-only">
-                        <Badge>view only</Badge>
+                        <Badge tone="ink">view only</Badge>
                     </span>
                 ) : readOnly ? (
-                    <Badge>view only</Badge>
+                    <Badge tone="ink">view only</Badge>
                 ) : null}
                 {/* Needs the whole file: a first open shows it once the stream ends. */}
                 {/* Smart import is off at launch (features.smartImport). */}
@@ -999,7 +1015,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     type="button"
                     title="Practice notes — a journal by lesson day"
                     onClick={() => setNotesOpen(true)}
-                    className={buttonClassName('ghost', 'sm')}
+                    className={buttonClassName('inkGhost', 'sm', INK_TEXT_ACTION)}
                 >
                     Notes
                 </button>
@@ -1016,9 +1032,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         aria-controls="play-along-bar"
                         onClick={togglePlayAlong}
                         className={buttonClassName(
-                            'ghost',
+                            'inkGhost',
                             'sm',
-                            'relative aria-expanded:bg-accent-soft aria-expanded:text-accent',
+                            `relative aria-expanded:bg-paper/10 aria-expanded:text-paper ${INK_TEXT_ACTION}`,
                         )}
                     >
                         <MusicIcon size={16} />
@@ -1047,24 +1063,14 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         openSignal={exportSignal}
                     />
                 ) : null}
-                {confirmed && state.role === 'owner' ? (
-                    // "Share" is sharing the score with people (links, who has
-                    // access); sending a copy of it is "Export", beside it.
-                    <Button
-                        size="sm"
-                        title="Share this score — links, and who has access"
-                        onClick={() => setShareOpen(true)}
-                    >
-                        Share
-                    </Button>
-                ) : confirmed && state.role && canLeave ? (
+                {confirmed && state.role !== 'owner' && state.role && canLeave ? (
                     // Members get the same dialog, minus the owner's controls:
                     // who else is here (editors) and a way to leave.
                     <button
                         type="button"
                         title="Who this score is shared with, and leaving it"
                         onClick={() => setShareOpen(true)}
-                        className={buttonClassName('ghost', 'sm')}
+                        className={buttonClassName('inkGhost', 'sm', INK_TEXT_ACTION)}
                     >
                         Sharing
                     </button>
@@ -1202,7 +1208,7 @@ type SyncDotStatus = SyncStatus | 'waiting';
 // that have gone on for minutes. A throttled or briefly unreachable server
 // is "retrying" — the marks are safe on this device either way.
 const SYNC_DOT_STYLES: Record<SyncDotStatus, { dot: string; short: string; label: string }> = {
-    synced: { dot: 'bg-emerald-500', short: 'Synced', label: 'Synced' },
+    synced: { dot: 'bg-tick-on-ink', short: 'Synced', label: 'Synced' },
     // Static, not pulsing: a loop in the corner of the eye all lesson, while
     // the teacher writes, is the wrong kind of motion.
     syncing: { dot: 'bg-amber-400', short: 'Syncing…', label: 'Syncing…' },
@@ -1237,15 +1243,15 @@ const SYNC_DOT_SHORTS = Object.fromEntries(SYNC_DOT_ORDER.map((key) => [key, SYN
 const SYNCING_SHOWN_AFTER_MS = 600;
 
 /**
- * The header's sync state: a dot, and from md up a word.
+ * The header's sync state: a dot and a word, so no state rests on colour alone.
  *
  * Calm on purpose, because it changes on every stroke (100+ a lesson).
  * "Syncing" only shows once a sync has lasted 600ms: a quick round trip
  * never leaves "Synced". Offline, retrying and error show at once. A
  * change of colour is a 200ms opacity crossfade between stacked dots
  * (compositor-only, rather than transitioning one dot's background), instant
- * under reduced motion; the word swaps in place at the width of the widest
- * ("Waiting for server", SwapLabel), so the header never reflows.
+ * under reduced motion. The word takes only its own width, so the header keeps
+ * the room "Waiting for server" would reserve for its actions.
  */
 export const SyncDot = ({ status }: { status: SyncDotStatus }) => {
     // The last state that was not "syncing": what a quick round trip keeps
@@ -1257,21 +1263,30 @@ export const SyncDot = ({ status }: { status: SyncDotStatus }) => {
     const longSync = useDelayedFlag(status === 'syncing', SYNCING_SHOWN_AFTER_MS);
     const shown: SyncDotStatus = status === 'syncing' && !longSync && settled !== null ? settled : status;
     return (
-        <span title={SYNC_DOT_STYLES[shown].label} className="flex items-center gap-1.5">
-            <span aria-hidden="true" className="grid h-2.5 w-2.5">
+        <span
+            title={SYNC_DOT_STYLES[shown].label}
+            className="flex items-center gap-[7px] text-[13px] text-on-ink-faint lg:-order-1 lg:mx-2.5"
+        >
+            <span aria-hidden="true" className="grid h-2 w-2">
                 {SYNC_DOT_ORDER.map((key) => (
                     <span
                         key={key}
                         data-sync-dot={key}
                         data-active={key === shown || undefined}
-                        className={`h-2.5 w-2.5 rounded-full [grid-area:1/1] transition-opacity duration-(--duration-fade) ease-out motion-reduce:transition-none ${
+                        className={`h-2 w-2 rounded-full [grid-area:1/1] transition-opacity duration-(--duration-fade) ease-out motion-reduce:transition-none ${
                             SYNC_DOT_STYLES[key].dot
                         } ${key === shown ? 'opacity-100' : 'opacity-0'}`}
                     />
                 ))}
             </span>
-            <span className="sr-only text-xs text-stone-500 md:not-sr-only">
-                <SwapLabel labels={SYNC_DOT_SHORTS} active={shown} live={false} align="start" />
+            <span>
+                <SwapLabel
+                    labels={SYNC_DOT_SHORTS}
+                    active={shown}
+                    live={false}
+                    align="start"
+                    className={ACTIVE_LABEL_ONLY}
+                />
             </span>
         </span>
     );
@@ -1349,8 +1364,9 @@ const LocalViewer = ({ docId }: { docId: string }) => {
             bytes={bytes}
             onStoreReady={onStoreReady}
             header={
-                <ViewerHeader backTo="/" backLabel="Back to home" title="Local score" titleAction={<StandModeButton />}>
-                    <Badge>this device only</Badge>
+                <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
+                    <Badge tone="ink">this device only</Badge>
+                    <StandModeButton />
                     {features.smartImport && annotationStore ? (
                         <ImportScanButton
                             store={annotationStore}

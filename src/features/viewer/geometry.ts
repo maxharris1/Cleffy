@@ -3,6 +3,44 @@ import type { PageSize, ViewState } from '@/types/models';
 /** Vertical gap between pages, in base (scale-1) units. */
 export const PAGE_GAP = 16;
 
+/** Tailwind's `sm` breakpoint (px): below it the viewer uses its phone layout. */
+export const SM_BREAKPOINT = 640;
+
+/**
+ * Viewport px around the score at the top bound: beside the fitted page
+ * column, and above page 1 under any strip covering the top. Phones follow
+ * Flow-Phone-Viewer; larger screens keep the page gap there, which grows with
+ * the zoom (`top: null`).
+ */
+const SCORE_MARGINS = {
+    phone: { side: 10, top: 14 },
+    wide: { side: PAGE_GAP, top: null },
+} as const;
+
+const scoreMargins = (viewportWidth: number) =>
+    viewportWidth > 0 && viewportWidth < SM_BREAKPOINT ? SCORE_MARGINS.phone : SCORE_MARGINS.wide;
+
+/** The top scroll bound: page 1 sits the top margin below the strip covering the top (`obscured`). */
+const minScrollY = (scale: number, viewportWidth: number, obscured: ObscuredEdges): number => {
+    const { top } = scoreMargins(viewportWidth);
+    return (top === null ? 0 : PAGE_GAP * scale - top) - Math.max(0, obscured.top);
+};
+
+/**
+ * The scrollY that starts the view on the row at content `rowTop`: below the
+ * strip covering the top, with the page gap as margin, or the top bound for
+ * the first row. Unclamped.
+ */
+export const rowTopScrollY = (
+    rowTop: number,
+    scale: number,
+    viewportWidth: number,
+    obscured: ObscuredEdges = NO_OBSCURED,
+): number =>
+    rowTop <= PAGE_GAP
+        ? minScrollY(scale, viewportWidth, obscured)
+        : (rowTop - PAGE_GAP) * scale - Math.max(0, obscured.top);
+
 /** Minimum / maximum committed zoom. */
 export const MIN_SCALE = 0.25;
 export const MAX_SCALE = 8;
@@ -99,6 +137,7 @@ export const turnFromPageIndex = (
     viewportHeight: number,
     layouts: readonly PageLayout[],
     obscured: ObscuredEdges = NO_OBSCURED,
+    viewportWidth = 0,
 ): number => {
     const top = Math.max(0, obscured.top);
     const bottom = viewportHeight - Math.max(0, obscured.bottom);
@@ -109,7 +148,7 @@ export const turnFromPageIndex = (
         const inView = Math.min(rowTop + rowHeight, bottom) - Math.max(rowTop, top);
         return inView > 0 && inView >= Math.min(rowHeight, uncovered) / 2;
     });
-    return index >= 0 ? index : focusedPageIndex(view, viewportHeight, layouts, obscured);
+    return index >= 0 ? index : focusedPageIndex(view, viewportHeight, layouts, obscured, viewportWidth);
 };
 
 /**
@@ -146,7 +185,7 @@ export const pageTurnView = (
     /** First page of a row, and the scrollY that starts the view on it. */
     const rowTarget = (i: number) => ({
         pageIndex: i,
-        scrollY: ((layouts[i]?.top ?? PAGE_GAP) - PAGE_GAP) * view.scale - Math.max(0, obscured.top),
+        scrollY: rowTopScrollY(layouts[i]?.top ?? PAGE_GAP, view.scale, viewportWidth, obscured),
     });
     const firstOfRow = (i: number) => pageRow(layouts, i).first;
     // Rows past the current one, nearest first.
@@ -239,17 +278,17 @@ export const focusedPageIndex = (
     viewportHeight: number,
     layouts: readonly PageLayout[],
     obscured: ObscuredEdges = NO_OBSCURED,
+    viewportWidth = 0,
 ): number => {
     if (layouts.length === 0) {
         return 0;
     }
-    const top = Math.max(0, obscured.top);
     const bottom = Math.max(0, obscured.bottom);
     // Scrolled to the very top (which sits above 0 by a strip at the top, as
     // clampScroll allows), page 1 is the page being read — even when the
     // viewport is tall enough that a later row sits nearer its centre (a whole
     // short score fits). Otherwise the pager read "p. 3 / 4" and Next was off.
-    const minY = top > 0 ? -top : 0;
+    const minY = minScrollY(view.scale, viewportWidth, obscured);
     if (view.scrollY <= minY + BOUND_EPSILON_PX) {
         return 0;
     }
@@ -330,7 +369,7 @@ export const clampScroll = (
     const contentW = layout.contentWidth * view.scale;
     const contentH = layout.contentHeight * view.scale;
     const maxX = Math.max(0, contentW - viewportWidth);
-    const minY = obscured.top > 0 ? -obscured.top : 0;
+    const minY = minScrollY(view.scale, viewportWidth, obscured);
     const maxY = Math.max(minY, contentH - (viewportHeight - Math.max(0, obscured.bottom)));
     return {
         scale: view.scale,
@@ -355,12 +394,12 @@ export const zoomAt = (view: ViewState, newScale: number, px: number, py: number
     };
 };
 
-/** Scale that fits the widest page to the viewport width (with a small margin). */
+/** Scale that fits the widest page to the viewport width, inside the side margins. */
 export const fitPageWidthScale = (layout: DocumentLayout, viewportWidth: number): number => {
     if (layout.contentWidth <= 0) {
         return 1;
     }
-    const scale = (viewportWidth - PAGE_GAP * 2) / layout.contentWidth;
+    const scale = (viewportWidth - scoreMargins(viewportWidth).side * 2) / layout.contentWidth;
     return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
 };
 
@@ -440,7 +479,7 @@ export const pageTopView = (
     const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, fitPageWidthScale(layout, viewportWidth) * relativeScale));
     const top = layout.layouts[pageIndex]?.top ?? PAGE_GAP;
     return clampScroll(
-        { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - Math.max(0, obscured.top) },
+        { scale, scrollX: 0, scrollY: rowTopScrollY(top, scale, viewportWidth, obscured) },
         layout,
         viewportWidth,
         viewportHeight,
@@ -486,12 +525,11 @@ export const reanchorView = (
     const x = cx * (after.contentWidth / before.contentWidth);
     const y = to.top + ((cy - from.top) / from.height) * to.height;
     // The top bound (clampScroll's minY) does not depend on the page sizes.
-    const minY = obscured.top > 0 ? -obscured.top : 0;
-    const pinnedTop = view.scrollY <= minY + BOUND_EPSILON_PX;
+    const pinnedTop = view.scrollY <= minScrollY(view.scale, viewportWidth, obscured) + BOUND_EPSILON_PX;
     return {
         scale,
         scrollX: x * scale - viewportWidth / 2,
-        scrollY: pinnedTop ? view.scrollY : y * scale - anchorY,
+        scrollY: pinnedTop ? minScrollY(scale, viewportWidth, obscured) : y * scale - anchorY,
     };
 };
 

@@ -1,9 +1,12 @@
+import { readFileSync } from 'node:fs';
+
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { useViewerStore } from '@/state/store';
+import { useGhostVariant } from '@/ui/onInk';
 
 beforeEach(() => {
     useViewerStore.setState({ penSeen: false, touchSeen: false });
@@ -44,6 +47,86 @@ describe('ViewerHeader', () => {
         expect(nav).toHaveClass('justify-start');
         expect(nav.className).toMatch(/lg:flex-\[0_1_auto\]/);
         expect(nav.className).toMatch(/lg:justify-end/);
+    });
+
+    it('caps each score control at the row width, so a wide presence group wraps inside the viewport', () => {
+        renderHeader();
+        const nav = screen.getByRole('navigation', { name: 'Score' });
+        expect(nav.className).toMatch(/\[&>\*\]:max-w-full/);
+        expect(nav.className).not.toMatch(/\[&>\*\]:shrink-0/);
+    });
+
+    it('keeps wrapped rows of touch targets apart on a coarse pointer, so a chip never steals a tap meant for the row above', () => {
+        renderHeader();
+        const nav = screen.getByRole('navigation', { name: 'Score' });
+        expect(nav).toHaveClass('pointer-coarse:gap-y-2');
+    });
+
+    it('sets the piece name in italic when the title reads "Composer — Piece"', () => {
+        render(
+            <MemoryRouter>
+                <ViewerHeader backTo="/library" backLabel="Back to library" title="Beethoven — Für Elise" />
+            </MemoryRouter>,
+        );
+        const title = screen.getByRole('button', { name: 'Beethoven — Für Elise' });
+        expect(title.querySelector('em')).toHaveTextContent(/^Für Elise$/);
+    });
+
+    it('leaves any other title upright', () => {
+        renderHeader();
+        expect(screen.getByRole('button', { name: 'Nocturne (Chopin)' }).querySelector('em')).toBeNull();
+    });
+
+    it('keeps the primary action last in focus order, after the score actions', () => {
+        render(
+            <MemoryRouter>
+                <ViewerHeader
+                    backTo="/library"
+                    backLabel="Back to library"
+                    title="Nocturne"
+                    primary={<button type="button">Share</button>}
+                >
+                    <button type="button">Export</button>
+                </ViewerHeader>
+            </MemoryRouter>,
+        );
+        const names = screen.getAllByRole('button').map((button) => button.textContent);
+        expect(names).toEqual(['Nocturne', 'Export', 'Share']);
+    });
+
+    it('tells the controls inside it that they sit on ink', () => {
+        const Probe = () => <span>{useGhostVariant()}</span>;
+        render(
+            <MemoryRouter>
+                <Probe />
+                <ViewerHeader backTo="/library" backLabel="Back to library" title="Nocturne">
+                    <Probe />
+                </ViewerHeader>
+            </MemoryRouter>,
+        );
+        expect(screen.getByText('ghost')).toBeInTheDocument();
+        expect(screen.getByText('inkGhost')).toBeInTheDocument();
+    });
+
+    it('gives its controls the shared on-ink focus ring the ink top bar uses', () => {
+        const style = document.createElement('style');
+        style.textContent = readFileSync(`${process.cwd()}/src/index.css`, 'utf8');
+        document.head.append(style);
+        try {
+            const shellBarRing = [...style.sheet!.cssRules]
+                .flatMap((rule) => (rule instanceof CSSMediaRule ? [...rule.cssRules] : [rule]))
+                .filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule && rule.selectorText === '.shell-bar')
+                .map((rule) => rule.style.getPropertyValue('--focus-ring').trim())
+                .find(Boolean);
+            expect(shellBarRing).toBe('var(--color-ink-rule)');
+
+            renderHeader();
+            const notes = screen.getByRole('button', { name: 'Notes' });
+            notes.focus();
+            expect(getComputedStyle(notes).getPropertyValue('--focus-ring').trim()).toBe(shellBarRing);
+        } finally {
+            style.remove();
+        }
     });
 });
 

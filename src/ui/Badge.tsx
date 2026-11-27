@@ -1,12 +1,13 @@
 import type { ReactNode } from 'react';
 
-export type BadgeTone = 'neutral' | 'accent' | 'ok' | 'warn';
+export type BadgeTone = 'neutral' | 'accent' | 'ok' | 'warn' | 'ink';
 
 const TONE_CLASSES: Record<BadgeTone, string> = {
     neutral: 'bg-ink/6 text-ink-soft',
     accent: 'bg-accent-soft text-accent',
     ok: 'bg-tick/10 text-done',
     warn: 'bg-amber-100 text-due',
+    ink: 'bg-paper/10 text-paper ring-1 ring-paper/24',
 };
 
 export interface BadgeProps {

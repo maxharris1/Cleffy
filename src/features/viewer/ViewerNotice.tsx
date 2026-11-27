@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, type ReactNode } from 'react';
 
 /**
- * The look every viewer notice shares: an amber card floating over the top of
+ * The look every viewer notice shares: a paper card floating over the top of
  * the score. Notices used to be full-width strips stacked above the viewport,
  * so each one that came or went pushed the whole score down or pulled it back
  * up under the reader's eyes. Over the score nothing moves, and nothing
@@ -9,7 +9,7 @@ import { useLayoutEffect, useRef, type ReactNode } from 'react';
  * (less padding, tighter lines), where every line it takes is score hidden.
  */
 const CARD =
-    'pointer-events-auto mx-auto w-full max-w-2xl rounded-xl border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-sm leading-snug text-amber-900 shadow-lg sm:px-3 sm:py-2 sm:leading-normal';
+    'pointer-events-auto mx-auto w-full max-w-2xl rounded-xl border border-panel-line bg-paper px-2.5 py-1.5 text-sm leading-snug text-ink shadow-lg sm:px-3 sm:py-2 sm:leading-normal';
 
 export const ViewerNotice = ({
     children,
@@ -38,8 +38,7 @@ export const ViewerNotice = ({
 
 /**
  * The one region the notices live in: absolute over the score's top edge,
- * below the phone's pager/zoom strip and below the toolbar docked at the top
- * from `sm`, inset from the notch. Lets presses through wherever there is no
+ * below the toolbar docked at the top from `sm`, inset from the notch. Lets presses through wherever there is no
  * notice. Tighter on phones, where a stack of them would otherwise cover a
  * good part of the score.
  *
@@ -82,7 +81,7 @@ export const ViewerNoticeRegion = ({
             ref={regionRef}
             data-ui-overlay
             data-viewer-notices
-            className="pointer-events-none absolute inset-x-0 top-14 z-30 flex flex-col gap-1.5 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] sm:top-[4.5rem] sm:gap-2"
+            className="pointer-events-none absolute inset-x-0 top-2 z-30 flex flex-col gap-1.5 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] sm:top-[4.5rem] sm:gap-2"
         >
             {children}
         </div>

@@ -8,6 +8,7 @@ import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { holdOps, resetInkRecoveryForTests } from '@/sync/inkRecovery';
+import type { PresencePeer } from '@/sync/wire';
 import type { DocumentRow } from '@/types/database';
 
 const fetchDocument = vi.fn();
@@ -68,7 +69,9 @@ vi.mock('@/features/student/studentApi', () => ({
 }));
 
 /** The sync wiring the viewer last handed the viewport, for driving realtime callbacks. */
-const viewportSync: { current: { onMembershipChanged?: () => void } | undefined } = { current: undefined };
+const viewportSync: {
+    current: { onMembershipChanged?: () => void; onPeers?: (peers: PresencePeer[]) => void } | undefined;
+} = { current: undefined };
 
 /** What the viewer last handed the PDF provider: the source, and the stream callbacks. */
 const pdfProps = vi.hoisted(() => ({
@@ -134,15 +137,28 @@ vi.mock('@/features/viewer/PdfViewport', () => ({
 }));
 
 vi.mock('@/features/viewer/ViewerHeader', () => ({
-    ViewerHeader: ({ title, children }: { title: string; children: ReactNode }) => (
+    ViewerHeader: ({ title, children, primary }: { title: string; children: ReactNode; primary?: ReactNode }) => (
         <header>
             <h1>{title}</h1>
             {children}
+            {primary}
         </header>
     ),
 }));
 
-vi.mock('@/features/viewer/presence/PresenceBar', () => ({ PresenceBar: () => null }));
+vi.mock('@/features/viewer/presence/PresenceBar', () => ({
+    PresenceBar: ({ peers, selfUserId }: { peers: PresencePeer[]; selfUserId: string }) => (
+        <div>
+            {peers
+                .filter((peer) => peer.userId !== selfUserId)
+                .map((peer) => (
+                    <button key={peer.userId} type="button" aria-label={`${peer.name}, on page ${peer.page + 1}`}>
+                        {peer.name}
+                    </button>
+                ))}
+        </div>
+    ),
+}));
 vi.mock('@/features/viewer/history/LessonHistoryButton', () => ({ LessonHistoryButton: () => null }));
 vi.mock('@/features/export/ShareExportMenu', () => ({
     ShareExportMenu: ({
@@ -877,6 +893,14 @@ describe('SyncDot', () => {
         vi.useRealTimers();
     });
 
+    it('keeps no room for inactive words at any width, so the desktop header stays one row', () => {
+        render(<SyncDot status="synced" />);
+        const label = document.querySelector('.swap-label')!;
+        expect(label).toHaveClass('[&>:not([data-swap-active])]:hidden');
+        expect(label.className).not.toMatch(/\b(max-)?(sm|md|lg|xl):\[&>:not/);
+        expect(activeLabel()).toBe('Synced');
+    });
+
     it('shows a retryable failure calmly and keeps red for errors', () => {
         const { rerender } = render(<SyncDot status="retrying" />);
         expect(activeLabel()).toBe('Retrying…');
@@ -1138,6 +1162,49 @@ describe('CloudViewer membership changes', () => {
         expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Share' }));
         expect(screen.getByTestId('share-dialog')).toHaveAttribute('data-role', 'owner');
+    });
+
+    it('tabs through the header as before the restyle: Full screen, then the presence chips, then Share last', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        act(() =>
+            viewportSync.current?.onPeers?.([
+                { userId: 'ada', name: 'Ada', color: '#000', page: 0, isAnonymous: false },
+            ]),
+        );
+        expect(screen.getByRole('button', { name: 'Ada, on page 1' })).toBeInTheDocument();
+
+        const visited: string[] = [];
+        while (!visited.includes('Share') && visited.length < 20) {
+            await user.tab();
+            const focused = document.activeElement as HTMLElement;
+            visited.push(focused.getAttribute('aria-label') ?? focused.textContent ?? '');
+        }
+        const at = (name: string) => visited.indexOf(name);
+        expect(at('Full screen')).toBeGreaterThanOrEqual(0);
+        expect(at('Full screen')).toBeLessThan(at('Ada, on page 1'));
+        expect(at('Ada, on page 1')).toBeLessThan(at('Share'));
+    });
+
+    it('lays the owner header out as Flow-Viewer on desktop: sync before Full screen, 15px actions and Share', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        expect(document.querySelector('[data-sync-dot]')?.closest('[title]')).toHaveClass('lg:-order-1');
+        expect(screen.getByRole('button', { name: 'Full screen' })).not.toHaveClass('lg:-order-1');
+        expect(screen.getByRole('button', { name: 'Notes' })).toHaveClass('text-[15px]!', 'font-medium!');
+        expect(screen.getByRole('button', { name: 'Share' })).toHaveClass(
+            'lg:text-[15px]',
+            'lg:px-[18px]',
+            'lg:rounded-xl',
+        );
     });
 
     it('offers the owner no smart import while the feature is off, even on the post-upload ?import=1', async () => {

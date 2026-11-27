@@ -17,6 +17,7 @@
 }
 
 @theme {
+    --animate-loading-pulse: loading-pulse 2s ease-in-out infinite;
     --font-display: 'Bodoni Moda Variable', ui-serif, Georgia, 'Times New Roman', serif;
     --font-sans: 'Instrument Sans Variable', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 
@@ -57,6 +58,7 @@
     --color-ink-hand: #facc15;
     --color-highlighter: #fde047;
     --color-tick: #15803d;
+    --color-tick-on-ink: #4ade80;
 
     /* Motion. One strong ease-out for anything entering or responding (UI
        motion should start fast and settle), a drawer curve for sheets, and
@@ -595,6 +597,16 @@ body {
     animation: progress-sweep 1.2s linear infinite;
 }
 
+@keyframes loading-pulse {
+    50% {
+        color: var(--color-ink-muted);
+    }
+    0%,
+    100% {
+        color: var(--color-ink);
+    }
+}
+
 @keyframes progress-breathe {
     from {
         opacity: 0.35;
@@ -896,6 +908,11 @@ body {
         backdrop-filter: none;
         background-color: #fff;
     }
+}
+
+/* Chrome that is always ink. The accent is under 3:1 on ink, so focus rings use the ink rule. */
+.chrome-ink {
+    --focus-ring: var(--color-ink-rule);
 }
 
 /*

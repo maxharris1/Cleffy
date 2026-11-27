@@ -20,6 +20,7 @@ import {
     MIN_SCALE,
     NO_OBSCURED,
     PAGE_GAP,
+    SM_BREAKPOINT,
     bitmapBudgetFactor,
     clampScroll,
     computeDocumentLayout,
@@ -31,6 +32,7 @@ import {
     pageTopView,
     pageTurnView,
     reanchorView,
+    rowTopScrollY,
     turnFromPageIndex,
     viewportToPagePoint,
     visiblePageRange,
@@ -39,6 +41,7 @@ import {
     type ObscuredEdges,
     type PageColumns,
 } from '@/features/viewer/geometry';
+import { useBottomDockHeight } from '@/features/viewer/bottomDock';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
@@ -111,18 +114,16 @@ const wrapperTransform = (view: ViewState, renderScale: number): string =>
 /** Default text-note size as a fraction of page width. */
 const DEFAULT_TEXT_SIZE = 0.018;
 
-/** Tailwind's `sm` breakpoint (px): below it the viewer uses its phone layout. */
-const SM_BREAKPOINT = 640;
-
 /**
- * Phones: the strip (px) the pager and zoom row cover at the top of the
- * viewport (top-2 + one 44px control + 4px), kept clear of page 1 the way a
- * toolbar docked at the top is.
+ * Phones: the strip (px) the pager and zoom row cover above the bottom
+ * toolbar (0.5rem + one 44px control + 4px), so the top of the viewport is
+ * left to page 1.
  */
 const PHONE_CONTROLS_STRIP = 56;
+const controlsStripFor = (width: number) => (width > 0 && width < SM_BREAKPOINT ? PHONE_CONTROLS_STRIP : 0);
 
 /** Larger screens: the strip (px) the pager and zoom row cover above the bottom safe area. */
-const FLOATING_CONTROLS_STRIP = 60;
+const FLOATING_CONTROLS_STRIP = 66;
 
 /**
  * A tap in the left/right margin strip of the viewport turns the page (the
@@ -361,20 +362,32 @@ export const PdfViewport = ({
     // the document and reports (child effects first) in the same commit as the
     // first fit, which must already see it. Syncing it from state in the effect
     // above would put the stale value back before the fit reads it.
-    // Phones add the pager/zoom strip to the top edge (see PHONE_CONTROLS_STRIP),
-    // and any notices floating over the score extend it (noticeInset).
+    // Phones add the pager/zoom strip to the bottom edge (see PHONE_CONTROLS_STRIP),
+    // above the toolbar or, without one, above the safe area the strip sits on,
+    // and above any bottom dock that raises it (useBottomDockHeight);
+    // any notices floating over the score extend the top edge (noticeInset).
     const toolbarEdgesRef = useRef<ObscuredEdges>(NO_OBSCURED);
     const controlsStripRef = useRef(0);
+    const safeBottomProbeRef = useRef<HTMLDivElement | null>(null);
+    const safeBottomRef = useRef(0);
     const noticeInsetRef = useRef(noticeInset);
-    const applyObscured = useCallback(() => {
+    const bottomDock = useBottomDockHeight();
+    const bottomDockRef = useRef(bottomDock);
+    const obscuredWithStrip = useCallback((strip: number): ObscuredEdges => {
         const toolbar = toolbarEdgesRef.current;
-        const edges = {
-            top: Math.max(toolbar.top, controlsStripRef.current, noticeInsetRef.current),
-            bottom: toolbar.bottom,
+        return {
+            top: Math.max(toolbar.top, noticeInsetRef.current),
+            bottom:
+                strip > 0
+                    ? Math.max(toolbar.bottom, safeBottomRef.current) + bottomDockRef.current + strip
+                    : toolbar.bottom,
         };
+    }, []);
+    const applyObscured = useCallback(() => {
+        const edges = obscuredWithStrip(controlsStripRef.current);
         obscuredRef.current = edges;
         setObscured((prev) => (prev.top === edges.top && prev.bottom === edges.bottom ? prev : edges));
-    }, []);
+    }, [obscuredWithStrip]);
     const reportObscured = useCallback(
         (edges: ObscuredEdges) => {
             toolbarEdgesRef.current = edges;
@@ -384,11 +397,12 @@ export const PdfViewport = ({
     );
     const gestureRef = useRef<GestureController | null>(null);
     /**
-     * How far above the top bound a pan may keep the view while the bound
-     * tightened under it (a notice went away mid-gesture): never further out
-     * than it already was, so nothing jumps under the finger. Null otherwise.
+     * How far past a bound (top or bottom) a pan may keep the view while the
+     * bound tightened under it (a notice or dock went away mid-gesture): never
+     * further out than it already was, so nothing jumps under the finger.
+     * Null otherwise.
      */
-    const slackTopRef = useRef<number | null>(null);
+    const slackRef = useRef<number | null>(null);
     /**
      * A settle into the bounds that a pointer on the score held off (or cut
      * short), in either direction: it resumes once the last pointer lifts.
@@ -411,7 +425,7 @@ export const PdfViewport = ({
         cancelSettleGlide();
         if (standModeRef.current) {
             // Stand mode places its page whole and centred, outside these bounds.
-            slackTopRef.current = null;
+            slackRef.current = null;
             settlePendingRef.current = false;
             return;
         }
@@ -422,17 +436,17 @@ export const PdfViewport = ({
         const { view: from, setView } = useViewerStore.getState();
         const target = clampScroll(from, layoutRef.current, width, height, obscuredRef.current);
         if (Math.abs(target.scrollY - from.scrollY) < 0.5 && Math.abs(target.scrollX - from.scrollX) < 0.5) {
-            slackTopRef.current = null;
+            slackRef.current = null;
             settlePendingRef.current = false;
             return;
         }
         if (gestureRef.current?.pointerActive) {
             // Settles once the last pointer lifts (below).
-            slackTopRef.current ??= from.scrollY;
+            slackRef.current ??= from.scrollY;
             settlePendingRef.current = true;
             return;
         }
-        slackTopRef.current = null;
+        slackRef.current = null;
         settlePendingRef.current = false;
         if (prefersReducedMotion()) {
             setView(target);
@@ -469,7 +483,7 @@ export const PdfViewport = ({
         // it is — a stroke must not start on a page gliding under the pen, nor
         // a pan's first move snap the rest of the way — and leaves what is left
         // to settle once the last pointer lifts (below), whichever way it was
-        // going; above the top bound, as slack too. Ahead of the gesture
+        // going; past a bound, as slack too. Ahead of the gesture
         // controller, so the slack is in place for its first move.
         const onPointerDown = (e: PointerEvent) => {
             if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
@@ -487,13 +501,13 @@ export const PdfViewport = ({
             if (Math.abs(v.scrollY - bound.scrollY) >= 0.5 || Math.abs(v.scrollX - bound.scrollX) >= 0.5) {
                 settlePendingRef.current = true;
             }
-            if (v.scrollY < bound.scrollY - 0.5) {
-                slackTopRef.current ??= v.scrollY;
+            if (Math.abs(v.scrollY - bound.scrollY) >= 0.5) {
+                slackRef.current ??= v.scrollY;
             }
         };
         // After the controller has seen the pointer go (it listens on the score).
         const onPointerEnd = () => {
-            if (settlePendingRef.current || slackTopRef.current !== null) {
+            if (settlePendingRef.current || slackRef.current !== null) {
                 settleIntoBounds();
             }
         };
@@ -515,6 +529,11 @@ export const PdfViewport = ({
         applyObscured();
         settleIntoBounds();
     }, [noticeInset, applyObscured, settleIntoBounds]);
+    useLayoutEffect(() => {
+        bottomDockRef.current = bottomDock;
+        applyObscured();
+        settleIntoBounds();
+    }, [bottomDock, applyObscured, settleIntoBounds]);
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
     // These live in state, not refs: the overlay divs only exist once the PDF
@@ -576,8 +595,8 @@ export const PdfViewport = ({
             const height = el.clientHeight;
             // Before the size reaches state, so the first fit already sees it.
             // Stand mode hides the pager and zoom row.
-            controlsStripRef.current =
-                width > 0 && width < SM_BREAKPOINT && !standModeRef.current ? PHONE_CONTROLS_STRIP : 0;
+            controlsStripRef.current = standModeRef.current ? 0 : controlsStripFor(width);
+            safeBottomRef.current = safeBottomProbeRef.current?.offsetHeight ?? 0;
             applyObscured();
             setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
         };
@@ -599,7 +618,7 @@ export const PdfViewport = ({
         // Start with the top of page 1 below a toolbar docked at the top.
         const edges = obscuredRef.current;
         const fitted = clampScroll(
-            { scale, scrollX: 0, scrollY: -edges.top },
+            { scale, scrollX: 0, scrollY: rowTopScrollY(PAGE_GAP, scale, viewportSize.width, edges) },
             layout,
             viewportSize.width,
             viewportSize.height,
@@ -636,14 +655,19 @@ export const PdfViewport = ({
             // page that was being read starts the view, as a layout switch
             // does, at the same multiple of fit-width.
             const prevLayout = computeDocumentLayout(pageSizes, prevColumns, spreadCover);
-            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts, obscuredRef.current);
+            const prevEdges = obscuredWithStrip(controlsStripFor(prev.width));
+            const focused = focusedPageIndex(v, prev.height, prevLayout.layouts, prevEdges, prev.width);
             const relative = v.scale / fitPageWidthScale(prevLayout, prev.width);
             const scale = Math.min(
                 MAX_SCALE,
                 Math.max(MIN_SCALE, fitPageWidthScale(layout, viewportSize.width) * relative),
             );
             const top = layout.layouts[focused]?.top ?? PAGE_GAP;
-            next = { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - obscuredRef.current.top };
+            next = {
+                scale,
+                scrollX: 0,
+                scrollY: rowTopScrollY(top, scale, viewportSize.width, obscuredRef.current),
+            };
         } else {
             const ratio = fitPageWidthScale(layout, viewportSize.width) / fitPageWidthScale(layout, prev.width);
             const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * ratio));
@@ -658,7 +682,7 @@ export const PdfViewport = ({
         next = clampScroll(next, layout, viewportSize.width, viewportSize.height, obscuredRef.current);
         setView(next);
         setRenderScale(next.scale);
-    }, [viewportSize, layout, pageColumns, pageSizes, spreadCover, standMode]);
+    }, [viewportSize, layout, pageColumns, pageSizes, spreadCover, standMode, obscuredWithStrip]);
 
     // Entering stand mode starts on the page being read; leaving it comes
     // back to the page it was showing. Before paint, and before the refs
@@ -669,13 +693,13 @@ export const PdfViewport = ({
             const v = useViewerStore.getState().view;
             const before = layoutRef.current;
             const size = viewportSizeRef.current;
-            const page = focusedPageIndex(v, size.height, before.layouts, obscuredRef.current);
+            const page = focusedPageIndex(v, size.height, before.layouts, obscuredRef.current, size.width);
             standEntryRef.current = { view: v, page, relative: v.scale / fitPageWidthScale(before, size.width), size };
             standReturnRef.current = null;
             // Nothing else moves the view while stand mode has it: a settle
             // under way stops here (a follow glide, on its next frame).
             cancelSettleGlide();
-            slackTopRef.current = null;
+            slackRef.current = null;
             settlePendingRef.current = false;
             standPageRef.current = page;
             setStandPage(page);
@@ -817,7 +841,7 @@ export const PdfViewport = ({
         standReturnRef.current = null;
         const { view: v, setView } = useViewerStore.getState();
         const { width, height } = viewportSizeRef.current;
-        const current = turnFromPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current);
+        const current = turnFromPageIndex(v, height, layoutRef.current.layouts, obscuredRef.current, width);
         const next = pageTurnView(v, layoutRef.current, current, direction, width, height, obscuredRef.current);
         if (!next) {
             return;
@@ -836,7 +860,7 @@ export const PdfViewport = ({
         const { view: v, setView, setPageColumns, setSpreadCover } = useViewerStore.getState();
         const { width, height } = viewportSize;
         const nextLayout = computeDocumentLayout(pageSizes, columns, coverPage);
-        const focused = focusedPageIndex(v, height, layout.layouts, obscured);
+        const focused = focusedPageIndex(v, height, layout.layouts, obscured, width);
         const scale = fitPageWidthScale(nextLayout, width);
         const top = nextLayout.layouts[focused]?.top ?? PAGE_GAP;
         fittedViewportRef.current = viewportSize;
@@ -845,7 +869,7 @@ export const PdfViewport = ({
         setSpreadCover(coverPage);
         setView(
             clampScroll(
-                { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - obscured.top },
+                { scale, scrollX: 0, scrollY: rowTopScrollY(top, scale, width, obscured) },
                 nextLayout,
                 width,
                 height,
@@ -969,14 +993,19 @@ export const PdfViewport = ({
                 viewportSizeRef.current.height,
                 obscuredRef.current,
             );
-            const slack = slackTopRef.current;
-            if (slack === null || v.scrollY >= clamped.scrollY) {
+            const slack = slackRef.current;
+            if (slack === null) {
                 return clamped;
             }
-            // Above a top bound that tightened mid-gesture: free to move back
-            // in, never further out. The rest settles when the gesture ends.
-            const scrollY = Math.max(slack, v.scrollY);
-            slackTopRef.current = scrollY;
+            const past = Math.sign(v.scrollY - clamped.scrollY);
+            if (past === 0 || past !== Math.sign(slack - clamped.scrollY)) {
+                slackRef.current = null;
+                return clamped;
+            }
+            // Past a bound that tightened mid-gesture: free to move back in,
+            // never further out. The rest settles when the gesture ends.
+            const scrollY = past < 0 ? Math.max(slack, v.scrollY) : Math.min(slack, v.scrollY);
+            slackRef.current = scrollY;
             return { ...clamped, scrollY };
         };
 
@@ -1187,10 +1216,12 @@ export const PdfViewport = ({
             channelRef.current?.setPage(Math.max(0, range.start));
             useViewerStore
                 .getState()
-                .setFocusedPageIndex(focusedPageIndex(view, viewportSize.height, layout.layouts, obscured));
+                .setFocusedPageIndex(
+                    focusedPageIndex(view, viewportSize.height, layout.layouts, obscured, viewportSize.width),
+                );
         }, 400);
         return () => clearTimeout(timer);
-    }, [view, viewportSize.height, layout, obscured]);
+    }, [view, viewportSize.height, viewportSize.width, layout, obscured]);
 
     // Keyboard: page turns (any role — pedals send these keys) and undo/redo.
     // None while a dialog is open, wherever its keys land: a page turned or a
@@ -1413,8 +1444,13 @@ export const PdfViewport = ({
         <div
             ref={containerRef}
             data-stand-mode={standMode || undefined}
-            className="ink-surface relative h-full overflow-clip bg-stone-200 data-stand-mode:fixed data-stand-mode:inset-x-0 data-stand-mode:top-0 data-stand-mode:z-[60] data-stand-mode:h-dvh"
+            className="ink-surface relative h-full overflow-clip bg-desk data-stand-mode:fixed data-stand-mode:inset-x-0 data-stand-mode:top-0 data-stand-mode:z-[60] data-stand-mode:h-dvh"
         >
+            <div
+                ref={safeBottomProbeRef}
+                aria-hidden
+                className="invisible absolute bottom-0 h-[var(--safe-bottom)] w-0"
+            />
             {status === 'loading' ? (
                 <div className="flex h-full items-center justify-center">
                     <LoadingText>Loading score…</LoadingText>
@@ -1457,15 +1493,14 @@ export const PdfViewport = ({
                     {overlayMode === 'history' && !standMode ? (
                         <div
                             data-ui-overlay
-                            // Phones: below the pager/zoom strip (PHONE_CONTROLS_STRIP), not over it.
-                            className="pointer-events-none absolute inset-x-0 top-14 z-20 flex justify-center sm:top-3"
+                            className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center sm:top-3"
                         >
-                            <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950 shadow">
+                            <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-panel-line bg-paper px-3 py-1.5 text-sm text-ink shadow">
                                 <span>Viewing day starting point</span>
                                 <button
                                     type="button"
                                     onClick={() => annotationStore.setHistoryOverlay(null)}
-                                    className="rounded-full bg-amber-800 px-2.5 py-0.5 text-xs font-medium text-white hover:bg-amber-700"
+                                    className="rounded-full bg-ink px-2.5 py-0.5 text-xs font-medium text-paper hover:bg-ink-soft"
                                 >
                                     Back to current
                                 </button>
@@ -1616,16 +1651,16 @@ const Pager = ({
     onTurn: (direction: -1 | 1) => void;
 }) => {
     const view = useViewerStore((s) => s.view);
-    const pageIndex = focusedPageIndex(view, viewportSize.height, layout.layouts, obscured);
+    const pageIndex = focusedPageIndex(view, viewportSize.height, layout.layouts, obscured, viewportSize.width);
     const pageCount = layout.layouts.length;
     // Turns step from the row at the top (see turnPage), not the labelled one.
-    const turnFrom = turnFromPageIndex(view, viewportSize.height, layout.layouts, obscured);
+    const turnFrom = turnFromPageIndex(view, viewportSize.height, layout.layouts, obscured, viewportSize.width);
     const canTurn = (direction: -1 | 1) =>
         pageTurnView(view, layout, turnFrom, direction, viewportSize.width, viewportSize.height, obscured) !== null;
     return (
         <div
             data-ui-overlay
-            className="absolute left-[max(0.5rem,var(--safe-left))] top-2 z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-[max(1rem,var(--safe-left))] sm:top-auto"
+            className="absolute bottom-[calc(var(--toolbar-bottom-clearance,var(--safe-bottom))+var(--viewer-bottom-dock,0px)+0.5rem)] left-[max(0.5rem,var(--safe-left))] z-10 flex items-center gap-1 tabular-nums sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:left-[max(1.25rem,var(--safe-left))] sm:gap-2"
         >
             <button
                 type="button"
@@ -1636,7 +1671,7 @@ const Pager = ({
             >
                 <ChevronLeftIcon size={20} />
             </button>
-            <span className="rounded-full border border-stone-200 bg-white/95 px-2.5 py-1 text-xs font-medium tabular-nums text-stone-600 shadow-sm">
+            <span className="inline-flex h-[34px] items-center rounded-full bg-white px-3 text-[13px] font-semibold tabular-nums text-ink shadow-[0_0_0_1px_rgba(28,25,23,0.08)]">
                 p. {Math.min(pageIndex + 1, pageCount)} / {pageCount}
             </span>
             <button
@@ -1654,7 +1689,7 @@ const Pager = ({
 
 /* Pager and zoom keys: a press dips the key (scale .97) as well as greying it. */
 const roundControlClassName =
-    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition-[scale] duration-(--duration-press) ease-out active:scale-[0.97] active:bg-stone-100';
+    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-ink-soft shadow-[0_0_0_1px_rgba(28,25,23,0.08),0_10px_22px_-12px_rgba(28,25,23,0.45)] transition-[scale] duration-(--duration-press) ease-out active:scale-[0.97] active:bg-stone-100 sm:h-[46px] sm:w-[46px]';
 
 const pagerButtonClassName = `${roundControlClassName} disabled:opacity-40 disabled:active:scale-100 disabled:active:bg-white`;
 
@@ -1675,12 +1710,11 @@ const ZoomControls = ({
     return (
         <div
             data-ui-overlay
-            // Phones: a row at the top-right, beside the pager, clear of the
-            // bottom toolbar; page 1 starts below the strip they share
-            // (PHONE_CONTROLS_STRIP). Larger screens: a column at the
+            // Phones: a row at the bottom-right, beside the pager, above the
+            // bottom toolbar (PHONE_CONTROLS_STRIP). Larger screens: a column at the
             // bottom-right — a row again on short landscape screens, where the
             // column would climb under the toolbar.
-            className="absolute right-[max(0.5rem,var(--safe-right))] top-2 flex flex-row items-center gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-[max(1rem,var(--safe-right))] sm:top-auto sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
+            className="absolute bottom-[calc(var(--toolbar-bottom-clearance,var(--safe-bottom))+var(--viewer-bottom-dock,0px)+0.5rem)] right-[max(0.5rem,var(--safe-right))] flex flex-row items-center gap-2 sm:bottom-[calc(1.25rem+var(--safe-bottom))] sm:right-[max(1.25rem,var(--safe-right))] sm:flex-col sm:items-end sm:[@media(max-height:500px)]:flex-row sm:[@media(max-height:500px)]:items-center"
         >
             {pageColumns !== null ? (
                 <PageLayoutMenu

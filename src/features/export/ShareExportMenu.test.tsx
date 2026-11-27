@@ -59,6 +59,7 @@ import {
     EXPORT_OFFLINE_MESSAGE,
 } from '@/features/export/exportClaim';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
+import { OnInkContext } from '@/ui/onInk';
 
 const teacher = {
     user: { id: 'teacher-1', is_anonymous: false, app_metadata: {} },
@@ -107,6 +108,20 @@ describe('ShareExportMenu export allowance', () => {
     afterEach(() => {
         cleanup();
         vi.restoreAllMocks();
+    });
+
+    it('sits in the phone ink header as Flow-Phone-Viewer has it: 15px, weight 500, as wide as “Export”', () => {
+        render(
+            <OnInkContext.Provider value>
+                <ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" />
+            </OnInkContext.Provider>,
+        );
+        const trigger = screen.getByRole('button', { name: 'Export' });
+        expect(trigger).toHaveClass('text-[15px]!', 'font-medium!');
+        const label = trigger.querySelector('.swap-label')!;
+        expect(label).toHaveClass('[&>:not([data-swap-active])]:hidden');
+        expect(label.className).not.toMatch(/\b(max-)?(sm|md|lg|xl):\[&>:not/);
+        expect(label.querySelector('[data-swap-active]')).toHaveTextContent('Export');
     });
 
     it('opens when the viewer’s “couldn’t be saved” banner asks (openSignal), and only then', async () => {

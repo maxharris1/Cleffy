@@ -3,68 +3,80 @@ import { Link } from 'react-router';
 
 import { useRecordPointerKinds } from '@/features/viewer/useRecordPointerKinds';
 import { ArrowLeftIcon } from '@/ui/icons';
+import { OnInkContext } from '@/ui/onInk';
 
 interface ViewerHeaderProps {
     backTo: string;
     backLabel: string;
     title: string;
-    /**
-     * A control kept on the title's row (the stand-mode toggle): on a phone it
-     * costs the title some width rather than the score another header row.
-     */
-    titleAction?: ReactNode;
     /** Right-side chrome: presence, sync status, badges, actions. */
     children?: ReactNode;
+    primary?: ReactNode;
 }
 
+const TITLE_SEPARATOR = ' — ';
+
+const ScoreTitle = ({ title }: { title: string }) => {
+    const at = title.indexOf(TITLE_SEPARATOR);
+    if (at <= 0 || at + TITLE_SEPARATOR.length >= title.length) {
+        return title;
+    }
+    return (
+        <>
+            {title.slice(0, at + TITLE_SEPARATOR.length)}
+            <em>{title.slice(at + TITLE_SEPARATOR.length)}</em>
+        </>
+    );
+};
+
 /**
- * Slim score-viewer top bar, shared by cloud and local viewers; safe-area aware.
+ * The score viewer's ink strip, shared by cloud and local viewers; safe-area aware.
  *
  * The action cluster wraps, and below lg it takes its own row, so Share / Export
  * / Notes stay on-screen on a phone or a ~768px tablet. A single nowrap row at
  * md clipped the title to unreadable crumbs beside the actions.
  */
-export const ViewerHeader = ({ backTo, backLabel, title, titleAction, children }: ViewerHeaderProps) => {
+export const ViewerHeader = ({ backTo, backLabel, title, children, primary }: ViewerHeaderProps) => {
     const [titleOpen, setTitleOpen] = useState(false);
     useRecordPointerKinds();
     return (
-        <header className="border-b border-stone-200 bg-white pb-2 pl-[max(0.75rem,var(--safe-left))] pr-[max(0.75rem,var(--safe-right))] pt-[max(0.5rem,var(--safe-top))] shadow-sm">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <div className="flex min-w-[12rem] flex-1 items-center gap-3">
-                    <Link
-                        to={backTo}
-                        aria-label={backLabel}
-                        title={backLabel}
-                        // Touch: a 44px hit area, pulled back by the negative margin so
-                        // the arrow and the title do not move.
-                        className="inline-flex shrink-0 items-center justify-center rounded-lg p-1.5 text-stone-600 transition-colors hover:bg-ink/5 pointer-coarse:-m-[7px] pointer-coarse:min-h-11 pointer-coarse:min-w-11"
-                    >
-                        <ArrowLeftIcon size={18} />
-                    </Link>
-                    {/* Truncated to one line; a tap (or click) shows the whole title, which
-                    a phone otherwise had no way to read — there is no hover there. */}
-                    <button
-                        type="button"
-                        aria-expanded={titleOpen}
-                        title={titleOpen ? undefined : title}
-                        onClick={() => setTitleOpen((open) => !open)}
-                        className={`min-w-0 flex-1 cursor-default text-left text-sm font-medium text-stone-700 pointer-coarse:hit-44-y ${
-                            titleOpen ? '[overflow-wrap:anywhere]' : 'truncate'
-                        }`}
-                    >
-                        {title}
-                    </button>
-                    {titleAction}
+        <header className="chrome-ink bg-ink pb-1.5 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))] pt-[max(0.25rem,var(--safe-top))] text-paper sm:pl-[max(1rem,var(--safe-left))] sm:pr-[max(1rem,var(--safe-right))] sm:pt-[max(0.375rem,var(--safe-top))]">
+            <OnInkContext.Provider value>
+                <div className="flex min-h-[3.25rem] flex-wrap items-center gap-x-4 gap-y-0.5">
+                    <div className="flex min-w-[12rem] flex-1 items-center gap-0.5 sm:gap-1.5">
+                        <Link
+                            to={backTo}
+                            aria-label={backLabel}
+                            title={backLabel}
+                            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] text-on-ink-muted transition-colors hover:bg-paper/10"
+                        >
+                            <ArrowLeftIcon size={20} />
+                        </Link>
+                        {/* Truncated to one line; a tap (or click) shows the whole title, which
+                        a phone otherwise had no way to read — there is no hover there. */}
+                        <button
+                            type="button"
+                            aria-expanded={titleOpen}
+                            title={titleOpen ? undefined : title}
+                            onClick={() => setTitleOpen((open) => !open)}
+                            className={`min-w-0 flex-1 cursor-default text-left font-display text-[19px] font-semibold leading-tight tracking-[-0.01em] text-paper [font-variation-settings:'opsz'_10] pointer-coarse:hit-44-y sm:text-[22px] ${
+                                titleOpen ? '[overflow-wrap:anywhere]' : 'truncate'
+                            }`}
+                        >
+                            <ScoreTitle title={title} />
+                        </button>
+                    </div>
+                    {children ? (
+                        <nav
+                            aria-label="Score"
+                            className="order-2 flex min-w-0 flex-[1_1_100%] flex-wrap items-center justify-start gap-x-1.5 gap-y-0.5 pointer-coarse:gap-y-2 lg:order-none lg:flex-[0_1_auto] lg:justify-end [&>*]:max-w-full [&>button]:px-3"
+                        >
+                            {children}
+                        </nav>
+                    ) : null}
+                    {primary ? <div className="order-1 shrink-0 lg:order-none">{primary}</div> : null}
                 </div>
-                {children ? (
-                    <nav
-                        aria-label="Score"
-                        className="flex min-w-0 flex-[1_1_100%] flex-wrap items-center justify-start gap-x-0.5 gap-y-1 lg:flex-[0_1_auto] lg:justify-end [&>*]:shrink-0 [&>button]:px-2 lg:[&>button]:px-3.5"
-                    >
-                        {children}
-                    </nav>
-                ) : null}
-            </div>
+            </OnInkContext.Provider>
         </header>
     );
 };

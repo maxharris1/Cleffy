@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
+import { useBottomDock } from '@/features/viewer/bottomDock';
 import {
     discardLostAccessInk,
     discardSignedOutInk,
@@ -73,6 +74,7 @@ export const SignedOutInkNotice = () => {
     const { accounts, lost } = useSyncExternalStore(subscribeInkRecovery, read);
     const [exporting, setExporting] = useState(false);
     const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+    const dockRef = useBottomDock();
 
     const first = accounts[0];
     if (!first && lost.length === 0) {
@@ -90,13 +92,14 @@ export const SignedOutInkNotice = () => {
     return (
         <>
             <div
+                ref={dockRef}
                 // Pinned to the window's bottom edge, but lifted above the viewer's
                 // phone toolbar when one is there (--toolbar-bottom-clearance,
                 // published by the Toolbar), so it never covers the pen.
-                className="fixed inset-x-0 bottom-[var(--toolbar-bottom-clearance,0px)] z-30 flex items-center gap-2 border-t border-amber-200 bg-amber-50 px-3 py-1.5 pb-[max(0.375rem,var(--safe-bottom))] sm:py-2"
+                className="fixed inset-x-0 bottom-[var(--toolbar-bottom-clearance,0px)] z-30 flex items-center gap-2 border-t border-panel-line bg-paper px-3 py-1.5 pb-[max(0.375rem,var(--safe-bottom))] sm:py-2"
                 role="status"
             >
-                <p className="min-w-0 flex-1 text-sm leading-snug text-amber-900">
+                <p className="min-w-0 flex-1 text-sm leading-snug text-ink">
                     <span className="sm:hidden">{short}</span>
                     <span className="hidden sm:inline">{long}</span>
                 </p>

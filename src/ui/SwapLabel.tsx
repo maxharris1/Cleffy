@@ -1,5 +1,8 @@
 import type { ReactNode } from 'react';
 
+/** The label is only as wide as the active one, so a header row keeps its room for the actions. */
+export const ACTIVE_LABEL_ONLY = '[&>:not([data-swap-active])]:hidden';
+
 export interface SwapLabelProps<K extends string> {
     /** Every label the control can show, by key. All of them are rendered. */
     labels: Record<K, ReactNode>;

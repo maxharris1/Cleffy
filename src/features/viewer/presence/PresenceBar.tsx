@@ -1,10 +1,7 @@
 import { Popover } from '@base-ui/react/popover';
 
-import { initialsOf } from '@/features/account/initials';
 import { linkViewerCount } from '@/lib/presenceName';
 import type { PresencePeer } from '@/sync/wire';
-
-const MAX_CHIPS = 5;
 
 export interface PresenceBarProps {
     peers: PresencePeer[];
@@ -14,31 +11,26 @@ export interface PresenceBarProps {
 }
 
 const CHIP =
-    'flex h-7 w-7 items-center justify-center rounded-full border-2 border-white text-[10px] font-bold text-white shadow-sm';
+    'inline-flex h-[30px] min-w-11 items-center gap-2 whitespace-nowrap rounded-full bg-paper/10 pl-2.5 pr-3 text-[13px] font-semibold text-paper ring-1 ring-paper/24';
 
 /**
- * Who's here: colored initial chips. Each chip is a button that opens a small
- * popover with the name and the page they are on — on hover with a mouse, on
- * a tap on touch, where a title tooltip never appeared.
+ * Who's here: one named chip per person, a dot in their ink colour. Past three
+ * rows the chips scroll, so a full studio never pushes the score off a phone.
+ * Each chip is a button that opens a small popover with the name and the
+ * page they are on — on hover with a mouse, on a tap on touch, where a title
+ * tooltip never appeared.
  */
 export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }: PresenceBarProps) => {
     const others = peers.filter((p) => p.userId !== selfUserId);
     if (others.length === 0) {
         return null;
     }
-    const shown = others.slice(0, MAX_CHIPS);
-    const overflow = others.length - shown.length;
-
     return (
-        // Overlapped on a fine pointer. On touch each chip's 44px hit area
-        // (hit-44) would overlap its neighbour's and the later chip would win
-        // every tap meant for the one before, so the chips stand apart there,
-        // 28px + a 16px gap: 44px from centre to centre, no overlap.
         <div
-            className="flex items-center -space-x-1.5 pointer-coarse:gap-4 pointer-coarse:space-x-0"
+            className="-m-1 flex max-h-[110px] min-w-0 max-w-full flex-wrap items-center gap-x-1.5 gap-y-1.5 overflow-y-auto p-1 pointer-coarse:-my-[7px] pointer-coarse:max-h-[132px] pointer-coarse:gap-y-3.5 pointer-coarse:py-[7px] lg:-order-1"
             aria-label={`${others.length} collaborators viewing`}
         >
-            {shown.map((peer) => {
+            {others.map((peer) => {
                 const name = labelOf(peer);
                 const who = `${name}${peer.isAnonymous && peer.via !== 'link' ? ' (guest)' : ''}`;
                 return (
@@ -47,10 +39,14 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
                             openOnHover
                             delay={150}
                             aria-label={`${who}, on page ${peer.page + 1}`}
-                            className={`${CHIP} relative cursor-default pointer-coarse:hit-44`}
-                            style={{ backgroundColor: peer.color }}
+                            className={`${CHIP} relative cursor-default pointer-coarse:hit-44-y`}
                         >
-                            {initialsOf(name)}
+                            <span
+                                aria-hidden="true"
+                                className="h-2.5 w-2.5 shrink-0 rounded-full"
+                                style={{ backgroundColor: peer.color }}
+                            />
+                            <span className="max-w-40 truncate">{name}</span>
                         </Popover.Trigger>
                         <Popover.Portal>
                             <Popover.Positioner side="bottom" sideOffset={6} collisionPadding={8} className="z-50">
@@ -63,7 +59,6 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
                     </Popover.Root>
                 );
             })}
-            {overflow > 0 ? <span className={`${CHIP} bg-stone-400`}>+{overflow}</span> : null}
         </div>
     );
 };
@@ -78,11 +73,8 @@ export const LinkViewerCount = ({ peers }: LinkViewerCountProps) => {
         return null;
     }
     return (
-        <span
-            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-accent-soft px-2.5 py-1 text-xs font-medium text-accent"
-            title="People watching through your view link"
-        >
-            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-accent" />
+        <span className={`${CHIP} lg:-order-1`} title="People watching through your view link">
+            <span aria-hidden="true" className="h-2.5 w-2.5 rounded-full bg-ink-rule" />
             {count} viewing
         </span>
     );
