@@ -1325,9 +1325,15 @@ const FilterChip = ({
     onClick: () => void;
     children: string;
 }) => (
-    <button type="button" aria-pressed={active} onClick={onClick} className={chipClassName(active)}>
+    <button
+        type="button"
+        aria-pressed={active}
+        onClick={onClick}
+        title={children}
+        className={chipClassName(active, 'max-w-full [&>svg]:shrink-0')}
+    >
         {icon}
-        {children}
+        <span className="truncate">{children}</span>
     </button>
 );
 

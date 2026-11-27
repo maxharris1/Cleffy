@@ -1685,6 +1685,34 @@ describe('grid view', () => {
         expect(screen.queryByRole('combobox', { name: 'Filter by tag' })).not.toBeInTheDocument();
     });
 
+    it('truncates a long tag inside its own chip, keeps its full name, and still filters by it', async () => {
+        const user = userEvent.setup();
+        const longName =
+            'Advanced intermediate piano repertoire for the winter studio recital and regional music festival audition preparation and sight-reading practice';
+        const tags = [...Array.from({ length: 8 }, (_, i) => tag(`t-${i}`, `Tag ${i + 1}`)), tag('t-long', longName)];
+        listLibraryTags.mockResolvedValue(tags);
+        mockBootstrap({ tags, documentTags: new Map([['d1', ['t-long']]]) });
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+        const chip = await screen.findByRole('button', { name: longName, pressed: false });
+        const row = screen.getByRole('button', { name: 'Favorites' }).parentElement as HTMLElement;
+        expect(row).toContainElement(chip);
+        expect(row).toHaveClass('min-w-0');
+        expect(chip).toHaveAttribute('title', longName);
+        expect(chip).toHaveClass('max-w-full');
+        expect(screen.getByText(longName, { selector: 'button > span' })).toHaveClass('truncate');
+
+        await user.click(chip);
+        expect(screen.getByRole('button', { name: longName, pressed: true })).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: 'Prelude and Fugue (Bach, Johann Sebastian)' })).toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).not.toBeInTheDocument();
+
+        await user.click(chip);
+        expect(screen.getByRole('button', { name: longName, pressed: false })).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toBeInTheDocument();
+    });
+
     it('hides the tile under a grouping, where it would have to pick a group', async () => {
         const user = userEvent.setup();
         renderLibrary();
