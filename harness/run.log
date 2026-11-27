@@ -1,0 +1,18 @@
+desktop-1440 | /library | boundary=0 | h1="Library" | nav=239,0,849,64 | {} | library-desktop-1440.png
+desktop-1440 | /search | boundary=0 | h1="Find a score" | nav=239,0,849,64 | {} | search-desktop-1440.png
+desktop-1440 | /students | boundary=0 | h1="Students" | nav=239,0,849,64 | {} | students-desktop-1440.png
+desktop-1440 | /admin/reports | boundary=0 | h1="Reports" | nav=239,0,849,64 | {} | admin-reports-desktop-1440.png
+desktop-1440 | /account | boundary=0 | h1="Account" | nav=239,0,849,64 | {} | account-desktop-1440.png
+desktop-1440 page errors: 0
+ipad-portrait | /library | boundary=0 | h1="Library" | nav=167,0,393,64 | {} | library-ipad-portrait.png
+ipad-portrait | /search | boundary=0 | h1="Find a score" | nav=167,0,393,64 | {} | search-ipad-portrait.png
+ipad-portrait | /students | boundary=0 | h1="Students" | nav=167,0,393,64 | {} | students-ipad-portrait.png
+ipad-portrait | /admin/reports | boundary=0 | h1="Reports" | nav=167,0,393,64 | {"small-tap-target":1} | admin-reports-ipad-portrait.png
+ipad-portrait | /account | boundary=0 | h1="Account" | nav=167,0,393,64 | {"small-tap-target":8} | account-ipad-portrait.png
+ipad-portrait page errors: 0
+iphone-14 | /library | boundary=0 | h1="Library" | nav=0,783,390,61 | {} | library-iphone-14.png
+iphone-14 | /search | boundary=0 | h1="Find a score" | nav=0,783,390,61 | {"overlapping-controls":3} | search-iphone-14.png
+iphone-14 | /students | boundary=0 | h1="Students" | nav=0,783,390,61 | {} | students-iphone-14.png
+iphone-14 | /admin/reports | boundary=0 | h1="Reports" | nav=0,783,390,61 | {"small-tap-target":1} | admin-reports-iphone-14.png
+iphone-14 | /account | boundary=0 | h1="Account" | nav=0,783,390,61 | {"obscured":1,"small-tap-target":8,"overlapping-controls":3} | account-iphone-14.png
+iphone-14 page errors: 0
