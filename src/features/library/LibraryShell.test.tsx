@@ -446,6 +446,22 @@ describe('LibraryShell', () => {
         expect(within(nav).getByRole('link', { name: 'Library' })).not.toHaveAttribute('aria-current');
     });
 
+    it('tabs through the wordmark, the nav, the upload and the account menu in that order', async () => {
+        const user = userEvent.setup();
+        renderShell('/search');
+        const nav = screen.getByRole('navigation', { name: 'Main' });
+        const expected = [
+            screen.getByRole('link', { name: 'Cleffy' }),
+            ...within(nav).getAllByRole('link'),
+            screen.getByLabelText('Upload score'),
+            screen.getByRole('button', { name: /Account menu/ }),
+        ];
+        for (const element of expected) {
+            await user.tab();
+            expect(document.activeElement).toBe(element);
+        }
+    });
+
     it('pads the chrome for the iPhone status bar', () => {
         renderShell();
         expect(screen.getByRole('banner')).toHaveClass('pt-[var(--safe-top)]');

@@ -151,8 +151,6 @@ const BAR_CONTAINER =
 const SHELL_PROGRESS =
     'shell-progress absolute inset-x-0 bottom-0 sm:pointer-events-none sm:top-[var(--safe-top)] sm:bottom-auto';
 
-// Below sm the links are the bottom tab bar's cells: icon over label, the
-// current one ruled along its top edge. From sm up they are the ink bar's tabs.
 const NAV_LINK_BASE =
     'flex min-h-[60px] flex-1 flex-col items-center justify-center gap-1 border-t-2 text-[11px] font-semibold transition-colors focus-visible:-outline-offset-4 sm:min-h-16 sm:flex-none sm:flex-row sm:gap-0 sm:border-t-0 sm:border-b-2 sm:px-0.5 sm:text-[15px]';
 const NAV_LINK_ACTIVE = 'border-accent text-ink sm:border-ink-hand sm:font-semibold sm:text-paper';
@@ -577,9 +575,6 @@ const LibraryFrame = ({
                         <Wordmark tone="ink" className="text-[26px] sm:text-[28px]" />
                     </Link>
 
-                    {/* Below sm the nav is the tab bar fixed to the bottom edge; it
-                        stays here in the markup so the tab order is the same at
-                        every width. */}
                     <nav
                         aria-label="Main"
                         className="shell-tabs fixed inset-x-0 bottom-0 z-30 flex border-t border-hairline bg-paper/97 pb-[var(--safe-bottom)] pl-[var(--safe-left)] pr-[var(--safe-right)] sm:static sm:flex-1 sm:items-center sm:gap-3 sm:border-t-0 sm:bg-transparent sm:p-0 md:gap-5 lg:gap-7"
@@ -775,7 +770,7 @@ const AccountMenu = ({
             popupClassName="w-64"
             open={open}
             onOpenChange={(next) => setOpenedAt(next ? pathname : null)}
-            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-paper/10 pointer-coarse:hit-44 sm:pr-1.5"
+            triggerClassName="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition-colors hover:bg-paper/10 max-sm:pointer-coarse:hit-44 sm:pr-1.5"
             triggerContent={
                 <>
                     <span
