@@ -61,6 +61,28 @@ export const STUB_USER = {
     user_metadata: { display_name: 'Ada Teacher' },
 };
 
+export const STUB_ENTITLEMENTS = {
+    tier: 'teacher',
+    status: 'active',
+    source: 'subscription',
+    current_period_end: '2099-01-01T00:00:00Z',
+    cancel_at_period_end: false,
+    limits: { cloud_scores: -1, omr_runs: -1, vision_reads: -1, smart_imports: -1, pdf_exports: -1, students: 50 },
+};
+
+// The RPCs the signed-in shell reads on every page answer with an object, so the default [] would crash it.
+const STUB_DEFAULTS = {
+    '/rpc/get_entitlements': STUB_ENTITLEMENTS,
+    '/rpc/library_bootstrap': {
+        documents: [],
+        has_more: false,
+        favorite_ids: [],
+        tags: [],
+        document_tags: [],
+        entitlements: STUB_ENTITLEMENTS,
+    },
+};
+
 class Reply {
     constructor(status, body) {
         this.status = status;
@@ -93,8 +115,9 @@ export async function stubApi(page, handlers = {}) {
             return route.fulfill({ status: 204, headers: { ...CORS, 'access-control-allow-methods': '*' } });
         }
         const url = new URL(request.url());
-        const key = Object.keys(handlers).find((k) => url.pathname.endsWith(k));
-        let out = auth[url.pathname] ?? (key === undefined ? [] : handlers[key]);
+        const answers = { ...STUB_DEFAULTS, ...handlers };
+        const key = Object.keys(answers).find((k) => url.pathname.endsWith(k));
+        let out = auth[url.pathname] ?? (key === undefined ? [] : answers[key]);
         if (typeof out === 'function') out = out(url, request);
         const { status, body } = out instanceof Reply ? out : { status: 200, body: out };
         const headers = { ...CORS, 'content-range': '*/0' };
