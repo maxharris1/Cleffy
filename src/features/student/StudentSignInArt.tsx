@@ -6,7 +6,7 @@ import { StudentCodeCard } from '@/features/roster/StudentCodeCard';
 export const StudentSignInArt = () => {
     const handwritingLoaded = useHandwritingFont() === 'loaded';
     return (
-        <div className={`w-[min(430px,100%)]${handwritingLoaded ? '' : ' score-ink-pending'}`}>
+        <div className={`display-opsz w-[min(430px,100%)]${handwritingLoaded ? '' : ' score-ink-pending'}`}>
             <StudentCodeCard
                 displayName="Leo Martin"
                 loginCode="K7QM-2HXP-9RTD"
