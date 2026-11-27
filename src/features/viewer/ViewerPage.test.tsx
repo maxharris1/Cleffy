@@ -893,10 +893,11 @@ describe('SyncDot', () => {
         vi.useRealTimers();
     });
 
-    it('keeps no room for inactive words in the phone header, only from sm up', () => {
+    it('keeps no room for inactive words at any width, so the desktop header stays one row', () => {
         render(<SyncDot status="synced" />);
         const label = document.querySelector('.swap-label')!;
-        expect(label).toHaveClass('max-sm:[&>:not([data-swap-active])]:hidden');
+        expect(label).toHaveClass('[&>:not([data-swap-active])]:hidden');
+        expect(label.className).not.toMatch(/\b(max-)?(sm|md|lg|xl):\[&>:not/);
         expect(activeLabel()).toBe('Synced');
     });
 

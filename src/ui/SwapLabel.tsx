@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 
-/** On a phone the label is only as wide as the active one, so a tight header row keeps its room. */
-export const PHONE_ACTIVE_LABEL_ONLY = 'max-sm:[&>:not([data-swap-active])]:hidden';
+/** The label is only as wide as the active one, so a header row keeps its room for the actions. */
+export const ACTIVE_LABEL_ONLY = '[&>:not([data-swap-active])]:hidden';
 
 export interface SwapLabelProps<K extends string> {
     /** Every label the control can show, by key. All of them are rendered. */

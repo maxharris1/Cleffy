@@ -119,7 +119,8 @@ describe('ShareExportMenu export allowance', () => {
         const trigger = screen.getByRole('button', { name: 'Export' });
         expect(trigger).toHaveClass('text-[15px]!', 'font-medium!');
         const label = trigger.querySelector('.swap-label')!;
-        expect(label).toHaveClass('max-sm:[&>:not([data-swap-active])]:hidden');
+        expect(label).toHaveClass('[&>:not([data-swap-active])]:hidden');
+        expect(label.className).not.toMatch(/\b(max-)?(sm|md|lg|xl):\[&>:not/);
         expect(label.querySelector('[data-swap-active]')).toHaveTextContent('Export');
     });
 

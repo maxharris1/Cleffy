@@ -41,6 +41,7 @@ import {
     type ObscuredEdges,
     type PageColumns,
 } from '@/features/viewer/geometry';
+import { useBottomDockHeight } from '@/features/viewer/bottomDock';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
@@ -355,20 +356,23 @@ export const PdfViewport = ({
     // first fit, which must already see it. Syncing it from state in the effect
     // above would put the stale value back before the fit reads it.
     // Phones add the pager/zoom strip to the bottom edge (see PHONE_CONTROLS_STRIP),
-    // above the toolbar or, without one, above the safe area the strip sits on;
+    // above the toolbar or, without one, above the safe area the strip sits on,
+    // and above any bottom dock that raises it (useBottomDockHeight);
     // any notices floating over the score extend the top edge (noticeInset).
     const toolbarEdgesRef = useRef<ObscuredEdges>(NO_OBSCURED);
     const controlsStripRef = useRef(0);
     const safeBottomProbeRef = useRef<HTMLDivElement | null>(null);
     const safeBottomRef = useRef(0);
     const noticeInsetRef = useRef(noticeInset);
+    const bottomDock = useBottomDockHeight();
+    const bottomDockRef = useRef(bottomDock);
     const applyObscured = useCallback(() => {
         const toolbar = toolbarEdgesRef.current;
         const edges = {
             top: Math.max(toolbar.top, noticeInsetRef.current),
             bottom:
                 controlsStripRef.current > 0
-                    ? Math.max(toolbar.bottom, safeBottomRef.current) + controlsStripRef.current
+                    ? Math.max(toolbar.bottom, safeBottomRef.current) + bottomDockRef.current + controlsStripRef.current
                     : toolbar.bottom,
         };
         obscuredRef.current = edges;
@@ -514,6 +518,11 @@ export const PdfViewport = ({
         applyObscured();
         settleIntoBounds();
     }, [noticeInset, applyObscured, settleIntoBounds]);
+    useLayoutEffect(() => {
+        bottomDockRef.current = bottomDock;
+        applyObscured();
+        settleIntoBounds();
+    }, [bottomDock, applyObscured, settleIntoBounds]);
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
     // These live in state, not refs: the overlay divs only exist once the PDF

@@ -61,7 +61,7 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
-import { PHONE_ACTIVE_LABEL_ONLY, SwapLabel } from '@/ui/SwapLabel';
+import { ACTIVE_LABEL_ONLY, SwapLabel } from '@/ui/SwapLabel';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 import { INK_TEXT_ACTION } from '@/ui/onInk';
 import { MusicIcon } from '@/ui/icons';
@@ -1250,9 +1250,8 @@ const SYNCING_SHOWN_AFTER_MS = 600;
  * never leaves "Synced". Offline, retrying and error show at once. A
  * change of colour is a 200ms opacity crossfade between stacked dots
  * (compositor-only, rather than transitioning one dot's background), instant
- * under reduced motion; from sm up the word swaps in place at the width of the
- * widest ("Waiting for server", SwapLabel), so the header never reflows. A phone
- * header keeps that room for its actions instead.
+ * under reduced motion. The word takes only its own width, so the header keeps
+ * the room "Waiting for server" would reserve for its actions.
  */
 export const SyncDot = ({ status }: { status: SyncDotStatus }) => {
     // The last state that was not "syncing": what a quick round trip keeps
@@ -1286,7 +1285,7 @@ export const SyncDot = ({ status }: { status: SyncDotStatus }) => {
                     active={shown}
                     live={false}
                     align="start"
-                    className={PHONE_ACTIVE_LABEL_ONLY}
+                    className={ACTIVE_LABEL_ONLY}
                 />
             </span>
         </span>
