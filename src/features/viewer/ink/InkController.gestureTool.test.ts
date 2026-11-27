@@ -5,6 +5,8 @@ import { purgeLocalDocument } from '@/features/library/documentsService';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
+import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
+import { FakeTimers } from '@/features/viewer/ink/handwriting/testStrokes';
 import { InkController } from '@/features/viewer/ink/InkController';
 import { AnnotationStore } from '@/sync/annotationStore';
 import type * as dbModule from '@/sync/db';
@@ -42,6 +44,8 @@ const fakeCanvas = (width: number, height: number) => {
         fill: (path: FakePath2D) => {
             shown.push(path.d);
         },
+        fillText: () => undefined,
+        measureText: (text: string) => ({ width: text.length * 8 }),
         fillStyle: '',
         globalAlpha: 1,
         globalCompositeOperation: 'source-over',
@@ -356,6 +360,107 @@ describe('InkController erase undo batch', () => {
             rows: [],
             ops: [],
         });
+    });
+});
+
+describe('InkController erase undo batch overlapping handwriting conversion', () => {
+    let timers: FakeTimers;
+    let handwriting: HandwritingController;
+
+    beforeEach(() => {
+        timers = new FakeTimers();
+        handwriting = new HandwritingController({
+            store,
+            recognizer: () => ({ text: '3', kind: 'digit' }),
+            isEnabled: () => true,
+            getAspect: () => PAGE_W / PAGE_H,
+            schedule: timers.schedule,
+            cancel: timers.cancel,
+        });
+    });
+
+    afterEach(() => handwriting.dispose());
+
+    const holdNextSnapshotCheck = () => {
+        const orig = snapshotService.ensureDayStartingSnapshot;
+        let out!: () => void;
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => (out = resolve));
+        const released = new Promise<void>((resolve) => (release = resolve));
+        vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementationOnce(async (...args) => {
+            out();
+            await released;
+            return orig(...args);
+        });
+        return { held, release };
+    };
+
+    const row = async (id: string) => db.annotations.get(id);
+
+    const eraseAcrossConversion = async (end: (e: PointerEvent) => void) => {
+        drawStroke(100, 300);
+        drawStroke(300, 300);
+        drawStroke(500, 300);
+        await settle();
+        const [a, b, c] = [...store.getPage(0).keys()] as [string, string, string];
+        handwriting.onStrokeCommitted(store.get(c)!);
+
+        useViewerStore.getState().setTool('eraser');
+        ink.delegate.onInkDown(pointer(110, 302));
+        ink.delegate.onInkMove(pointer(130, 304));
+        await settle();
+        expect((await row(a))?.deletedAt).not.toBeNull();
+
+        const conversion = holdNextSnapshotCheck();
+        timers.fire();
+        await conversion.held;
+
+        const eraseB = holdNextSnapshotCheck();
+        ink.delegate.onInkMove(pointer(310, 302));
+        ink.delegate.onInkMove(pointer(330, 304));
+        await eraseB.held;
+
+        conversion.release();
+        await handwriting.settle();
+        const printed = [...store.getPage(0).values()].find((mark) => mark.kind === 'text')!;
+        expect(printed).toBeDefined();
+
+        eraseB.release();
+        await settle();
+        expect((await row(b))?.deletedAt).not.toBeNull();
+        end(pointer(330, 304));
+        await settle();
+        return { a, b, c, printed: printed.id };
+    };
+
+    const undoRestoresEraseThenConversion = async (end: (e: PointerEvent) => void) => {
+        const { a, b, c, printed } = await eraseAcrossConversion(end);
+
+        await store.undoLast();
+        await settle();
+        expect(store.getPage(0).has(a)).toBe(true);
+        expect(store.getPage(0).has(b)).toBe(true);
+        expect((await row(a))?.deletedAt).toBeNull();
+        expect((await row(b))?.deletedAt).toBeNull();
+        expect(store.getPage(0).has(printed)).toBe(true);
+        expect((await row(printed))?.deletedAt).toBeNull();
+
+        await store.undoLast();
+        await settle();
+        expect((await row(printed))?.deletedAt).not.toBeNull();
+        expect(store.getPage(0).has(printed)).toBe(false);
+        expect(store.getPage(0).has(c)).toBe(true);
+        expect((await row(c))?.deletedAt).toBeNull();
+        expect(store.getPage(0).has(a)).toBe(true);
+        expect(store.getPage(0).has(b)).toBe(true);
+    };
+
+    it('one undo restores every stroke the drag erased after lift, and leaves the print for the next undo', async () => {
+        await undoRestoresEraseThenConversion((e) => ink.delegate.onInkUp(e));
+    });
+
+    it('one undo restores every stroke the drag erased after cancel, and leaves the print for the next undo', async () => {
+        await undoRestoresEraseThenConversion((e) => ink.delegate.onInkCancel(e));
     });
 });
 

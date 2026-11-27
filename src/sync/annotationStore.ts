@@ -562,8 +562,8 @@ export class AnnotationStore {
         return this.undo.canRedo;
     }
 
-    async create(annotation: Annotation): Promise<void> {
-        await this.commit({ type: 'create', annotation }, { recordUndo: true });
+    async create(annotation: Annotation, options: { batch?: UndoBatchHandle } = {}): Promise<void> {
+        await this.commit({ type: 'create', annotation }, { recordUndo: true, batch: options.batch });
     }
 
     /**
@@ -616,16 +616,14 @@ export class AnnotationStore {
     }
 
     /** True when this call tombstoned the row; false if it was already gone. */
-    async delete(id: string): Promise<boolean> {
+    async delete(id: string, options: { batch?: UndoBatchHandle } = {}): Promise<boolean> {
         const prev = this.byId.get(id);
         if (!prev || prev.deletedAt) {
             return false;
         }
         return this.commit(
             { type: 'delete', annotation: { ...prev, deletedAt: nowIso(), updatedAt: nowIso() }, prev },
-            {
-                recordUndo: true,
-            },
+            { recordUndo: true, batch: options.batch },
         );
     }
 
@@ -1201,7 +1199,7 @@ export class AnnotationStore {
         }
     }
 
-    private async commit(op: CommitOp, options: { recordUndo?: boolean }): Promise<boolean> {
+    private async commit(op: CommitOp, options: { recordUndo?: boolean; batch?: UndoBatchHandle }): Promise<boolean> {
         if (this.historyOverlay) {
             return false;
         }
@@ -1220,7 +1218,7 @@ export class AnnotationStore {
             const preEdit = options.recordUndo ? this.startingPointFor(author) : [];
             this.applyLocal(op.annotation);
             if (options.recordUndo) {
-                this.pushCommitInverse(op, null);
+                this.pushCommitInverse(op, this.undo.reserve(options.batch));
                 try {
                     await this.captureStartingPoint(author, preEdit, live);
                 } catch (err) {
@@ -1257,7 +1255,7 @@ export class AnnotationStore {
         }
 
         const { annotation } = op;
-        const slotInFrameOpenAtStart = options.recordUndo ? this.undo.reserve() : null;
+        const slotInFrameOpenAtStart = options.recordUndo ? this.undo.reserve(options.batch) : null;
 
         // From here the edit is unsaved (see hasUnsavedEdit), though it is
         // not drawn until the snapshot below is checked: a reconcile of this

@@ -82,13 +82,13 @@ const convertGroupToTextExclusive = async (
             if (!live || live.deletedAt || live.kind !== 'stroke') {
                 return abort();
             }
-            const did = await store.delete(id);
+            const did = await store.delete(id, { batch });
             if (!did) {
                 return abort();
             }
             deleted.push(id);
         }
-        await store.create(text);
+        await store.create(text, { batch });
         store.endBatch(batch);
         return text;
     } catch (err) {

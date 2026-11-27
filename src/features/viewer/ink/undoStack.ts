@@ -70,14 +70,23 @@ export class UndoStack {
         this.pushEntry({ ops: [op], pending: 0, onSettled: [] });
     }
 
-    /** Hold a place in the open frame, or null when no frame is open. */
-    reserve(): UndoSlot | null {
-        const current = this.batches[this.batches.length - 1];
-        if (!current) {
+    /**
+     * Hold a place in `handle`'s frame (the innermost when omitted), or null
+     * when no frame is open. A closed `handle` gets an entry of its own, so
+     * its inverse never lands in another owner's frame.
+     */
+    reserve(handle?: UndoBatchHandle): UndoSlot | null {
+        const frame = this.batches[this.frameIndex(handle)];
+        if (frame) {
+            frame.pending += 1;
+            return { entry: frame };
+        }
+        if (handle === undefined) {
             return null;
         }
-        current.pending += 1;
-        return { entry: current };
+        const entry: Entry = { ops: [], pending: 1, onSettled: [] };
+        this.pushEntry(entry);
+        return { entry };
     }
 
     /** Record `op` where `slot` was reserved, or as `pushInverse` would without one. */

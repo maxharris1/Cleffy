@@ -1025,7 +1025,7 @@ export class InkController {
             canvases.committed.height,
         );
         for (const hit of hits) {
-            settleEdit(this.opts.store.delete(hit.id));
+            settleEdit(this.opts.store.delete(hit.id, { batch: this.openBatch ?? undefined }));
         }
     }
 
