@@ -42,14 +42,12 @@ export const SplitBrandShell = ({ title, subtitle, children, art, footer }: Spli
                     <Wordmark />
                 </Link>
             </div>
-            <div className="brand-enter mx-auto my-auto w-full max-w-[400px] py-10 lg:mx-0">
+            <div className="brand-enter mx-auto my-auto w-full max-w-[400px] min-w-0 py-10 [overflow-wrap:anywhere] lg:mx-0">
                 <h1 className="display-opsz font-display text-[44px] leading-[1.02] font-semibold tracking-[-0.02em] text-balance text-ink sm:text-[60px]">
                     {title}
                 </h1>
                 {subtitle ? (
-                    <p className="mt-3.5 text-[17px] leading-normal text-pretty text-stone-600 [overflow-wrap:anywhere]">
-                        {subtitle}
-                    </p>
+                    <p className="mt-3.5 text-[17px] leading-normal text-pretty text-stone-600">{subtitle}</p>
                 ) : null}
                 {children ? <div className="mt-[30px]">{children}</div> : null}
             </div>

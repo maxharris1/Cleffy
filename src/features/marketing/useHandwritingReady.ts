@@ -3,15 +3,7 @@ import { useEffect, useState } from 'react';
 /** The landing page's handwriting face (landing.css). */
 const HANDWRITING = '500 1em Caveat';
 
-/** Past this, write the notes in whatever face there is rather than hold them back. */
-const GIVE_UP_MS = 3000;
-
-/**
- * True once the handwriting face has loaded (or failed, or taken too long),
- * so a score note is never seen being written in a fallback face. True from
- * the start where the browser has no font loading API (jsdom) or already has
- * the face.
- */
+/** Never times out into the fallback face: the notes stay hidden until Caveat loads. */
 export const useHandwritingReady = (): boolean => {
     const [ready, setReady] = useState(() => {
         if (typeof document === 'undefined' || !('fonts' in document)) {
@@ -28,18 +20,17 @@ export const useHandwritingReady = (): boolean => {
         if (ready) {
             return;
         }
-        let done = false;
-        const settle = () => {
-            if (!done) {
-                done = true;
-                setReady(true);
-            }
-        };
-        const timer = window.setTimeout(settle, GIVE_UP_MS);
-        document.fonts.load(HANDWRITING).then(settle, settle);
+        let current = true;
+        document.fonts.load(HANDWRITING).then(
+            () => {
+                if (current) {
+                    setReady(true);
+                }
+            },
+            () => {},
+        );
         return () => {
-            done = true;
-            window.clearTimeout(timer);
+            current = false;
         };
     }, [ready]);
 
