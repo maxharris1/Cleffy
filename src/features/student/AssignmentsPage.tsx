@@ -213,14 +213,14 @@ const AssignmentsView = ({ session }: { session: Session }) => {
     }
 
     return (
-        <main className="paper-page safe-page min-h-full">
+        <main className="paper-page min-h-full pb-[var(--safe-bottom)]">
             <header className="bg-ink pt-[var(--safe-top)] text-paper [--focus-ring:var(--color-ink-rule)]">
-                <div className="mx-auto flex min-h-16 w-full max-w-[880px] items-center justify-between gap-3 px-[18px] py-2.5 sm:gap-4 sm:px-10 sm:py-0">
-                    <Wordmark tone="ink" className="shrink-0 text-[26px] sm:text-[28px]" />
+                <div className="mx-auto flex min-h-16 w-full max-w-[880px] items-center justify-between gap-3 py-2.5 pr-[max(18px,var(--safe-right))] pl-[max(18px,var(--safe-left))] sm:gap-4 sm:py-0 sm:pr-[max(2.5rem,var(--safe-right))] sm:pl-[max(2.5rem,var(--safe-left))]">
+                    <Wordmark tone="ink" className="shrink-0 text-[22px] min-[360px]:text-[26px] sm:text-[28px]" />
                     <div className="flex min-w-0 items-center gap-2 sm:gap-3.5">
                         <span className="inline-flex h-[30px] min-w-0 items-center gap-2 rounded-full bg-paper/10 pr-3 pl-2.5 text-[13px] font-semibold text-paper shadow-[0_0_0_1px_rgb(247_245_239/0.24)]">
-                            <span aria-hidden="true" className="size-2.5 shrink-0 rounded-full bg-blue-600" />
-                            <span className="truncate">{name}</span>
+                            <span aria-hidden="true" className="size-2.5 shrink-0 rounded-full bg-[#2563eb]" />
+                            <span className="min-w-12 truncate">{name}</span>
                         </span>
                         <button
                             type="button"
@@ -234,7 +234,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                 </div>
             </header>
 
-            <div className="mx-auto w-full max-w-[880px] px-[18px] pt-[22px] pb-14 sm:px-10 sm:pt-9 lg:pt-11 [&>.page-head]:mb-0">
+            <div className="mx-auto w-full max-w-[880px] pt-[22px] pr-[max(18px,var(--safe-right))] pb-14 pl-[max(18px,var(--safe-left))] sm:pt-9 sm:pr-[max(2.5rem,var(--safe-right))] sm:pl-[max(2.5rem,var(--safe-left))] lg:pt-11 [&>.page-head]:mb-0">
                 <PageHead
                     width="home"
                     title={
@@ -330,7 +330,7 @@ const AssignmentRow = ({ score: { assignment, document: doc } }: { score: Assign
                     </span>
                     {assignment.note ? (
                         <span className="mt-2 block max-w-[520px] sm:mt-3">
-                            <span className="inline-block -rotate-1 font-hand text-[21px] leading-[1.1] font-bold [overflow-wrap:anywhere] text-red-700 sm:text-[25px]">
+                            <span className="inline-block -rotate-1 font-hand text-[21px] leading-[1.1] font-bold [overflow-wrap:anywhere] text-[#b91c1c] sm:text-[25px]">
                                 {assignment.note}
                             </span>
                         </span>

@@ -237,6 +237,17 @@ describe('StudentLoginPage', () => {
         expect(screen.getByRole('status')).not.toHaveTextContent('kept on this device');
     });
 
+    it('sets the kept-changes and deleted-account notices in the same amber panel as the student home', () => {
+        renderLogin({ signedOutByTeacher: true, keptChanges: 3 });
+        expect(screen.getByRole('status')).toHaveClass('rounded-xl', 'bg-amber-100', 'text-due');
+        expect(screen.getByRole('status')).not.toHaveClass('text-amber-800');
+        cleanup();
+
+        renderLogin({ signedOutByTeacher: true, accountDeleted: true, discardedChanges: 2 });
+        expect(screen.getByRole('status')).toHaveClass('rounded-xl', 'bg-amber-100', 'text-due');
+        expect(screen.getByRole('status')).not.toHaveClass('text-amber-800');
+    });
+
     it('keeps saying where the kept changes are after a sign-in fails, beside the reason it failed', async () => {
         const user = userEvent.setup();
         const archived =

@@ -150,12 +150,12 @@ const CredentialEntry = () => {
             {/* Stays up through a failed sign-in: what became of the queued
                 changes is still true, and still the thing to know. */}
             {signedOutByTeacher && accountDeleted ? (
-                <p className="mb-4 text-sm text-amber-800" role="status">
+                <p className="mb-4 rounded-xl bg-amber-100 px-4 py-3 text-sm text-due" role="status">
                     {ACCOUNT_DELETED}
                     {discardedChanges > 0 ? ` ${discardedChangesNotice(discardedChanges)}` : null}
                 </p>
             ) : signedOutByTeacher ? (
-                <p className="mb-4 text-sm text-amber-800" role="status">
+                <p className="mb-4 rounded-xl bg-amber-100 px-4 py-3 text-sm text-due" role="status">
                     {SIGNED_OUT_BY_TEACHER}
                     {keptChanges > 0 ? ` ${keptChangesNotice(keptChanges)}` : null}
                 </p>
