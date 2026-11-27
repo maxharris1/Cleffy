@@ -1698,7 +1698,7 @@ const LIBRARY_UNAVAILABLE_COPY: Record<LoadFailure, { title: string; body: strin
 };
 
 /** The list could not be loaded and this device holds no copy of it. */
-const LibraryUnavailable = ({ reason, onRetry }: { reason: LoadFailure; onRetry: () => void }) => (
+export const LibraryUnavailable = ({ reason, onRetry }: { reason: LoadFailure; onRetry: () => void }) => (
     <EmptyState
         className="library-empty mt-8 md:mt-16"
         title={LIBRARY_UNAVAILABLE_COPY[reason].title}
@@ -1711,7 +1711,7 @@ const LibraryUnavailable = ({ reason, onRetry }: { reason: LoadFailure; onRetry:
     </EmptyState>
 );
 
-const EmptyLibrary = ({
+export const EmptyLibrary = ({
     uploading,
     quotaExhausted,
     uploadPct,

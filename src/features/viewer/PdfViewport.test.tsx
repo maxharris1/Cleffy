@@ -983,3 +983,42 @@ describe('PdfViewport phone controls over a bottom dock', () => {
         }
     });
 });
+
+describe('PdfViewport with no tool in hand', () => {
+    afterEach(() => {
+        useViewerStore.setState({ tool: 'pen', fingerDraws: false });
+    });
+
+    it.each(['mouse', 'touch'])('scrolls the score under a %s drag and inks nothing', async (pointerType) => {
+        viewport = { width: 390, height: 664 };
+        let store: AnnotationStore | null = null;
+        render(<ViewerUnderNotices readOnly={false} onStore={(s) => (store = s)} />);
+        await waitFor(() => expect(view().scrollY).toBe(-stackBottomPx(3)));
+        await waitFor(() => expect(store).not.toBeNull());
+        const create = vi.spyOn(store as unknown as AnnotationStore, 'create');
+        // Finger drawing on: with nothing in hand a finger still scrolls.
+        act(() => useViewerStore.setState({ tool: null, fingerDraws: true }));
+
+        const drag = (type: string, x: number, y: number) =>
+            act(() => {
+                document.querySelector('.ink-surface')!.dispatchEvent(
+                    new PointerEvent(type, {
+                        pointerId: 3,
+                        pointerType,
+                        buttons: type === 'pointerup' ? 0 : 1,
+                        clientX: x,
+                        clientY: y,
+                        bubbles: true,
+                    }),
+                );
+            });
+        const start = view().scrollY;
+        drag('pointerdown', 200, 400);
+        drag('pointermove', 200, 360);
+        drag('pointermove', 200, 320);
+        drag('pointerup', 200, 320);
+
+        expect(view().scrollY).toBeCloseTo(start + 80);
+        expect(create).not.toHaveBeenCalled();
+    });
+});

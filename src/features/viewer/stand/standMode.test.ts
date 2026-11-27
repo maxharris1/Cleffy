@@ -112,7 +112,7 @@ describe('standMayInk', () => {
     it('starts nothing that needs the hidden chrome', () => {
         expect(standMayInk('pen', 'text')).toBe(false);
         expect(standMayInk('pen', 'fingering')).toBe(false);
-        expect(standMayInk('pen', 'pan')).toBe(false);
+        expect(standMayInk('pen', null)).toBe(false);
     });
 });
 

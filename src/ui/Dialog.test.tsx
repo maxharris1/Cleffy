@@ -344,4 +344,23 @@ describe('Dialog, Escape while its panel is loading', () => {
         expect(onCloseBelow).toHaveBeenCalledTimes(1);
         expect(onCloseTop).toHaveBeenCalledTimes(1);
     });
+
+    it('keeps the 448 px panel by default and takes a design width when given one', async () => {
+        const { unmount } = render(
+            <Dialog label="Rename" onClose={() => {}}>
+                <p>Body</p>
+            </Dialog>,
+        );
+        expect(await screen.findByRole('dialog', { name: 'Rename' })).toHaveClass('max-w-md');
+        unmount();
+
+        render(
+            <Dialog label="Setup card" onClose={() => {}} maxWidth={480}>
+                <p>Body</p>
+            </Dialog>,
+        );
+        const wide = await screen.findByRole('dialog', { name: 'Setup card' });
+        expect(wide).toHaveClass('max-w-[480px]');
+        expect(wide).not.toHaveClass('max-w-md');
+    });
 });

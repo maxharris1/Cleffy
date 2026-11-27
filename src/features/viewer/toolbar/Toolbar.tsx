@@ -9,7 +9,6 @@ import type { StrokeWidthKey, Tool } from '@/types/models';
 import { PointerIcon, RedoIcon, UndoIcon } from '@/ui/icons';
 
 const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }> = [
-    { tool: 'pan', label: 'Pan', short: 'Pan', icon: <PanIcon /> },
     { tool: 'pen', label: 'Pen', short: 'Pen', icon: <PenIcon /> },
     { tool: 'highlighter', label: 'Highlighter', short: 'Mark', icon: <HighlighterIcon /> },
     { tool: 'eraser', label: 'Eraser', short: 'Erase', icon: <EraserIcon /> },
@@ -91,7 +90,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
 
     const selectTool = (next: Tool) => {
         setStyleOpen(false);
-        setTool(next);
+        setTool(next === tool ? null : next);
     };
 
     // A tap outside the style popover (or Escape) puts it away.
@@ -361,7 +360,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
 };
 
 /** A stroke-width preview: an ink dot, a marker dot, or the eraser's ring. */
-function SizeDot({ tool, size }: { tool: Tool; size: number }) {
+function SizeDot({ tool, size }: { tool: Tool | null; size: number }) {
     return (
         <span
             className={`rounded-full ${tool === 'highlighter' ? 'bg-amber-400/70' : 'bg-stone-700'} ${
@@ -369,18 +368,6 @@ function SizeDot({ tool, size }: { tool: Tool; size: number }) {
             }`}
             style={{ width: size, height: size }}
         />
-    );
-}
-
-function PanIcon() {
-    return (
-        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
-            <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M9 11V6a1.5 1.5 0 0 1 3 0v5M12 11V4.5a1.5 1.5 0 0 1 3 0V11M15 11V6.5a1.5 1.5 0 0 1 3 0V14a5 5 0 0 1-5 5h-1.5a5 5 0 0 1-5-5v-2.5a1.5 1.5 0 0 1 3 0V11"
-            />
-        </svg>
     );
 }
 

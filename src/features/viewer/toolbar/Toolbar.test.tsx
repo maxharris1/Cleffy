@@ -43,9 +43,10 @@ describe('Toolbar', () => {
     it('offers only the core markup tools with fingering switched off', async () => {
         await renderToolbar();
 
-        for (const name of ['Pan', 'Pen', 'Highlighter', 'Eraser', 'Text note']) {
+        for (const name of ['Pen', 'Highlighter', 'Eraser', 'Text note']) {
             expect(screen.getByRole('button', { name })).toBeInTheDocument();
         }
+        expect(screen.queryByRole('button', { name: 'Pan' })).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /fingering/i })).not.toBeInTheDocument();
     });
 
@@ -124,8 +125,27 @@ describe('Toolbar', () => {
         await user.click(screen.getByRole('button', { name: 'Text note' }));
         expect(screen.getByRole('button', { name: 'Text colour' })).toBeInTheDocument();
 
-        await user.click(screen.getByRole('button', { name: 'Pan' }));
+        await user.click(screen.getByRole('button', { name: 'Text note' }));
         expect(screen.queryByRole('button', { name: /colour|size/i })).not.toBeInTheDocument();
+    });
+
+    it('puts the tool in hand down when it is clicked again, leaving every tool unpressed', async () => {
+        flags.fingering = true;
+        const { useViewerStore } = await renderToolbar();
+        const user = userEvent.setup();
+        const tools = ['Pen', 'Highlighter', 'Eraser', 'Text note', /fingering/i].map((name) =>
+            screen.getByRole('button', { name }),
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Pen' }));
+        expect(useViewerStore.getState().tool).toBeNull();
+        for (const button of tools) {
+            expect(button).toHaveAttribute('aria-pressed', 'false');
+        }
+
+        await user.click(screen.getByRole('button', { name: 'Eraser' }));
+        expect(useViewerStore.getState().tool).toBe('eraser');
+        expect(screen.getByRole('button', { name: 'Eraser' })).toHaveAttribute('aria-pressed', 'true');
     });
 
     it('says while its popup is open, so floating UI (the demo’s value card) can step aside', async () => {
