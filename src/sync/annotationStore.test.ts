@@ -331,6 +331,34 @@ describe('AnnotationStore', () => {
         spy.mockRestore();
     });
 
+    it("an undo waiting on the previous account's erase leaves the next account's marks alone", async () => {
+        store.setAuthor('user-1');
+        await store.create(makeStroke('a1'));
+        const orig = snapshotService.ensureDayStartingSnapshot;
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => (release = resolve));
+        const spy = vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementationOnce(async (...args) => {
+            await released;
+            return orig(...args);
+        });
+        const batch = store.beginBatch();
+        const deleting = store.delete('a1');
+        store.endBatch(batch);
+        const undoing = store.undoLast();
+
+        store.setAuthor('user-2');
+        const creating = store.create(makeStroke('b1'));
+        await Promise.resolve();
+        release();
+        await Promise.allSettled([deleting, creating]);
+        await undoing;
+
+        expect(store.get('b1')?.deletedAt).toBeNull();
+        expect((await db.annotations.get('b1'))?.deletedAt).toBeNull();
+        expect(store.canUndo).toBe(true);
+        spy.mockRestore();
+    });
+
     describe('unsaved edits (hasUnsavedEdit / whenSaved)', () => {
         /** Hold the next day-snapshot check until `release`; `held` resolves once it is out. */
         const holdSnapshotCheck = (beforeRelease?: () => Promise<void>) => {
