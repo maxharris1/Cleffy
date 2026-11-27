@@ -166,6 +166,8 @@ const fingerSwipe = (el: Element) => {
     clock += 1000;
 };
 
+const panDistance = () => (h.onPan?.mock.calls ?? []).reduce((sum, [dx, dy]) => sum + Math.hypot(dx, dy), 0);
+
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 
 const setFingerDraws = (fingerDraws: boolean) => {
@@ -253,13 +255,13 @@ describe("/try, a pen pressed on the router's Loading demo… screen", () => {
             act(() => h.releaseImport());
             const viewport = await openScore();
             expect(useViewerStore.getState().penSeen).toBe(true);
-            expect(screen.queryByRole('button', { name: 'Draw with finger' })).not.toBeInTheDocument();
+            expect(screen.queryByRole('group', { name: 'What a finger does' })).not.toBeInTheDocument();
 
             setFingerDraws(fingerDraws);
             fingerSwipe(viewport);
             await settle();
             expect(h.shown).toHaveLength(0);
-            expect(h.onPan).toHaveBeenCalled();
+            expect(panDistance()).toBeGreaterThan(0);
         },
     );
 });
@@ -297,7 +299,7 @@ describe("/try, a pen pressed on the demo's own loading screen", () => {
             fingerSwipe(viewport);
             await settle();
             expect(h.shown).toHaveLength(0);
-            expect(h.onPan).toHaveBeenCalled();
+            expect(panDistance()).toBeGreaterThan(0);
         },
     );
 
@@ -357,8 +359,8 @@ describe("the first queued pen press on the router's loading screen, before pass
             await settle();
             expect({
                 penSeen: useViewerStore.getState().penSeen,
-                switchVisible: screen.queryByRole('button', { name: 'Draw with finger' }) !== null,
-                panned: h.onPan?.mock.calls.length !== 0,
+                switchVisible: screen.queryByRole('group', { name: 'What a finger does' }) !== null,
+                panned: panDistance() > 0,
                 committed: h.shown.length,
             }).toEqual({ penSeen: true, switchVisible: false, panned: true, committed: 0 });
         } finally {
