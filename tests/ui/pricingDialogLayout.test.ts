@@ -78,7 +78,7 @@ describe.skipIf(!CHROMIUM || !CSS)('Plans dialog layout', () => {
         rmSync(dir, { recursive: true, force: true });
     });
 
-    /** Each plan card's buttons: label, and how far its text runs past the button's own box. */
+    /** How many lines the heading takes, and each plan card's buttons: label, how far its text runs past the button's own box, and focus ring. */
     const measureActions = async (markup: string, width: number) => {
         const file = join(dir, `${Math.random().toString(36).slice(2)}.html`);
         const stylesheet = pathToFileURL(join(ASSETS, CSS!)).href;
@@ -90,8 +90,12 @@ describe.skipIf(!CHROMIUM || !CSS)('Plans dialog layout', () => {
         try {
             await page.goto(pathToFileURL(file).href);
             await page.evaluate(() => document.fonts.ready);
-            return await page.evaluate(() =>
-                [...document.querySelectorAll<HTMLButtonElement>('section button')].map((button) => {
+            return await page.evaluate(() => {
+                const heading = document.querySelector('h2')!;
+                const headingLines = Math.round(
+                    heading.getBoundingClientRect().height / parseFloat(getComputedStyle(heading).lineHeight),
+                );
+                const actions = [...document.querySelectorAll<HTMLButtonElement>('section button')].map((button) => {
                     const box = button.getBoundingClientRect();
                     const range = document.createRange();
                     range.selectNodeContents(button);
@@ -110,8 +114,9 @@ describe.skipIf(!CHROMIUM || !CSS)('Plans dialog layout', () => {
                             button.scrollWidth - button.clientWidth,
                         ),
                     };
-                }),
-            );
+                });
+                return { actions, headingLines };
+            });
         } finally {
             await page.close();
         }
@@ -120,7 +125,7 @@ describe.skipIf(!CHROMIUM || !CSS)('Plans dialog layout', () => {
     it.each(STATES.flatMap(([state, props]) => VIEWPORTS.map((width) => [state, width, props] as const)))(
         'keeps every plan action label inside its button for %s at %i px',
         async (_state, width, props) => {
-            const actions = await measureActions(markupFor(props), width);
+            const { actions } = await measureActions(markupFor(props), width);
             expect(actions.length).toBeGreaterThan(0);
             for (const { label, overflow } of actions) {
                 expect(overflow, `${label} at ${width}px`).toBe(0);
@@ -129,7 +134,7 @@ describe.skipIf(!CHROMIUM || !CSS)('Plans dialog layout', () => {
     );
 
     it('rings Resume subscription on the ink card in the ink rule, not the accent', async () => {
-        const actions = await measureActions(
+        const { actions } = await measureActions(
             markupFor({ currentTier: 'teacher', subscription: { endsAt: null, cancelling: true } }),
             390,
         );
@@ -137,8 +142,13 @@ describe.skipIf(!CHROMIUM || !CSS)('Plans dialog layout', () => {
         expect(resume).toMatchObject({ ring: '#818cf8', card: 'rgb(28, 25, 23)' });
     });
 
+    it.each([1024, 1440])('sets the heading on one line at %i px', async (width) => {
+        const { headingLines } = await measureActions(markupFor({ currentTier: 'free' }), width);
+        expect(headingLines).toBe(1);
+    });
+
     it('lays out the Founding action at 320 px', async () => {
-        const actions = await measureActions(markupFor({ currentTier: 'free' }), 320);
+        const { actions } = await measureActions(markupFor({ currentTier: 'free' }), 320);
         expect(actions.map(({ label }) => label)).toContain('Become a Founding Teacher');
     });
 });
