@@ -1053,16 +1053,21 @@ export class AnnotationStore {
         }
         const request = this.undo.requestUndo();
         const press = this.guardAtPress();
-        for (;;) {
-            const entry = await this.undo.popUndo(request);
-            if (!entry) {
-                break;
+        noteEditsInFlight(1, this.docId);
+        try {
+            for (;;) {
+                const entry = await this.undo.popUndo(request);
+                if (!entry) {
+                    break;
+                }
+                const inverses = await this.replayEntry(entry, press);
+                if (inverses) {
+                    this.undo.pushRedoEntry(inverses);
+                    break;
+                }
             }
-            const inverses = await this.replayEntry(entry, press);
-            if (inverses) {
-                this.undo.pushRedoEntry(inverses);
-                break;
-            }
+        } finally {
+            noteEditsInFlight(-1, this.docId);
         }
         this.notifyMeta();
     }
@@ -1072,16 +1077,21 @@ export class AnnotationStore {
             return;
         }
         const press = this.guardAtPress();
-        for (;;) {
-            const entry = this.undo.popRedo();
-            if (!entry) {
-                break;
+        noteEditsInFlight(1, this.docId);
+        try {
+            for (;;) {
+                const entry = this.undo.popRedo();
+                if (!entry) {
+                    break;
+                }
+                const inverses = await this.replayEntry(entry, press);
+                if (inverses) {
+                    this.undo.pushUndoEntryRaw(inverses);
+                    break;
+                }
             }
-            const inverses = await this.replayEntry(entry, press);
-            if (inverses) {
-                this.undo.pushUndoEntryRaw(inverses);
-                break;
-            }
+        } finally {
+            noteEditsInFlight(-1, this.docId);
         }
         this.notifyMeta();
     }
@@ -1102,9 +1112,10 @@ export class AnnotationStore {
         const inverses: UndoableOp[] = [];
         const wrote: string[] = [];
         for (let start = 0; start < reversed.length; start += CHUNK) {
-            if (!live() || generation !== this.generation) {
-                // Signed out, or reset for another account, between chunks:
-                // the rest of the entry is not applied.
+            if (generation !== this.generation) {
+                // Signed out, or reset for another account, since the press:
+                // the rest of the entry is not applied. A score lost meanwhile
+                // is left to persistMany, which keeps the chunk as closed ink.
                 throw new RecoveryCancelled();
             }
             const commits: CommitOp[] = [];
