@@ -137,9 +137,10 @@ const NAV_ITEMS: { to: string; label: string; end: boolean; needsStudents?: bool
 const SHELL_CONTAINER = 'mx-auto w-full max-w-[100rem] px-4 sm:px-6 lg:px-10';
 const BAR_CONTAINER = 'mx-auto w-full max-w-[85rem] px-4 sm:px-6 lg:px-10';
 
-// From sm up the bar hangs below the header so the current tab's underline on
-// the bar's bottom edge stays visible.
-const SHELL_PROGRESS = 'shell-progress absolute inset-x-0 bottom-0 sm:top-full sm:bottom-auto';
+// From sm up the strip runs along the top of the bar's row: the current tab's
+// underline owns the bottom edge, and below the bar it would sit over the page.
+const SHELL_PROGRESS =
+    'shell-progress absolute inset-x-0 bottom-0 sm:pointer-events-none sm:top-[var(--safe-top)] sm:bottom-auto';
 
 const NAV_LINK_BASE =
     'shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors sm:flex sm:min-h-16 sm:items-center sm:rounded-none sm:border-b-2 sm:px-0.5 sm:py-0 sm:text-[15px] sm:focus-visible:-outline-offset-4';
@@ -582,12 +583,13 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         {/* The menu closes on click, and the upload before sign-out can
                             take seconds on a slow connection: say what is happening
                             where the menu was, or the click looks like it did nothing.
-                            From sm up it hangs below the bar instead: inline, it pushed
-                            the row past the viewport at 640-700px. */}
+                            From sm up it sits in the band under the controls instead:
+                            inline, it pushed the row past the viewport at 640-700px,
+                            and below the bar it covered the page's sticky controls. */}
                         {savingBeforeSignOut ? (
                             <span
                                 role="status"
-                                className="text-sm text-stone-600 sm:pointer-events-none sm:absolute sm:top-full sm:right-6 sm:mt-3 sm:rounded-lg sm:bg-ink sm:px-3 sm:py-1.5 sm:text-on-ink-muted sm:shadow-md lg:right-10"
+                                className="text-sm text-stone-600 sm:pointer-events-none sm:absolute sm:right-6 sm:bottom-px sm:text-[10px] sm:leading-none sm:text-on-ink-muted lg:right-10"
                             >
                                 Saving changes…
                             </span>

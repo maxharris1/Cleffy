@@ -384,21 +384,21 @@ describe('LibraryShell', () => {
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
-    it('hangs the saving status and its progress below the bar from sm up, out of the row', async () => {
+    it('keeps the saving status and its progress inside the bar from sm up, off the page below', async () => {
         const user = userEvent.setup();
         sessionMocks.syncBeforeSignOut.mockReturnValue(new Promise(() => undefined));
-        renderShell();
+        renderShell('/search');
 
         await user.click(await screen.findByRole('button', { name: /Account menu/ }));
         await user.click(await screen.findByRole('menuitem', { name: 'Sign out' }));
 
         const status = screen.getByRole('status');
-        expect(status).toHaveClass('sm:absolute', 'sm:top-full');
-        expect(status.closest('.sm\\:relative')).not.toBeNull();
-        expect(screen.getByRole('progressbar', { name: 'Saving changes before signing out' })).toHaveClass(
-            'sm:top-full',
-            'sm:bottom-auto',
-        );
+        expect(status).toHaveClass('sm:absolute', 'sm:bottom-px', 'sm:pointer-events-none');
+        expect(status).not.toHaveClass('sm:top-full');
+        expect(status.closest('.sm\\:relative')).toHaveClass('sm:h-16');
+        const progress = screen.getByRole('progressbar', { name: 'Saving changes before signing out' });
+        expect(progress).toHaveClass('sm:top-[var(--safe-top)]', 'sm:bottom-auto', 'sm:pointer-events-none');
+        expect(progress).not.toHaveClass('sm:top-full');
     });
 
     it('offers help and the legal pages from the account menu', async () => {
@@ -797,20 +797,20 @@ describe('LibraryShell upload bar', () => {
         });
     });
 
-    it('hangs the upload bar below the top bar from sm up, off the current tab underline', async () => {
+    it('runs the upload bar along the top of the bar from sm up, off the current tab underline', async () => {
         uploadReaching(40);
         renderShell();
         pickFile();
         await elapse(0);
-        expect(bar()).toHaveClass('sm:top-full', 'sm:bottom-auto');
+        expect(bar()).toHaveClass('sm:top-[var(--safe-top)]', 'sm:bottom-auto');
     });
 
-    it('hangs the IMSLP import bar below the top bar from sm up, off the current tab underline', async () => {
+    it('runs the IMSLP import bar along the top of the bar from sm up, off the current tab underline', async () => {
         importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
         renderShell('/search');
         fireEvent.click(screen.getByRole('button', { name: 'import' }));
         await elapse(0);
-        expect(bar('Importing score')).toHaveClass('sm:top-full', 'sm:bottom-auto');
+        expect(bar('Importing score')).toHaveClass('sm:top-[var(--safe-top)]', 'sm:bottom-auto');
     });
 
     it('turns the IMSLP sweep into a full bar for the same beat before opening the score', async () => {

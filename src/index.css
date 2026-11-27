@@ -827,8 +827,7 @@ body {
  * From sm up the top bar is ink. Unlayered and after the block above so the
  * opaque-paper fallback for .chrome-paper cannot put paper text on paper. The
  * accent is under 3:1 on ink, so focus rings and the progress fill use the
- * wordmark's ink rule instead. The progress strip hangs below the bar, so its
- * square ink track reads as part of the bar.
+ * wordmark's ink rule instead.
  */
 @media (width >= 40rem) {
     .shell-bar {
