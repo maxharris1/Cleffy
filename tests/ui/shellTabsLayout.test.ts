@@ -105,7 +105,14 @@ const shellMarkup = (path: string, page: () => unknown) =>
 const termsMarkup = () =>
     renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/terms'] }, createElement(TermsPage)));
 
-type Setup = { width: number; height?: number; rootFont?: string; safeBottom?: string; touch?: boolean };
+type Setup = {
+    width: number;
+    height?: number;
+    rootFont?: string;
+    defaultFont?: number;
+    safeBottom?: string;
+    touch?: boolean;
+};
 
 describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
     let browser: Browser;
@@ -137,6 +144,10 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
             hasTouch: setup.touch ?? false,
         });
         try {
+            if (setup.defaultFont) {
+                const cdp = await page.context().newCDPSession(page);
+                await cdp.send('Page.setFontSizes', { fontSizes: { standard: setup.defaultFont } });
+            }
             await page.goto(pathToFileURL(file).href);
             await page.evaluate(() => document.fonts.ready);
             return await run(page);
@@ -282,22 +293,41 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
     );
 
     it.each([
-        [320, '16px'],
-        [320, '12px'],
-        [320, '9px'],
-        [390, '16px'],
-        [390, '12px'],
-        [390, '9px'],
+        [320, 9],
+        [390, 12],
+        [390, 16],
     ] as const)(
-        "lands a touch 43 px from the upload button's left edge on Upload score at %i px with a %s default font",
-        async (width, rootFont) => {
-            const hit = await withPage(
+        'lands every touch inside the phone upload button on Upload score at %i px with a %i px default font',
+        async (width, defaultFont) => {
+            const result = await withPage(
                 shellMarkup('/library', rows),
-                { width, rootFont, touch: true },
+                { width, defaultFont, touch: true },
                 async (page) => {
-                    const point = await page.evaluate(() => {
-                        const rect = document.querySelector('label.shell-upload')!.getBoundingClientRect();
-                        return { x: rect.left + 43, y: rect.top + rect.height / 2 };
+                    const { box, missed } = await page.evaluate(() => {
+                        const label = document.querySelector('label.shell-upload')!;
+                        const rect = label.getBoundingClientRect();
+                        const radius = Number.parseFloat(getComputedStyle(label).borderTopRightRadius);
+                        const insideShape = (x: number, y: number) => {
+                            const cx = Math.min(Math.max(x, radius), rect.width - radius);
+                            const cy = Math.min(Math.max(y, radius), rect.height - radius);
+                            return Math.hypot(x - cx, y - cy) <= radius;
+                        };
+                        const missed: string[] = [];
+                        for (let x = 0.5; x < rect.width; x += 1) {
+                            for (let y = 0.5; y < rect.height; y += 1) {
+                                if (!insideShape(x, y)) continue;
+                                const hit = document.elementFromPoint(rect.left + x, rect.top + y)!;
+                                if (!label.contains(hit)) {
+                                    missed.push(
+                                        `${x},${y} ${hit.closest('[aria-label]')?.getAttribute('aria-label') ?? hit.tagName}`,
+                                    );
+                                }
+                            }
+                        }
+                        return {
+                            box: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                            missed,
+                        };
                     });
                     await page.evaluate(() => {
                         document.addEventListener(
@@ -312,11 +342,25 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
                             { once: true },
                         );
                     });
-                    await page.touchscreen.tap(point.x, point.y);
-                    return page.evaluate(() => document.body.dataset.touched);
+                    await page.touchscreen.tap(box.left + 43, box.top + box.height / 2);
+                    const tapped = await page.evaluate(() => document.body.dataset.touched);
+                    const avatar = await page.evaluate(() => {
+                        const trigger = document.querySelector('[aria-label^="Account menu"]')!;
+                        const area = getComputedStyle(trigger, '::after');
+                        const rect = trigger.getBoundingClientRect();
+                        return {
+                            width: Math.max(rect.width, Number.parseFloat(area.width) || 0),
+                            height: Math.max(rect.height, Number.parseFloat(area.height) || 0),
+                        };
+                    });
+                    return { size: { width: box.width, height: box.height }, missed, tapped, avatar };
                 },
             );
-            expect(hit).toBe('Upload score');
+            expect(result.size).toEqual({ width: 44, height: 44 });
+            expect(result.missed).toEqual([]);
+            expect(result.tapped).toBe('Upload score');
+            expect(result.avatar.width).toBeGreaterThanOrEqual(44);
+            expect(result.avatar.height).toBeGreaterThanOrEqual(44);
         },
     );
 
