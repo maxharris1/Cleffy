@@ -16,6 +16,7 @@ const fetchSignInStillValid = vi.fn();
 const signOut = vi.fn();
 const signOutKeepingChanges = vi.fn();
 const signOutDeletedAccount = vi.fn();
+const syncBeforeSignOut = vi.fn();
 
 vi.mock('@/features/student/studentApi', () => ({
     fetchMyAssignments: (...args: unknown[]) => fetchMyAssignments(...args),
@@ -30,7 +31,7 @@ vi.mock('@/features/auth/session', async (importOriginal) => ({
     signOut: (...args: unknown[]) => signOut(...args),
     signOutKeepingChanges: (...args: unknown[]) => signOutKeepingChanges(...args),
     signOutDeletedAccount: (...args: unknown[]) => signOutDeletedAccount(...args),
-    syncBeforeSignOut: async () => ({ pending: 0, refused: 0 }),
+    syncBeforeSignOut: (...args: unknown[]) => syncBeforeSignOut(...args),
 }));
 
 /** A provisioned student: no email, user_type set by student-provision. */
@@ -96,6 +97,8 @@ const StudentLoginStub = () => {
     return <p>{told ? 'student login (signed out by teacher)' : 'student login'}</p>;
 };
 
+const inkBar = () => screen.getAllByRole('banner')[0] as HTMLElement;
+
 const renderAssignments = () =>
     render(
         <MemoryRouter initialEntries={['/assignments']}>
@@ -114,6 +117,7 @@ beforeEach(() => {
     signOut.mockResolvedValue(undefined);
     signOutKeepingChanges.mockResolvedValue(0);
     signOutDeletedAccount.mockResolvedValue(0);
+    syncBeforeSignOut.mockResolvedValue({ pending: 0, refused: 0 });
 });
 
 afterEach(() => {
@@ -144,6 +148,22 @@ describe('AssignmentsPage', () => {
         expect(within(chloe).queryByText(/^Due /)).not.toBeInTheDocument();
     });
 
+    it('heads the list "Your pieces." and marks each piece Can edit or View only', async () => {
+        fetchMyAssignments.mockResolvedValue([
+            assigned('doc-1', 'Prelude and Fugue', { note: 'Circle anything that trips you.' }),
+            assigned('doc-2', 'An Chloe', { access: 'view' }),
+        ]);
+        renderAssignments();
+
+        expect(screen.getByRole('heading', { level: 1, name: 'Your pieces.' })).toBeInTheDocument();
+        const prelude = await screen.findByRole('link', { name: /Prelude and Fugue/ });
+        expect(within(prelude).getByText('Can edit')).toBeInTheDocument();
+        expect(within(prelude).getByText('Open')).toBeInTheDocument();
+        expect(prelude).toHaveAccessibleName(expect.stringContaining('Circle anything that trips you.'));
+        const chloe = screen.getByRole('link', { name: /An Chloe/ });
+        expect(within(chloe).queryByText('Can edit')).not.toBeInTheDocument();
+    });
+
     it('invites the student to wait rather than showing an empty page', async () => {
         renderAssignments();
         expect(await screen.findByRole('heading', { name: 'Nothing here yet' })).toBeInTheDocument();
@@ -164,6 +184,38 @@ describe('AssignmentsPage', () => {
 
         expect(signOut).toHaveBeenCalled();
         expect(await screen.findByText('student login')).toBeInTheDocument();
+    });
+
+    it('runs the ink bar to the top edge and pads it by the safe-area inset once', async () => {
+        renderAssignments();
+        await screen.findByRole('heading', { name: 'Nothing here yet' });
+
+        const main = screen.getByRole('main');
+        expect(main).not.toHaveClass('safe-page');
+        expect(main.className).not.toMatch(/(^|\s)(p|pt|py)-\[?[^\s]*safe-top/);
+        expect(inkBar()).toHaveClass('pt-[var(--safe-top)]');
+    });
+
+    it('keeps the student’s name in the ink bar while it saves before sign-out', async () => {
+        const user = userEvent.setup();
+        syncBeforeSignOut.mockReturnValue(new Promise(() => undefined));
+        fetchMyRosterProfile.mockResolvedValue(rosterRow('Maximiliana Konstantinopoulou-Featherstonehaugh'));
+        renderAssignments();
+
+        const name = await within(inkBar()).findByText('Maximiliana Konstantinopoulou-Featherstonehaugh');
+        await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+        expect(await screen.findByRole('button', { name: 'Saving changes…' })).toBeDisabled();
+        expect(inkBar()).toContainElement(name);
+    });
+
+    it('sets the teacher’s note in #b91c1c and the presence dot in #2563eb', async () => {
+        fetchMyAssignments.mockResolvedValue([assigned('doc-1', 'Prelude', { note: 'Slow down in bar 9.' })]);
+        renderAssignments();
+
+        expect(await screen.findByText('Slow down in bar 9.')).toHaveClass('text-[#b91c1c]');
+        const dot = inkBar().querySelector('[aria-hidden="true"].rounded-full');
+        expect(dot).toHaveClass('bg-[#2563eb]');
     });
 
     it('picks up a piece assigned while the page is open, when the student comes back to it', async () => {

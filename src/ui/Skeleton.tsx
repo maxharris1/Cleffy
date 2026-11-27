@@ -85,14 +85,18 @@ export const RosterSkeleton = ({ label, count = 5 }: { label: string; count?: nu
 
 /** A student's assigned pieces: title-height cards with a badge slot. */
 export const AssignmentsSkeleton = ({ label, count = 4 }: { label: string; count?: number }) => (
-    <div className="mt-6" aria-busy="true">
+    <div aria-busy="true">
         <Status label={label} />
-        <ul className="space-y-3">
+        <ul>
             {Array.from({ length: count }, (_, i) => (
-                <li key={i} className="rounded-xl border border-stone-300/60 bg-white/70 px-4 py-3.5">
-                    <div className="flex items-center gap-2.5">
-                        <SkeletonBlock className="h-5 w-2/3" />
-                        <SkeletonBlock className="ml-auto h-5 w-16 rounded-full" />
+                <li
+                    key={i}
+                    className="flex items-start gap-3.5 border-b border-hairline py-4 sm:items-center sm:gap-7 sm:px-1 sm:py-6"
+                >
+                    <SkeletonBlock className="aspect-[1275/1650] w-16 shrink-0 rounded-[3px] sm:w-24" />
+                    <div className="flex min-w-0 grow flex-col gap-2.5">
+                        <SkeletonBlock className="h-6 w-2/3 sm:h-8" />
+                        <SkeletonBlock className="h-[22px] w-20 rounded-full" />
                     </div>
                 </li>
             ))}

@@ -6,6 +6,8 @@ import { RequireStudent } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { LegalLinks } from '@/features/legal/LegalLinks';
+import { ScoreThumb } from '@/features/library/ScoreThumb';
+import '@/features/marketing/handwriting.css';
 import { parseCachedAssignments } from '@/features/student/assignmentsCache';
 import { EndedSignInInkPrompt } from '@/features/student/EndedSignInInkPrompt';
 import { signOutEndedStudent } from '@/features/student/endedSignIn';
@@ -21,6 +23,9 @@ import { Badge } from '@/ui/Badge';
 import { EmptyState } from '@/ui/EmptyState';
 import { AssignmentsSkeleton } from '@/ui/Skeleton';
 import { buttonClassName } from '@/ui/classNames';
+import { ChevronRightIcon } from '@/ui/icons';
+import { PageHead } from '@/ui/PageHead';
+import { Wordmark } from '@/ui/Wordmark';
 
 /**
  * The whole student app: the pieces their teacher assigned, and a way out.
@@ -208,46 +213,49 @@ const AssignmentsView = ({ session }: { session: Session }) => {
     }
 
     return (
-        <main className="paper-page safe-page min-h-full">
-            <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6 sm:py-10">
-                <header className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                        <p className="landing-brand font-display text-2xl font-semibold sm:text-3xl">Cleffy</p>
-                        <p className="mt-1 truncate text-sm text-stone-500">{name}</p>
-                    </div>
-                    <button
-                        type="button"
-                        onClick={() => void requestSignOut()}
-                        disabled={savingBeforeSignOut}
-                        className={buttonClassName('ghost', 'sm', 'shrink-0')}
-                    >
-                        {savingBeforeSignOut ? 'Saving changes…' : 'Sign out'}
-                    </button>
-                </header>
+        <main className="paper-page min-h-full pb-[var(--safe-bottom)]">
+            <StudentInkBar name={name} saving={savingBeforeSignOut} onSignOut={() => void requestSignOut()} />
 
-                <h1 className="mt-8 font-display text-2xl font-semibold tracking-tight text-stone-800 sm:mt-10">
-                    Your pieces
-                </h1>
+            <div className="mx-auto w-full max-w-[880px] pt-[22px] pr-[max(18px,var(--safe-right))] pb-14 pl-[max(18px,var(--safe-left))] sm:pt-9 sm:pr-[max(2.5rem,var(--safe-right))] sm:pl-[max(2.5rem,var(--safe-left))] lg:pt-11 [&>.page-head]:mb-0">
+                <PageHead
+                    width="home"
+                    title={
+                        <>
+                            Your <em>pieces.</em>
+                        </>
+                    }
+                    subtitle={
+                        <p>
+                            Everything your teacher has given you. New marks show up on the page{' '}
+                            <span className="text-ink shadow-[inset_0_-0.52em_0_var(--color-highlighter)]">
+                                as they are made
+                            </span>
+                            .
+                        </p>
+                    }
+                />
 
                 {notice ? (
-                    <p className="mt-5 text-sm text-amber-800" role="status">
-                        {notice}
-                    </p>
+                    <div className="border-b border-hairline py-4">
+                        <p className="rounded-xl bg-amber-100 px-4 py-3 text-sm text-due" role="status">
+                            {notice}
+                        </p>
+                    </div>
                 ) : null}
 
                 {loading && scores === null ? <AssignmentsSkeleton label="Finding your pieces…" /> : null}
 
                 {scores && scores.length > 0 ? (
-                    <ul className="mt-6 space-y-3">
+                    <ul>
                         {scores.map((score) => (
-                            <AssignmentCard key={score.assignment.id} score={score} />
+                            <AssignmentRow key={score.assignment.id} score={score} />
                         ))}
                     </ul>
                 ) : null}
 
                 {scores && scores.length === 0 ? (
                     <EmptyState
-                        className="mt-16"
+                        className="py-16"
                         title="Nothing here yet"
                         body="Your teacher will assign your pieces."
                     />
@@ -257,11 +265,11 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                     created and controls the account), so say where to go instead.
                     Not "ask your teacher": a teacher can only archive a student,
                     which keeps the account and its marks. */}
-                <footer className="mt-16 border-t border-stone-300/50 pt-4">
-                    <p className="text-xs text-stone-500">
+                <footer className="mt-7">
+                    <p className="text-[13px] leading-normal text-pretty text-ink-muted">
                         Your teacher looks after this account. To have it and its data deleted, contact us.
                     </p>
-                    <LegalLinks withContact className="mt-2" />
+                    <LegalLinks withContact className="mt-1.5" />
                 </footer>
             </div>
             {signOutDialog}
@@ -269,39 +277,85 @@ const AssignmentsView = ({ session }: { session: Session }) => {
     );
 };
 
-const AssignmentCard = ({ score: { assignment, document: doc } }: { score: AssignedScore }) => {
+export const StudentInkBar = ({
+    name,
+    saving,
+    onSignOut,
+}: {
+    name: string;
+    saving: boolean;
+    onSignOut: () => void;
+}) => (
+    <header className="bg-ink pt-[var(--safe-top)] text-paper [--focus-ring:var(--color-ink-rule)]">
+        <div
+            className={`mx-auto flex min-h-16 w-full max-w-[880px] items-center justify-between gap-3 py-2.5 pr-[max(18px,var(--safe-right))] pl-[max(18px,var(--safe-left))] sm:gap-4 sm:py-0 sm:pr-[max(2.5rem,var(--safe-right))] sm:pl-[max(2.5rem,var(--safe-left))] ${saving ? 'max-sm:flex-wrap' : ''}`}
+        >
+            <Wordmark tone="ink" className="shrink-0 text-[22px] min-[360px]:text-[26px] sm:text-[28px]" />
+            <div
+                className={`flex min-w-0 items-center justify-end gap-2 sm:gap-3.5 ${saving ? 'max-sm:basis-full' : ''}`}
+            >
+                <span className="inline-flex h-[30px] min-w-[5.5rem] items-center gap-2 rounded-full bg-paper/10 pr-3 pl-2.5 text-[13px] font-semibold text-paper shadow-[0_0_0_1px_rgb(247_245_239/0.24)]">
+                    <span aria-hidden="true" className="size-2.5 shrink-0 rounded-full bg-[#2563eb]" />
+                    <span className="truncate">{name}</span>
+                </span>
+                <button
+                    type="button"
+                    onClick={onSignOut}
+                    disabled={saving}
+                    className={buttonClassName('inkGhost', 'sm', 'shrink-0 hover:text-paper')}
+                >
+                    {saving ? 'Saving changes…' : 'Sign out'}
+                </button>
+            </div>
+        </div>
+    </header>
+);
+
+const AssignmentRow = ({ score: { assignment, document: doc } }: { score: AssignedScore }) => {
     const due = formatDue(assignment.due_at);
 
     return (
-        <li>
+        <li className="border-b border-hairline">
             <Link
                 to={`/doc/${assignment.document_id}`}
-                className="block rounded-xl border border-stone-300/60 bg-white/70 px-4 py-3.5 transition-colors hover:border-accent/50 hover:bg-white"
+                className="flex items-start gap-3.5 py-4 text-ink sm:flex-wrap sm:items-center sm:gap-x-7 sm:gap-y-4 sm:px-1 sm:py-6"
             >
-                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
-                    {/* Two lines before it ellipsizes — a long catalogue title
-                        ("Sonata in C major, K 545: I. Allegro") is told apart
-                        by its end — and the whole title on hover. The 14rem
-                        basis lets the badges wrap below it on a phone rather
-                        than squeeze it to a word or two; they wrap together. */}
-                    <span
-                        title={doc.title}
-                        className="line-clamp-2 min-w-0 grow basis-56 text-lg font-medium break-words text-stone-800"
-                    >
-                        {doc.title}
+                <ScoreThumb
+                    docId={doc.id}
+                    contentRev={doc.content_rev ?? 0}
+                    thumbRev={doc.thumb_rev ?? null}
+                    frameClassName="aspect-[1275/1650] w-16 rounded-[3px] shadow-[0_0_0_1px_rgb(28_25_23/0.1)] sm:w-24 sm:shadow-[0_0_0_1px_rgb(28_25_23/0.1),0_16px_30px_-20px_rgb(28_25_23/0.5)]"
+                />
+                <span className="block min-w-0 grow sm:basis-[280px]">
+                    <span className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                        {/* Two lines before it ellipsizes: a long catalogue title
+                            ("Sonata in C major, K 545: I. Allegro") is told apart
+                            by its end, and the whole title shows on hover. */}
+                        <span
+                            title={doc.title}
+                            className="display-opsz line-clamp-2 w-full min-w-0 font-display text-[21px] leading-[1.15] font-semibold break-words sm:w-auto sm:text-[30px]"
+                        >
+                            {doc.title}
+                        </span>
+                        {assignment.access === 'view' ? (
+                            <Badge>View only</Badge>
+                        ) : (
+                            <Badge tone="accent">Can edit</Badge>
+                        )}
+                        {due ? <Badge tone="warn">Due {due}</Badge> : null}
                     </span>
-                    {due || assignment.access === 'view' ? (
-                        <span className="flex max-w-full flex-wrap items-center gap-x-2.5 gap-y-1.5">
-                            {due ? <Badge>Due {due}</Badge> : null}
-                            {assignment.access === 'view' ? <Badge>View only</Badge> : null}
+                    {assignment.note ? (
+                        <span className="mt-2 block max-w-[520px] sm:mt-3">
+                            <span className="inline-block -rotate-1 font-hand text-[21px] leading-[1.1] font-bold [overflow-wrap:anywhere] text-[#b91c1c] sm:text-[25px]">
+                                {assignment.note}
+                            </span>
                         </span>
                     ) : null}
-                </div>
-                {assignment.note ? (
-                    <p className="mt-1.5 text-sm leading-relaxed [overflow-wrap:anywhere] text-stone-600">
-                        {assignment.note}
-                    </p>
-                ) : null}
+                </span>
+                <span className="hidden shrink-0 items-center gap-1.5 text-[15px] font-semibold text-accent sm:inline-flex">
+                    Open
+                    <ChevronRightIcon size={18} />
+                </span>
             </Link>
         </li>
     );

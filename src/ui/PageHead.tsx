@@ -1,10 +1,17 @@
 import type { ReactNode } from 'react';
 
-/** The README's page max widths (1360 and 1180 px) less the shell's 40 px gutters. */
+/** The README's page max widths (1360, 1180 and 880 px) less the 40 px gutters. */
 const HEAD_WIDTH = {
     wide: 'max-w-[1280px]',
     narrow: 'max-w-[1100px]',
+    home: 'max-w-[800px]',
 } as const;
+
+const TITLE_SIZE: Record<keyof typeof HEAD_WIDTH, string> = {
+    wide: 'text-[44px] sm:text-[60px]',
+    narrow: 'text-[44px] sm:text-[60px]',
+    home: 'text-[46px] sm:text-[64px]',
+};
 
 export interface PageHeadProps {
     width: keyof typeof HEAD_WIDTH;
@@ -25,7 +32,9 @@ export const PageHead = ({ width, eyebrow, title, subtitle, action }: PageHeadPr
                         {eyebrow}
                     </p>
                 ) : null}
-                <h1 className="display-opsz text-balance font-display text-[44px] font-semibold leading-[1.02] tracking-[-0.02em] text-ink sm:text-[60px]">
+                <h1
+                    className={`display-opsz text-balance font-display ${TITLE_SIZE[width]} font-semibold leading-[1.02] tracking-[-0.02em] text-ink`}
+                >
                     {title}
                 </h1>
                 {subtitle ? (
