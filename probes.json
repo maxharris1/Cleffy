@@ -1,0 +1,1222 @@
+{
+  "plans-free-desktop": {
+    "dpr": 1,
+    "width": 1440,
+    "viewportHeight": 900,
+    "headingLines": 1,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 188,
+          "y": 290.953125,
+          "w": 255.5,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 211,
+            "y": 397.953125,
+            "w": 209.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 457.5,
+          "y": 290.953125,
+          "w": 255.5,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 480.5,
+            "y": 397.953125,
+            "w": 209.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 727,
+          "y": 290.953125,
+          "w": 255.5,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 750,
+            "y": 397.953125,
+            "w": 209.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 996.5,
+          "y": 290.953125,
+          "w": 255.5,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 1019.5,
+            "y": 397.953125,
+            "w": 209.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 188,
+        "y": 852.09375,
+        "w": 1064,
+        "h": 19.5,
+        "visible": false
+      }
+    }
+  },
+  "plans-paid-desktop": {
+    "dpr": 1,
+    "width": 1440,
+    "viewportHeight": 900,
+    "headingLines": 1,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 188,
+          "y": 290.953125,
+          "w": 255.5,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 211,
+            "y": 397.953125,
+            "w": 209.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 457.5,
+          "y": 290.953125,
+          "w": 255.5,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 480.5,
+            "y": 397.953125,
+            "w": 209.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 727,
+          "y": 290.953125,
+          "w": 255.5,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 750,
+            "y": 397.953125,
+            "w": 209.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 996.5,
+          "y": 290.953125,
+          "w": 255.5,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 1019.5,
+            "y": 397.953125,
+            "w": 209.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 188,
+        "y": 852.09375,
+        "w": 1064,
+        "h": 19.5,
+        "visible": false
+      }
+    }
+  },
+  "review-desktop": {
+    "dpr": 1,
+    "width": 1440,
+    "viewportHeight": 900,
+    "cards": [
+      {
+        "name": "Review your ",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 524,
+          "y": 164,
+          "w": 392,
+          "h": 869.875,
+          "visible": false
+        },
+        "caption": null
+      }
+    ],
+    "checkoutTitle": {
+      "text": "Review your Teacher subscription",
+      "fontSize": "28px"
+    }
+  },
+  "unconfigured-desktop": {
+    "dpr": 1,
+    "width": 1440,
+    "viewportHeight": 900,
+    "cards": []
+  },
+  "plans-free-tablet": {
+    "dpr": 2,
+    "width": 820,
+    "viewportHeight": 1180,
+    "headingLines": 2,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 449.90625,
+          "w": 359,
+          "h": 453.65625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 556.90625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 417,
+          "y": 449.90625,
+          "w": 359,
+          "h": 453.65625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 440,
+            "y": 556.90625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 917.5625,
+          "w": 359,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1024.5625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 417,
+          "y": 917.5625,
+          "w": 359,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 440,
+            "y": 1024.5625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 1392.03125,
+        "w": 732,
+        "h": 32,
+        "visible": false
+      }
+    }
+  },
+  "plans-paid-tablet": {
+    "dpr": 2,
+    "width": 820,
+    "viewportHeight": 1180,
+    "headingLines": 2,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 449.90625,
+          "w": 359,
+          "h": 453.65625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 556.90625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 417,
+          "y": 449.90625,
+          "w": 359,
+          "h": 453.65625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 440,
+            "y": 556.90625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 917.5625,
+          "w": 359,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 1024.5625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 417,
+          "y": 917.5625,
+          "w": 359,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 440,
+            "y": 1024.5625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 1392.03125,
+        "w": 732,
+        "h": 32,
+        "visible": false
+      }
+    }
+  },
+  "review-tablet": {
+    "dpr": 2,
+    "width": 820,
+    "viewportHeight": 1180,
+    "cards": [
+      {
+        "name": "Review your ",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 214,
+          "y": 192,
+          "w": 392,
+          "h": 899.875,
+          "visible": false
+        },
+        "caption": null
+      }
+    ],
+    "checkoutTitle": {
+      "text": "Review your Teacher subscription",
+      "fontSize": "28px"
+    }
+  },
+  "unconfigured-tablet": {
+    "dpr": 2,
+    "width": 820,
+    "viewportHeight": 1180,
+    "cards": []
+  },
+  "plans-free-phone": {
+    "dpr": 3,
+    "width": 390,
+    "viewportHeight": 844,
+    "headingLines": 2,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 554.1875,
+          "w": 302,
+          "h": 433.65625,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 661.1875,
+            "w": 256,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 1001.84375,
+          "w": 302,
+          "h": 473.953125,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1108.84375,
+            "w": 256,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 1489.796875,
+          "w": 302,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1596.796875,
+            "w": 256,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 1910.265625,
+          "w": 302,
+          "h": 445.65625,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 2017.265625,
+            "w": 256,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 2463.921875,
+        "w": 302,
+        "h": 64,
+        "visible": false
+      }
+    }
+  },
+  "plans-paid-phone": {
+    "dpr": 3,
+    "width": 390,
+    "viewportHeight": 844,
+    "headingLines": 2,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 554.1875,
+          "w": 302,
+          "h": 389.65625,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 661.1875,
+            "w": 256,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 957.84375,
+          "w": 302,
+          "h": 473.953125,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1064.84375,
+            "w": 256,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 1445.796875,
+          "w": 302,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 1552.796875,
+            "w": 256,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 1866.265625,
+          "w": 302,
+          "h": 445.65625,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1973.265625,
+            "w": 256,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 2419.921875,
+        "w": 302,
+        "h": 64,
+        "visible": false
+      }
+    }
+  },
+  "review-phone": {
+    "dpr": 3,
+    "width": 390,
+    "viewportHeight": 844,
+    "cards": [
+      {
+        "name": "Review your ",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 230.8125,
+          "w": 302,
+          "h": 1090.875,
+          "visible": false
+        },
+        "caption": null
+      }
+    ],
+    "checkoutTitle": {
+      "text": "Review your Teacher subscription",
+      "fontSize": "28px"
+    }
+  },
+  "unconfigured-phone": {
+    "dpr": 3,
+    "width": 390,
+    "viewportHeight": 844,
+    "cards": []
+  },
+  "f5-plans-free-640": {
+    "dpr": 2,
+    "width": 640,
+    "viewportHeight": 1180,
+    "headingLines": 2,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 449.90625,
+          "w": 269,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 556.90625,
+            "w": 223,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 327,
+          "y": 449.90625,
+          "w": 269,
+          "h": 513.140625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 350,
+            "y": 556.90625,
+            "w": 223,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 977.046875,
+          "w": 269,
+          "h": 465.25,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1084.046875,
+            "w": 223,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 327,
+          "y": 977.046875,
+          "w": 269,
+          "h": 465.25,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 350,
+            "y": 1084.046875,
+            "w": 223,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 1510.296875,
+        "w": 552,
+        "h": 32,
+        "visible": false
+      }
+    }
+  },
+  "f5-plans-free-700": {
+    "dpr": 2,
+    "width": 700,
+    "viewportHeight": 1180,
+    "headingLines": 2,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 449.90625,
+          "w": 299,
+          "h": 473.953125,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 556.90625,
+            "w": 253,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 357,
+          "y": 449.90625,
+          "w": 299,
+          "h": 473.953125,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 380,
+            "y": 556.90625,
+            "w": 253,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 937.859375,
+          "w": 299,
+          "h": 445.65625,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1044.859375,
+            "w": 253,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 357,
+          "y": 937.859375,
+          "w": 299,
+          "h": 445.65625,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 380,
+            "y": 1044.859375,
+            "w": 253,
+            "h": 19.5,
+            "visible": false
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 1451.515625,
+        "w": 612,
+        "h": 32,
+        "visible": false
+      }
+    }
+  },
+  "f5-plans-free-780": {
+    "dpr": 2,
+    "width": 780,
+    "viewportHeight": 1180,
+    "headingLines": 2,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 449.90625,
+          "w": 339,
+          "h": 453.65625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 556.90625,
+            "w": 293,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 397,
+          "y": 449.90625,
+          "w": 339,
+          "h": 453.65625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 420,
+            "y": 556.90625,
+            "w": 293,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 917.5625,
+          "w": 339,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1024.5625,
+            "w": 293,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 397,
+          "y": 917.5625,
+          "w": 339,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 420,
+            "y": 1024.5625,
+            "w": 293,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 1392.03125,
+        "w": 692,
+        "h": 32,
+        "visible": false
+      }
+    }
+  },
+  "f5-plans-free-820": {
+    "dpr": 2,
+    "width": 820,
+    "viewportHeight": 1180,
+    "headingLines": 2,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 449.90625,
+          "w": 359,
+          "h": 453.65625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 556.90625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 417,
+          "y": 449.90625,
+          "w": 359,
+          "h": 453.65625,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 440,
+            "y": 556.90625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 44,
+          "y": 917.5625,
+          "w": 359,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 67,
+            "y": 1024.5625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 417,
+          "y": 917.5625,
+          "w": 359,
+          "h": 406.46875,
+          "visible": false
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 440,
+            "y": 1024.5625,
+            "w": 313,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 1392.03125,
+        "w": 732,
+        "h": 32,
+        "visible": false
+      }
+    }
+  },
+  "f5-plans-free-1024": {
+    "dpr": 2,
+    "width": 1024,
+    "viewportHeight": 1180,
+    "headingLines": 1,
+    "headingCloseOverlaps": 0,
+    "cards": [
+      {
+        "name": "Free",
+        "background": "rgb(28, 25, 23)",
+        "box": {
+          "x": 44,
+          "y": 334.953125,
+          "w": 223.5,
+          "h": 553.03125,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(214, 211, 209)",
+          "box": {
+            "x": 67,
+            "y": 441.953125,
+            "w": 177.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Personal",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 281.5,
+          "y": 334.953125,
+          "w": 223.5,
+          "h": 553.03125,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 304.5,
+            "y": 441.953125,
+            "w": 177.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Teacher",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 519,
+          "y": 334.953125,
+          "w": 223.5,
+          "h": 553.03125,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 542,
+            "y": 441.953125,
+            "w": 177.5,
+            "h": 19.5,
+            "visible": true
+          }
+        }
+      },
+      {
+        "name": "Academy",
+        "background": "rgba(0, 0, 0, 0)",
+        "box": {
+          "x": 756.5,
+          "y": 334.953125,
+          "w": 223.5,
+          "h": 553.03125,
+          "visible": true
+        },
+        "caption": {
+          "color": "rgb(87, 83, 78)",
+          "box": {
+            "x": 779.5,
+            "y": 441.953125,
+            "w": 177.5,
+            "h": 39,
+            "visible": true
+          }
+        }
+      }
+    ],
+    "agreement": {
+      "color": "rgb(107, 99, 93)",
+      "box": {
+        "x": 44,
+        "y": 955.984375,
+        "w": 936,
+        "h": 32,
+        "visible": true
+      }
+    }
+  }
+}
