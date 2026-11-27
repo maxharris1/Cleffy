@@ -209,7 +209,36 @@ describe('Toolbar', () => {
             expect(effectiveBox(button).minWidth, button.getAttribute('aria-label') ?? '').toBeGreaterThanOrEqual(44);
         }
         for (const key of within(fingerSwitch() as HTMLElement).getAllByRole('button')) {
-            expect(key).toHaveClass('pointer-coarse:min-w-11');
+            expect(effectiveBox(key).minWidth, key.getAttribute('aria-label') ?? '').toBeGreaterThanOrEqual(44);
+        }
+    });
+
+    it('holds 44px phone targets on a fine-pointer device once a finger is seen', async () => {
+        useViewport({ width: 390, coarse: false });
+        const { useViewerStore } = await renderToolbar();
+        act(() => useViewerStore.getState().notePointer('touch'));
+        const group = fingerSwitch() as HTMLElement;
+        const bar = group.parentElement as HTMLElement;
+
+        for (const button of Array.from(bar.querySelectorAll<HTMLElement>(':scope > button'))) {
+            const box = effectiveBox(button);
+            const name = button.getAttribute('aria-label') ?? '';
+            expect(box.minWidth, name).toBeGreaterThanOrEqual(44);
+            expect(box.hit44y, name).toBe(true);
+        }
+        const trough = effectiveBox(group);
+        const keyHeight = trough.height - trough.paddingTop - trough.paddingBottom;
+        for (const key of within(group).getAllByRole('button')) {
+            const box = effectiveBox(key);
+            const name = key.getAttribute('aria-label') ?? '';
+            expect(box.minWidth, name).toBeGreaterThanOrEqual(44);
+            expect(keyHeight + 2 * box.overhangY, name).toBeGreaterThanOrEqual(44);
+        }
+
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Pen colour and size' }));
+        const popover = screen.getByRole('group', { name: 'Pen colour and size' });
+        for (const button of within(popover).getAllByRole('button')) {
+            expect(effectiveBox(button).hit44, button.getAttribute('aria-label') ?? '').toBe(true);
         }
     });
 
