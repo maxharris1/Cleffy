@@ -695,7 +695,7 @@ const ShellUploadButton = ({
         className={buttonClassName(
             'inkPrimary',
             'sm',
-            `shell-upload max-sm:size-[44px] max-sm:min-h-[44px] max-sm:rounded-xl max-sm:px-0 max-sm:shadow-none sm:hover:bg-accent-hover lg:rounded-xl lg:px-[18px] lg:text-[15px]${uploading || quotaExhausted ? ' pointer-events-none opacity-80' : ''}`,
+            `shell-upload max-sm:hit-44 max-sm:size-[44px] max-sm:min-h-[44px] max-sm:rounded-xl max-sm:px-0 max-sm:shadow-none sm:hover:bg-accent-hover lg:rounded-xl lg:px-[18px] lg:text-[15px]${uploading || quotaExhausted ? ' pointer-events-none opacity-80' : ''}`,
         )}
     >
         <UploadIcon size={16} className="max-sm:size-[19px]" />

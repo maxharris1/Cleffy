@@ -105,7 +105,14 @@ const shellMarkup = (path: string, page: () => unknown) =>
 const termsMarkup = () =>
     renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/terms'] }, createElement(TermsPage)));
 
-type Setup = { width: number; height?: number; rootFont?: string; safeBottom?: string; touch?: boolean };
+type Setup = {
+    width: number;
+    height?: number;
+    rootFont?: string;
+    defaultFont?: number;
+    safeBottom?: string;
+    touch?: boolean;
+};
 
 describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
     let browser: Browser;
@@ -137,6 +144,10 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
             hasTouch: setup.touch ?? false,
         });
         try {
+            if (setup.defaultFont) {
+                const cdp = await page.context().newCDPSession(page);
+                await cdp.send('Page.setFontSizes', { fontSizes: { standard: setup.defaultFont } });
+            }
             await page.goto(pathToFileURL(file).href);
             await page.evaluate(() => document.fonts.ready);
             return await run(page);
@@ -282,41 +293,83 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
     );
 
     it.each([
-        [320, '16px'],
-        [320, '12px'],
-        [320, '9px'],
-        [390, '16px'],
-        [390, '12px'],
-        [390, '9px'],
+        [320, 9],
+        [390, 12],
+        [390, 16],
     ] as const)(
-        "lands a touch 43 px from the upload button's left edge on Upload score at %i px with a %s default font",
-        async (width, rootFont) => {
-            const hit = await withPage(
+        'lands every touch inside the phone upload button on Upload score at %i px with a %i px default font',
+        async (width, defaultFont) => {
+            const result = await withPage(
                 shellMarkup('/library', rows),
-                { width, rootFont, touch: true },
+                { width, defaultFont, touch: true },
                 async (page) => {
-                    const point = await page.evaluate(() => {
-                        const rect = document.querySelector('label.shell-upload')!.getBoundingClientRect();
-                        return { x: rect.left + 43, y: rect.top + rect.height / 2 };
+                    const { box, missed } = await page.evaluate(() => {
+                        const label = document.querySelector('label.shell-upload')!;
+                        const rect = label.getBoundingClientRect();
+                        const missed: string[] = [];
+                        for (let x = 0.5; x < rect.width; x += 1) {
+                            for (let y = 0.5; y < rect.height; y += 1) {
+                                const hit = document.elementFromPoint(rect.left + x, rect.top + y)!;
+                                if (!label.contains(hit)) {
+                                    missed.push(
+                                        `${x},${y} ${hit.closest('[aria-label]')?.getAttribute('aria-label') ?? hit.tagName}`,
+                                    );
+                                }
+                            }
+                        }
+                        return {
+                            box: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                            missed,
+                        };
                     });
                     await page.evaluate(() => {
-                        document.addEventListener(
-                            'touchstart',
-                            (event) => {
-                                const target = event.target as Element;
-                                const label = target.closest('label.shell-upload');
-                                document.body.dataset.touched = label
-                                    ? label.querySelector('input')!.getAttribute('aria-label')!
-                                    : (target.closest('[aria-label]')?.getAttribute('aria-label') ?? target.tagName);
-                            },
-                            { once: true },
-                        );
+                        document.addEventListener('touchstart', (event) => {
+                            const target = event.target as Element;
+                            const label = target.closest('label.shell-upload');
+                            document.body.dataset.touched = label
+                                ? label.querySelector('input')!.getAttribute('aria-label')!
+                                : (target.closest('[aria-label]')?.getAttribute('aria-label') ?? target.tagName);
+                        });
                     });
-                    await page.touchscreen.tap(point.x, point.y);
-                    return page.evaluate(() => document.body.dataset.touched);
+                    const taps = {
+                        'right edge': [43, box.height / 2],
+                        'upper right': [43, 1],
+                        'lower right': [43, 43],
+                        'upper left': [1, 1],
+                        'lower left': [1, 43],
+                    } as const;
+                    const tapped: Record<string, string | undefined> = {};
+                    for (const [name, [x, y]] of Object.entries(taps)) {
+                        await page.touchscreen.tap(box.left + x, box.top + y);
+                        tapped[name] = await page.evaluate(() => document.body.dataset.touched);
+                    }
+                    const avatarMissed = await page.evaluate(() => {
+                        const trigger = document.querySelector('[aria-label^="Account menu"]')!;
+                        const rect = trigger.getBoundingClientRect();
+                        const left = rect.left + rect.width / 2 - 22;
+                        const top = rect.top + rect.height / 2 - 22;
+                        const missed: string[] = [];
+                        for (let x = 0.5; x < 44; x += 1) {
+                            for (let y = 0.5; y < 44; y += 1) {
+                                const hit = document.elementFromPoint(left + x, top + y)!;
+                                if (!trigger.contains(hit)) missed.push(`${x},${y} ${hit.tagName}`);
+                            }
+                        }
+                        return missed;
+                    });
+                    return { size: { width: box.width, height: box.height }, missed, tapped, avatarMissed };
                 },
             );
-            expect(hit).toBe('Upload score');
+            expect(result.size).toEqual({ width: 44, height: 44 });
+            expect(result.tapped).toEqual({
+                'right edge': 'Upload score',
+                'upper right': 'Upload score',
+                'lower right': 'Upload score',
+                'upper left': 'Upload score',
+                'lower left': 'Upload score',
+            });
+            expect(result.missed).toEqual([]);
+            expect(result.avatarMissed).toEqual([]);
         },
     );
 
