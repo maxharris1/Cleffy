@@ -306,16 +306,9 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
                     const { box, missed } = await page.evaluate(() => {
                         const label = document.querySelector('label.shell-upload')!;
                         const rect = label.getBoundingClientRect();
-                        const radius = Number.parseFloat(getComputedStyle(label).borderTopRightRadius);
-                        const insideShape = (x: number, y: number) => {
-                            const cx = Math.min(Math.max(x, radius), rect.width - radius);
-                            const cy = Math.min(Math.max(y, radius), rect.height - radius);
-                            return Math.hypot(x - cx, y - cy) <= radius;
-                        };
                         const missed: string[] = [];
                         for (let x = 0.5; x < rect.width; x += 1) {
                             for (let y = 0.5; y < rect.height; y += 1) {
-                                if (!insideShape(x, y)) continue;
                                 const hit = document.elementFromPoint(rect.left + x, rect.top + y)!;
                                 if (!label.contains(hit)) {
                                     missed.push(
@@ -330,37 +323,53 @@ describe.skipIf(!CHROMIUM || !CSS)('Shell tab bar layout', () => {
                         };
                     });
                     await page.evaluate(() => {
-                        document.addEventListener(
-                            'touchstart',
-                            (event) => {
-                                const target = event.target as Element;
-                                const label = target.closest('label.shell-upload');
-                                document.body.dataset.touched = label
-                                    ? label.querySelector('input')!.getAttribute('aria-label')!
-                                    : (target.closest('[aria-label]')?.getAttribute('aria-label') ?? target.tagName);
-                            },
-                            { once: true },
-                        );
+                        document.addEventListener('touchstart', (event) => {
+                            const target = event.target as Element;
+                            const label = target.closest('label.shell-upload');
+                            document.body.dataset.touched = label
+                                ? label.querySelector('input')!.getAttribute('aria-label')!
+                                : (target.closest('[aria-label]')?.getAttribute('aria-label') ?? target.tagName);
+                        });
                     });
-                    await page.touchscreen.tap(box.left + 43, box.top + box.height / 2);
-                    const tapped = await page.evaluate(() => document.body.dataset.touched);
-                    const avatar = await page.evaluate(() => {
+                    const taps = {
+                        'right edge': [43, box.height / 2],
+                        'upper right': [43, 1],
+                        'lower right': [43, 43],
+                        'upper left': [1, 1],
+                        'lower left': [1, 43],
+                    } as const;
+                    const tapped: Record<string, string | undefined> = {};
+                    for (const [name, [x, y]] of Object.entries(taps)) {
+                        await page.touchscreen.tap(box.left + x, box.top + y);
+                        tapped[name] = await page.evaluate(() => document.body.dataset.touched);
+                    }
+                    const avatarMissed = await page.evaluate(() => {
                         const trigger = document.querySelector('[aria-label^="Account menu"]')!;
-                        const area = getComputedStyle(trigger, '::after');
                         const rect = trigger.getBoundingClientRect();
-                        return {
-                            width: Math.max(rect.width, Number.parseFloat(area.width) || 0),
-                            height: Math.max(rect.height, Number.parseFloat(area.height) || 0),
-                        };
+                        const left = rect.left + rect.width / 2 - 22;
+                        const top = rect.top + rect.height / 2 - 22;
+                        const missed: string[] = [];
+                        for (let x = 0.5; x < 44; x += 1) {
+                            for (let y = 0.5; y < 44; y += 1) {
+                                const hit = document.elementFromPoint(left + x, top + y)!;
+                                if (!trigger.contains(hit)) missed.push(`${x},${y} ${hit.tagName}`);
+                            }
+                        }
+                        return missed;
                     });
-                    return { size: { width: box.width, height: box.height }, missed, tapped, avatar };
+                    return { size: { width: box.width, height: box.height }, missed, tapped, avatarMissed };
                 },
             );
             expect(result.size).toEqual({ width: 44, height: 44 });
+            expect(result.tapped).toEqual({
+                'right edge': 'Upload score',
+                'upper right': 'Upload score',
+                'lower right': 'Upload score',
+                'upper left': 'Upload score',
+                'lower left': 'Upload score',
+            });
             expect(result.missed).toEqual([]);
-            expect(result.tapped).toBe('Upload score');
-            expect(result.avatar.width).toBeGreaterThanOrEqual(44);
-            expect(result.avatar.height).toBeGreaterThanOrEqual(44);
+            expect(result.avatarMissed).toEqual([]);
         },
     );
 
