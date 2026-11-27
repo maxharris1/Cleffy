@@ -1,9 +1,41 @@
-import { useState, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
 import type { AnnotationStore } from '@/sync/annotationStore';
+
+/**
+ * Publishes how far down the window the notices and overlay over the score
+ * reach, as --viewer-top-band: the demo's value card caps its phone height by
+ * it (DemoValueCard.css), so the pager and zoom row it raises stays below them.
+ */
+const useViewerTopBand = (
+    scoreRef: RefObject<HTMLDivElement | null>,
+    overlayRef: RefObject<HTMLDivElement | null>,
+    noticeInset: number,
+    hasOverlay: boolean,
+) =>
+    useLayoutEffect(() => {
+        const root = document.documentElement.style;
+        const measure = () => {
+            const band = overlayRef.current
+                ? overlayRef.current.getBoundingClientRect().bottom
+                : (scoreRef.current?.getBoundingClientRect().top ?? 0) + noticeInset;
+            root.setProperty('--viewer-top-band', `${Math.round(band)}px`);
+        };
+        measure();
+        const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+        for (const element of [scoreRef.current, overlayRef.current]) {
+            if (element) {
+                observer?.observe(element);
+            }
+        }
+        return () => {
+            observer?.disconnect();
+            root.removeProperty('--viewer-top-band');
+        };
+    }, [scoreRef, overlayRef, noticeInset, hasOverlay]);
 
 interface LocalViewerFrameProps {
     docId: string;
@@ -52,6 +84,9 @@ export const LocalViewerFrame = ({
 }: LocalViewerFrameProps) => {
     /** How far the notices over the score reach down it (ViewerNoticeRegion). */
     const [noticeInset, setNoticeInset] = useState(0);
+    const scoreRef = useRef<HTMLDivElement>(null);
+    const overlayRef = useRef<HTMLDivElement>(null);
+    useViewerTopBand(scoreRef, overlayRef, noticeInset, Boolean(overlay));
     return (
         // Fixed, so the whole viewer is one stack: UI floating over it from
         // outside (the demo's value card, z-40) would cover a toolbar popup
@@ -61,10 +96,11 @@ export const LocalViewerFrame = ({
         <div className="fixed inset-0 flex flex-col has-[[data-toolbar-popup]]:z-50 has-[[data-stand-mode]]:z-[60]">
             {header}
             <main className="flex min-h-0 flex-1 flex-col">
-                <div className="relative min-h-0 flex-1">
+                <div ref={scoreRef} className="relative min-h-0 flex-1">
                     <ViewerNoticeRegion onInsetChange={setNoticeInset}>{notices}</ViewerNoticeRegion>
                     {overlay ? (
                         <div
+                            ref={overlayRef}
                             data-ui-overlay
                             // Where the notice region starts, or just below its notices.
                             style={noticeInset > 0 ? { top: noticeInset + 8 } : undefined}
