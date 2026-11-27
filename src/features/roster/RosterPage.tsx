@@ -246,6 +246,7 @@ export const RosterPage = () => {
             return;
         }
         setStudents(roster);
+        setLoadError(null);
         persistRoster(userId, roster, currentCounts());
     };
     const reloadAssignments = async () => {
