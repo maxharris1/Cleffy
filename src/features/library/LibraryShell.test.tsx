@@ -36,6 +36,7 @@ const sessionMocks = vi.hoisted(() => ({
 }));
 vi.mock('@/features/auth/session', () => ({
     displayNameOf: () => 'Ada Teacher',
+    storedDisplayNameOf: () => 'Ada Teacher',
     signOut: () => sessionMocks.signOut(),
     syncBeforeSignOut: () => sessionMocks.syncBeforeSignOut(),
 }));

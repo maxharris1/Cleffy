@@ -15,7 +15,7 @@
         margin: 16mm;
     }
 
-    body:has(.student-code-card) > #root {
+    body:has(.student-code-card) > * {
         visibility: hidden;
     }
 
@@ -30,14 +30,18 @@
         top: 0;
         width: 100%;
         margin: 0;
-        padding: 14mm 10mm;
+        padding: 12px;
         background: #fff;
-        border: 1px solid #1c1917;
         box-shadow: none;
     }
 
-    /* Ink on white: the on-screen stone greys are too light to print, and no
+    /* Ink on white: the on-screen greys are too light to print, and no
        printer is asked to render a background. */
+    .student-code-card-frame,
+    .student-code-card-letter {
+        border-color: #000;
+    }
+
     .student-code-card-name,
     .student-code-card-code {
         color: #000;

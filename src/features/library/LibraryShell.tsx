@@ -3,7 +3,7 @@ import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react
 
 import { initialsOf } from '@/features/account/initials';
 import { RequireRegistered } from '@/features/auth/AuthGates';
-import { displayNameOf, signOut } from '@/features/auth/session';
+import { displayNameOf, signOut, storedDisplayNameOf } from '@/features/auth/session';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
@@ -57,6 +57,8 @@ const PricingDialog = lazy(() =>
 export type LibraryOutletContext = {
     userId: string;
     userLabel: string;
+    /** The account's stored display name, '' when it never set one (no email fallback). */
+    teacherName?: string;
     uploadPct: number | null;
     uploading: boolean;
     onUpload: (file: File) => Promise<void>;
@@ -152,13 +154,24 @@ export const LibraryShell = () => {
                     userId={session.user.id}
                     userLabel={displayNameOf(session)}
                     userEmail={session.user.email ?? ''}
+                    teacherName={storedDisplayNameOf(session)}
                 />
             )}
         </RequireRegistered>
     );
 };
 
-const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLabel: string; userEmail: string }) => {
+const LibraryFrame = ({
+    userId,
+    userLabel,
+    userEmail,
+    teacherName,
+}: {
+    userId: string;
+    userLabel: string;
+    userEmail: string;
+    teacherName: string;
+}) => {
     const [uploadPct, setUploadPct] = useState<number | null>(null);
     const [importingImslp, setImportingImslp] = useState(false);
     /** The IMSLP import landed: its sweep becomes a full bar for the finishing beat. */
@@ -515,6 +528,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const outlet: LibraryOutletContext = {
         userId,
         userLabel,
+        teacherName,
         uploadPct,
         uploading,
         onUpload,

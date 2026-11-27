@@ -40,7 +40,7 @@ import { PageHead } from '@/ui/PageHead';
 import { RosterSkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
-import { MoreVerticalIcon } from '@/ui/icons';
+import { MoreVerticalIcon, PrinterIcon } from '@/ui/icons';
 
 const rosterEyebrow = (active: number, unclaimed: number): string =>
     `${active} ${active === 1 ? 'student' : 'students'} · ${unclaimed} still to set up`;
@@ -154,7 +154,7 @@ const persistRoster = (userId: string, students: ManagedStudentRow[], assignment
 };
 
 export const RosterPage = () => {
-    const { userId, canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
+    const { userId, teacherName, canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
@@ -505,8 +505,8 @@ export const RosterPage = () => {
             )}
 
             {codeCard ? (
-                <Dialog label="Setup card" onClose={() => setCodeCard(null)}>
-                    <p className="text-sm leading-relaxed text-stone-600">
+                <Dialog label="Setup card" onClose={() => setCodeCard(null)} maxWidth={480}>
+                    <p className="text-[15px] leading-normal text-ink-muted">
                         Print this now or write it down. The code is stored as a hash, so nothing can read it back — a
                         lost card is replaced by resetting their access, never recovered. It works once: the student
                         spends it choosing their username and password.
@@ -515,13 +515,15 @@ export const RosterPage = () => {
                         displayName={codeCard.displayName}
                         loginCode={codeCard.loginCode}
                         username={codeCard.username}
-                        className="mt-4"
+                        teacherName={teacherName}
+                        className="mt-5"
                     />
-                    <div className="mt-5 flex justify-end gap-2">
-                        <Button variant="ghost" size="sm" onClick={() => setCodeCard(null)}>
+                    <div className="mt-[22px] flex justify-end gap-2">
+                        <Button variant="ghost" onClick={() => setCodeCard(null)}>
                             Done
                         </Button>
-                        <Button size="sm" onClick={() => window.print()}>
+                        <Button onClick={() => window.print()}>
+                            <PrinterIcon size={17} />
                             Print card
                         </Button>
                     </div>

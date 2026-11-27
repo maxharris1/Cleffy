@@ -249,6 +249,21 @@ describe('RosterPage', () => {
         expect(screen.getByLabelText('Student name')).toHaveValue('');
     });
 
+    it('opens the setup card at the design width of 480 px', async () => {
+        const user = userEvent.setup();
+        provisionStudent.mockResolvedValue({
+            student: { id: 's1', studentUserId: 's1-user', displayName: 'Ada Lovelace' },
+            loginCode: 'ABCD-EFGH-JKMN',
+        });
+        renderRoster();
+
+        await user.type(await screen.findByLabelText('Student name'), 'Ada Lovelace');
+        await attest(user);
+        await user.click(screen.getByRole('button', { name: 'Add student' }));
+
+        expect(await screen.findByRole('dialog', { name: 'Setup card' })).toHaveClass('max-w-[480px]');
+    });
+
     it('asks for the student’s own address only once the invite method is chosen', async () => {
         const user = userEvent.setup();
         provisionStudent.mockResolvedValue({

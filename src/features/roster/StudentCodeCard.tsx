@@ -21,6 +21,8 @@
  * visibility rather than display, so the card keeps its position in the tree
  * while everything around it stops painting.
  */
+import type { ReactNode } from 'react';
+
 import './StudentCodeCard.css';
 
 export interface StudentCodeCardProps {
@@ -33,35 +35,76 @@ export interface StudentCodeCardProps {
      * are not asked to remember a name they picked months ago.
      */
     username?: string | null;
+    /** The teacher's own display name; the "From" line is left off without one. */
+    teacherName?: string;
     className?: string;
 }
 
-export const StudentCodeCard = ({ displayName, loginCode, username = null, className = '' }: StudentCodeCardProps) => (
+const Step = ({ letter, children }: { letter: string; children: ReactNode }) => (
+    <li className="flex items-start gap-3.5">
+        <span
+            aria-hidden="true"
+            className="student-code-card-letter flex size-[30px] flex-none items-center justify-center border-[1.5px] border-ink font-display text-[17px] font-semibold"
+        >
+            {letter}
+        </span>
+        <div className="min-w-0 flex-1 pt-1 text-[15px] leading-[1.45]">{children}</div>
+    </li>
+);
+
+export const StudentCodeCard = ({
+    displayName,
+    loginCode,
+    username = null,
+    teacherName = '',
+    className = '',
+}: StudentCodeCardProps) => (
     <div
-        className={`student-code-card rounded-2xl border border-stone-300 bg-white px-5 py-6 text-center${
+        className={`student-code-card rounded bg-white p-3 text-left text-ink shadow-[0_0_0_1px_rgba(28,25,23,0.1),0_34px_60px_-30px_rgba(0,0,0,0.6)]${
             className ? ` ${className}` : ''
         }`}
     >
-        <p className="student-code-card-label text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
-            Cleffy setup card
-        </p>
-        <p className="student-code-card-name mt-1 font-display text-2xl font-semibold text-stone-800 [overflow-wrap:anywhere]">
-            {displayName}
-        </p>
-        <p className="student-code-card-code mt-5 break-words font-mono text-2xl font-semibold tracking-widest text-ink sm:text-3xl">
-            {loginCode}
-        </p>
-        {username ? (
-            <p className="student-code-card-hint mt-4 text-sm text-stone-600">
-                Your username: <span className="font-medium text-stone-800 [overflow-wrap:anywhere]">{username}</span>
+        <div className="student-code-card-frame border border-ink px-4 pt-5 pb-4 sm:px-[22px] sm:pt-[22px]">
+            <div className="flex items-center justify-between gap-3">
+                <span className="inline-flex items-center gap-2">
+                    <span className="landing-brand font-display text-[22px] font-semibold">Cleffy</span>
+                    <span
+                        aria-hidden="true"
+                        className="student-code-card-rule mt-1 w-[21px] border-t-2 border-accent"
+                    />
+                </span>
+                <p className="student-code-card-label text-xs font-semibold tracking-[0.08em] text-ink-muted uppercase">
+                    Setup card
+                </p>
+            </div>
+            <p className="student-code-card-name mt-5 font-display text-[40px] leading-[1.05] font-semibold tracking-[-0.01em] [overflow-wrap:anywhere]">
+                {displayName}
             </p>
-        ) : null}
-        <p className="student-code-card-hint mt-5 text-sm leading-relaxed text-stone-600">
-            Go to <span className="font-medium text-stone-800">{window.location.origin}/student/claim</span>, enter this
-            code once, then choose your username and password.
-        </p>
-        <p className="student-code-card-hint mt-1 text-xs text-stone-500">
-            Keep this card — the code is never shown again.
-        </p>
+            {teacherName ? (
+                <p className="student-code-card-hint mt-1.5 text-sm text-ink-muted [overflow-wrap:anywhere]">
+                    From {teacherName}
+                </p>
+            ) : null}
+            {username ? (
+                <p className="student-code-card-hint mt-1.5 text-sm text-ink-muted">
+                    Your username: <span className="font-medium text-ink [overflow-wrap:anywhere]">{username}</span>
+                </p>
+            ) : null}
+            <ol className="mt-5 flex flex-col gap-3.5">
+                <Step letter="A">
+                    Go to <strong className="[overflow-wrap:anywhere]">{window.location.origin}/student/claim</strong>
+                </Step>
+                <Step letter="B">
+                    Type this setup code
+                    <p className="student-code-card-code mt-2.5 w-fit max-w-full border-[1.5px] border-dashed border-[#8a8478] px-3.5 py-2.5 font-mono text-[15px] font-bold tracking-[0.06em] sm:tracking-[0.12em] [overflow-wrap:anywhere] sm:text-[22px]">
+                        {loginCode}
+                    </p>
+                </Step>
+                <Step letter="C">Choose a username and a password. That’s it.</Step>
+            </ol>
+            <p className="student-code-card-hint mt-[18px] border-t border-hairline pt-3 text-xs leading-[1.45] text-ink-muted">
+                Keep this card. The code works once and is never shown again.
+            </p>
+        </div>
     </div>
 );

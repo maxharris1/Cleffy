@@ -9,10 +9,12 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { Segmented, type SegmentedOption } from '@/ui/Segmented';
 import { SwapLabel } from '@/ui/SwapLabel';
 import { TextField } from '@/ui/TextField';
 import { toast } from '@/ui/toast';
-import { buttonClassName } from '@/ui/classNames';
+import { buttonClassName, fieldLabelClassName } from '@/ui/classNames';
+import { CheckIcon } from '@/ui/icons';
 
 export interface AssignDialogProps {
     documentId: string;
@@ -130,8 +132,8 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
     ).length;
 
     return (
-        <Dialog label="Assign to students" onClose={onClose} sheet>
-            <p className="text-sm text-stone-600">
+        <Dialog label="Assign to students" onClose={onClose} sheet maxWidth={520}>
+            <p className="text-[15px] leading-normal text-ink-muted">
                 Give “{documentTitle}” to students on your roster. They will find it waiting the next time they sign in.
             </p>
 
@@ -151,23 +153,34 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                 </EmptyState>
             ) : (
                 <>
-                    <ul className="mt-4 max-h-52 overflow-auto overscroll-contain">
+                    <ul className="mt-3.5 flex max-h-60 flex-col gap-0.5 overflow-auto overscroll-contain">
                         {roster.map((student) => {
                             const already = assigned.has(student.student_user_id);
+                            const picked = !already && selected.has(student.student_user_id);
                             return (
                                 <li key={student.id}>
                                     <label
-                                        className={`flex items-center gap-3 rounded-lg px-2 py-2 text-sm transition-colors ${
-                                            already ? 'text-stone-500' : 'cursor-pointer text-stone-800 hover:bg-ink/5'
+                                        className={`relative flex min-h-11 items-center gap-3 rounded-[10px] px-2.5 text-[15px] transition-colors ${
+                                            already
+                                                ? 'bg-accent/7 text-ink-muted'
+                                                : picked
+                                                  ? 'cursor-pointer bg-accent/7 font-semibold text-ink'
+                                                  : 'cursor-pointer text-ink hover:bg-ink/5'
                                         }`}
                                     >
                                         <input
                                             type="checkbox"
-                                            className="h-4 w-4 accent-accent"
-                                            checked={already || selected.has(student.student_user_id)}
+                                            className="peer sr-only"
+                                            checked={already || picked}
                                             disabled={already || busy}
                                             onChange={() => toggle(student.student_user_id)}
                                         />
+                                        <span
+                                            aria-hidden="true"
+                                            className="flex size-5 flex-none items-center justify-center rounded-md border-[1.5px] border-field-line bg-white text-white peer-checked:border-accent peer-checked:bg-accent peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-accent peer-disabled:opacity-60"
+                                        >
+                                            {already || picked ? <CheckIcon size={14} strokeWidth={2.6} /> : null}
+                                        </span>
                                         <span className="min-w-0 flex-1 truncate">{student.display_name}</span>
                                         {already ? <Badge tone="accent">Assigned</Badge> : null}
                                     </label>
@@ -176,45 +189,35 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                         })}
                     </ul>
 
-                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-medium uppercase tracking-[0.08em] text-stone-600">Access</span>
-                        <div className="flex rounded-lg border border-stone-300 p-0.5">
-                            {(['edit', 'view'] as const).map((value) => (
-                                <button
-                                    key={value}
-                                    type="button"
-                                    aria-pressed={access === value}
-                                    onClick={() => setAccess(value)}
-                                    className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
-                                        access === value ? 'bg-accent text-white' : 'text-stone-600 hover:bg-ink/5'
-                                    }`}
-                                >
-                                    {value === 'edit' ? 'Can edit' : 'View only'}
-                                </button>
-                            ))}
-                        </div>
+                    <div className="mt-[18px] flex flex-wrap items-center gap-3">
+                        <span className={fieldLabelClassName}>Access</span>
+                        <Segmented
+                            label="Access"
+                            size="md"
+                            value={access}
+                            options={ACCESS_OPTIONS}
+                            onChange={setAccess}
+                        />
                     </div>
                     {/* One shared layer of marks per score (an owner decision): an
                         editor edits all of it, the teacher's marks included, so
                         the choice is said plainly here rather than discovered. */}
-                    <p className="mt-1.5 text-xs text-stone-500">{ACCESS_HINT[access]}</p>
+                    <p className="mt-2 text-[13px] leading-normal text-ink-muted">{ACCESS_HINT[access]}</p>
 
-                    <div className="mt-4">
+                    <div className="mt-[18px]">
                         <TextField
                             id="assign-note"
                             label="Note (optional)"
-                            size="sm"
                             value={note}
                             maxLength={280}
                             placeholder="Bars 12–24, hands separately"
                             onChange={(event) => setNote(event.target.value)}
                         />
                     </div>
-                    <div className="mt-4 sm:max-w-[13rem]">
+                    <div className="mt-4 max-w-[220px]">
                         <TextField
                             id="assign-due"
                             label="Due date (optional)"
-                            size="sm"
                             type="date"
                             value={due}
                             onChange={(event) => setDue(event.target.value)}
@@ -224,10 +227,10 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
                     {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
 
                     <div className="mt-5 flex justify-end gap-2">
-                        <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+                        <Button variant="ghost" onClick={onClose} disabled={busy}>
                             Cancel
                         </Button>
-                        <Button size="sm" onClick={() => void submit()} disabled={busy || pickedCount === 0}>
+                        <Button onClick={() => void submit()} disabled={busy || pickedCount === 0}>
                             <SwapLabel
                                 labels={{
                                     idle: pickedCount > 1 ? `Assign to ${pickedCount} students` : 'Assign',
@@ -247,6 +250,11 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
  * What each access level lets a student do, said where the teacher picks it.
  * Marks live on one shared layer, so Edit reaches every mark on the score.
  */
+const ACCESS_OPTIONS = [
+    { value: 'edit', label: 'Can edit' },
+    { value: 'view', label: 'View only' },
+] as const satisfies readonly SegmentedOption<AssignmentAccess>[];
+
 const ACCESS_HINT: Record<AssignmentAccess, string> = {
     edit: 'They can add, change and erase all marks on this score, including yours.',
     view: 'They can read and play from it, but not mark it up.',
