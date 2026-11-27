@@ -2,11 +2,17 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 
 import { LoadingText } from '@/ui/Loading';
+import { Wordmark } from '@/ui/Wordmark';
 
 interface BrandShellProps {
     title: string;
     subtitle?: string;
     children?: ReactNode;
+}
+
+interface SplitBrandShellProps extends BrandShellProps {
+    art: ReactNode;
+    footer?: ReactNode;
 }
 
 const BRAND_CLASS = 'landing-brand font-display text-3xl font-semibold leading-none';
@@ -23,6 +29,38 @@ const BrandFrame = ({ brand, title, subtitle, children }: BrandShellProps & { br
             {children ? <div className="mt-8 text-left">{children}</div> : null}
         </div>
     </main>
+);
+
+export const SplitBrandShell = ({ title, subtitle, children, art, footer }: SplitBrandShellProps) => (
+    <div className="paper-page flex min-h-full">
+        <main className="safe-split-pane flex min-w-0 flex-1 flex-col lg:flex-[1_1_420px]">
+            <div>
+                <Link
+                    to="/"
+                    className="inline-flex text-[30px] leading-none pointer-coarse:-my-[7px] pointer-coarse:py-[7px]"
+                >
+                    <Wordmark />
+                </Link>
+            </div>
+            <div className="brand-enter mx-auto my-auto w-full max-w-[400px] min-w-0 py-10 [overflow-wrap:anywhere] lg:mx-0">
+                <h1 className="display-opsz font-display text-[44px] leading-[1.02] font-semibold tracking-[-0.02em] text-balance text-ink sm:text-[60px]">
+                    {title}
+                </h1>
+                {subtitle ? (
+                    <p className="mt-3.5 text-[17px] leading-normal text-pretty text-stone-600">{subtitle}</p>
+                ) : null}
+                {children ? <div className="mt-[30px]">{children}</div> : null}
+            </div>
+            {footer}
+        </main>
+        <aside
+            aria-hidden="true"
+            inert
+            className="hidden min-w-0 flex-[1.15_1_460px] flex-col items-center justify-center bg-ink px-14 py-16 text-paper select-none lg:flex"
+        >
+            {art}
+        </aside>
+    </div>
 );
 
 /** Cleffy brand frame used by auth, join, and empty/error surfaces. */

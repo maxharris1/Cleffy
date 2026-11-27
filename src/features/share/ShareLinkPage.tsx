@@ -7,12 +7,13 @@ import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/fe
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { AgreementNote } from '@/features/legal/AgreementNote';
+import { SignInArt } from '@/features/marketing/SignInArt';
 import { BusyCountdown } from '@/features/share/BusyCountdown';
 import { requestShareSession, type DeadAnswer, type ShareSessionAnswer } from '@/features/share/linkSession';
 import { peekShareLink, redeemShareLink } from '@/features/share/shareService';
 import { deadLinkMessage, LINK_TOKEN, tokenFromHash } from '@/features/share/shareLinkText';
 import type { ShareRole } from '@/types/database';
-import { BrandShell } from '@/ui/BrandShell';
+import { SplitBrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { linkClassName } from '@/ui/classNames';
 import { ErrorText } from '@/ui/ErrorText';
@@ -25,26 +26,26 @@ const LinkViewerPage = lazy(() =>
 
 /** /s and /invite while Share v2 is off. */
 export const LinkUnavailable = () => (
-    <BrandShell title="This link isn't available.">
+    <SplitBrandShell art={<SignInArt />} title="This link isn't available.">
         <div className="text-center">
             <Link to="/" className={linkClassName}>
                 Back to home
             </Link>
         </div>
-    </BrandShell>
+    </SplitBrandShell>
 );
 
 type Phase = { kind: 'checking' } | ShareSessionAnswer | { kind: 'join'; role: ShareRole };
 
 const DeadLink = ({ answer, registered }: { answer: Pick<DeadAnswer, 'state' | 'expiredAt'>; registered: boolean }) => (
-    <BrandShell title="This link can't open the score">
+    <SplitBrandShell art={<SignInArt />} title="This link can't open the score">
         <div className="text-center">
             <ErrorText>{deadLinkMessage(answer.state, answer.expiredAt)}</ErrorText>
             <Link to={registered ? '/library' : '/'} className={`mt-3 inline-block ${linkClassName}`}>
                 {registered ? 'Go to the library' : 'Back to home'}
             </Link>
         </div>
-    </BrandShell>
+    </SplitBrandShell>
 );
 
 /**
@@ -143,7 +144,7 @@ export const ShareLinkPage = () => {
     }
     if (phase.kind === 'dead') {
         return guestDiscarded ? (
-            <BrandShell title="This link can't open the score">
+            <SplitBrandShell art={<SignInArt />} title="This link can't open the score">
                 <div className="text-center">
                     <ErrorText>{deadLinkMessage(phase.state, phase.expiredAt)}</ErrorText>
                     {/* The deleted guest's session is still in memory; a full load drops it. */}
@@ -151,53 +152,53 @@ export const ShareLinkPage = () => {
                         Back to home
                     </a>
                 </div>
-            </BrandShell>
+            </SplitBrandShell>
         ) : (
             <DeadLink answer={phase} registered={registered} />
         );
     }
     if (loading || session) {
         return (
-            <BrandShell title="Opening the score">
+            <SplitBrandShell art={<SignInArt />} title="Opening the score">
                 {joinError ? (
                     <ErrorText className="text-center">{joinError}</ErrorText>
                 ) : (
                     <LoadingText className="text-center">Joining…</LoadingText>
                 )}
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
     switch (phase.kind) {
         case 'checking':
             return (
-                <BrandShell title="Opening the score">
+                <SplitBrandShell art={<SignInArt />} title="Opening the score">
                     <LoadingText className="text-center">Checking the link…</LoadingText>
-                </BrandShell>
+                </SplitBrandShell>
             );
         case 'busy':
             return (
-                <BrandShell title="Opening the score">
+                <SplitBrandShell art={<SignInArt />} title="Opening the score">
                     <BusyCountdown retryAfterSec={phase.retryAfterSec} onRetry={retry} className="text-sm" />
-                </BrandShell>
+                </SplitBrandShell>
             );
         case 'failed':
             return (
-                <BrandShell title="This link can't open the score">
+                <SplitBrandShell art={<SignInArt />} title="This link can't open the score">
                     <div className="text-center">
                         <ErrorText>{deadLinkMessage('unavailable')}</ErrorText>
                         <Button size="sm" variant="secondary" className="mt-3" onClick={retry}>
                             Try now
                         </Button>
                     </div>
-                </BrandShell>
+                </SplitBrandShell>
             );
         case 'viewer':
             return (
                 <Suspense
                     fallback={
-                        <BrandShell title="Opening the score">
+                        <SplitBrandShell art={<SignInArt />} title="Opening the score">
                             <LoadingText className="text-center">Opening the score…</LoadingText>
-                        </BrandShell>
+                        </SplitBrandShell>
                     }
                 >
                     <LinkViewerPage token={token} first={phase} onDead={onViewerDead} />
@@ -275,7 +276,7 @@ export const JoinCard = ({
     };
 
     return (
-        <BrandShell title={role === 'editor' ? 'Join to edit' : 'Join to view'}>
+        <SplitBrandShell art={<SignInArt />} title={role === 'editor' ? 'Join to edit' : 'Join to view'}>
             {submitting ? (
                 <LoadingText className="text-center">Joining…</LoadingText>
             ) : (
@@ -317,6 +318,6 @@ export const JoinCard = ({
                     <AgreementNote action="joining" className="mt-3" />
                 </>
             )}
-        </BrandShell>
+        </SplitBrandShell>
     );
 };

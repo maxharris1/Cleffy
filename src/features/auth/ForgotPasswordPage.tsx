@@ -4,7 +4,8 @@ import { Link } from 'react-router';
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { passwordResetProblem } from '@/features/auth/authErrors';
 import { requestPasswordReset } from '@/features/auth/session';
-import { BrandShell } from '@/ui/BrandShell';
+import { SignInArt } from '@/features/marketing/SignInArt';
+import { SplitBrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
 /** Thrown to the form for the few failures it may report (see passwordResetProblem). */
@@ -22,7 +23,8 @@ export const ForgotPasswordPage = () => {
 
     if (sentTo) {
         return (
-            <BrandShell
+            <SplitBrandShell
+                art={<SignInArt />}
                 title="Check your email"
                 subtitle={`If an account exists for ${sentTo}, we’ve sent it a link to reset the password.`}
             >
@@ -34,12 +36,16 @@ export const ForgotPasswordPage = () => {
                         Back to log in
                     </Link>
                 </p>
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
 
     return (
-        <BrandShell title="Forgot password" subtitle="Enter your email and we'll send a reset link.">
+        <SplitBrandShell
+            art={<SignInArt />}
+            title="Forgot password"
+            subtitle="Enter your email and we'll send a reset link."
+        >
             <AuthCredentialsForm
                 email
                 emailId="forgot-email"
@@ -70,6 +76,6 @@ export const ForgotPasswordPage = () => {
                     setSentTo(email);
                 }}
             />
-        </BrandShell>
+        </SplitBrandShell>
     );
 };

@@ -1,0 +1,8 @@
+/* Caveat (SIL OFL 1.1, src/assets/fonts/Caveat-OFL.txt) */
+@font-face {
+    font-family: 'Caveat';
+    font-style: normal;
+    font-weight: 500 700;
+    font-display: swap;
+    src: url('../../assets/fonts/caveat-latin-wght.woff2') format('woff2-variations');
+}
