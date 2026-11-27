@@ -15,7 +15,7 @@ const PHONE = '(max-width: 39.99rem)';
  * Clear of the top bar on a phone: the safe-area inset plus the height of a
  * one-row header (the viewer's, and the library's brand row).
  */
-const BELOW_HEADER = 'calc(var(--safe-top) + 3.5rem)';
+const BELOW_HEADER = 'calc(var(--safe-top) + max(3.5rem, 0.625rem + 44px))';
 /** Above the home indicator, with the same breathing room Sonner gives by default. */
 const ABOVE_HOME_INDICATOR = 'calc(var(--safe-bottom) + 1.5rem)';
 const SIDE = { left: 'max(1rem, var(--safe-left))', right: 'max(1rem, var(--safe-right))' };
