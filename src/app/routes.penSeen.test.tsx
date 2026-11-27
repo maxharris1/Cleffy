@@ -1,20 +1,27 @@
+import { setImmediate as queueInputTask } from 'node:timers';
+
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { AppRoutes as Routes } from '@/app/routes';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import type { GestureCallbacks } from '@/features/viewer/ink/GestureController';
-import { useViewerStore } from '@/state/store';
+import type { useViewerStore as ViewerStore } from '@/state/store';
 import { useViewport } from '@/test/touchLayout';
 
 /**
- * The first /try loading screen: the score's bytes are still on the way and
- * neither the viewer header nor the viewport exists yet. The viewer is a stub
+ * The /try and /doc loading screens, rendered through the real AppRoutes: the
+ * router's own fallback while the lazy page import is held, then the page's
+ * fallback while the score's bytes are on the way. The demo viewer is a stub
  * that mounts the real Toolbar, GestureController and InkController on a page
  * whose canvas records what it shows.
  */
 const h = vi.hoisted(() => ({
     track: vi.fn(),
+    releaseImport: (): void => undefined,
+    importHeld: Promise.resolve(),
     resolveScore: null as ((bytes: ArrayBuffer) => void) | null,
     onPan: null as ReturnType<typeof vi.fn<GestureCallbacks['onPan']>> | null,
     shown: [] as string[],
@@ -22,6 +29,17 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/webEvents', () => ({ track: h.track }));
+
+vi.mock('@/lib/supabase', () => ({
+    isSupabaseConfigured: () => true,
+}));
+
+vi.mock('@/features/auth/session', () => ({
+    useSession: () => ({ session: null, loading: false, lastEvent: null }),
+    isRegisteredSession: () => false,
+    userTypeOf: () => null,
+    displayNameOf: () => '',
+}));
 
 vi.mock('@/features/demo/loadDemoScore', () => ({
     DemoScoreUnavailableError: class extends Error {},
@@ -44,7 +62,7 @@ class FakePath2D {
     constructor(readonly d = '') {}
 }
 
-vi.mock('@/features/demo/DemoViewer', async () => {
+const demoViewerStub = async () => {
     const { useEffect, useRef, useState } = await import('react');
     const { AnnotationStore } = await import('@/sync/annotationStore');
     const { ScribblerDb } = await import('@/sync/db');
@@ -93,12 +111,12 @@ vi.mock('@/features/demo/DemoViewer', async () => {
                     store,
                     registry,
                     isReadOnly: () => false,
-                    panKeyHeld: () => false,
                     getView: () => ({ scale: 1, scrollX: 0, scrollY: 0 }),
                     getLayout: () => layout,
                     toLocal: (e) => ({ x: e.clientX, y: e.clientY }),
                     onTextIntent: () => undefined,
                     onFingeringSelect: () => undefined,
+                    panKeyHeld: () => false,
                 });
                 const onPan = vi.fn<GestureCallbacks['onPan']>();
                 const gestures = new GestureController(el, {
@@ -129,9 +147,10 @@ vi.mock('@/features/demo/DemoViewer', async () => {
             );
         },
     };
-});
+};
 
-const { DemoPage } = await import('@/features/demo/DemoPage');
+let AppRoutes: typeof Routes;
+let useViewerStore: typeof ViewerStore;
 
 let clock: number;
 let nextPointerId = 1;
@@ -147,6 +166,8 @@ const fingerSwipe = (el: Element) => {
     clock += 1000;
 };
 
+const panDistance = () => (h.onPan?.mock.calls ?? []).reduce((sum, [dx, dy]) => sum + Math.hypot(dx, dy), 0);
+
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 
 const setFingerDraws = (fingerDraws: boolean) => {
@@ -155,13 +176,33 @@ const setFingerDraws = (fingerDraws: boolean) => {
 };
 
 const openScore = async () => {
+    await waitFor(() => expect(h.resolveScore).not.toBeNull());
     act(() => h.resolveScore!(new ArrayBuffer(8)));
     const viewport = await screen.findByTestId('viewport');
     await waitFor(() => expect(h.ready).toBe(true));
     return viewport;
 };
 
-beforeEach(() => {
+const holdImport = () => {
+    h.importHeld = new Promise<void>((resolve) => {
+        h.releaseImport = resolve;
+    });
+};
+
+beforeEach(async () => {
+    vi.resetModules();
+    h.importHeld = Promise.resolve();
+    vi.doMock('@/features/demo/DemoViewer', demoViewerStub);
+    vi.doMock('@/features/demo/DemoPage', async (importOriginal) => {
+        await h.importHeld;
+        return importOriginal();
+    });
+    vi.doMock('@/features/viewer/ViewerPage', async () => {
+        await h.importHeld;
+        return { ViewerPage: () => <div>viewer-page</div> };
+    });
+    ({ AppRoutes } = await import('@/app/routes'));
+    ({ useViewerStore } = await import('@/state/store'));
     clock = 10_000;
     h.resolveScore = null;
     h.onPan = null;
@@ -182,26 +223,73 @@ afterEach(() => {
     vi.unstubAllGlobals();
 });
 
-const renderTry = async () => {
+const renderAt = (path: string) =>
     render(
-        <MemoryRouter initialEntries={['/try']}>
-            <DemoPage />
+        <MemoryRouter initialEntries={[path]}>
+            <AppRoutes />
         </MemoryRouter>,
     );
+
+const renderTry = async () => {
+    renderAt('/try');
     const loading = await screen.findByText('Loading demo…');
     expect(screen.queryByRole('banner')).not.toBeInTheDocument();
     return loading;
 };
 
-describe('DemoPage, a pen pressed on the first loading screen', () => {
+const penPress = (el: Element) => {
+    fireEvent.pointerDown(el, { pointerType: 'pen' });
+    fireEvent.pointerUp(el, { pointerType: 'pen' });
+};
+
+describe("/try, a pen pressed on the router's Loading demo… screen", () => {
     it.each([true, false])(
         'hides the Scroll | Draw switch and a finger drag scrolls without ink, Finger-draw %s',
         async (fingerDraws) => {
+            holdImport();
             const loading = await renderTry();
             setFingerDraws(fingerDraws);
 
-            fireEvent.pointerDown(loading, { pointerType: 'pen' });
-            fireEvent.pointerUp(loading, { pointerType: 'pen' });
+            penPress(loading);
+
+            act(() => h.releaseImport());
+            const viewport = await openScore();
+            expect(useViewerStore.getState().penSeen).toBe(true);
+            expect(screen.queryByRole('group', { name: 'What a finger does' })).not.toBeInTheDocument();
+
+            setFingerDraws(fingerDraws);
+            fingerSwipe(viewport);
+            await settle();
+            expect(h.shown).toHaveLength(0);
+            expect(panDistance()).toBeGreaterThan(0);
+        },
+    );
+});
+
+describe("/doc, a pen pressed on the router's Loading viewer… screen", () => {
+    it('counts once the viewer page mounts', async () => {
+        holdImport();
+        renderAt('/doc/local-score');
+        const loading = await screen.findByText('Loading viewer…');
+
+        penPress(loading);
+
+        act(() => h.releaseImport());
+        await screen.findByText('viewer-page');
+        expect(useViewerStore.getState().penSeen).toBe(true);
+    });
+});
+
+describe("/try, a pen pressed on the demo's own loading screen", () => {
+    it.each([true, false])(
+        'hides Draw with finger and a finger drag scrolls without ink, Finger-draw %s',
+        async (fingerDraws) => {
+            await renderTry();
+            await waitFor(() => expect(h.resolveScore).not.toBeNull());
+            const loading = screen.getByText('Loading demo…');
+            setFingerDraws(fingerDraws);
+
+            penPress(loading);
             expect(useViewerStore.getState().penSeen).toBe(true);
 
             const viewport = await openScore();
@@ -211,7 +299,7 @@ describe('DemoPage, a pen pressed on the first loading screen', () => {
             fingerSwipe(viewport);
             await settle();
             expect(h.shown).toHaveLength(0);
-            expect(h.onPan).toHaveBeenCalled();
+            expect(panDistance()).toBeGreaterThan(0);
         },
     );
 
@@ -227,5 +315,68 @@ describe('DemoPage, a pen pressed on the first loading screen', () => {
         expect(h.shown).toHaveLength(1);
         expect(h.onPan).not.toHaveBeenCalled();
         expect(useViewerStore.getState().penSeen).toBe(false);
+    });
+});
+
+describe("the first queued pen press on the router's loading screen, before passive effects run", () => {
+    const pressOnceFallbackPaints = async (path: string, label: string) => {
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', false);
+        const mount = document.body.appendChild(document.createElement('div'));
+        const root = createRoot(mount);
+        const pressed = new Promise<void>((resolve) => {
+            const poll = () => {
+                const fallback = mount.querySelector('main');
+                if (fallback?.textContent !== label) {
+                    queueInputTask(poll);
+                    return;
+                }
+                fallback.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'pen', bubbles: true }));
+                resolve();
+            };
+            queueInputTask(poll);
+        });
+        root.render(
+            <MemoryRouter initialEntries={[path]}>
+                <AppRoutes />
+            </MemoryRouter>,
+        );
+        await pressed;
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+        return () => {
+            act(() => root.unmount());
+            mount.remove();
+        };
+    };
+
+    it('on /try, hides Draw with finger and a finger drag pans without ink', async () => {
+        holdImport();
+        setFingerDraws(true);
+        const unmount = await pressOnceFallbackPaints('/try', 'Loading demo…');
+        try {
+            act(() => h.releaseImport());
+            const viewport = await openScore();
+            fingerSwipe(viewport);
+            await settle();
+            expect({
+                penSeen: useViewerStore.getState().penSeen,
+                switchVisible: screen.queryByRole('group', { name: 'What a finger does' }) !== null,
+                panned: panDistance() > 0,
+                committed: h.shown.length,
+            }).toEqual({ penSeen: true, switchVisible: false, panned: true, committed: 0 });
+        } finally {
+            unmount();
+        }
+    });
+
+    it('on /doc, counts once the viewer page mounts', async () => {
+        holdImport();
+        const unmount = await pressOnceFallbackPaints('/doc/local-score', 'Loading viewer…');
+        try {
+            act(() => h.releaseImport());
+            await screen.findByText('viewer-page');
+            expect(useViewerStore.getState().penSeen).toBe(true);
+        } finally {
+            unmount();
+        }
     });
 });

@@ -45,7 +45,6 @@ import { LocalViewerFrame } from '@/features/viewer/LocalViewerFrame';
 import { ViewerNotice, ViewerNoticeRegion } from '@/features/viewer/ViewerNotice';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
-import { useRecordPointerKinds } from '@/features/viewer/useRecordPointerKinds';
 import { features } from '@/lib/features';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
@@ -88,7 +87,6 @@ const confirmedMeta = (doc: DocumentRow) => ({
 
 export const ViewerPage = () => {
     const { documentId } = useParams<{ documentId: string }>();
-    useRecordPointerKinds();
     if (!documentId) {
         return null;
     }

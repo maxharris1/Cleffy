@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useLayoutEffect } from 'react';
 
 import { useViewerStore } from '@/state/store';
 
@@ -8,7 +8,7 @@ import { useViewerStore } from '@/state/store';
  * still counts once the score opens.
  */
 export const useRecordPointerKinds = () => {
-    useEffect(() => {
+    useLayoutEffect(() => {
         const onPointerDown = (e: PointerEvent) => useViewerStore.getState().notePointer(e.pointerType);
         document.addEventListener('pointerdown', onPointerDown, { capture: true });
         return () => document.removeEventListener('pointerdown', onPointerDown, { capture: true });
