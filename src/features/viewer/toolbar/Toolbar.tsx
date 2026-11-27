@@ -84,6 +84,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const { setTool, setColor, setWidthKey, setFingerDraws } = useViewerStore.getState();
     const [styleOpen, setStyleOpen] = useState(false);
     const overlayRef = useRef<HTMLDivElement | null>(null);
+    const safeBottomProbeRef = useRef<HTMLDivElement | null>(null);
     const styleButtonRef = useRef<HTMLButtonElement | null>(null);
     const popoverRef = useRef<HTMLDivElement | null>(null);
     const popoverId = useId();
@@ -142,7 +143,8 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     }, [styleOpen]);
 
     // Report the strip of viewport the bar covers whenever either one resizes
-    // (rotation, a tool that adds the style button, the safe area).
+    // (rotation, a tool that adds the style button) or the bottom safe area
+    // moves the bar without resizing anything (the probe's height tracks it).
     useEffect(() => {
         const overlay = overlayRef.current;
         const viewport = overlay?.parentElement;
@@ -171,6 +173,9 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
         observer?.observe(overlay);
         observer?.observe(viewport);
+        if (safeBottomProbeRef.current) {
+            observer?.observe(safeBottomProbeRef.current);
+        }
         window.addEventListener('resize', measure);
         measure();
         return () => {
@@ -221,6 +226,11 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
             data-ui-overlay
             className="pointer-events-none absolute bottom-[calc(0.75rem+var(--safe-bottom))] left-[max(0.5rem,var(--safe-left))] right-[max(0.5rem,var(--safe-right))] z-20 flex justify-center sm:inset-x-0 sm:bottom-auto sm:top-3"
         >
+            <div
+                ref={safeBottomProbeRef}
+                aria-hidden
+                className="invisible absolute bottom-0 h-[var(--safe-bottom)] w-0"
+            />
             <div
                 data-touch-ui={touchSeen ? '' : undefined}
                 className="chrome-glass pointer-events-auto flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2 lg:pointer-coarse:gap-3 max-sm:overflow-x-auto max-sm:[scrollbar-width:none]"

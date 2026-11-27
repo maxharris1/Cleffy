@@ -600,7 +600,10 @@ export const PdfViewport = ({
             const safeBottomChanged = safeBottom !== safeBottomRef.current;
             safeBottomRef.current = safeBottom;
             applyObscured();
-            if (safeBottomChanged) {
+            // A resize in the same delivery clamps against the new size (below);
+            // settling now would clamp against the old one first.
+            const sized = viewportSizeRef.current;
+            if (safeBottomChanged && sized.width === width && sized.height === height) {
                 settleIntoBounds();
             }
             setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
@@ -720,13 +723,16 @@ export const PdfViewport = ({
             }
             return;
         }
+        // A resize while it was on (the safe area, say) measured no strip.
+        controlsStripRef.current = controlsStripFor(containerRef.current?.clientWidth ?? 0);
+        applyObscured();
         const entry = standEntryRef.current;
         if (entry) {
             standEntryRef.current = null;
             standReturnRef.current = { page: standPageRef.current, entry };
             setStandMenu((m) => ({ ...m, open: false }));
         }
-    }, [standMode, cancelSettleGlide]);
+    }, [standMode, cancelSettleGlide, applyObscured]);
 
     // Stand mode: the page or spread, whole and centred, at every size full
     // screen passes through. Then, once it ends, that page back at the top of the
