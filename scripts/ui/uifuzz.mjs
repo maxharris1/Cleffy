@@ -115,9 +115,9 @@ export async function stubApi(page, handlers = {}) {
             return route.fulfill({ status: 204, headers: { ...CORS, 'access-control-allow-methods': '*' } });
         }
         const url = new URL(request.url());
-        const answers = { ...STUB_DEFAULTS, ...handlers };
-        const key = Object.keys(answers).find((k) => url.pathname.endsWith(k));
-        let out = auth[url.pathname] ?? (key === undefined ? [] : answers[key]);
+        const answers = [...Object.entries(handlers), ...Object.entries(STUB_DEFAULTS)];
+        const [, answer = []] = answers.find(([k]) => url.pathname.endsWith(k)) ?? [];
+        let out = auth[url.pathname] ?? answer;
         if (typeof out === 'function') out = out(url, request);
         const { status, body } = out instanceof Reply ? out : { status: 200, body: out };
         const headers = { ...CORS, 'content-range': '*/0' };
