@@ -9,7 +9,7 @@ import { ResendConfirmation } from '@/features/auth/ResendConfirmation';
 import { signUpWithPassword } from '@/features/auth/session';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import { SignInArt } from '@/features/marketing/SignInArt';
-import { BrandShell } from '@/ui/BrandShell';
+import { SplitBrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
 export const RegisterPage = () => (
@@ -27,7 +27,7 @@ const RegisterForm = () => {
 
     if (needsConfirm) {
         return (
-            <BrandShell
+            <SplitBrandShell
                 art={<SignInArt sentence="register" />}
                 title="Check your email"
                 subtitle={`We sent a confirmation link to ${email}.`}
@@ -44,7 +44,7 @@ const RegisterForm = () => {
                     already exists, try signing in" — and then signing in,
                     which answers "email not confirmed". */}
                 <ResendConfirmation email={email} className="mt-5" />
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
 
@@ -60,7 +60,7 @@ const RegisterForm = () => {
     }
 
     return (
-        <BrandShell
+        <SplitBrandShell
             art={<SignInArt sentence="register" />}
             title="Create account"
             subtitle="Upload scores, annotate, and share with your class."
@@ -92,7 +92,7 @@ const RegisterForm = () => {
                     navigate('/library', { replace: true });
                 }}
             />
-        </BrandShell>
+        </SplitBrandShell>
     );
 };
 

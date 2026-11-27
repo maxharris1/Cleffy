@@ -17,7 +17,6 @@ const Presence = ({ name, color }: { name: string; color: string }) => (
     </span>
 );
 
-/** The ink half of the sign-in pages: the landing hero's marked score, drawn and still. */
 export const SignInArt = ({ sentence = 'default' }: { sentence?: SignInArtSentence }) => {
     const handwritingReady = useHandwritingReady();
     return (

@@ -4,7 +4,7 @@ import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { updatePassword } from '@/features/auth/session';
 import { SignInArt } from '@/features/marketing/SignInArt';
-import { BrandShell } from '@/ui/BrandShell';
+import { SplitBrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
 /**
@@ -19,7 +19,7 @@ const UpdatePasswordForm = () => {
     const navigate = useNavigate();
 
     return (
-        <BrandShell
+        <SplitBrandShell
             art={<SignInArt />}
             title="Set a new password"
             subtitle="Choose a password for your Cleffy account."
@@ -45,6 +45,6 @@ const UpdatePasswordForm = () => {
                     navigate('/library', { replace: true });
                 }}
             />
-        </BrandShell>
+        </SplitBrandShell>
     );
 };

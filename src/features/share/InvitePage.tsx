@@ -14,7 +14,7 @@ import {
 } from '@/features/share/inviteApi';
 import { SignInArt } from '@/features/marketing/SignInArt';
 import { tokenFromHash } from '@/features/share/shareLinkText';
-import { BrandShell } from '@/ui/BrandShell';
+import { SplitBrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { linkClassName } from '@/ui/classNames';
 import { ErrorText } from '@/ui/ErrorText';
@@ -120,16 +120,16 @@ export const InvitePage = () => {
     }
     if (step.kind === 'failed') {
         return (
-            <BrandShell art={<SignInArt />} title="Invite">
+            <SplitBrandShell art={<SignInArt />} title="Invite">
                 <ErrorText className="text-center">Could not open this invite. Try again in a moment.</ErrorText>
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
     if (step.kind === 'loading' || loading || !invite) {
         return (
-            <BrandShell art={<SignInArt />} title="Invite">
+            <SplitBrandShell art={<SignInArt />} title="Invite">
                 <LoadingText className="text-center">Opening the invite…</LoadingText>
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
     if (step.kind === 'age') {
@@ -151,16 +151,16 @@ export const InvitePage = () => {
 
     if (step.kind === 'refused') {
         return (
-            <BrandShell art={<SignInArt />} title={headline}>
+            <SplitBrandShell art={<SignInArt />} title={headline}>
                 <p className="text-center text-sm text-stone-700">
                     Sorry, you can't make an account here. Nothing was saved.
                 </p>
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
     if (step.kind === 'mismatch') {
         return (
-            <BrandShell art={<SignInArt />} title={headline}>
+            <SplitBrandShell art={<SignInArt />} title={headline}>
                 <div className="text-center">
                     <p className="text-sm text-stone-700">
                         This invite is for {invite.emailMasked}. Sign out to accept it.
@@ -174,12 +174,12 @@ export const InvitePage = () => {
                         Sign out
                     </Button>
                 </div>
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
     if (step.kind === 'signIn') {
         return (
-            <BrandShell
+            <SplitBrandShell
                 art={<SignInArt />}
                 title={headline}
                 subtitle={`You already have an account. Sign in as ${invite.emailMasked} to accept.`}
@@ -195,12 +195,12 @@ export const InvitePage = () => {
                         setStep({ kind: 'ready' });
                     }}
                 />
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
     if (step.kind === 'password') {
         return (
-            <BrandShell art={<SignInArt />} title="Choose a password" subtitle={headline}>
+            <SplitBrandShell art={<SignInArt />} title="Choose a password" subtitle={headline}>
                 <TextField
                     id="invite-email"
                     label="Email"
@@ -232,27 +232,27 @@ export const InvitePage = () => {
                         }}
                     />
                 </div>
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
 
     return (
-        <BrandShell art={<SignInArt />} title={headline}>
+        <SplitBrandShell art={<SignInArt />} title={headline}>
             <Button className="w-full" disabled={busy} onClick={() => void accept()}>
                 {registered ? (busy ? 'Accepting…' : 'Accept and open') : busy ? 'Checking…' : 'Continue'}
             </Button>
             {error ? <ErrorText className="mt-3 text-center">{error}</ErrorText> : null}
-        </BrandShell>
+        </SplitBrandShell>
     );
 };
 
 const DeadInvite = ({ state }: { state: string }) => (
-    <BrandShell art={<SignInArt />} title="This invite can't be used">
+    <SplitBrandShell art={<SignInArt />} title="This invite can't be used">
         <div className="text-center">
             <ErrorText>{deadInviteMessage(state)}</ErrorText>
             <Link to="/" className={`mt-3 inline-block ${linkClassName}`}>
                 Back to home
             </Link>
         </div>
-    </BrandShell>
+    </SplitBrandShell>
 );

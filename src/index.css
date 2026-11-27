@@ -394,7 +394,6 @@ body {
     animation: hero-chip-in 0.35s var(--ease-out) var(--d, 0s) forwards;
 }
 
-/* The sign-in art (SignInArt): the same marks, already drawn, never moving. */
 .score-ink-still .hero-ink {
     stroke-dashoffset: 0;
     animation: none;
@@ -405,7 +404,6 @@ body {
     animation: none;
 }
 
-/* Until the handwriting face is in, its notes stay hidden rather than show a fallback face. */
 .score-ink-pending .font-hand {
     visibility: hidden;
 }

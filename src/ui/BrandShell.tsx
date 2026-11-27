@@ -8,15 +8,16 @@ interface BrandShellProps {
     title: string;
     subtitle?: string;
     children?: ReactNode;
-    /** Decoration for the ink half. Given, the page splits in two; the ink half is hidden below 1024px. */
-    art?: ReactNode;
-    /** Pinned to the bottom of the paper half in the split layout; after the content otherwise. */
+}
+
+interface SplitBrandShellProps extends BrandShellProps {
+    art: ReactNode;
     footer?: ReactNode;
 }
 
 const BRAND_CLASS = 'landing-brand font-display text-3xl font-semibold leading-none';
 
-const BrandFrame = ({ brand, title, subtitle, children, footer }: BrandShellProps & { brand: ReactNode }) => (
+const BrandFrame = ({ brand, title, subtitle, children }: BrandShellProps & { brand: ReactNode }) => (
     <main className="paper-page safe-brand-shell flex min-h-full flex-col items-center justify-center">
         <div className="brand-enter w-full max-w-sm text-center">
             {brand}
@@ -26,12 +27,11 @@ const BrandFrame = ({ brand, title, subtitle, children, footer }: BrandShellProp
                 <p className="mt-2 text-sm leading-relaxed text-stone-600 [overflow-wrap:anywhere]">{subtitle}</p>
             ) : null}
             {children ? <div className="mt-8 text-left">{children}</div> : null}
-            {footer}
         </div>
     </main>
 );
 
-const SplitFrame = ({ title, subtitle, children, art, footer }: BrandShellProps) => (
+export const SplitBrandShell = ({ title, subtitle, children, art, footer }: SplitBrandShellProps) => (
     <div className="paper-page flex min-h-full">
         <main className="safe-split-pane flex min-w-0 flex-1 flex-col lg:flex-[1_1_420px]">
             <div>
@@ -66,19 +66,16 @@ const SplitFrame = ({ title, subtitle, children, art, footer }: BrandShellProps)
 );
 
 /** Cleffy brand frame used by auth, join, and empty/error surfaces. */
-export const BrandShell = (props: BrandShellProps) =>
-    props.art ? (
-        <SplitFrame {...props} />
-    ) : (
-        <BrandFrame
-            {...props}
-            brand={
-                <Link to="/" className={BRAND_CLASS}>
-                    Cleffy
-                </Link>
-            }
-        />
-    );
+export const BrandShell = (props: BrandShellProps) => (
+    <BrandFrame
+        {...props}
+        brand={
+            <Link to="/" className={BRAND_CLASS}>
+                Cleffy
+            </Link>
+        }
+    />
+);
 
 /**
  * The same frame with no router in it, for the crash screen. The error
@@ -87,7 +84,7 @@ export const BrandShell = (props: BrandShellProps) =>
  * drawn — a crash screen that crashes is a blank page. A plain anchor is also
  * the right way out of a broken page: a full load.
  */
-export const StaticBrandShell = (props: Omit<BrandShellProps, 'art'>) => (
+export const StaticBrandShell = (props: BrandShellProps) => (
     <BrandFrame
         {...props}
         brand={

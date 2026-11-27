@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useMemo, useState, type ComponentProps, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 
 import {
@@ -10,10 +10,14 @@ import {
 } from '@/features/auth/ageCheck';
 import { countryOptions } from '@/features/legal/countries';
 import { features } from '@/lib/features';
-import { BrandShell } from '@/ui/BrandShell';
+import { BrandShell, SplitBrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 import { fieldClassName, fieldLabelClassName, linkClassName } from '@/ui/classNames';
+
+/** The guest-upgrade overlay passes no art and keeps the centred column. */
+const Shell = ({ art, ...props }: ComponentProps<typeof BrandShell> & { art?: ReactNode }) =>
+    art ? <SplitBrandShell art={art} {...props} /> : <BrandShell {...props} />;
 
 /** How far back the year list goes. */
 const YEARS_SHOWN = 100;
@@ -29,7 +33,6 @@ export interface AgeScreenProps {
     onPass: (gate: AgeGate) => void;
     /** Under the form, e.g. the sign-up page's "Already have an account?". */
     footer?: ReactNode;
-    /** The sign-in pages' ink half (BrandShell). */
     art?: ReactNode;
 }
 
@@ -68,7 +71,7 @@ export const AgeScreen = ({ purpose, onPass, footer, art }: AgeScreenProps) => {
 
     if (blocked) {
         return (
-            <BrandShell
+            <Shell
                 art={art}
                 title="Sorry"
                 subtitle="Cleffy accounts are for people who meet the minimum age where they live."
@@ -83,7 +86,7 @@ export const AgeScreen = ({ purpose, onPass, footer, art }: AgeScreenProps) => {
                         Back to home
                     </Link>
                 </p>
-            </BrandShell>
+            </Shell>
         );
     }
 
@@ -106,7 +109,7 @@ export const AgeScreen = ({ purpose, onPass, footer, art }: AgeScreenProps) => {
     const selectClass = fieldClassName('md', 'mt-1.5');
 
     return (
-        <BrandShell art={art} title={title} subtitle={subtitle}>
+        <Shell art={art} title={title} subtitle={subtitle}>
             <form noValidate onSubmit={submit}>
                 <label htmlFor="age-country" className={fieldLabelClassName}>
                     Where do you live?
@@ -169,6 +172,6 @@ export const AgeScreen = ({ purpose, onPass, footer, art }: AgeScreenProps) => {
                 </p>
             </form>
             {footer}
-        </BrandShell>
+        </Shell>
     );
 };

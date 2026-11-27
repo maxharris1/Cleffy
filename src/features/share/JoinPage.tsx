@@ -10,7 +10,7 @@ import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import { SignInArt } from '@/features/marketing/SignInArt';
 import { peekShareLink, redeemShareLink } from '@/features/share/shareService';
-import { BrandShell } from '@/ui/BrandShell';
+import { SplitBrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
@@ -181,7 +181,7 @@ export const JoinPage = () => {
     }
 
     return (
-        <BrandShell
+        <SplitBrandShell
             art={<SignInArt />}
             title="Join a shared score"
             subtitle={shownError || busy ? undefined : 'Enter your name so collaborators know who you are.'}
@@ -234,6 +234,6 @@ export const JoinPage = () => {
                     <AgreementNote action="joining" className="mt-2" />
                 </>
             )}
-        </BrandShell>
+        </SplitBrandShell>
     );
 };

@@ -10,7 +10,7 @@ import { signInWithPassword } from '@/features/auth/session';
 import { CancelSubscriptionLink } from '@/features/billing/CancelSubscriptionLink';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import { SignInArt } from '@/features/marketing/SignInArt';
-import { BrandShell } from '@/ui/BrandShell';
+import { SplitBrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
 export const LoginPage = () => (
@@ -35,7 +35,7 @@ const LoginForm = () => {
     const [unconfirmed, setUnconfirmed] = useState<string | null>(null);
 
     return (
-        <BrandShell
+        <SplitBrandShell
             art={<SignInArt />}
             title="Log in"
             subtitle="Upload and share scores with your account."
@@ -98,6 +98,6 @@ const LoginForm = () => {
                     navigate(next, { replace: true });
                 }}
             />
-        </BrandShell>
+        </SplitBrandShell>
     );
 };
