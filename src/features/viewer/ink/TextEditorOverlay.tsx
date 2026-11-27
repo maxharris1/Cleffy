@@ -168,9 +168,20 @@ export const TextEditorOverlay = ({
     }, []);
 
     const spacePending = useRef(false);
+    // Before a space typed early for a non-character key: a drag later in the
+    // same Space hold restores it, so the hold edits nothing.
+    const beforeHeldSpace = useRef<{ value: string; start: number; end: number } | null>(null);
     useEffect(() => {
         const drop = () => {
             spacePending.current = false;
+            const before = beforeHeldSpace.current;
+            const el = ref.current;
+            beforeHeldSpace.current = null;
+            if (before && el) {
+                el.value = before.value;
+                el.setSelectionRange(before.start, before.end);
+                fitHeight(el);
+            }
         };
         document.addEventListener('pointerdown', drop, true);
         return () => document.removeEventListener('pointerdown', drop, true);
@@ -221,7 +232,12 @@ export const TextEditorOverlay = ({
                     spacePending.current ||= !e.repeat;
                     return;
                 }
-                if (!MODIFIER_KEYS.has(e.key)) {
+                if (e.key.length === 1) {
+                    beforeHeldSpace.current = null;
+                    typePendingSpace(e.currentTarget);
+                } else if (spacePending.current && !MODIFIER_KEYS.has(e.key)) {
+                    const { value, selectionStart: start, selectionEnd: end } = e.currentTarget;
+                    beforeHeldSpace.current = { value, start, end };
                     typePendingSpace(e.currentTarget);
                 }
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -236,11 +252,13 @@ export const TextEditorOverlay = ({
             onInput={(e) => fitHeight(e.currentTarget)}
             onKeyUp={(e) => {
                 if (e.key === ' ') {
+                    beforeHeldSpace.current = null;
                     typePendingSpace(e.currentTarget);
                 }
             }}
             onBlur={(e) => {
                 spacePending.current = false;
+                beforeHeldSpace.current = null;
                 commit(e.currentTarget.value);
             }}
             onPointerDown={(e) => e.stopPropagation()}

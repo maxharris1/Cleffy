@@ -1052,6 +1052,36 @@ describe('PdfViewport Space-held panning', () => {
         expect(view().scrollY).toBeCloseTo(start + 6);
     });
 
+    it('keeps the pan of a stylus Space-drag when an ignored palm touches down after Space is released', async () => {
+        await renderEditable();
+        viewport = { width: 800, height: 600 };
+        act(() => useViewerStore.setState({ tool: 'pen' }));
+        const start = view().scrollY;
+        const surface = document.querySelector('.ink-surface')!;
+        const pointer = (type: string, pointerId: number, pointerType: string, x: number, y: number) =>
+            act(() => {
+                surface.dispatchEvent(
+                    new PointerEvent(type, {
+                        pointerId,
+                        pointerType,
+                        buttons: type === 'pointerup' ? 0 : 1,
+                        clientX: x,
+                        clientY: y,
+                        bubbles: true,
+                    }),
+                );
+            });
+        fireEvent.keyDown(document.body, { key: ' ' });
+        pointer('pointerdown', 40, 'pen', 769, 400);
+        pointer('pointermove', 40, 'pen', 769, 397);
+        pointer('pointermove', 40, 'pen', 769, 394);
+        fireEvent.keyUp(document.body, { key: ' ' });
+        pointer('pointerdown', 41, 'touch', 690, 490);
+        pointer('pointerup', 40, 'pen', 769, 394);
+        pointer('pointerup', 41, 'touch', 690, 490);
+        expect(view().scrollY).toBeCloseTo(start + 6);
+    });
+
     it('keeps the pan when Space is released and pressed again before the mouse comes up', async () => {
         await renderEditable();
         const start = view().scrollY;
@@ -1149,6 +1179,58 @@ describe('PdfViewport Space-held panning', () => {
             fireEvent.blur(note);
             await waitFor(() => expect(create).toHaveBeenCalled());
             expect(create.mock.calls[0]![0]).toMatchObject({ payload: { text: 'ab' } });
+        });
+
+        describe('a saved note reopened as ab', () => {
+            const reopenNote = async () => {
+                const { create, note } = await openNote();
+                fireEvent.blur(note);
+                await waitFor(() => expect(create).toHaveBeenCalled());
+                const store = create.mock.contexts[0] as AnnotationStore;
+                await waitFor(() =>
+                    expect(screen.queryByRole('textbox', { name: 'Text note' })).not.toBeInTheDocument(),
+                );
+                act(() => useViewerStore.setState({ tool: 'pen' }));
+                act(() => useViewerStore.setState({ tool: 'text' }));
+                const tap = mousePointer(202);
+                tap('pointerdown', 405);
+                tap('pointerup', 405);
+                const reopened = (await screen.findByRole('textbox', { name: 'Text note' })) as HTMLTextAreaElement;
+                expect(reopened.value).toBe('ab');
+                const writes = [vi.spyOn(store, 'create'), vi.spyOn(store, 'update'), vi.spyOn(store, 'delete')];
+                create.mockClear();
+                return { note: reopened, writes };
+            };
+
+            it.each([
+                ['all of it selected', 0, 2],
+                ['the caret between a and b', 1, 1],
+            ])('keeps ab with %s when ArrowRight comes down during a Space-drag', async (_, from, to) => {
+                const { note, writes } = await reopenNote();
+                note.setSelectionRange(from, to);
+                const start = view().scrollY;
+                fireEvent.keyDown(note, { key: ' ' });
+                fireEvent.keyDown(note, { key: 'ArrowRight' });
+                fireEvent.keyUp(note, { key: 'ArrowRight' });
+                mouseDrag(-80);
+                expect(view().scrollY).toBeCloseTo(start + 80);
+                fireEvent.keyUp(document.body, { key: ' ' });
+                expect(note.value).toBe('ab');
+                fireEvent.blur(note);
+                await act(async () => {});
+                for (const write of writes) {
+                    expect(write).not.toHaveBeenCalled();
+                }
+            });
+        });
+
+        it('types the space before ArrowRight when no drag follows', async () => {
+            const { note } = await openNote();
+            fireEvent.keyDown(note, { key: ' ' });
+            fireEvent.keyDown(note, { key: 'ArrowRight' });
+            expect(note.value).toBe('a b');
+            fireEvent.keyUp(note, { key: ' ' });
+            expect(note.value).toBe('a b');
         });
 
         it('never types the space when the score is dragged while it is held', async () => {
