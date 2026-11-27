@@ -163,6 +163,28 @@ describe('AnnotationStore', () => {
         expect(store.getPage(0).has('a1')).toBe(true);
     });
 
+    it('an edit made for an outer batch undoes with that batch, not the inner one open over it', async () => {
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+
+        const outer = store.beginBatch();
+        const inner = store.beginBatch();
+        await store.delete('a1', { batch: outer });
+        await store.create(makeStroke('c1'), { batch: outer });
+        await store.delete('a2');
+        store.endBatch(inner);
+        store.endBatch(outer);
+
+        await store.undoLast();
+        expect(store.getPage(0).has('a1')).toBe(true);
+        expect((await db.annotations.get('a1'))?.deletedAt).toBeNull();
+        expect(store.getPage(0).has('c1')).toBe(false);
+        expect(store.getPage(0).has('a2')).toBe(false);
+
+        await store.undoLast();
+        expect(store.getPage(0).has('a2')).toBe(true);
+    });
+
     it('a new op clears the redo stack', async () => {
         await store.create(makeStroke('a1'));
         await store.undoLast();
@@ -328,6 +350,34 @@ describe('AnnotationStore', () => {
         });
         await store.create(makeStroke('new'));
         expect(store.get('new')?.id).toBe('new');
+        spy.mockRestore();
+    });
+
+    it("an undo waiting on the previous account's erase leaves the next account's marks alone", async () => {
+        store.setAuthor('user-1');
+        await store.create(makeStroke('a1'));
+        const orig = snapshotService.ensureDayStartingSnapshot;
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => (release = resolve));
+        const spy = vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementationOnce(async (...args) => {
+            await released;
+            return orig(...args);
+        });
+        const batch = store.beginBatch();
+        const deleting = store.delete('a1');
+        store.endBatch(batch);
+        const undoing = store.undoLast();
+
+        store.setAuthor('user-2');
+        const creating = store.create(makeStroke('b1'));
+        await Promise.resolve();
+        release();
+        await Promise.allSettled([deleting, creating]);
+        await undoing;
+
+        expect(store.get('b1')?.deletedAt).toBeNull();
+        expect((await db.annotations.get('b1'))?.deletedAt).toBeNull();
+        expect(store.canUndo).toBe(true);
         spy.mockRestore();
     });
 

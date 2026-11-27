@@ -3,7 +3,8 @@ import { Link, useNavigate } from 'react-router';
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { updatePassword } from '@/features/auth/session';
-import { BrandShell } from '@/ui/BrandShell';
+import { SignInArt } from '@/features/marketing/SignInArt';
+import { SplitBrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
 /**
@@ -18,7 +19,11 @@ const UpdatePasswordForm = () => {
     const navigate = useNavigate();
 
     return (
-        <BrandShell title="Set a new password" subtitle="Choose a password for your Cleffy account.">
+        <SplitBrandShell
+            art={<SignInArt />}
+            title="Set a new password"
+            subtitle="Choose a password for your Cleffy account."
+        >
             <AuthCredentialsForm
                 password
                 confirm
@@ -40,6 +45,6 @@ const UpdatePasswordForm = () => {
                     navigate('/library', { replace: true });
                 }}
             />
-        </BrandShell>
+        </SplitBrandShell>
     );
 };

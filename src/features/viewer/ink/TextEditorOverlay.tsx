@@ -37,6 +37,10 @@ export interface TextEditorOverlayProps {
 
 /** Gap (CSS px) the editor keeps from the viewer's right and bottom edges. */
 const VIEWPORT_MARGIN = 8;
+
+/** Keys that only qualify another key: holding one with Space types nothing yet. */
+const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'Fn', 'OS']);
+
 /** The textarea's p-1 padding plus its 1px border, both sides. */
 const BOX_EXTRA = 10;
 /** Smallest font (CSS px) the editor lays text out at; smaller notes are scaled down from it. */
@@ -163,6 +167,45 @@ export const TextEditorOverlay = ({
         }
     }, []);
 
+    const spacePending = useRef(false);
+    const undoEarlySpaceOnScoreDrag = useRef<{ value: string; start: number; end: number } | null>(null);
+    useEffect(() => {
+        const drop = (e: PointerEvent) => {
+            spacePending.current = false;
+            const before = undoEarlySpaceOnScoreDrag.current;
+            const el = ref.current;
+            const onScore =
+                e.target instanceof Element &&
+                !e.target.closest('[data-ui-overlay]') &&
+                !!el?.parentElement?.contains(e.target);
+            if (!onScore) {
+                return;
+            }
+            undoEarlySpaceOnScoreDrag.current = null;
+            if (before && el) {
+                el.value = before.value;
+                el.setSelectionRange(before.start, before.end);
+                fitHeight(el);
+            }
+        };
+        document.addEventListener('pointerdown', drop, true);
+        return () => document.removeEventListener('pointerdown', drop, true);
+    }, []);
+    const typePendingSpace = (el: HTMLTextAreaElement) => {
+        if (!spacePending.current) {
+            return;
+        }
+        spacePending.current = false;
+        const { selectionStart: start, selectionEnd: end } = el;
+        if (el.value.length - (end - start) >= el.maxLength) {
+            return;
+        }
+        if (!document.execCommand?.('insertText', false, ' ')) {
+            el.setRangeText(' ', start, end, 'end');
+        }
+        fitHeight(el);
+    };
+
     return (
         <textarea
             ref={ref}
@@ -188,6 +231,17 @@ export const TextEditorOverlay = ({
                 fontWeight: proseFace?.weight,
             }}
             onKeyDown={(e) => {
+                if (e.key === ' ' && !(e.ctrlKey || e.metaKey || e.altKey || e.nativeEvent.isComposing)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    spacePending.current ||= !e.repeat;
+                    return;
+                }
+                if (spacePending.current && !MODIFIER_KEYS.has(e.key)) {
+                    const { value, selectionStart: start, selectionEnd: end } = e.currentTarget;
+                    typePendingSpace(e.currentTarget);
+                    undoEarlySpaceOnScoreDrag.current = { value, start, end };
+                }
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     commit(e.currentTarget.value);
@@ -197,8 +251,21 @@ export const TextEditorOverlay = ({
                 }
                 e.stopPropagation();
             }}
-            onInput={(e) => fitHeight(e.currentTarget)}
-            onBlur={(e) => commit(e.currentTarget.value)}
+            onInput={(e) => {
+                undoEarlySpaceOnScoreDrag.current = null;
+                fitHeight(e.currentTarget);
+            }}
+            onKeyUp={(e) => {
+                if (e.key === ' ') {
+                    undoEarlySpaceOnScoreDrag.current = null;
+                    typePendingSpace(e.currentTarget);
+                }
+            }}
+            onBlur={(e) => {
+                spacePending.current = false;
+                undoEarlySpaceOnScoreDrag.current = null;
+                commit(e.currentTarget.value);
+            }}
             onPointerDown={(e) => e.stopPropagation()}
         />
     );

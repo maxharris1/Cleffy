@@ -1630,9 +1630,10 @@ export const openMarksFor = (userId: string | null, docId: string): Annotation[]
 };
 
 /**
- * A local edit of this score started (+1) or finished (-1) its write (see
- * hasUnsavedInk). Finished, it is written, held or let go, so the score's
- * PDF goes now if nothing else keeps it (pruneSource).
+ * A local edit of this score, or an Undo or Redo press, started (+1) or
+ * finished (-1) its write (see hasUnsavedInk). Finished, it is written,
+ * held or let go, so the score's PDF goes now if nothing else keeps it
+ * (pruneSource).
  */
 export const noteEditsInFlight = (delta: number, docId: string): void => {
     inFlight = Math.max(0, inFlight + delta);
