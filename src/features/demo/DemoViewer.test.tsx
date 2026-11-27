@@ -16,6 +16,7 @@ import { ScribblerDb } from '@/sync/db';
 import type * as DbModule from '@/sync/db';
 import { resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import { stubAnimate } from '@/test/animate';
+import { useViewport } from '@/test/touchLayout';
 import type { Annotation } from '@/types/models';
 
 /**
@@ -400,6 +401,23 @@ describe('DemoViewer, finger drawing', () => {
 
         unmount();
         expect(useViewerStore.getState().fingerDraws).toBe(previous);
+    });
+});
+
+describe('DemoViewer, toolbar', () => {
+    it('offers the Scroll | Draw switch on a touch screen, set to Draw, with no Pan or Finger button', async () => {
+        useViewport({ width: 390, coarse: true });
+        h.withToolbar = true;
+        renderDemo();
+        await screen.findByTestId('viewport');
+
+        const group = screen.getByRole('group', { name: 'What a finger does' });
+        expect(within(group).getByRole('button', { name: 'Finger draws' })).toHaveAttribute('aria-pressed', 'true');
+        expect(within(group).getByRole('button', { name: 'Finger scrolls' })).toHaveAttribute('aria-pressed', 'false');
+        for (const name of ['Pan', 'Draw with finger']) {
+            expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+        }
+        vi.unstubAllGlobals();
     });
 });
 

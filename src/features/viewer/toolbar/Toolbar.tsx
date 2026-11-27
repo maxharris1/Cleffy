@@ -8,7 +8,8 @@ import { useReportToolbarPopup } from '@/features/viewer/toolbar/toolbarPopup';
 import { settleEdit, type AnnotationStore } from '@/sync/annotationStore';
 import { STROKE_COLORS, useViewerStore } from '@/state/store';
 import type { StrokeWidthKey, Tool } from '@/types/models';
-import { PointerIcon, RedoIcon, UndoIcon } from '@/ui/icons';
+import { PointerIcon, RedoIcon, ScrollIcon, UndoIcon } from '@/ui/icons';
+import { Segmented, type SegmentedOption } from '@/ui/Segmented';
 
 const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }> = [
     { tool: 'pen', label: 'Pen', short: 'Pen', icon: <PenIcon /> },
@@ -33,14 +34,22 @@ const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
     { key: 'thick', label: 'Thick', preview: 7 },
 ];
 
+type FingerMode = 'scroll' | 'draw';
+
+const FINGER_MODES = [
+    { value: 'scroll', label: 'Finger scrolls', icon: <FingerModeKey icon={<ScrollIcon size={20} />} text="Scroll" /> },
+    { value: 'draw', label: 'Finger draws', icon: <FingerModeKey icon={<PointerIcon size={20} />} text="Draw" /> },
+] as const satisfies readonly SegmentedOption<FingerMode>[];
+
 /**
- * Phone buttons share one row: each may shrink to fit a 320px screen and
- * stops growing at 44px; from `sm` up they keep their natural labelled size.
- * On touch the 40px-tall buttons reach 44px through an invisible ::after
- * (hit-44-y): height only, since on a phone they sit edge to edge.
+ * Phone buttons share one row and stop growing at 44px. With a fine pointer
+ * they may shrink to fit a 320px screen; on touch they hold 44px and the row
+ * scrolls sideways instead. From `sm` up they keep their natural labelled
+ * size. On touch the 40px-tall buttons reach 44px through an invisible
+ * ::after (hit-44-y): height only, since on a phone they sit edge to edge.
  */
 const BAR_BUTTON =
-    'flex h-10 min-w-0 max-w-11 flex-1 basis-0 items-center justify-center rounded-xl text-stone-600 active:bg-ink/10 pointer-coarse:hit-44-y sm:max-w-none sm:flex-none sm:basis-auto';
+    'flex h-10 min-w-0 max-w-11 flex-1 basis-0 items-center justify-center rounded-xl text-stone-600 active:bg-ink/10 pointer-coarse:hit-44-y max-sm:pointer-coarse:min-w-11 sm:max-w-none sm:flex-none sm:basis-auto';
 
 const DIVIDER = 'mx-0.5 h-6 w-px shrink-0 bg-stone-200 sm:mx-1';
 
@@ -71,7 +80,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const fingerDraws = useViewerStore((s) => s.fingerDraws);
     const penSeen = useViewerStore((s) => s.penSeen);
     const touchSeen = useViewerStore((s) => s.touchSeen);
-    const touchScreen = useMediaQuery('(any-pointer: coarse)');
+    const touchScreen = useMediaQuery('(pointer: coarse)');
     const { setTool, setColor, setWidthKey, setFingerDraws } = useViewerStore.getState();
     const [styleOpen, setStyleOpen] = useState(false);
     const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -93,8 +102,16 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const styleLabel = showColors && showSize ? `${colorCaption} and size` : showColors ? colorCaption : sizeCaption;
     const preview = WIDTHS.find((w) => w.key === widthKey)?.preview ?? 4;
 
+    const fingerSwitch = showFingerSwitch({ touchScreen, touchSeen, penSeen });
+    const fingerScrolls = fingerSwitch && !fingerDraws;
+
     const selectTool = (next: Tool) => {
         setStyleOpen(false);
+        if (fingerScrolls) {
+            setTool(next);
+            setFingerDraws(true);
+            return;
+        }
         setTool(next === tool ? null : next);
     };
 
@@ -204,7 +221,18 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
             data-ui-overlay
             className="pointer-events-none absolute bottom-[calc(0.75rem+var(--safe-bottom))] left-[max(0.5rem,var(--safe-left))] right-[max(0.5rem,var(--safe-right))] z-20 flex justify-center sm:inset-x-0 sm:bottom-auto sm:top-3"
         >
-            <div className="chrome-glass pointer-events-auto relative flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2 lg:pointer-coarse:gap-3">
+            <div className="chrome-glass pointer-events-auto flex w-full flex-nowrap items-center justify-between rounded-2xl border border-stone-200 bg-white/95 px-1 py-1.5 shadow-lg sm:w-auto sm:max-w-[calc(100vw-1rem)] sm:flex-wrap sm:justify-center sm:gap-1 sm:px-2 lg:pointer-coarse:gap-3 max-sm:overflow-x-auto max-sm:[scrollbar-width:none]">
+                {fingerSwitch ? (
+                    <>
+                        <Segmented
+                            label="What a finger does"
+                            value={fingerDraws ? 'draw' : 'scroll'}
+                            options={FINGER_MODES}
+                            onChange={(mode) => setFingerDraws(mode === 'draw')}
+                        />
+                        <div className={DIVIDER} />
+                    </>
+                ) : null}
                 {TOOLS.map(({ tool: t, label, short, icon }) => (
                     <button
                         key={t}
@@ -215,7 +243,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                         onClick={() => selectTool(t)}
                         className={`${BAR_BUTTON} gap-1 sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
                             tool === t ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
-                        }`}
+                        } ${fingerScrolls ? 'opacity-[0.45]' : ''}`}
                     >
                         <span className="flex h-5 w-5 items-center justify-center">{icon}</span>
                         <span className="hidden text-[10px] font-medium leading-none sm:block">{short}</span>
@@ -340,35 +368,19 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                 >
                     <RedoIcon size={20} />
                 </button>
-
-                {showFingerSwitch({ touchScreen, touchSeen, penSeen }) && (
-                    <>
-                        <div className={DIVIDER} />
-                        <button
-                            type="button"
-                            title={
-                                fingerDraws
-                                    ? 'Finger drawing on — a finger draws ink'
-                                    : 'Finger drawing off — a finger pans'
-                            }
-                            aria-label="Draw with finger"
-                            aria-pressed={fingerDraws}
-                            onClick={() => setFingerDraws(!fingerDraws)}
-                            className={`${BAR_BUTTON} gap-1 sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
-                                fingerDraws ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
-                            }`}
-                        >
-                            <span className="flex h-5 w-5 items-center justify-center">
-                                <PointerIcon size={20} />
-                            </span>
-                            <span className="hidden text-[10px] font-medium leading-none sm:block">Finger</span>
-                        </button>
-                    </>
-                )}
             </div>
         </div>
     );
 };
+
+function FingerModeKey({ icon, text }: { icon: ReactNode; text: string }) {
+    return (
+        <span className="flex items-center gap-1 sm:px-1.5">
+            {icon}
+            <span className="hidden text-[13px] sm:inline">{text}</span>
+        </span>
+    );
+}
 
 /** A stroke-width preview: an ink dot, a marker dot, or the eraser's ring. */
 function SizeDot({ tool, size }: { tool: Tool | null; size: number }) {
