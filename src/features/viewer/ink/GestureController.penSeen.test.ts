@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { createElement } from 'react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController, type GestureCallbacks } from '@/features/viewer/ink/GestureController';
 import { InkController } from '@/features/viewer/ink/InkController';
+import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { trackPointerKinds, useViewerStore } from '@/state/store';
+import { useViewport } from '@/test/touchLayout';
 
 const PAGE_W = 1000;
 const PAGE_H = 1300;
@@ -55,7 +60,7 @@ let clock: number;
 let el: HTMLDivElement;
 let page: ReturnType<typeof fakeCanvas>;
 let ink: InkController;
-let gestures: GestureController;
+let gestures: GestureController | null;
 let onPan: ReturnType<typeof vi.fn<GestureCallbacks['onPan']>>;
 let onZoomBy: ReturnType<typeof vi.fn<GestureCallbacks['onZoomBy']>>;
 let stopTracking: () => void;
@@ -87,13 +92,23 @@ const twoFingerPinch = (firstX: number) => {
     clock += 1000;
 };
 
-beforeEach(async () => {
+beforeEach(() => {
     clock = 10_000;
     vi.stubGlobal('Path2D', FakePath2D);
     vi.stubGlobal('requestAnimationFrame', () => 0);
     vi.spyOn(performance, 'now').mockImplementation(() => clock);
     useViewerStore.setState({ tool: 'pen', fingerDraws: true, penSeen: false, touchSeen: false });
+    gestures = null;
+    render(
+        createElement(
+            MemoryRouter,
+            null,
+            createElement(ViewerHeader, { backTo: '/library', backLabel: 'Back to library', title: 'Nocturne' }),
+        ),
+    );
+});
 
+const mountViewport = async () => {
     const store = new AnnotationStore(new ScribblerDb(`test-${crypto.randomUUID()}`), 'local-pen-seen');
     await store.load();
     const registry = new CanvasRegistry();
@@ -101,6 +116,7 @@ beforeEach(async () => {
         store,
         registry,
         isReadOnly: () => false,
+        panKeyHeld: () => false,
         getView: () => ({ scale: 1, scrollX: 0, scrollY: 0 }),
         getLayout: () => layout,
         toLocal: (e) => ({ x: e.clientX, y: e.clientY }),
@@ -123,19 +139,24 @@ beforeEach(async () => {
         onGestureEnd: () => undefined,
     });
     gestures.setInkDelegate(ink.delegate);
-});
+};
 
 afterEach(() => {
-    stopTracking();
-    gestures.destroy();
-    ink.destroy();
-    el.remove();
+    if (gestures) {
+        stopTracking();
+        gestures.destroy();
+        ink.destroy();
+        el.remove();
+    }
+    cleanup();
     useViewerStore.setState({ penSeen: false, touchSeen: false, fingerDraws: false });
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
 });
 
 describe('a finger once a stylus has been seen', () => {
+    beforeEach(mountViewport);
+
     it('draws with Finger-draw on while no stylus has been seen', async () => {
         swipe('touch');
         await settle();
@@ -169,21 +190,24 @@ describe('a finger once a stylus has been seen', () => {
         expect(page.shown).toHaveLength(0);
         expect(onPan).toHaveBeenCalled();
     });
+});
+
+describe('a stylus seen before the viewport mounts', () => {
+    beforeEach(() => useViewport({ width: 1024, coarse: true }));
 
     it.each([true, false])(
-        'scrolls after the stylus only tapped the viewer header, Finger-draw %s',
+        'scrolls after a stylus tapped the viewer header before the viewport mounted, Finger-draw %s',
         async (fingerDraws) => {
             useViewerStore.setState({ fingerDraws });
-            const title = document.createElement('h1');
-            document.body.appendChild(title);
-            const at = (type: string) =>
-                new PointerEvent(type, { pointerId: nextPointerId, pointerType: 'pen', button: 0, bubbles: true });
-            title.dispatchEvent(at('pointerdown'));
-            title.dispatchEvent(at('pointerup'));
-            nextPointerId++;
-            title.remove();
+            expect(useViewerStore.getState().fingerDraws).toBe(fingerDraws);
 
+            const title = screen.getByRole('button', { name: 'Nocturne' });
+            fireEvent.pointerDown(title, { pointerType: 'pen' });
+            fireEvent.pointerUp(title, { pointerType: 'pen' });
             expect(useViewerStore.getState().penSeen).toBe(true);
+
+            await mountViewport();
+            expect(useViewerStore.getState().fingerDraws).toBe(fingerDraws);
             swipe('touch');
             await settle();
             expect(page.shown).toHaveLength(0);
@@ -193,6 +217,8 @@ describe('a finger once a stylus has been seen', () => {
 });
 
 describe('a touch observed in the viewer', () => {
+    beforeEach(mountViewport);
+
     it('is recorded on the first finger, before any stylus', () => {
         useViewerStore.setState({ fingerDraws: false });
         expect(useViewerStore.getState().touchSeen).toBe(false);
@@ -203,6 +229,8 @@ describe('a touch observed in the viewer', () => {
 });
 
 describe('two fingers in Draw with a tool in hand', () => {
+    beforeEach(mountViewport);
+
     it('pan and zoom the page and leave no stroke', async () => {
         twoFingerPinch(100);
         await settle();
@@ -226,6 +254,8 @@ describe('two fingers in Draw with a tool in hand', () => {
 });
 
 describe('successive finger contacts in a finger-only session', () => {
+    beforeEach(mountViewport);
+
     it('draws a second stroke begun 100ms after the first', async () => {
         swipe('touch', el, 100);
         swipe('touch', el, 100);

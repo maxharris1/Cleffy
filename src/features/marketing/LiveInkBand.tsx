@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 
 import { ScoreInk } from '@/features/marketing/ScoreInk';
-import { useHandwritingReady } from '@/features/marketing/useHandwritingReady';
+import { useHandwritingFont } from '@/features/marketing/useHandwritingFont';
 import { useInViewOnce } from '@/features/marketing/useInViewOnce';
 
 const rise = (i: number) => ({ '--i': i }) as CSSProperties;
@@ -49,7 +49,7 @@ const LiveArrow = () => (
  */
 export const LiveInkBand = () => {
     const { ref, inView } = useInViewOnce<HTMLElement>(0.2);
-    const handwritingReady = useHandwritingReady();
+    const fontSettled = useHandwritingFont() !== 'pending';
     return (
         <section ref={ref} aria-labelledby="live-title" className={`ink-band${inView ? ' is-revealed' : ''}`}>
             <div className="safe-landing-gutter mx-auto w-full max-w-6xl pt-[60px] pb-16 lg:pt-24 lg:pb-[104px]">
@@ -70,7 +70,7 @@ export const LiveInkBand = () => {
                 </div>
                 <div
                     className={`mt-8 flex flex-col items-center lg:mt-14 lg:flex-row lg:gap-10${
-                        inView && handwritingReady ? ' is-inview' : ''
+                        inView && fontSettled ? ' is-inview' : ''
                     }`}
                 >
                     <figure className="ink-rise w-full min-w-0 lg:flex-[1.8_1_0%]" style={rise(1)}>
