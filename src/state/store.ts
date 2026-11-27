@@ -121,6 +121,9 @@ interface ViewerStore extends PlaybackSlice {
     /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
     selectedTextId: string | null;
     setSelectedTextId: (selectedTextId: string | null) => void;
+    /** A stylus has touched the viewer this session. Never persisted. */
+    penSeen: boolean;
+    markPenSeen: () => void;
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
@@ -146,7 +149,7 @@ const INITIAL_PLAYBACK = {
  * AnnotationStore's in-memory map (plan §sync). Usable outside React via
  * useViewerStore.getState() from high-frequency pointer handlers.
  */
-export const useViewerStore = create<ViewerStore>((set) => ({
+export const useViewerStore = create<ViewerStore>((set, get) => ({
     view: INITIAL_VIEW,
     pinch: null,
     tool: 'pen',
@@ -182,6 +185,12 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setStandMode: (standMode) => set({ standMode }),
     selectedTextId: null,
     setSelectedTextId: (selectedTextId) => set({ selectedTextId }),
+    penSeen: false,
+    markPenSeen: () => {
+        if (!get().penSeen) {
+            set({ penSeen: true });
+        }
+    },
     ...INITIAL_PLAYBACK,
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),

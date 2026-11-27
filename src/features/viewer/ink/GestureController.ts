@@ -1,3 +1,5 @@
+import { useViewerStore } from '@/state/store';
+
 /**
  * Demultiplexes pointer/wheel/Safari-gesture input on the viewer surface.
  *
@@ -157,6 +159,9 @@ export class GestureController {
     };
 
     private onPointerDown = (e: PointerEvent): void => {
+        if (e.pointerType === 'pen') {
+            useViewerStore.getState().markPenSeen();
+        }
         // Never claim pointers that start on UI overlays (toolbar, zoom buttons,
         // text editor) — capturing them would swallow their click events.
         if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {

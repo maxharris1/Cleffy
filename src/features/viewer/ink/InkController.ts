@@ -8,6 +8,7 @@ import {
     type DocumentLayout,
 } from '@/features/viewer/geometry';
 import { hitTestPage } from '@/features/viewer/ink/hitTest';
+import { pointerDraws } from '@/features/viewer/ink/inputPolicy';
 import {
     buildStrokePath,
     drawAnnotation,
@@ -416,7 +417,7 @@ export class InkController {
     }
 
     private shouldInk(e: PointerEvent): boolean {
-        const { tool, fingerDraws } = useViewerStore.getState();
+        const { tool, fingerDraws, penSeen } = useViewerStore.getState();
         if (tool === null) {
             return false;
         }
@@ -426,7 +427,7 @@ export class InkController {
             if (this.opts.isReadOnly()) {
                 return false;
             }
-            if (e.pointerType === 'touch' && !fingerDraws) {
+            if (!pointerDraws(e.pointerType, true, { penSeen, fingerDraws })) {
                 return false;
             }
         }
