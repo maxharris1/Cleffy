@@ -67,6 +67,28 @@ afterEach(() => {
 });
 
 describe('StudentClaimPage', () => {
+    it('shows which of the two steps the student is on', async () => {
+        const user = userEvent.setup();
+        renderClaim();
+
+        expect(screen.getByText('Step 1 of 2')).toBeInTheDocument();
+        await enterCode(user);
+        expect(screen.getByText('Step 2 of 2')).toBeInTheDocument();
+        expect(screen.queryByText('Step 1 of 2')).not.toBeInTheDocument();
+    });
+
+    it('draws the sample setup card as decoration outside the tab order', () => {
+        renderClaim();
+
+        const art = screen.getByText('Leo Martin').closest('aside');
+        expect(art).toHaveAttribute('aria-hidden', 'true');
+        expect(art).toHaveAttribute('inert');
+        expect(art).toHaveTextContent('Go to cleffy.io/student/claim');
+        expect(art).toHaveTextContent('K7QM-2HXP-9RTD');
+        expect(art).toHaveTextContent('hand this over at the lesson');
+        expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
+    });
+
     it('refuses an incomplete code without asking the server about it', async () => {
         const user = userEvent.setup();
         renderClaim();

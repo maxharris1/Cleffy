@@ -4,8 +4,9 @@ import { Link, useNavigate } from 'react-router';
 
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { updatePassword, useSession, userTypeOf } from '@/features/auth/session';
+import { StudentSignInArt } from '@/features/student/StudentSignInArt';
 import { getSupabase } from '@/lib/supabase';
-import { BrandLoading, BrandShell } from '@/ui/BrandShell';
+import { BrandLoading, SplitBrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
 /** Whether the account we are signed in as still has a password to choose. */
@@ -121,7 +122,8 @@ export const StudentWelcomePage = () => {
  * Naming the cause would only offer them a distinction they cannot act on.
  */
 const DeadLink = () => (
-    <BrandShell
+    <SplitBrandShell
+        art={<StudentSignInArt />}
         title="This link no longer works"
         subtitle="That link has expired or was already used — ask your teacher to send a new one."
     >
@@ -130,14 +132,15 @@ const DeadLink = () => (
                 Go to sign in
             </Link>
         </p>
-    </BrandShell>
+    </SplitBrandShell>
 );
 
 const ChoosePassword = ({ name }: { name: string | null }) => {
     const navigate = useNavigate();
 
     return (
-        <BrandShell
+        <SplitBrandShell
+            art={<StudentSignInArt />}
             title="Choose your password"
             subtitle={
                 name
@@ -168,6 +171,6 @@ const ChoosePassword = ({ name }: { name: string | null }) => {
                     navigate('/assignments', { replace: true });
                 }}
             />
-        </BrandShell>
+        </SplitBrandShell>
     );
 };

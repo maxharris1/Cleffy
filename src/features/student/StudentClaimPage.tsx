@@ -5,9 +5,10 @@ import { useSession, userTypeOf } from '@/features/auth/session';
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { AgreementNote } from '@/features/legal/AgreementNote';
+import { StudentSignInArt } from '@/features/student/StudentSignInArt';
 import { StudentAuthError, claimStudentAccount } from '@/features/student/studentApi';
 import { refuseInput } from '@/lib/shake';
-import { BrandLoading, BrandShell } from '@/ui/BrandShell';
+import { BrandLoading, SplitBrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 import { TextField } from '@/ui/TextField';
@@ -63,6 +64,17 @@ export const StudentClaimPage = () => {
 const CODE_INPUT_CLASS = fieldClassName('md', 'mt-1.5 text-center font-mono text-xl uppercase tracking-wide');
 
 const USERNAME_HINT = `${USERNAME_MIN}-${USERNAME_MAX} lowercase letters, numbers and underscores`;
+
+const StepIndicator = ({ step }: { step: 1 | 2 }) => (
+    <div className="mb-[22px] flex items-center gap-1.5">
+        <span aria-hidden="true" className="h-[3px] w-7 rounded-[2px] bg-accent" />
+        <span
+            aria-hidden="true"
+            className={`h-[3px] w-7 rounded-[2px] ${step === 2 ? 'bg-accent' : 'bg-field-line'}`}
+        />
+        <p className="ml-2 text-[13px] font-semibold text-ink-muted">Step {step} of 2</p>
+    </div>
+);
 
 const ClaimFlow = () => {
     const navigate = useNavigate();
@@ -227,18 +239,20 @@ const ClaimFlow = () => {
 
     if (strandedMessage) {
         return (
-            <BrandShell title="Your account is ready" subtitle={strandedMessage}>
+            <SplitBrandShell art={<StudentSignInArt />} title="Your account is ready" subtitle={strandedMessage}>
                 <p className="text-center text-sm text-stone-600">
                     <Link to="/student" className={linkClassName}>
                         Go to sign in
                     </Link>
                 </p>
-            </BrandShell>
+            </SplitBrandShell>
         );
     }
 
     return (
-        <BrandShell
+        <SplitBrandShell
+            art={<StudentSignInArt />}
+            aboveTitle={<StepIndicator step={step} />}
             title="Set up your account"
             subtitle={
                 step === 1
@@ -361,6 +375,6 @@ const ClaimFlow = () => {
                     </Link>
                 )}
             </p>
-        </BrandShell>
+        </SplitBrandShell>
     );
 };

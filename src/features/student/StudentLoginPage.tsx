@@ -7,9 +7,10 @@ import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { SignedOutByTeacherState } from '@/features/student/endedSignIn';
 import { discardedChangesNotice, keptChangesNotice } from '@/features/student/keptChangesNotice';
+import { StudentSignInArt } from '@/features/student/StudentSignInArt';
 import { StudentAuthError, loginStudent } from '@/features/student/studentApi';
 import { refuseInput } from '@/lib/shake';
-import { BrandLoading, BrandShell } from '@/ui/BrandShell';
+import { BrandLoading, SplitBrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 import { TextField } from '@/ui/TextField';
@@ -146,7 +147,12 @@ const CredentialEntry = () => {
     };
 
     return (
-        <BrandShell title="Your music" subtitle="Sign in with the username or email you use for Cleffy.">
+        <SplitBrandShell
+            art={<StudentSignInArt />}
+            title="Your music"
+            subtitle="Sign in with the username or email you use for Cleffy."
+            footer={<LegalLinks className="justify-center lg:justify-start" />}
+        >
             {/* Stays up through a failed sign-in: what became of the queued
                 changes is still true, and still the thing to know. */}
             {signedOutByTeacher && accountDeleted ? (
@@ -232,7 +238,6 @@ const CredentialEntry = () => {
                     I am a teacher
                 </Link>
             </p>
-            <LegalLinks className="mt-6 justify-center" />
-        </BrandShell>
+        </SplitBrandShell>
     );
 };
