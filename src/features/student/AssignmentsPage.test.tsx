@@ -144,6 +144,22 @@ describe('AssignmentsPage', () => {
         expect(within(chloe).queryByText(/^Due /)).not.toBeInTheDocument();
     });
 
+    it('heads the list "Your pieces." and marks each piece Can edit or View only', async () => {
+        fetchMyAssignments.mockResolvedValue([
+            assigned('doc-1', 'Prelude and Fugue', { note: 'Circle anything that trips you.' }),
+            assigned('doc-2', 'An Chloe', { access: 'view' }),
+        ]);
+        renderAssignments();
+
+        expect(screen.getByRole('heading', { level: 1, name: 'Your pieces.' })).toBeInTheDocument();
+        const prelude = await screen.findByRole('link', { name: /Prelude and Fugue/ });
+        expect(within(prelude).getByText('Can edit')).toBeInTheDocument();
+        expect(within(prelude).getByText('Open')).toBeInTheDocument();
+        expect(prelude).toHaveAccessibleName(expect.stringContaining('Circle anything that trips you.'));
+        const chloe = screen.getByRole('link', { name: /An Chloe/ });
+        expect(within(chloe).queryByText('Can edit')).not.toBeInTheDocument();
+    });
+
     it('invites the student to wait rather than showing an empty page', async () => {
         renderAssignments();
         expect(await screen.findByRole('heading', { name: 'Nothing here yet' })).toBeInTheDocument();
