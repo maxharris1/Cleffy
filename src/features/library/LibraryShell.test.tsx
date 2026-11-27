@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect } from 'react';
 import { MemoryRouter, Route, Routes, useNavigate, useOutletContext, useParams } from 'react-router';
@@ -385,6 +385,23 @@ describe('LibraryShell', () => {
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
+    it('keeps the saving status and its progress inside the bar from sm up, off the page below', async () => {
+        const user = userEvent.setup();
+        sessionMocks.syncBeforeSignOut.mockReturnValue(new Promise(() => undefined));
+        renderShell('/search');
+
+        await user.click(await screen.findByRole('button', { name: /Account menu/ }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Sign out' }));
+
+        const status = screen.getByRole('status');
+        expect(status).toHaveClass('sm:absolute', 'sm:bottom-px', 'sm:pointer-events-none');
+        expect(status).not.toHaveClass('sm:top-full');
+        expect(status.closest('.sm\\:relative')).toHaveClass('sm:h-16');
+        const progress = screen.getByRole('progressbar', { name: 'Saving changes before signing out' });
+        expect(progress).toHaveClass('sm:top-[var(--safe-top)]', 'sm:bottom-auto', 'sm:pointer-events-none');
+        expect(progress).not.toHaveClass('sm:top-full');
+    });
+
     it('offers help and the legal pages from the account menu', async () => {
         const user = userEvent.setup();
         renderShell();
@@ -398,6 +415,13 @@ describe('LibraryShell', () => {
         expect(await screen.findByRole('menuitem', { name: 'Terms' })).toHaveAttribute('href', '/terms');
         expect(await screen.findByRole('menuitem', { name: 'Refunds' })).toHaveAttribute('href', '/refunds');
         expect(await screen.findByRole('menuitem', { name: 'Copyright' })).toHaveAttribute('href', '/copyright');
+    });
+
+    it('marks only the current tab as the current page', () => {
+        renderShell('/search');
+        const nav = screen.getByRole('navigation', { name: 'Main' });
+        expect(within(nav).getByRole('link', { name: 'Find a score' })).toHaveAttribute('aria-current', 'page');
+        expect(within(nav).getByRole('link', { name: 'Library' })).not.toHaveAttribute('aria-current');
     });
 
     it('pads the chrome for the iPhone status bar', () => {
@@ -772,6 +796,22 @@ describe('LibraryShell upload bar', () => {
             expect(offer()).not.toBeInTheDocument();
             expect(screen.getByText('search page')).toBeInTheDocument();
         });
+    });
+
+    it('runs the upload bar along the top of the bar from sm up, off the current tab underline', async () => {
+        uploadReaching(40);
+        renderShell();
+        pickFile();
+        await elapse(0);
+        expect(bar()).toHaveClass('sm:top-[var(--safe-top)]', 'sm:bottom-auto');
+    });
+
+    it('runs the IMSLP import bar along the top of the bar from sm up, off the current tab underline', async () => {
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+        fireEvent.click(screen.getByRole('button', { name: 'import' }));
+        await elapse(0);
+        expect(bar('Importing score')).toHaveClass('sm:top-[var(--safe-top)]', 'sm:bottom-auto');
     });
 
     it('turns the IMSLP sweep into a full bar for the same beat before opening the score', async () => {
