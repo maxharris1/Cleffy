@@ -308,7 +308,6 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
 
                     {showColors || showSize ? (
                         <>
-                            {/* Below lg: one button that opens the colours and sizes. */}
                             <div className={`${DIVIDER} lg:hidden`} />
                             <button
                                 ref={styleButtonRef}
@@ -351,7 +350,6 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                                     aria-label={styleLabel}
                                     // Lifts the viewer frame over floating UI while open (LocalViewerFrame).
                                     data-toolbar-popup
-                                    // Above the phone's bottom bar; below the bar docked at the top from sm.
                                     className={`ui-menu-pop absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-[18px] bg-white px-3 py-2 ${BAR_SHADOW} [--transform-origin:bottom_center] sm:bottom-auto sm:[--transform-origin:top_center] sm:top-full sm:mb-0 sm:mt-2 lg:hidden`}
                                 >
                                     {showColors ? (
@@ -373,7 +371,6 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                         </>
                     ) : null}
 
-                    {/* From lg up: colours and sizes inline, as in production. */}
                     {showColors ? (
                         <div className="hidden lg:contents">
                             <div className={DIVIDER} />
