@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { DocumentLayout } from '@/features/viewer/geometry';
+import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { InkController } from '@/features/viewer/ink/InkController';
 import { AnnotationStore } from '@/sync/annotationStore';
@@ -53,6 +54,7 @@ const pointer = (clientX: number, clientY: number) =>
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 
+let db: ScribblerDb;
 let store: AnnotationStore;
 let ink: InkController;
 let page: ReturnType<typeof fakeCanvas>;
@@ -67,7 +69,7 @@ const drawStroke = (x: number, y: number) => {
 beforeEach(async () => {
     vi.stubGlobal('Path2D', FakePath2D);
     vi.stubGlobal('requestAnimationFrame', () => 0);
-    const db = new ScribblerDb(`test-${crypto.randomUUID()}`);
+    db = new ScribblerDb(`test-${crypto.randomUUID()}`);
     store = new AnnotationStore(db, DOC);
     await store.load();
     const registry = new CanvasRegistry();
@@ -228,5 +230,61 @@ describe('InkController erase undo batch', () => {
         await store.undoLast();
         await settle();
         expect(strokesShown()).toBe(3);
+    });
+
+    const holdNextSnapshotCheck = () => {
+        const orig = snapshotService.ensureDayStartingSnapshot;
+        let out!: () => void;
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => (out = resolve));
+        const released = new Promise<void>((resolve) => (release = resolve));
+        vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementationOnce(async (...args) => {
+            out();
+            await released;
+            return orig(...args);
+        });
+        return { held, release };
+    };
+
+    const marksSaved = async () => (await db.annotations.toArray()).filter((a) => !a.deletedAt).length;
+
+    const undoWhileLastDeletePendingThenDraw = async (end: (e: PointerEvent) => void) => {
+        drawStroke(100, 300);
+        drawStroke(300, 300);
+        drawStroke(500, 300);
+        await settle();
+        useViewerStore.getState().setTool('eraser');
+        ink.delegate.onInkDown(pointer(110, 302));
+        ink.delegate.onInkMove(pointer(130, 304));
+        await settle();
+        expect(strokesShown()).toBe(2);
+
+        const gate = holdNextSnapshotCheck();
+        ink.delegate.onInkMove(pointer(310, 302));
+        ink.delegate.onInkMove(pointer(330, 304));
+        await gate.held;
+        end(pointer(330, 304));
+        const undoing = store.undoLast();
+
+        useViewerStore.getState().setTool('pen');
+        drawStroke(700, 300);
+        await settle();
+        expect(await marksSaved()).toBe(2);
+
+        gate.release();
+        await undoing;
+        await settle();
+    };
+
+    it('undo pressed while the last delete is pending after lift keeps a stroke drawn after the press', async () => {
+        await undoWhileLastDeletePendingThenDraw((e) => ink.delegate.onInkUp(e));
+        expect(strokesShown()).toBe(4);
+        expect(await marksSaved()).toBe(4);
+    });
+
+    it('undo pressed while the last delete is pending after cancel keeps a stroke drawn after the press', async () => {
+        await undoWhileLastDeletePendingThenDraw((e) => ink.delegate.onInkCancel(e));
+        expect(strokesShown()).toBe(4);
+        expect(await marksSaved()).toBe(4);
     });
 });

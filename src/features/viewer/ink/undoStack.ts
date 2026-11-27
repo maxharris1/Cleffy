@@ -39,6 +39,11 @@ export interface UndoSlot {
     entry: Entry;
 }
 
+/** The entries one Undo press may replay, newest first. */
+export interface UndoRequest {
+    entries: Entry[];
+}
+
 export class UndoStack {
     private undoStack: Entry[] = [];
     private redoStack: UndoableOp[][] = [];
@@ -133,18 +138,30 @@ export class UndoStack {
         this.batches.splice(idx, 1);
     }
 
-    /** Pop the newest entry's ops once every inverse it still holds a place for has landed. */
-    async popUndo(): Promise<UndoableOp[] | null> {
+    /** Snapshot the stack for one Undo press; later pushes are not included. */
+    requestUndo(): UndoRequest {
+        return { entries: [...this.undoStack].reverse() };
+    }
+
+    /**
+     * Pop the newest of `request`'s entries still on the stack, once every
+     * inverse it holds a place for has landed. Entries pushed after the
+     * request, or dropped by `clear`, are never taken.
+     */
+    async popUndo(request: UndoRequest): Promise<UndoableOp[] | null> {
         for (;;) {
-            const top = this.undoStack[this.undoStack.length - 1];
-            if (!top) {
+            const entry = request.entries.shift();
+            if (!entry) {
                 return null;
             }
-            if (top.pending === 0) {
-                this.undoStack.pop();
-                return top.ops;
+            while (entry.pending > 0) {
+                await new Promise<void>((resolve) => entry.onSettled.push(resolve));
             }
-            await new Promise<void>((resolve) => top.onSettled.push(resolve));
+            const idx = this.undoStack.indexOf(entry);
+            if (idx !== -1) {
+                this.undoStack.splice(idx, 1);
+                return entry.ops;
+            }
         }
     }
 
