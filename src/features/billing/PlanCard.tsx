@@ -13,7 +13,7 @@ const TONES: Record<PlanCardTone, { card: string; secondary: string; note: strin
         tick: 'text-tick',
     },
     ink: {
-        card: 'border-ink bg-ink text-paper shadow-[0_30px_50px_-30px_rgba(28,25,23,0.7)]',
+        card: 'border-ink bg-ink text-paper shadow-[0_30px_50px_-30px_rgba(28,25,23,0.7)] [--focus-ring:var(--color-ink-rule)]',
         secondary: 'text-on-ink-muted',
         note: 'text-[#4ade80]',
         status: 'text-amber-300',
@@ -76,7 +76,7 @@ export const PlanCard = ({
                     ))}
                 </ul>
             ) : null}
-            <div className="mt-auto pt-5">
+            <div className="mt-auto pt-5 [&>button]:text-center [&>button]:whitespace-normal">
                 {current ? (
                     <div className="flex min-h-11 items-center">
                         <span

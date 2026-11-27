@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
@@ -7,6 +10,48 @@ import { PricingDialog } from '@/features/billing/PricingDialog';
 import { utilityStyleAt } from '@/test/tailwindStyle';
 
 import { autoRenewalConsentText, purchaseTermsFor } from '../../../supabase/functions/_shared/billingTerms';
+
+const INDEX_CSS = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8');
+
+/** A `var(--color-<name>)` from our theme as its hex; anything else as given. */
+const themeHex = (value: string): string => {
+    const name = value.match(/^var\((--color-[\w-]+)\)$/)?.[1] ?? value;
+    return INDEX_CSS.match(new RegExp(`${name}:\\s*(#[0-9a-f]{6});`))?.[1] ?? value;
+};
+
+/** A card's own theme colour, or the panel's paper behind a transparent card. */
+const colourOf = async (element: Element, property: string, fallback: string) => {
+    const value = await utilityStyleAt(element, property, 1280);
+    return themeHex(value?.startsWith('var(--color-') ? value : fallback);
+};
+
+/** The global :focus-visible outline: var(--focus-ring, accent), set by the nearest ancestor. */
+const focusRingOf = async (element: HTMLElement) => {
+    for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+        const ring = await utilityStyleAt(node, '--focus-ring', 1280);
+        if (ring) {
+            return themeHex(ring);
+        }
+    }
+    return themeHex('--color-accent');
+};
+
+const luminance = (hex: string) => {
+    const channel = (i: number) => {
+        const v = parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255;
+        return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * channel(0) + 0.7152 * channel(1) + 0.0722 * channel(2);
+};
+
+const contrast = (a: string, b: string) => {
+    expect(
+        [a, b].every((hex) => /^#[0-9a-f]{6}$/.test(hex)),
+        `${a} on ${b}`,
+    ).toBe(true);
+    const [x, y] = [luminance(a), luminance(b)];
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+};
 
 const createCheckoutSession = vi.fn();
 const createPortalSession = vi.fn();
@@ -411,6 +456,28 @@ describe('PricingDialog for an existing subscriber', () => {
             const current = cardOf(/^Personal/);
             expect(within(current).getByRole('button', { name: 'Resume subscription' })).toBeInTheDocument();
             expect(within(current).queryByRole('button', { name: /Switch to|Choose/ })).not.toBeInTheDocument();
+        });
+
+        it('rings keyboard focus at 3:1 or better against every card it sits on', async () => {
+            await renderPricing(
+                <PricingDialog
+                    currentTier="personal"
+                    subscription={{ endsAt: null, cancelling: true }}
+                    onClose={vi.fn()}
+                />,
+            );
+            const buttons = screen.getAllByRole('heading', { level: 3 }).flatMap((heading) => {
+                const card = heading.closest('section') as HTMLElement;
+                return within(card)
+                    .queryAllByRole('button')
+                    .map((button) => [card, button] as const);
+            });
+            expect(buttons.some(([, button]) => button.textContent === 'Resume subscription')).toBe(true);
+            for (const [card, button] of buttons) {
+                const background = await colourOf(card, 'background-color', '--color-paper');
+                const ring = await focusRingOf(button);
+                expect(contrast(ring, background), `${button.textContent} focus ring`).toBeGreaterThanOrEqual(3);
+            }
         });
 
         it('offers Choose on every other card', async () => {
