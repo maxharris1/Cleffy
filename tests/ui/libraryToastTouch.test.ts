@@ -49,18 +49,22 @@ vi.mock('@/features/billing/useEntitlements', () => ({
     }),
 }));
 
-const shellMarkup = () =>
+const SHELL_PATHS = ['/library', '/search', '/students'];
+
+const shellMarkup = (path: string) =>
     renderToStaticMarkup(
         createElement(
             MemoryRouter,
-            { initialEntries: ['/library'] },
+            { initialEntries: [path] },
             createElement(
                 Routes,
                 null,
                 createElement(
                     Route,
                     { element: createElement(LibraryShell) },
-                    createElement(Route, { path: '/library', element: createElement('div', null, 'Library') }),
+                    ...SHELL_PATHS.map((child) =>
+                        createElement(Route, { key: child, path: child, element: createElement('div', null, child) }),
+                    ),
                 ),
             ),
         ),
@@ -76,7 +80,6 @@ describe.skipIf(!CHROMIUM)('the favorite-error toast over the phone Library head
     let browser: Browser | undefined;
     let server: ViteDevServer | undefined;
     let url = '';
-    const markup = shellMarkup();
 
     beforeAll(async () => {
         server = await createServer({
@@ -102,7 +105,7 @@ describe.skipIf(!CHROMIUM)('the favorite-error toast over the phone Library head
         width: number,
         defaultFont: number,
         run: (page: Page) => Promise<T>,
-        { settled = true } = {},
+        { settled = true, path = '/library' } = {},
     ) => {
         const context = await browser!.newContext({ viewport: { width, height: 844 }, hasTouch: true });
         const page = await context.newPage();
@@ -118,7 +121,7 @@ describe.skipIf(!CHROMIUM)('the favorite-error toast over the phone Library head
             await page.evaluate((html) => {
                 document.getElementById('shell')!.innerHTML = html;
                 window.showFavoriteError();
-            }, markup);
+            }, shellMarkup(path));
             await page
                 .locator('[data-sonner-toast][data-mounted="true"]', { hasText: 'Could not update favorites.' })
                 .waitFor();
@@ -187,6 +190,23 @@ describe.skipIf(!CHROMIUM)('the favorite-error toast over the phone Library head
                 return (await chooser).element().getAttribute('aria-label');
             });
             expect(chose).toBe('Upload score');
+        },
+    );
+
+    it.each(['/search', '/students'])(
+        'places the favorite-error toast as dev does, unclipped, on %s at 320 px with a 9 px default font',
+        async (path) => {
+            const placed = await withToast(
+                320,
+                9,
+                (page) =>
+                    page.evaluate(() => ({
+                        top: document.querySelector('[data-sonner-toast]')!.getBoundingClientRect().top,
+                        clip: getComputedStyle(document.querySelector('[data-sonner-toaster]')!).clipPath,
+                    })),
+                { path },
+            );
+            expect(placed).toEqual({ top: 31.5, clip: 'none' });
         },
     );
 

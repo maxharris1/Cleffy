@@ -566,6 +566,7 @@ const LibraryFrame = ({
                 progress and the account menu stay reachable from any page. */}
             <header
                 ref={headerRef}
+                data-route={pathname === '/library' ? 'library' : undefined}
                 className="shell-bar sticky top-0 z-30 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] sm:pl-0 sm:pr-0"
             >
                 <div
