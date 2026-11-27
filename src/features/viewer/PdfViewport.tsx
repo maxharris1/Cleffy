@@ -596,15 +596,26 @@ export const PdfViewport = ({
             // Before the size reaches state, so the first fit already sees it.
             // Stand mode hides the pager and zoom row.
             controlsStripRef.current = standModeRef.current ? 0 : controlsStripFor(width);
-            safeBottomRef.current = safeBottomProbeRef.current?.offsetHeight ?? 0;
+            const safeBottom = safeBottomProbeRef.current?.offsetHeight ?? 0;
+            const safeBottomChanged = safeBottom !== safeBottomRef.current;
+            safeBottomRef.current = safeBottom;
             applyObscured();
+            // A resize in the same delivery clamps against the new size (below);
+            // settling now would clamp against the old one first.
+            const sized = viewportSizeRef.current;
+            if (safeBottomChanged && sized.width === width && sized.height === height) {
+                settleIntoBounds();
+            }
             setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
         };
         const observer = new ResizeObserver(measure);
         observer.observe(el);
+        if (safeBottomProbeRef.current) {
+            observer.observe(safeBottomProbeRef.current);
+        }
         measure();
         return () => observer.disconnect();
-    }, [applyObscured]);
+    }, [applyObscured, settleIntoBounds]);
 
     // Fit the widest page to the viewport width once the document is ready.
     useEffect(() => {
@@ -712,13 +723,16 @@ export const PdfViewport = ({
             }
             return;
         }
+        // A resize while it was on (the safe area, say) measured no strip.
+        controlsStripRef.current = controlsStripFor(containerRef.current?.clientWidth ?? 0);
+        applyObscured();
         const entry = standEntryRef.current;
         if (entry) {
             standEntryRef.current = null;
             standReturnRef.current = { page: standPageRef.current, entry };
             setStandMenu((m) => ({ ...m, open: false }));
         }
-    }, [standMode, cancelSettleGlide]);
+    }, [standMode, cancelSettleGlide, applyObscured]);
 
     // Stand mode: the page or spread, whole and centred, at every size full
     // screen passes through. Then, once it ends, that page back at the top of the

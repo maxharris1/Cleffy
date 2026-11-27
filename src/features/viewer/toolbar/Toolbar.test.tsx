@@ -357,4 +357,48 @@ describe('Toolbar', () => {
         spy.mockRestore();
         vi.unstubAllGlobals();
     });
+
+    it('reports again when only the bottom safe area moves the bar, both ways', async () => {
+        const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top }) as DOMRect;
+        let barTop = 598;
+        const spy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+            this: HTMLElement,
+        ) {
+            return this.dataset['testid'] === 'viewport' ? rect(0, 664) : rect(barTop, barTop + 54);
+        });
+        const observers: { callback: () => void; targets: Element[] }[] = [];
+        vi.stubGlobal(
+            'ResizeObserver',
+            class {
+                private readonly entry: (typeof observers)[number];
+                constructor(callback: () => void) {
+                    this.entry = { callback, targets: [] };
+                    observers.push(this.entry);
+                }
+                observe(target: Element) {
+                    this.entry.targets.push(target);
+                }
+                disconnect() {
+                    this.entry.targets = [];
+                }
+            },
+        );
+        const insetChanged = () => {
+            const probe = document.querySelector('[data-ui-overlay] .h-\\[var\\(--safe-bottom\\)\\]');
+            expect(probe).not.toBeNull();
+            act(() => observers.filter(({ targets }) => targets.includes(probe!)).forEach((o) => o.callback()));
+        };
+        const reports: Array<{ top: number; bottom: number }> = [];
+        await renderToolbar((edges) => reports.push(edges));
+        expect(reports.at(-1)).toEqual({ top: 0, bottom: 66 });
+
+        barTop = 564;
+        insetChanged();
+        expect(reports.at(-1)).toEqual({ top: 0, bottom: 100 });
+
+        barTop = 598;
+        insetChanged();
+        expect(reports.at(-1)).toEqual({ top: 0, bottom: 66 });
+        spy.mockRestore();
+    });
 });
