@@ -1037,14 +1037,14 @@ export const PdfViewport = ({
                     turnPage(1);
                     return;
                 }
-                // Tap a measure to seek there — with the pan tool (or as a
+                // Tap a measure to seek there — with no tool in hand (or as a
                 // read-only viewer, whose taps can't mean anything else).
                 const feature = playbackRef.current;
                 if (!feature?.score) {
                     return;
                 }
                 const state = useViewerStore.getState();
-                if (!readOnlyRef.current && state.tool !== 'pan') {
+                if (!readOnlyRef.current && state.tool !== null) {
                     return;
                 }
                 const point = viewportToPagePoint(state.view, layoutRef.current.layouts, x, y);
@@ -1518,7 +1518,7 @@ const ReadOnlyFingeringToggle = () => {
                 type="button"
                 aria-pressed={active}
                 title={active ? 'Stop selecting' : 'Fingering — drag over a chord or phrase'}
-                onClick={() => useViewerStore.getState().setTool(active ? 'pan' : 'fingering')}
+                onClick={() => useViewerStore.getState().setTool(active ? null : 'fingering')}
                 className={`chrome-glass pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg ${
                     active
                         ? 'border-accent bg-accent-soft text-accent'

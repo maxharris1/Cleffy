@@ -83,7 +83,7 @@ interface PlaybackSlice {
 interface ViewerStore extends PlaybackSlice {
     view: ViewState;
     pinch: PinchPreview | null;
-    tool: Tool;
+    tool: Tool | null;
     color: string;
     widthKey: StrokeWidthKey;
     /** 0-based page most centered in the viewport (for page share/export). */
@@ -103,7 +103,7 @@ interface ViewerStore extends PlaybackSlice {
     setView: (view: ViewState) => void;
     setPinch: (pinch: PinchPreview | null) => void;
     resetView: (view?: Partial<ViewState>) => void;
-    setTool: (tool: Tool) => void;
+    setTool: (tool: Tool | null) => void;
     setColor: (color: string) => void;
     setWidthKey: (widthKey: StrokeWidthKey) => void;
     setFocusedPageIndex: (focusedPageIndex: number) => void;
