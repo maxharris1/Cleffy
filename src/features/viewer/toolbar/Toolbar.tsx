@@ -458,7 +458,14 @@ function SizeDot({ tool, size }: { tool: Tool | null; size: number }) {
 
 function PenIcon() {
     return (
-        <svg viewBox="0 0 24 24" className="h-[19px] w-[19px] shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+        <svg
+            viewBox="0 0 24 24"
+            className="h-[19px] w-[19px] shrink-0"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            aria-hidden
+        >
             <path strokeLinecap="round" strokeLinejoin="round" d="M15.5 4.5 19.5 8.5 9 19H5v-4L15.5 4.5z" />
         </svg>
     );
@@ -466,7 +473,14 @@ function PenIcon() {
 
 function HighlighterIcon() {
     return (
-        <svg viewBox="0 0 24 24" className="h-[19px] w-[19px] shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+        <svg
+            viewBox="0 0 24 24"
+            className="h-[19px] w-[19px] shrink-0"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            aria-hidden
+        >
             <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -479,7 +493,14 @@ function HighlighterIcon() {
 
 function EraserIcon() {
     return (
-        <svg viewBox="0 0 24 24" className="h-[19px] w-[19px] shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+        <svg
+            viewBox="0 0 24 24"
+            className="h-[19px] w-[19px] shrink-0"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            aria-hidden
+        >
             <path strokeLinecap="round" strokeLinejoin="round" d="m7 17-3-3 8-8 6 6-8 8H7zM6 20h12" />
         </svg>
     );
@@ -487,7 +508,14 @@ function EraserIcon() {
 
 function TextIcon() {
     return (
-        <svg viewBox="0 0 24 24" className="h-[19px] w-[19px] shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+        <svg
+            viewBox="0 0 24 24"
+            className="h-[19px] w-[19px] shrink-0"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            aria-hidden
+        >
             <path strokeLinecap="round" strokeLinejoin="round" d="M5 7V5h14v2M12 5v14M9 19h6" />
         </svg>
     );
@@ -496,7 +524,14 @@ function TextIcon() {
 function FingeringIcon() {
     // Three white keys, two black keys straddling the dividers (piano octave slice).
     return (
-        <svg viewBox="0 0 24 24" className="h-[19px] w-[19px] shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+        <svg
+            viewBox="0 0 24 24"
+            className="h-[19px] w-[19px] shrink-0"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            aria-hidden
+        >
             <rect x="4" y="5" width="16" height="14" rx="1.5" />
             <path strokeLinecap="round" strokeWidth="2.5" d="M9.33 5.5v6M14.67 5.5v6" />
             <path strokeLinecap="round" d="M9.33 13.5v5M14.67 13.5v5" className="opacity-50" />
