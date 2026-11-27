@@ -1102,9 +1102,10 @@ export class AnnotationStore {
         const inverses: UndoableOp[] = [];
         const wrote: string[] = [];
         for (let start = 0; start < reversed.length; start += CHUNK) {
-            if (!live() || generation !== this.generation) {
-                // Signed out, or reset for another account, between chunks:
-                // the rest of the entry is not applied.
+            if (generation !== this.generation) {
+                // Signed out, or reset for another account, since the press:
+                // the rest of the entry is not applied. A score lost meanwhile
+                // is left to persistMany, which keeps the chunk as closed ink.
                 throw new RecoveryCancelled();
             }
             const commits: CommitOp[] = [];

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { loadExportMarks } from '@/features/export/exportAnnotations';
 import { purgeLocalDocument } from '@/features/library/documentsService';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import * as snapshotService from '@/features/viewer/history/snapshotService';
@@ -8,6 +9,7 @@ import { InkController } from '@/features/viewer/ink/InkController';
 import { AnnotationStore } from '@/sync/annotationStore';
 import type * as dbModule from '@/sync/db';
 import { ScribblerDb } from '@/sync/db';
+import { accountSignedIn, lostAccessInk, resetInkRecoveryForTests } from '@/sync/inkRecovery';
 import { useViewerStore } from '@/state/store';
 
 vi.mock('@/sync/db', async (importOriginal) => ({
@@ -73,11 +75,9 @@ const drawStroke = (x: number, y: number) => {
     ink.delegate.onInkUp(pointer(x + 40, y));
 };
 
-beforeEach(async () => {
-    vi.stubGlobal('Path2D', FakePath2D);
-    vi.stubGlobal('requestAnimationFrame', () => 0);
-    db = new ScribblerDb(`test-${crypto.randomUUID()}`);
-    store = new AnnotationStore(db, DOC);
+const mount = async (docId: string, author: string | null) => {
+    store = new AnnotationStore(db, docId);
+    store.setAuthor(author);
     await store.load();
     const registry = new CanvasRegistry();
     ink = new InkController({
@@ -94,12 +94,20 @@ beforeEach(async () => {
     page = fakeCanvas(PAGE_W, PAGE_H);
     registry.register(0, { committed: page.canvas, live: fakeCanvas(PAGE_W, PAGE_H).canvas });
     useViewerStore.getState().setTool('pen');
+};
+
+beforeEach(async () => {
+    vi.stubGlobal('Path2D', FakePath2D);
+    vi.stubGlobal('requestAnimationFrame', () => 0);
+    db = new ScribblerDb(`test-${crypto.randomUUID()}`);
+    await mount(DOC, null);
 });
 
 afterEach(() => {
     ink.destroy();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    resetInkRecoveryForTests();
 });
 
 const strokesShown = () => page.shown.length;
@@ -348,5 +356,70 @@ describe('InkController erase undo batch', () => {
             rows: [],
             ops: [],
         });
+    });
+});
+
+describe('InkController settled erase undo overtaken by a loss-of-access purge', () => {
+    const CLOUD_DOC = '6f1c2b9e-3a4d-4e5f-8a7b-1c2d3e4f5a6b';
+    const AUTHOR = 'author-1';
+
+    beforeEach(async () => {
+        ink.destroy();
+        accountSignedIn(AUTHOR);
+        await mount(CLOUD_DOC, AUTHOR);
+    });
+
+    const drawn = () => [...store.getPage(0).keys()];
+
+    const undoSettledEraseThenPurge = async (end: (e: PointerEvent) => void, heldInk: 'keep' | 'discard' = 'keep') => {
+        drawStroke(100, 300);
+        drawStroke(300, 300);
+        drawStroke(500, 300);
+        await settle();
+        const erased = drawn().slice(0, 2).sort();
+        useViewerStore.getState().setTool('eraser');
+        ink.delegate.onInkDown(pointer(110, 302));
+        ink.delegate.onInkMove(pointer(130, 304));
+        ink.delegate.onInkMove(pointer(310, 302));
+        ink.delegate.onInkMove(pointer(330, 304));
+        await settle();
+        expect(strokesShown()).toBe(1);
+        expect((await db.annotations.bulkGet(erased)).map((row) => Boolean(row?.deletedAt))).toEqual([true, true]);
+        end(pointer(330, 304));
+
+        await Promise.allSettled([store.undoLast(), purgeLocalDocument(CLOUD_DOC, { heldInk })]);
+        await settle();
+        const exported = await loadExportMarks(CLOUD_DOC, AUTHOR, undefined, { lostAccess: true });
+        return {
+            marks: lostAccessInk().map((score) => [score.userId, score.docId, score.marks]),
+            exported: exported.annotations.map((mark) => mark.id).sort(),
+            restored: erased,
+            rows: await db.annotations.where('docId').equals(CLOUD_DOC).toArray(),
+            ops: await db.ops.where('docId').equals(CLOUD_DOC).toArray(),
+        };
+    };
+
+    it('keeps the restored marks for Export after lift, and writes nothing back', async () => {
+        const after = await undoSettledEraseThenPurge((e) => ink.delegate.onInkUp(e));
+        expect(after.marks).toEqual([[AUTHOR, CLOUD_DOC, 2]]);
+        expect(after.exported).toEqual(after.restored);
+        expect(after.rows).toEqual([]);
+        expect(after.ops).toEqual([]);
+    });
+
+    it('keeps the restored marks for Export after cancel, and writes nothing back', async () => {
+        const after = await undoSettledEraseThenPurge((e) => ink.delegate.onInkCancel(e));
+        expect(after.marks).toEqual([[AUTHOR, CLOUD_DOC, 2]]);
+        expect(after.exported).toEqual(after.restored);
+        expect(after.rows).toEqual([]);
+        expect(after.ops).toEqual([]);
+    });
+
+    it('lets the restored marks go when the purge discards held ink', async () => {
+        const after = await undoSettledEraseThenPurge((e) => ink.delegate.onInkUp(e), 'discard');
+        expect(after.marks).toEqual([]);
+        expect(after.exported).toEqual([]);
+        expect(after.rows).toEqual([]);
+        expect(after.ops).toEqual([]);
     });
 });
