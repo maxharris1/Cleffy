@@ -387,11 +387,12 @@ export const PdfViewport = ({
     );
     const gestureRef = useRef<GestureController | null>(null);
     /**
-     * How far above the top bound a pan may keep the view while the bound
-     * tightened under it (a notice went away mid-gesture): never further out
-     * than it already was, so nothing jumps under the finger. Null otherwise.
+     * How far past a bound (top or bottom) a pan may keep the view while the
+     * bound tightened under it (a notice or dock went away mid-gesture): never
+     * further out than it already was, so nothing jumps under the finger.
+     * Null otherwise.
      */
-    const slackTopRef = useRef<number | null>(null);
+    const slackRef = useRef<number | null>(null);
     /**
      * A settle into the bounds that a pointer on the score held off (or cut
      * short), in either direction: it resumes once the last pointer lifts.
@@ -414,7 +415,7 @@ export const PdfViewport = ({
         cancelSettleGlide();
         if (standModeRef.current) {
             // Stand mode places its page whole and centred, outside these bounds.
-            slackTopRef.current = null;
+            slackRef.current = null;
             settlePendingRef.current = false;
             return;
         }
@@ -425,17 +426,17 @@ export const PdfViewport = ({
         const { view: from, setView } = useViewerStore.getState();
         const target = clampScroll(from, layoutRef.current, width, height, obscuredRef.current);
         if (Math.abs(target.scrollY - from.scrollY) < 0.5 && Math.abs(target.scrollX - from.scrollX) < 0.5) {
-            slackTopRef.current = null;
+            slackRef.current = null;
             settlePendingRef.current = false;
             return;
         }
         if (gestureRef.current?.pointerActive) {
             // Settles once the last pointer lifts (below).
-            slackTopRef.current ??= from.scrollY;
+            slackRef.current ??= from.scrollY;
             settlePendingRef.current = true;
             return;
         }
-        slackTopRef.current = null;
+        slackRef.current = null;
         settlePendingRef.current = false;
         if (prefersReducedMotion()) {
             setView(target);
@@ -472,7 +473,7 @@ export const PdfViewport = ({
         // it is — a stroke must not start on a page gliding under the pen, nor
         // a pan's first move snap the rest of the way — and leaves what is left
         // to settle once the last pointer lifts (below), whichever way it was
-        // going; above the top bound, as slack too. Ahead of the gesture
+        // going; past a bound, as slack too. Ahead of the gesture
         // controller, so the slack is in place for its first move.
         const onPointerDown = (e: PointerEvent) => {
             if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
@@ -490,13 +491,13 @@ export const PdfViewport = ({
             if (Math.abs(v.scrollY - bound.scrollY) >= 0.5 || Math.abs(v.scrollX - bound.scrollX) >= 0.5) {
                 settlePendingRef.current = true;
             }
-            if (v.scrollY < bound.scrollY - 0.5) {
-                slackTopRef.current ??= v.scrollY;
+            if (Math.abs(v.scrollY - bound.scrollY) >= 0.5) {
+                slackRef.current ??= v.scrollY;
             }
         };
         // After the controller has seen the pointer go (it listens on the score).
         const onPointerEnd = () => {
-            if (settlePendingRef.current || slackTopRef.current !== null) {
+            if (settlePendingRef.current || slackRef.current !== null) {
                 settleIntoBounds();
             }
         };
@@ -688,7 +689,7 @@ export const PdfViewport = ({
             // Nothing else moves the view while stand mode has it: a settle
             // under way stops here (a follow glide, on its next frame).
             cancelSettleGlide();
-            slackTopRef.current = null;
+            slackRef.current = null;
             settlePendingRef.current = false;
             standPageRef.current = page;
             setStandPage(page);
@@ -981,14 +982,15 @@ export const PdfViewport = ({
                 viewportSizeRef.current.height,
                 obscuredRef.current,
             );
-            const slack = slackTopRef.current;
-            if (slack === null || v.scrollY >= clamped.scrollY) {
+            const slack = slackRef.current;
+            const past = Math.sign(v.scrollY - clamped.scrollY);
+            if (slack === null || past === 0 || past !== Math.sign(slack - clamped.scrollY)) {
                 return clamped;
             }
-            // Above a top bound that tightened mid-gesture: free to move back
-            // in, never further out. The rest settles when the gesture ends.
-            const scrollY = Math.max(slack, v.scrollY);
-            slackTopRef.current = scrollY;
+            // Past a bound that tightened mid-gesture: free to move back in,
+            // never further out. The rest settles when the gesture ends.
+            const scrollY = past < 0 ? Math.max(slack, v.scrollY) : Math.min(slack, v.scrollY);
+            slackRef.current = scrollY;
             return { ...clamped, scrollY };
         };
 
