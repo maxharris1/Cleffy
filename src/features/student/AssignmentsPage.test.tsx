@@ -196,7 +196,7 @@ describe('AssignmentsPage', () => {
         expect(inkBar()).toHaveClass('pt-[var(--safe-top)]');
     });
 
-    it('keeps part of the student’s name in the chip while it saves before sign-out', async () => {
+    it('keeps the student’s name in the ink bar while it saves before sign-out', async () => {
         const user = userEvent.setup();
         syncBeforeSignOut.mockReturnValue(new Promise(() => undefined));
         fetchMyRosterProfile.mockResolvedValue(rosterRow('Maximiliana Konstantinopoulou-Featherstonehaugh'));
@@ -206,7 +206,7 @@ describe('AssignmentsPage', () => {
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
 
         expect(await screen.findByRole('button', { name: 'Saving changes…' })).toBeDisabled();
-        expect(name).toHaveClass('truncate', 'min-w-12');
+        expect(inkBar()).toContainElement(name);
     });
 
     it('sets the teacher’s note in #b91c1c and the presence dot in #2563eb', async () => {

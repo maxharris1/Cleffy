@@ -214,25 +214,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
 
     return (
         <main className="paper-page min-h-full pb-[var(--safe-bottom)]">
-            <header className="bg-ink pt-[var(--safe-top)] text-paper [--focus-ring:var(--color-ink-rule)]">
-                <div className="mx-auto flex min-h-16 w-full max-w-[880px] items-center justify-between gap-3 py-2.5 pr-[max(18px,var(--safe-right))] pl-[max(18px,var(--safe-left))] sm:gap-4 sm:py-0 sm:pr-[max(2.5rem,var(--safe-right))] sm:pl-[max(2.5rem,var(--safe-left))]">
-                    <Wordmark tone="ink" className="shrink-0 text-[22px] min-[360px]:text-[26px] sm:text-[28px]" />
-                    <div className="flex min-w-0 items-center gap-2 sm:gap-3.5">
-                        <span className="inline-flex h-[30px] min-w-0 items-center gap-2 rounded-full bg-paper/10 pr-3 pl-2.5 text-[13px] font-semibold text-paper shadow-[0_0_0_1px_rgb(247_245_239/0.24)]">
-                            <span aria-hidden="true" className="size-2.5 shrink-0 rounded-full bg-[#2563eb]" />
-                            <span className="min-w-12 truncate">{name}</span>
-                        </span>
-                        <button
-                            type="button"
-                            onClick={() => void requestSignOut()}
-                            disabled={savingBeforeSignOut}
-                            className={buttonClassName('inkGhost', 'sm', 'shrink-0 hover:text-paper')}
-                        >
-                            {savingBeforeSignOut ? 'Saving changes…' : 'Sign out'}
-                        </button>
-                    </div>
-                </div>
-            </header>
+            <StudentInkBar name={name} saving={savingBeforeSignOut} onSignOut={() => void requestSignOut()} />
 
             <div className="mx-auto w-full max-w-[880px] pt-[22px] pr-[max(18px,var(--safe-right))] pb-14 pl-[max(18px,var(--safe-left))] sm:pt-9 sm:pr-[max(2.5rem,var(--safe-right))] sm:pl-[max(2.5rem,var(--safe-left))] lg:pt-11 [&>.page-head]:mb-0">
                 <PageHead
@@ -294,6 +276,40 @@ const AssignmentsView = ({ session }: { session: Session }) => {
         </main>
     );
 };
+
+export const StudentInkBar = ({
+    name,
+    saving,
+    onSignOut,
+}: {
+    name: string;
+    saving: boolean;
+    onSignOut: () => void;
+}) => (
+    <header className="bg-ink pt-[var(--safe-top)] text-paper [--focus-ring:var(--color-ink-rule)]">
+        <div
+            className={`mx-auto flex min-h-16 w-full max-w-[880px] items-center justify-between gap-3 py-2.5 pr-[max(18px,var(--safe-right))] pl-[max(18px,var(--safe-left))] sm:gap-4 sm:py-0 sm:pr-[max(2.5rem,var(--safe-right))] sm:pl-[max(2.5rem,var(--safe-left))] ${saving ? 'max-sm:flex-wrap' : ''}`}
+        >
+            <Wordmark tone="ink" className="shrink-0 text-[22px] min-[360px]:text-[26px] sm:text-[28px]" />
+            <div
+                className={`flex min-w-0 items-center justify-end gap-2 sm:gap-3.5 ${saving ? 'max-sm:basis-full' : ''}`}
+            >
+                <span className="inline-flex h-[30px] min-w-[5.5rem] items-center gap-2 rounded-full bg-paper/10 pr-3 pl-2.5 text-[13px] font-semibold text-paper shadow-[0_0_0_1px_rgb(247_245_239/0.24)]">
+                    <span aria-hidden="true" className="size-2.5 shrink-0 rounded-full bg-[#2563eb]" />
+                    <span className="truncate">{name}</span>
+                </span>
+                <button
+                    type="button"
+                    onClick={onSignOut}
+                    disabled={saving}
+                    className={buttonClassName('inkGhost', 'sm', 'shrink-0 hover:text-paper')}
+                >
+                    {saving ? 'Saving changes…' : 'Sign out'}
+                </button>
+            </div>
+        </div>
+    </header>
+);
 
 const AssignmentRow = ({ score: { assignment, document: doc } }: { score: AssignedScore }) => {
     const due = formatDue(assignment.due_at);
