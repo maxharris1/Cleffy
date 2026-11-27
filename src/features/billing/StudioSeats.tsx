@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
+import { AccountSection } from '@/features/account/AccountSection';
 import {
     createStudio,
     fetchOwnedStudio,
@@ -122,20 +123,19 @@ export const StudioSeats = ({ userId, tier, source, seatReadOnly = false }: Stud
 
     if (source === 'studio_member') {
         return (
-            <section className="mt-8 border-t border-stone-300/50 pt-6">
-                <h2 className="text-sm font-medium uppercase tracking-[0.08em] text-stone-600">Academy</h2>
+            <AccountSection title="Academy">
                 {seatReadOnly ? (
-                    <p className="mt-2 text-sm text-amber-800">
+                    <p className="text-sm text-amber-800">
                         Your academy has more teachers than its plan covers, so your seat is read-only. You can still
                         open and export your scores, but not edit them or add new ones. Ask your academy&apos;s owner to
                         keep your seat active, or choose a plan of your own.
                     </p>
                 ) : (
-                    <p className="mt-2 text-sm text-stone-600">
+                    <p className="text-sm text-stone-600">
                         You hold a seat in someone else&apos;s academy, so your plan is billed by its owner.
                     </p>
                 )}
-            </section>
+            </AccountSection>
         );
     }
 
@@ -178,12 +178,10 @@ export const StudioSeats = ({ userId, tier, source, seatReadOnly = false }: Stud
         });
 
     return (
-        <section className="mt-8 border-t border-stone-300/50 pt-6">
-            <h2 className="text-sm font-medium uppercase tracking-[0.08em] text-stone-600">Academy seats</h2>
-
+        <AccountSection title="Academy seats">
             {!studio ? (
                 <>
-                    <p className="mt-2 text-sm text-stone-600">Name your academy to start adding teachers.</p>
+                    <p className="text-sm text-stone-600">Name your academy to start adding teachers.</p>
                     <Button
                         size="sm"
                         className="mt-3"
@@ -195,7 +193,7 @@ export const StudioSeats = ({ userId, tier, source, seatReadOnly = false }: Stud
                 </>
             ) : (
                 <>
-                    <p className="mt-2 text-sm text-stone-500">
+                    <p className="text-sm text-stone-500">
                         {seatsUsed} of {seatLimit} seats used — you hold one as the owner.
                     </p>
 
@@ -313,6 +311,6 @@ export const StudioSeats = ({ userId, tier, source, seatReadOnly = false }: Stud
             )}
 
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
-        </section>
+        </AccountSection>
     );
 };

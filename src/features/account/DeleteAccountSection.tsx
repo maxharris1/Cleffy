@@ -9,6 +9,7 @@ import {
     clearLocalAccountData,
     requestAccountDeletion,
 } from '@/features/account/accountDeletion';
+import { ACCOUNT_BODY, AccountSection } from '@/features/account/AccountSection';
 import { userTypeOf } from '@/features/auth/session';
 import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import { Button } from '@/ui/Button';
@@ -16,9 +17,6 @@ import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { TextField } from '@/ui/TextField';
 import { linkClassName } from '@/ui/classNames';
-
-const SECTION = 'mt-8 border-t border-stone-300/50 pt-6';
-const SECTION_HEADING = 'text-sm font-medium uppercase tracking-[0.08em] text-stone-600';
 
 /** What deletion does, in the order delete-account does it. Kept in step with the privacy policy's #deleting. */
 const CONSEQUENCES = [
@@ -75,9 +73,8 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
     // for and controls the account. Say so instead of offering a button that fails.
     if (userTypeOf(session) === 'student') {
         return (
-            <section className={SECTION}>
-                <h2 className={SECTION_HEADING}>Delete account</h2>
-                <p className="mt-2 text-sm text-stone-600">
+            <AccountSection title="Delete account">
+                <p className={ACCOUNT_BODY}>
                     Your teacher manages this account, so it can’t be deleted from here. Your teacher can archive it,
                     which ends your sign-in but keeps your marks; to have the account and its data deleted, write to{' '}
                     <a href={`mailto:${LEGAL_ENTITY.contactEmail}`} className={linkClassName}>
@@ -85,7 +82,7 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
                     </a>
                     .
                 </p>
-            </section>
+            </AccountSection>
         );
     }
 
@@ -128,13 +125,12 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
     };
 
     return (
-        <section className={SECTION}>
-            <h2 className={SECTION_HEADING}>Delete account</h2>
-            <p className="mt-2 text-sm text-stone-600">
+        <AccountSection title="Delete account">
+            <p className={ACCOUNT_BODY}>
                 Permanently delete your account, your scores and everything shared from them. This cannot be undone.
                 Export or download anything you want to keep first.
             </p>
-            <Button size="sm" variant="danger" className="mt-3" onClick={() => setOpen(true)}>
+            <Button variant="dangerOutline" className="mt-3" onClick={() => setOpen(true)}>
                 Delete account…
             </Button>
 
@@ -187,6 +183,6 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
                     </form>
                 </Dialog>
             ) : null}
-        </section>
+        </AccountSection>
     );
 };
