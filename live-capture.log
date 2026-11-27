@@ -1,0 +1,27 @@
+live-saving-640-L12R16T24 -> /tmp/uicap/shots/live-saving-640-L12R16T24.png  vw=640 --safe-left=12px
+  wordmark      x 24-143 y 35-77 inside=true hit1pxL=true hit1pxR=true
+  Library       x 155-207 y 24-88 inside=true hit1pxL=true hit1pxR=true
+  Students      x 219-286 y 24-88 inside=true hit1pxL=true hit1pxR=true
+  Find a score  x 298-386 y 24-88 inside=true hit1pxL=true hit1pxR=true
+  Upload score  x 404-544 y 34-78 inside=true hit1pxL=true hit1pxR=true
+  avatar        x 552-616 y 36-76 inside=true hit1pxL=true hit1pxR=true
+  overlaps=[] status "Saving changes…" x 538-616 y 77-87 visible=true color=rgb(214, 211, 209)
+  uifuzz audit: []
+live-saving-640-L0R0 -> /tmp/uicap/shots/live-saving-640-L0R0.png  vw=640 --safe-left=0px
+  wordmark      x 24-143 y 11-53 inside=true hit1pxL=true hit1pxR=true
+  Library       x 155-207 y 0-64 inside=true hit1pxL=true hit1pxR=true
+  Students      x 219-286 y 0-64 inside=true hit1pxL=true hit1pxR=true
+  Find a score  x 298-386 y 0-64 inside=true hit1pxL=true hit1pxR=true
+  Upload score  x 404-544 y 10-54 inside=true hit1pxL=true hit1pxR=true
+  avatar        x 552-616 y 12-52 inside=true hit1pxL=true hit1pxR=true
+  overlaps=[] status "Saving changes…" x 538-616 y 53-63 visible=true color=rgb(214, 211, 209)
+  uifuzz audit: []
+live-saving-700-L0R0 -> /tmp/uicap/shots/live-saving-700-L0R0.png  vw=700 --safe-left=0px
+  wordmark      x 24-143 y 11-53 inside=true hit1pxL=true hit1pxR=true
+  Library       x 155-207 y 0-64 inside=true hit1pxL=true hit1pxR=true
+  Students      x 219-286 y 0-64 inside=true hit1pxL=true hit1pxR=true
+  Find a score  x 298-386 y 0-64 inside=true hit1pxL=true hit1pxR=true
+  Upload score  x 464-604 y 10-54 inside=true hit1pxL=true hit1pxR=true
+  avatar        x 612-676 y 12-52 inside=true hit1pxL=true hit1pxR=true
+  overlaps=[] status "Saving changes…" x 598-676 y 53-63 visible=true color=rgb(214, 211, 209)
+  uifuzz audit: []
