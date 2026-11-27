@@ -21,7 +21,7 @@ import { useViewerStore } from '@/state/store';
 import type { DocumentRow, MemberRole } from '@/types/database';
 import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
-import { SwapLabel } from '@/ui/SwapLabel';
+import { PHONE_ACTIVE_LABEL_ONLY, SwapLabel } from '@/ui/SwapLabel';
 import { useGhostActionClassName } from '@/ui/onInk';
 import { buttonClassName } from '@/ui/classNames';
 import { Menu, MenuItem, MenuSeparator } from '@/ui/Menu';
@@ -373,6 +373,7 @@ export const ShareExportMenu = ({
                                 ),
                             }}
                             active={active}
+                            className={PHONE_ACTIVE_LABEL_ONLY}
                         />
                     }
                     menuLabel="Export"

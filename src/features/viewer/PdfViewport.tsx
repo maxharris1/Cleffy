@@ -355,15 +355,21 @@ export const PdfViewport = ({
     // first fit, which must already see it. Syncing it from state in the effect
     // above would put the stale value back before the fit reads it.
     // Phones add the pager/zoom strip to the bottom edge (see PHONE_CONTROLS_STRIP),
-    // and any notices floating over the score extend the top one (noticeInset).
+    // above the toolbar or, without one, above the safe area the strip sits on;
+    // any notices floating over the score extend the top edge (noticeInset).
     const toolbarEdgesRef = useRef<ObscuredEdges>(NO_OBSCURED);
     const controlsStripRef = useRef(0);
+    const safeBottomProbeRef = useRef<HTMLDivElement | null>(null);
+    const safeBottomRef = useRef(0);
     const noticeInsetRef = useRef(noticeInset);
     const applyObscured = useCallback(() => {
         const toolbar = toolbarEdgesRef.current;
         const edges = {
             top: Math.max(toolbar.top, noticeInsetRef.current),
-            bottom: toolbar.bottom + controlsStripRef.current,
+            bottom:
+                controlsStripRef.current > 0
+                    ? Math.max(toolbar.bottom, safeBottomRef.current) + controlsStripRef.current
+                    : toolbar.bottom,
         };
         obscuredRef.current = edges;
         setObscured((prev) => (prev.top === edges.top && prev.bottom === edges.bottom ? prev : edges));
@@ -571,6 +577,7 @@ export const PdfViewport = ({
             // Stand mode hides the pager and zoom row.
             controlsStripRef.current =
                 width > 0 && width < SM_BREAKPOINT && !standModeRef.current ? PHONE_CONTROLS_STRIP : 0;
+            safeBottomRef.current = safeBottomProbeRef.current?.offsetHeight ?? 0;
             applyObscured();
             setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
         };
@@ -1364,6 +1371,11 @@ export const PdfViewport = ({
             data-stand-mode={standMode || undefined}
             className="ink-surface relative h-full overflow-clip bg-desk data-stand-mode:fixed data-stand-mode:inset-x-0 data-stand-mode:top-0 data-stand-mode:z-[60] data-stand-mode:h-dvh"
         >
+            <div
+                ref={safeBottomProbeRef}
+                aria-hidden
+                className="invisible absolute bottom-0 h-[var(--safe-bottom)] w-0"
+            />
             {status === 'loading' ? (
                 <div className="flex h-full items-center justify-center">
                     <LoadingText>Loading score…</LoadingText>

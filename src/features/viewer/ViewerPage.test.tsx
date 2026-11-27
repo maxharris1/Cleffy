@@ -893,6 +893,13 @@ describe('SyncDot', () => {
         vi.useRealTimers();
     });
 
+    it('keeps no room for inactive words in the phone header, only from sm up', () => {
+        render(<SyncDot status="synced" />);
+        const label = document.querySelector('.swap-label')!;
+        expect(label).toHaveClass('max-sm:[&>:not([data-swap-active])]:hidden');
+        expect(activeLabel()).toBe('Synced');
+    });
+
     it('shows a retryable failure calmly and keeps red for errors', () => {
         const { rerender } = render(<SyncDot status="retrying" />);
         expect(activeLabel()).toBe('Retrying…');
@@ -1191,7 +1198,7 @@ describe('CloudViewer membership changes', () => {
 
         expect(document.querySelector('[data-sync-dot]')?.closest('[title]')).toHaveClass('lg:-order-1');
         expect(screen.getByRole('button', { name: 'Full screen' })).not.toHaveClass('lg:-order-1');
-        expect(screen.getByRole('button', { name: 'Notes' })).toHaveClass('lg:text-[15px]', 'lg:font-medium');
+        expect(screen.getByRole('button', { name: 'Notes' })).toHaveClass('text-[15px]!', 'font-medium!');
         expect(screen.getByRole('button', { name: 'Share' })).toHaveClass(
             'lg:text-[15px]',
             'lg:px-[18px]',

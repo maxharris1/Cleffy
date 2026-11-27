@@ -92,12 +92,12 @@ describe('LessonHistoryButton', () => {
         expect(toast.success).not.toHaveBeenCalled();
     });
 
-    it("uses Flow-Viewer's 15px, weight 500 type on desktop when it sits in the ink header", () => {
+    it("uses the header's 15px, weight 500 type when it sits in the ink header", () => {
         render(
             <OnInkContext.Provider value>
                 <LessonHistoryButton store={storeWith(vi.fn())} canRestore />
             </OnInkContext.Provider>,
         );
-        expect(screen.getByRole('button', { name: 'History' })).toHaveClass('lg:text-[15px]', 'lg:font-medium');
+        expect(screen.getByRole('button', { name: 'History' })).toHaveClass('text-[15px]!', 'font-medium!');
     });
 });
