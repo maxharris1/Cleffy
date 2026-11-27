@@ -1046,7 +1046,7 @@ export class AnnotationStore {
             return; // read-only while an overlay is shown — don't consume the entry
         }
         for (;;) {
-            const entry = this.undo.popUndo();
+            const entry = await this.undo.popUndo();
             if (!entry) {
                 break;
             }

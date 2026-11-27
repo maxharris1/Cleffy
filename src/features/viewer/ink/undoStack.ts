@@ -27,6 +27,7 @@ const MAX_DEPTH = 100;
 interface Entry {
     ops: UndoableOp[];
     pending: number;
+    onSettled: (() => void)[];
 }
 
 interface OpenBatch extends Entry {
@@ -61,7 +62,7 @@ export class UndoStack {
             current.ops.push(op);
             return;
         }
-        this.pushEntry({ ops: [op], pending: 0 });
+        this.pushEntry({ ops: [op], pending: 0, onSettled: [] });
     }
 
     /** Hold a place in the open frame, or null when no frame is open. */
@@ -74,15 +75,15 @@ export class UndoStack {
         return { entry: current };
     }
 
-    /** Record `op` where `slot` was reserved, or as its own step without one. */
+    /** Record `op` where `slot` was reserved, or as `pushInverse` would without one. */
     fill(slot: UndoSlot | null, op: UndoableOp): void {
         if (!slot) {
             this.pushInverse(op);
             return;
         }
         this.redoStack = [];
-        slot.entry.pending -= 1;
         slot.entry.ops.push(op);
+        this.settleOne(slot.entry);
     }
 
     /** Give up `slot`; a closed entry left with nothing to undo is dropped. */
@@ -91,19 +92,19 @@ export class UndoStack {
             return;
         }
         const { entry } = slot;
-        entry.pending -= 1;
-        if (entry.pending === 0 && entry.ops.length === 0) {
+        if (entry.pending === 1 && entry.ops.length === 0) {
             const idx = this.undoStack.indexOf(entry);
             if (idx !== -1) {
                 this.undoStack.splice(idx, 1);
             }
         }
+        this.settleOne(entry);
     }
 
     beginBatch(): UndoBatchHandle {
         const id = this.nextHandle;
         this.nextHandle += 1;
-        this.batches.push({ id, ops: [], pending: 0 });
+        this.batches.push({ id, ops: [], pending: 0, onSettled: [] });
         return id;
     }
 
@@ -132,9 +133,19 @@ export class UndoStack {
         this.batches.splice(idx, 1);
     }
 
-    /** Pop the ops to replay for undo; push their redo counterparts via fn. */
-    popUndo(): UndoableOp[] | null {
-        return this.undoStack.pop()?.ops ?? null;
+    /** Pop the newest entry's ops once every inverse it still holds a place for has landed. */
+    async popUndo(): Promise<UndoableOp[] | null> {
+        for (;;) {
+            const top = this.undoStack[this.undoStack.length - 1];
+            if (!top) {
+                return null;
+            }
+            if (top.pending === 0) {
+                this.undoStack.pop();
+                return top.ops;
+            }
+            await new Promise<void>((resolve) => top.onSettled.push(resolve));
+        }
     }
 
     popRedo(): UndoableOp[] | null {
@@ -146,13 +157,30 @@ export class UndoStack {
     }
 
     pushUndoEntryRaw(ops: UndoableOp[]): void {
-        this.pushEntry({ ops, pending: 0 });
+        this.pushEntry({ ops, pending: 0, onSettled: [] });
     }
 
     clear(): void {
+        for (const entry of [...this.undoStack, ...this.batches]) {
+            entry.pending = 0;
+            this.wake(entry);
+        }
         this.undoStack = [];
         this.redoStack = [];
         this.batches = [];
+    }
+
+    private settleOne(entry: Entry): void {
+        entry.pending -= 1;
+        if (entry.pending === 0) {
+            this.wake(entry);
+        }
+    }
+
+    private wake(entry: Entry): void {
+        for (const resolve of entry.onSettled.splice(0)) {
+            resolve();
+        }
     }
 
     private pushEntry(entry: Entry): void {

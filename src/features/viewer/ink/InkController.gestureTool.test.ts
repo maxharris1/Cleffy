@@ -184,6 +184,34 @@ describe('InkController erase undo batch', () => {
         expect(strokesShown()).toBe(3);
     });
 
+    it('undo pressed right after the stylus lifts, before the last delete lands, restores every mark the gesture erased', async () => {
+        await eraseFirstTwoOfThree();
+        ink.delegate.onInkUp(pointer(330, 304));
+        const undoing = store.undoLast();
+        await settle();
+        await undoing;
+        await settle();
+        expect(strokesShown()).toBe(3);
+
+        await store.redoLast();
+        await settle();
+        expect(strokesShown()).toBe(1);
+    });
+
+    it('undo pressed right after the gesture is cancelled, before the last delete lands, restores every mark the gesture erased', async () => {
+        await eraseFirstTwoOfThree();
+        ink.delegate.onInkCancel(pointer(330, 304));
+        const undoing = store.undoLast();
+        await settle();
+        await undoing;
+        await settle();
+        expect(strokesShown()).toBe(3);
+
+        await store.redoLast();
+        await settle();
+        expect(strokesShown()).toBe(1);
+    });
+
     it('undo and redo replay a settled erase as one step', async () => {
         await eraseFirstTwoOfThree();
         await settle();
