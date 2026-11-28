@@ -2,6 +2,22 @@
 import { ACCOUNTS, STUB_ENTITLEMENTS, STUB_USER, VIEWPORTS } from '../../../scripts/ui/uifuzz.mjs';
 
 console.log(VIEWPORTS['desktop-1440'].viewport.width.toFixed(0));
+/**
+ * @type {Record<
+ *     | 'desktop-1440'
+ *     | 'laptop-1280'
+ *     | 'ipad-landscape'
+ *     | 'ipad-portrait'
+ *     | 'ipad-mini-portrait'
+ *     | 'iphone-14'
+ *     | 'iphone-se'
+ *     | 'android-small'
+ *     | 'iphone-landscape',
+ *     { viewport: { width: number; height: number } }
+ * >}
+ */
+const everyViewport = VIEWPORTS;
+console.log(everyViewport['laptop-1280'].viewport.width.toFixed(0));
 console.log(VIEWPORTS['iphone-se'].viewport.height.toFixed(0));
 console.log(STUB_USER.role.toUpperCase());
 console.log(STUB_USER.user_metadata.display_name.toUpperCase());
