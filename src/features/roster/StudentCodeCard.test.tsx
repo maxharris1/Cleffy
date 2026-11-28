@@ -49,4 +49,11 @@ describe('StudentCodeCard', () => {
 
         expect(printCard).toMatch(/padding:\s*12px;/);
     });
+
+    it('keeps its own line heights for the wordmark and the teacher byline on the printed card', () => {
+        render(<StudentCodeCard displayName="Leo Martin" loginCode="K7QM-2HXP-9RTD" teacherName="Ms. Davis" />);
+
+        expect(screen.getByText('Cleffy').className).not.toMatch(/(^|\s)leading-/);
+        expect(screen.getByText('From Ms. Davis').className).not.toMatch(/(^|\s)leading-/);
+    });
 });
