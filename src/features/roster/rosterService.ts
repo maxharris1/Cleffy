@@ -349,6 +349,26 @@ const documentTitles = async (documentIds: string[]): Promise<Map<string, string
 
 const UNKNOWN_TITLE = 'Untitled score';
 
+export interface ThumbRevs {
+    contentRev: number;
+    thumbRev: number | null;
+}
+
+/** The revisions a score's thumbnail is keyed on, for a set of score ids, in one query. */
+export const documentThumbRevs = async (documentIds: string[]): Promise<Map<string, ThumbRevs>> => {
+    const unique = [...new Set(documentIds)];
+    if (unique.length === 0) {
+        return new Map();
+    }
+    const { data, error } = await getSupabase().from('documents').select('id, content_rev, thumb_rev').in('id', unique);
+    if (error) {
+        throw new Error(`Could not load score previews: ${error.message}`);
+    }
+    return new Map(
+        (data ?? []).map((row) => [row.id, { contentRev: row.content_rev ?? 0, thumbRev: row.thumb_rev ?? null }]),
+    );
+};
+
 /**
  * Every assignment the teacher owns, grouped by the student it belongs to.
  *

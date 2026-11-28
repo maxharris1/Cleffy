@@ -212,6 +212,7 @@ const renderShell = (initialEntry = '/library') =>
                 <Route element={<LibraryShell />}>
                     <Route path="/library" element={<ShellPage name="library page" />} />
                     <Route path="/students" element={<ShellPage name="students page" />} />
+                    <Route path="/students/:studentId" element={<ShellPage name="student page" />} />
                     <Route path="/search" element={<ImportPage />} />
                 </Route>
                 <Route path="/doc/:id" element={<DocPage />} />
@@ -443,6 +444,13 @@ describe('LibraryShell', () => {
         renderShell('/search');
         const nav = screen.getByRole('navigation', { name: 'Main' });
         expect(within(nav).getByRole('link', { name: 'Find a score' })).toHaveAttribute('aria-current', 'page');
+        expect(within(nav).getByRole('link', { name: 'Library' })).not.toHaveAttribute('aria-current');
+    });
+
+    it('keeps the Students tab current on one student’s page', async () => {
+        renderShell('/students/student-1');
+        const nav = screen.getByRole('navigation', { name: 'Main' });
+        expect(await within(nav).findByRole('link', { name: 'Students' })).toHaveAttribute('aria-current', 'page');
         expect(within(nav).getByRole('link', { name: 'Library' })).not.toHaveAttribute('aria-current');
     });
 

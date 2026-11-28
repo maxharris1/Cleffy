@@ -132,7 +132,7 @@ const NAV_ITEMS: {
     needsStudents?: boolean;
 }[] = [
     { to: '/library', label: 'Library', icon: LibraryIcon, end: true },
-    { to: '/students', label: 'Students', icon: StudentsIcon, end: true, needsStudents: true },
+    { to: '/students', label: 'Students', icon: StudentsIcon, end: false, needsStudents: true },
     { to: '/search', label: 'Find a score', icon: SearchIcon, end: true },
 ];
 

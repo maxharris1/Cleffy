@@ -20,6 +20,7 @@ export const ROUTE_PATTERNS = [
     '/library',
     '/search',
     '/students',
+    '/students/:studentId',
     '/account',
     '/admin/reports',
     '/settings',
