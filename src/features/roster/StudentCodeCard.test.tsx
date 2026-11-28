@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 import { cleanup, render, screen } from '@testing-library/react';
+import postcss from 'postcss';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { StudentCodeCard } from '@/features/roster/StudentCodeCard';
@@ -40,5 +41,22 @@ describe('StudentCodeCard', () => {
         const printCard = /@media print[\s\S]*?\.student-code-card \{([^}]*)\}/.exec(css)?.[1] ?? '';
 
         expect(printCard).toMatch(/padding:\s*12px;/);
+    });
+
+    it('takes everything outside the card out of the print flow, so a long roster adds no sheets', () => {
+        const css = postcss.parse(readFileSync(`${process.cwd()}/src/features/roster/StudentCodeCard.css`, 'utf8'));
+        const removed: string[] = [];
+        css.walkAtRules('media', (media) => {
+            if (media.params.trim() !== 'print') {
+                return;
+            }
+            media.walkDecls('display', (decl) => {
+                if (decl.value === 'none' && decl.parent?.type === 'rule') {
+                    removed.push(...(decl.parent as postcss.Rule).selectors);
+                }
+            });
+        });
+
+        expect(removed).toContain('body:has(.student-code-card) > :not(:has(.student-code-card))');
     });
 });

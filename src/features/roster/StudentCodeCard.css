@@ -10,6 +10,10 @@
  * every rule that reaches outside the card is gated on the card being on the
  * page: printing anything else afterwards must keep its content and margins.
  * The body takes the named page because the fixed-position card cannot.
+ *
+ * Browsers repeat a fixed element on every printed sheet, so whatever else
+ * still has height in the flow (the roster behind the dialog) would print the
+ * card once per sheet it fills.
  */
 @media print {
     @page student-code-card {
@@ -22,6 +26,10 @@
 
     body:has(.student-code-card) > * {
         visibility: hidden;
+    }
+
+    body:has(.student-code-card) > :not(:has(.student-code-card)) {
+        display: none;
     }
 
     .student-code-card,
