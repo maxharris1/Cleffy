@@ -23,6 +23,7 @@ import {
     parseRetryAfterSec,
     readBodyCapped,
     tryDownloadPdfWith,
+    type DownloadPhaseTimer,
     type DownloadResult,
     type MwFetchOptions,
 } from './imslpDownload.ts';
@@ -186,4 +187,5 @@ export const isPdfFileTitle = (title: string): boolean => stripFilePrefix(title)
  * imslpDownload.ts. The pipeline lives there, import-free, so vitest can drive
  * it with a fake fetch.
  */
-export const tryDownloadPdf = (filename: string): Promise<DownloadResult> => tryDownloadPdfWith(filename, { mwFetch });
+export const tryDownloadPdf = (filename: string, onPhase?: DownloadPhaseTimer): Promise<DownloadResult> =>
+    tryDownloadPdfWith(filename, { mwFetch, onPhase });

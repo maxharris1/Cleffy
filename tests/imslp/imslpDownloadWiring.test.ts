@@ -29,6 +29,26 @@ describe('IMSLP entry point security wiring', () => {
         expect(source).toContain('openUrl: imagefromIndexUrl(canonicalFilename)');
     });
 
+    it('times the pre-flow checks in order and wraps the flow deps through the span table', () => {
+        const order = [
+            "timing.time('rl_ip', () =>",
+            'checkRateLimit(`download:${clientKey(req)}`',
+            "timing.time('auth', () => requireUser(req))",
+            "timing.time('elig_rl_del', () =>\n        userClient.rpc('can_import_imslp')",
+            "timing.time('elig_rl_del', () =>\n        checkRateLimit(`download:user:${userId}`",
+            "timing.time('elig_rl_del', async () => await accountDeletionPending(admin, userId))",
+            'timedCacheDeps(timing, imslpPdfCacheStore(admin))',
+            'fields.cacheHit = cache.entry !== null',
+            'timedImportDeps(timing, fields, {',
+        ].map((needle) => source.indexOf(needle));
+        expect(order.every((at) => at > 0)).toBe(true);
+        expect(order).toEqual([...order].sort((a, b) => a - b));
+        expect(source).toContain('const fields = downloadFields(telemetry);');
+        expect(source).toContain('tryDownloadPdf(canonicalFilename, (phase, run) =>');
+        expect(source).toContain("timing.time('imslp_credits', () =>");
+        expect(source).toContain("Deno.serve(withServerTiming('imslp-download', handle));");
+    });
+
     it('keeps policy helpers out of RPC schemas and drops the unused import URL', () => {
         const config = readFileSync('supabase/config.toml', 'utf8');
         expect(config).toContain('schemas = ["public", "graphql_public"]');
