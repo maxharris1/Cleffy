@@ -12,8 +12,8 @@ const STAFF_LINE = 'rgb(247 245 239 / 0.85)';
 const STAFF_LINES = `linear-gradient(to bottom, ${STAFF_LINE} 0 2px, transparent 2px 24px, ${STAFF_LINE} 24px 26px, transparent 26px 48px, ${STAFF_LINE} 48px 50px, transparent 50px 72px, ${STAFF_LINE} 72px 74px, transparent 74px 96px, ${STAFF_LINE} 96px 98px)`;
 
 /** Catch-all 404 — the PWA navigateFallback lands unknown URLs on the SPA, which renders this. */
-export const NotFoundPage = () => (
-    <main className="chrome-ink flex min-h-full flex-col bg-ink pt-[max(36px,var(--safe-top))] pr-[max(24px,var(--safe-right))] pb-[max(36px,var(--safe-bottom))] pl-[max(24px,var(--safe-left))] text-paper sm:pr-[max(40px,var(--safe-right))] sm:pl-[max(40px,var(--safe-left))]">
+export const NotFoundPage = ({ landmark: Landmark = 'main' }: { landmark?: 'main' | 'div' }) => (
+    <Landmark className="chrome-ink flex min-h-full flex-col bg-ink pt-[max(36px,var(--safe-top))] pr-[max(24px,var(--safe-right))] pb-[max(36px,var(--safe-bottom))] pl-[max(24px,var(--safe-left))] text-paper sm:pr-[max(40px,var(--safe-right))] sm:pl-[max(40px,var(--safe-left))]">
         <div>
             <Link
                 to="/"
@@ -53,5 +53,5 @@ export const NotFoundPage = () => (
             </p>
         </div>
         <LegalLinks tone="ink" />
-    </main>
+    </Landmark>
 );

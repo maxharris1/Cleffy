@@ -1,21 +1,22 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { RosterAssignment } from '@/features/roster/rosterService';
 import { StudentDetailPage } from '@/features/roster/StudentDetailPage';
+import { getDb } from '@/sync/db';
 import type { ManagedStudentRow } from '@/types/database';
 
 const listRoster = vi.fn();
-const listAssignmentsForStudents = vi.fn();
+const listAssignmentsForStudent = vi.fn();
 const documentThumbRevs = vi.fn();
 const assignScore = vi.fn();
 const unassignScore = vi.fn();
 
 vi.mock('@/features/roster/rosterService', () => ({
     listRoster: (...args: unknown[]) => listRoster(...args),
-    listAssignmentsForStudents: (...args: unknown[]) => listAssignmentsForStudents(...args),
+    listAssignmentsForStudent: (...args: unknown[]) => listAssignmentsForStudent(...args),
     documentThumbRevs: (...args: unknown[]) => documentThumbRevs(...args),
     assignScore: (...args: unknown[]) => assignScore(...args),
     unassignScore: (...args: unknown[]) => unassignScore(...args),
@@ -71,7 +72,15 @@ const renderAt = (path: string) =>
     render(
         <MemoryRouter initialEntries={[path]}>
             <Routes>
-                <Route path="/students/:studentId" element={<StudentDetailPage />} />
+                <Route
+                    element={
+                        <main>
+                            <Outlet context={{ userId: 'teacher-1' }} />
+                        </main>
+                    }
+                >
+                    <Route path="/students/:studentId" element={<StudentDetailPage />} />
+                </Route>
                 <Route path="/library" element={<p>library page</p>} />
             </Routes>
         </MemoryRouter>,
@@ -79,17 +88,10 @@ const renderAt = (path: string) =>
 
 beforeEach(() => {
     listRoster.mockResolvedValue([student('s1', 'Leo Martin', { username: 'leo_plays', claimed_at: '2026-08-02' })]);
-    listAssignmentsForStudents.mockResolvedValue(
-        new Map([
-            [
-                's1-user',
-                [
-                    assigned('doc-1', 'Für Elise', 's1-user', { due_at: inFuture(3), note: 'Start at bar 9.' }),
-                    assigned('doc-2', 'Minuet in G', 's1-user', { access: 'view' }),
-                ],
-            ],
-        ]),
-    );
+    listAssignmentsForStudent.mockResolvedValue([
+        assigned('doc-1', 'Für Elise', 's1-user', { due_at: inFuture(3), note: 'Start at bar 9.' }),
+        assigned('doc-2', 'Minuet in G', 's1-user', { access: 'view' }),
+    ]);
     documentThumbRevs.mockResolvedValue(new Map());
     assignScore.mockResolvedValue(undefined);
     unassignScore.mockResolvedValue(undefined);
@@ -118,7 +120,7 @@ describe('StudentDetailPage', () => {
     });
 
     it('leaves out the parts of the line it has no data for', async () => {
-        listAssignmentsForStudents.mockResolvedValue(new Map());
+        listAssignmentsForStudent.mockResolvedValue([]);
         listRoster.mockResolvedValue([student('s1', 'Leo Martin')]);
         renderAt('/students/s1');
 
@@ -176,7 +178,79 @@ describe('StudentDetailPage', () => {
     it('renders the not-found page for an id that is not on this roster', async () => {
         renderAt('/students/someone-else');
 
-        expect(await screen.findByRole('heading', { name: 'Tacet' })).toBeInTheDocument();
+        expect(await screen.findByRole('heading', { name: 'Tacet.' })).toBeInTheDocument();
         expect(screen.queryByText('Leo Martin')).not.toBeInTheDocument();
+        expect(screen.getAllByRole('main')).toHaveLength(1);
+    });
+
+    it('renders the not-found page for an absent id even when assignments cannot be read', async () => {
+        listRoster.mockResolvedValue([]);
+        listAssignmentsForStudent.mockRejectedValue(new Error('Could not load assignments: offline'));
+        renderAt('/students/s1');
+
+        expect(await screen.findByRole('heading', { name: 'Tacet.' })).toBeInTheDocument();
+        expect(screen.queryByText(/Could not load assignments/)).not.toBeInTheDocument();
+    });
+
+    it('asks only for this student’s assignments', async () => {
+        renderAt('/students/s1');
+
+        await screen.findAllByRole('listitem');
+        expect(listAssignmentsForStudent).toHaveBeenCalledWith('s1-user');
+    });
+
+    it('drops an unassigned row even when the refresh after it fails', async () => {
+        const user = userEvent.setup();
+        renderAt('/students/s1');
+
+        const item = within((await screen.findAllByRole('listitem'))[1]!);
+        listRoster.mockRejectedValue(new Error('Could not load your roster: offline'));
+        await user.click(item.getByRole('button', { name: 'Unassign' }));
+
+        expect(await screen.findByText('Could not load your roster: offline')).toBeInTheDocument();
+        expect(screen.getAllByRole('listitem')).toHaveLength(1);
+        expect(screen.queryByRole('link', { name: 'Minuet in G' })).not.toBeInTheDocument();
+        expect(screen.getByText(/1 score\b/)).toBeInTheDocument();
+    });
+
+    it('shows the access a successful change set even when the refresh after it fails', async () => {
+        const user = userEvent.setup();
+        renderAt('/students/s1');
+
+        const item = within((await screen.findAllByRole('listitem'))[0]!);
+        listRoster.mockRejectedValue(new Error('Could not load your roster: offline'));
+        await user.click(item.getByRole('button', { name: 'View' }));
+
+        expect(await screen.findByText('Could not load your roster: offline')).toBeInTheDocument();
+        expect(item.getByRole('button', { name: 'View' })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('rewrites the roster’s cached count when a score is unassigned', async () => {
+        await getDb().rosterCache.put({
+            userId: 'teacher-1',
+            students: [student('s1', 'Leo Martin')],
+            assignmentCounts: [
+                ['s1-user', 2],
+                ['s2-user', 4],
+            ],
+            cachedAt: '2026-08-01T00:00:00Z',
+        });
+        const user = userEvent.setup();
+        renderAt('/students/s1');
+
+        const item = within((await screen.findAllByRole('listitem'))[1]!);
+        listRoster.mockReturnValue(new Promise(() => undefined));
+        await user.click(item.getByRole('button', { name: 'Unassign' }));
+
+        await waitFor(async () => {
+            const cached = await getDb().rosterCache.get('teacher-1');
+            expect(new Map(cached?.assignmentCounts)).toEqual(
+                new Map([
+                    ['s1-user', 1],
+                    ['s2-user', 4],
+                ]),
+            );
+        });
+        await getDb().rosterCache.clear();
     });
 });
