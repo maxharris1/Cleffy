@@ -296,9 +296,6 @@ type Route = (req: Request, url: URL) => unknown;
 let registered: Promise<(req: Request) => Promise<Response>> | undefined;
 const registeredHandler = () =>
     (registered ??= (async () => {
-        Deno.env.set('SUPABASE_URL', SUPABASE);
-        Deno.env.set('SUPABASE_ANON_KEY', 'anon-key');
-        Deno.env.set('SUPABASE_SERVICE_ROLE_KEY', 'service-key');
         const deno = Deno as unknown as { serve: unknown };
         const serve = deno.serve;
         let captured: ((req: Request) => Promise<Response>) | undefined;
@@ -362,11 +359,19 @@ const fakeNetwork =
         return new Response('{}', { status: 503 });
     };
 
+const TEST_ENV: Record<string, string> = {
+    SUPABASE_URL: SUPABASE,
+    SUPABASE_ANON_KEY: 'anon-key',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-key',
+};
+
 const runRegistered = async (routes: Record<string, Route>, body: Record<string, unknown>) => {
-    const handler = await registeredHandler();
+    const realEnvGet = Deno.env.get;
     const realFetch = globalThis.fetch;
+    Deno.env.get = (key: string) => TEST_ENV[key];
     globalThis.fetch = fakeNetwork(routes);
     try {
+        const handler = await registeredHandler();
         return await run(() =>
             handler(
                 new Request('https://x.test/functions/v1/imslp-download', {
@@ -383,6 +388,7 @@ const runRegistered = async (routes: Record<string, Route>, body: Record<string,
         );
     } finally {
         globalThis.fetch = realFetch;
+        Deno.env.get = realEnvGet;
     }
 };
 
