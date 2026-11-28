@@ -682,10 +682,6 @@ export const PdfViewport = ({
         setRenderScale(next.scale);
     }, [viewportSize, layout, pageColumns, pageSizes, spreadCover, standMode, obscuredWithStrip]);
 
-    // Edges arrive from separate observers in either order, so the view settles
-    // on each committed change. A resize, committed or still on its way to
-    // state, reanchors above instead. Only the toolbar's own clearance growing
-    // keeps an end-of-score view at the end.
     const settledEdgesRef = useRef({ obscured, toolbarBottom: 0 });
     useLayoutEffect(() => {
         const before = settledEdgesRef.current;
@@ -693,22 +689,22 @@ export const PdfViewport = ({
         settledEdgesRef.current = { obscured, toolbarBottom };
         const { width, height } = viewportSize;
         const container = containerRef.current;
-        if (
+        const resizePending =
             viewportSize !== fittedViewportRef.current ||
             container?.clientWidth !== width ||
-            container.clientHeight !== height
-        ) {
+            container.clientHeight !== height;
+        if (resizePending) {
             return;
         }
         const { view: v, setView } = useViewerStore.getState();
         const atEnd = (edges: ObscuredEdges) => clampScroll({ ...v, scrollY: Infinity }, layout, width, height, edges);
-        if (
+        const toolbarClearanceGrewAtEnd =
             !standReturnRef.current &&
             before.toolbarBottom > 0 &&
             toolbarBottom > before.toolbarBottom &&
             obscured.bottom > before.obscured.bottom &&
-            Math.abs(v.scrollY - atEnd(before.obscured).scrollY) < 0.5
-        ) {
+            Math.abs(v.scrollY - atEnd(before.obscured).scrollY) < 0.5;
+        if (toolbarClearanceGrewAtEnd) {
             if (!gestureRef.current?.pointerActive) {
                 cancelSettleGlide();
                 setView(atEnd(obscured));
