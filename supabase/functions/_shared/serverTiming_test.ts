@@ -1,4 +1,5 @@
 import { corsHeaders, jsonResponse, optionsResponse } from './cors.ts';
+import { CONTROL_BODY_MAX_BYTES, readCappedJson } from './readCappedJson.ts';
 import { withServerTiming } from './serverTiming.ts';
 
 const assert = (condition: unknown, message = 'assertion failed'): void => {
@@ -111,7 +112,7 @@ Deno.test('a throwing handler logs once with status 500 and rethrows; a throwing
 
 Deno.test('the log line and header never carry the token, request body or response body', async () => {
     const handler = withServerTiming<'auth'>('test-fn', async (req, timing) => {
-        await timing.time('auth', () => req.json());
+        await timing.time('auth', () => readCappedJson(req, CONTROL_BODY_MAX_BYTES));
         return new Response('%PDF-1.7 fake', { headers: { ...corsHeaders, 'Content-Type': 'application/pdf' } });
     });
     let res: Response | undefined;
