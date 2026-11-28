@@ -35,4 +35,11 @@ describe('StudentSignInArt', () => {
             expect(sized, text).toBe(true);
         }
     });
+
+    it('sets the wordmark and the teacher byline at normal line height, as Flow-Student does', () => {
+        render(<StudentSignInArt />);
+
+        expect(screen.getByText('Cleffy')).toHaveClass('leading-[normal]');
+        expect(screen.getByText('From Ms. Davis')).toHaveClass('leading-[normal]');
+    });
 });
