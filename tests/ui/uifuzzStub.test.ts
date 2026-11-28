@@ -1,6 +1,12 @@
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
-import { API, reply, STUB_ENTITLEMENTS, stubApi } from '../../scripts/ui/uifuzz.mjs';
+import type * as Uifuzz from '../../scripts/ui/uifuzz.mjs';
+import type { ViewportName } from '../../scripts/ui/uifuzz.mjs';
+import { API, reply, STUB_ENTITLEMENTS, stubApi, VIEWPORTS } from '../../scripts/ui/uifuzz.mjs';
 
 type Fulfilled = { status: number; body: string };
 type RouteHandler = (route: unknown) => unknown;
@@ -36,4 +42,71 @@ describe('stubApi', () => {
         const suffix = path.slice(path.lastIndexOf('_'));
         expect(await answer(path, { [suffix]: { tier: 'free' } })).toEqual({ status: 200, body: { tier: 'free' } });
     });
+});
+
+const DECLARED: Record<keyof typeof Uifuzz, true> = {
+    ACCOUNTS: true,
+    API: true,
+    BASE: true,
+    SHOTS: true,
+    STUB_ENTITLEMENTS: true,
+    STUB_USER: true,
+    VIEWPORTS: true,
+    audit: true,
+    close: true,
+    login: true,
+    open: true,
+    reply: true,
+    shot: true,
+    stubApi: true,
+};
+
+const VIEWPORT_NAMES: Record<ViewportName, true> = {
+    'desktop-1440': true,
+    'laptop-1280': true,
+    'ipad-landscape': true,
+    'ipad-portrait': true,
+    'ipad-mini-portrait': true,
+    'iphone-14': true,
+    'iphone-se': true,
+    'android-small': true,
+    'iphone-landscape': true,
+};
+
+describe('uifuzz type declarations', () => {
+    it('declare every runtime export', async () => {
+        expect(Object.keys(await import('../../scripts/ui/uifuzz.mjs')).sort()).toEqual(Object.keys(DECLARED).sort());
+    });
+
+    it('name every runtime viewport', () => {
+        expect(Object.keys(VIEWPORTS).sort()).toEqual(Object.keys(VIEWPORT_NAMES).sort());
+    });
+
+    it('declare every helper the ui-check skill tells agents to import', () => {
+        const skill = readFileSync(resolve(process.cwd(), '.claude/skills/ui-check/SKILL.md'), 'utf8');
+        const documented = [...skill.matchAll(/import\s*{([^}]*)}\s*from\s*'[^']*scripts\/ui\/uifuzz\.mjs'/g)].flatMap(
+            ([, names]) => names!.split(',').map((name) => name.trim()),
+        );
+        expect(documented.length).toBeGreaterThan(0);
+        expect(documented.filter((name) => !(name in DECLARED))).toEqual([]);
+    });
+
+    it('keep the known property shapes of exported values for checked JS consumers', () => {
+        const tsc = spawnSync(
+            process.execPath,
+            [
+                resolve(process.cwd(), 'node_modules/typescript/bin/tsc'),
+                '--ignoreConfig',
+                '--allowJs',
+                '--noEmit',
+                '--strictNullChecks',
+                '--module',
+                'nodenext',
+                '--skipLibCheck',
+                resolve(process.cwd(), 'tests/ui/fixtures/uifuzzConsumer.mjs'),
+            ],
+            { encoding: 'utf8' },
+        );
+        expect({ status: tsc.status, output: tsc.stdout + tsc.stderr }).toEqual({ status: 0, output: '' });
+    }, 60_000);
 });
