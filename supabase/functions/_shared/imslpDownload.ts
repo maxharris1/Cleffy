@@ -453,9 +453,15 @@ export interface MwFetchOptions {
  */
 export type MwFetch = (params: Record<string, string>, options?: MwFetchOptions) => Promise<unknown>;
 
+/** The wait-page fetch, then the CDN or fallback PDF fetch. */
+export type DownloadPhase = 'imslp_wait' | 'imslp_cdn';
+
+export type DownloadPhaseTimer = <T>(phase: DownloadPhase, run: () => Promise<T>) => Promise<T>;
+
 export interface DownloadDeps {
     /** MediaWiki API call for the imageinfo fallback. */
     mwFetch: MwFetch;
+    onPhase?: DownloadPhaseTimer;
     fetchImpl?: typeof fetch;
     budgetMs?: number;
     now?: () => number;
@@ -524,6 +530,7 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
     const now = deps.now ?? Date.now;
     const deadline = now() + (deps.budgetMs ?? DOWNLOAD_BUDGET_MS);
     const remaining = () => deadline - now();
+    const phase: DownloadPhaseTimer = deps.onPhase ?? ((_phase, run) => run());
     const openUrl = imagefromIndexUrl(filename);
     let retryAfterSec: number | null = null;
     const fail = (code: DownloadFailureCode): DownloadResult => ({
@@ -559,7 +566,9 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
     // Primary path: wait-page HTML → CDN URL (skips the cosmetic 15s timer).
     let lastCode: DownloadFailureCode = 'upstream';
     try {
-        const page = await fetchWithin(openUrl, 'text/html,application/xhtml+xml,application/pdf,*/*', PAGE_TIMEOUT_MS);
+        const page = await phase('imslp_wait', () =>
+            fetchWithin(openUrl, 'text/html,application/xhtml+xml,application/pdf,*/*', PAGE_TIMEOUT_MS),
+        );
         const direct = classifyDownloadBody(page.bytes, page.contentType);
         if (direct.ok) {
             return { ok: true, bytes: page.bytes, filename };
@@ -572,7 +581,7 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
 
         const cdnUrl = extractCdnUrlFromWaitPage(html);
         if (cdnUrl) {
-            const pdf = await fetchWithin(cdnUrl, 'application/pdf,*/*', PDF_TIMEOUT_MS);
+            const pdf = await phase('imslp_cdn', () => fetchWithin(cdnUrl, 'application/pdf,*/*', PDF_TIMEOUT_MS));
             const classified = classifyDownloadBody(pdf.bytes, pdf.contentType);
             if (classified.ok) {
                 return { ok: true, bytes: pdf.bytes, filename };
@@ -604,18 +613,20 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
                     reject(new ImslpFetchError('timeout', 'Download budget exhausted'));
                 }, left);
             });
-            const data = (await Promise.race([
-                deps.mwFetch(
-                    {
-                        action: 'query',
-                        titles: `File:${filename}`,
-                        prop: 'imageinfo',
-                        iiprop: 'url|size|mime',
-                    },
-                    { attempts: 1, timeoutMs: Math.max(1, Math.min(FALLBACK_API_TIMEOUT_MS, left)) },
-                ),
-                budgetSpent,
-            ])) as {
+            const data = (await phase('imslp_cdn', () =>
+                Promise.race([
+                    deps.mwFetch(
+                        {
+                            action: 'query',
+                            titles: `File:${filename}`,
+                            prop: 'imageinfo',
+                            iiprop: 'url|size|mime',
+                        },
+                        { attempts: 1, timeoutMs: Math.max(1, Math.min(FALLBACK_API_TIMEOUT_MS, left)) },
+                    ),
+                    budgetSpent,
+                ]),
+            )) as {
                 query?: {
                     pages?: Record<string, { imageinfo?: Array<{ url?: string; size?: number; mime?: string }> }>;
                 };
@@ -659,7 +670,7 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
     const candidates = [imageUrl, openUrl].filter((u): u is string => Boolean(u));
     for (const url of candidates) {
         try {
-            const got = await fetchWithin(url, 'application/pdf,*/*', PDF_TIMEOUT_MS);
+            const got = await phase('imslp_cdn', () => fetchWithin(url, 'application/pdf,*/*', PDF_TIMEOUT_MS));
             const classified = classifyDownloadBody(got.bytes, got.contentType);
             if (classified.ok) {
                 return { ok: true, bytes: got.bytes, filename };

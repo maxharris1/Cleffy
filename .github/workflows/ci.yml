@@ -363,6 +363,8 @@ jobs:
               run: deno test --config supabase/functions/deno.json supabase/functions/_shared/imslpPdfCacheStore_test.ts
             - name: Server-Timing measurement Deno tests
               run: deno test --config supabase/functions/deno.json supabase/functions/_shared/serverTiming_test.ts
+            - name: imslp-download Server-Timing Deno tests
+              run: deno test --config supabase/functions/deno.json supabase/functions/imslp-download/timing_test.ts
             - name: Share v2 Edge Function Deno tests
               run: >-
                   deno test --config supabase/functions/deno.json
