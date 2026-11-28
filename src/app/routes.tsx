@@ -87,6 +87,9 @@ const AccountDeletedPage = lazy(() =>
 
 // Lazy: the roster is a Teacher/Academy-only surface — personal accounts never open it.
 const RosterPage = lazy(() => import('@/features/roster/RosterPage').then((m) => ({ default: m.RosterPage })));
+const StudentDetailPage = lazy(() =>
+    import('@/features/roster/StudentDetailPage').then((m) => ({ default: m.StudentDetailPage })),
+);
 
 /**
  * The billing surface moved to /account, but Stripe returns users to /settings:
@@ -215,6 +218,14 @@ export const AppRoutes = () => {
                     element={
                         <Suspense fallback={<LoadingText className="mt-10">Loading roster…</LoadingText>}>
                             <RosterPage />
+                        </Suspense>
+                    }
+                />
+                <Route
+                    path="/students/:studentId"
+                    element={
+                        <Suspense fallback={<LoadingText className="mt-10">Loading student…</LoadingText>}>
+                            <StudentDetailPage />
                         </Suspense>
                     }
                 />

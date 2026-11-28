@@ -334,20 +334,76 @@ export const listRoster = async (): Promise<ManagedStudentRow[]> => {
     });
 };
 
-/** Titles for a set of score ids, in one query — the client-side half of the joins below. */
-const documentTitles = async (documentIds: string[]): Promise<Map<string, string>> => {
-    const unique = [...new Set(documentIds)];
-    if (unique.length === 0) {
-        return new Map();
+const isUuid = (value: string): boolean =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+export const findRosterStudent = async (studentId: string): Promise<ManagedStudentRow | null> => {
+    if (!isUuid(studentId)) {
+        return null;
     }
-    const { data, error } = await getSupabase().from('documents').select('id, title').in('id', unique);
+    const { data, error } = await getSupabase()
+        .from('managed_students')
+        .select(MANAGED_STUDENT_COLUMNS)
+        .eq('id', studentId)
+        .maybeSingle();
     if (error) {
-        throw new Error(`Could not load score titles: ${error.message}`);
+        throw new Error(`Could not load this student: ${error.message}`);
     }
-    return new Map((data ?? []).map((row) => [row.id, row.title]));
+    return data;
+};
+
+const DOCUMENT_ID_BATCH = 100;
+
+/**
+ * Splits score ids into batches small enough that neither the response row cap
+ * nor the request URL length cuts a batch short.
+ */
+const documentIdBatches = (documentIds: string[]): string[][] => {
+    const unique = [...new Set(documentIds)];
+    const batches: string[][] = [];
+    for (let from = 0; from < unique.length; from += DOCUMENT_ID_BATCH) {
+        batches.push(unique.slice(from, from + DOCUMENT_ID_BATCH));
+    }
+    return batches;
+};
+
+const documentTitles = async (documentIds: string[]): Promise<Map<string, string>> => {
+    const pages = await Promise.all(
+        documentIdBatches(documentIds).map(async (ids) => {
+            const { data, error } = await getSupabase().from('documents').select('id, title').in('id', ids);
+            if (error) {
+                throw new Error(`Could not load score titles: ${error.message}`);
+            }
+            return data ?? [];
+        }),
+    );
+    return new Map(pages.flat().map((row) => [row.id, row.title]));
 };
 
 const UNKNOWN_TITLE = 'Untitled score';
+
+export interface ThumbRevs {
+    contentRev: number;
+    thumbRev: number | null;
+}
+
+export const documentThumbRevs = async (documentIds: string[]): Promise<Map<string, ThumbRevs>> => {
+    const pages = await Promise.all(
+        documentIdBatches(documentIds).map(async (ids) => {
+            const { data, error } = await getSupabase()
+                .from('documents')
+                .select('id, content_rev, thumb_rev')
+                .in('id', ids);
+            if (error) {
+                throw new Error(`Could not load score previews: ${error.message}`);
+            }
+            return data ?? [];
+        }),
+    );
+    return new Map(
+        pages.flat().map((row) => [row.id, { contentRev: row.content_rev ?? 0, thumbRev: row.thumb_rev ?? null }]),
+    );
+};
 
 /**
  * Every assignment the teacher owns, grouped by the student it belongs to.
@@ -373,6 +429,34 @@ export const listAssignmentsForStudents = async (): Promise<Map<string, RosterAs
         grouped.set(assignment.student_user_id, forStudent);
     }
     return grouped;
+};
+
+const POSTGREST_MAX_ROWS = 1000;
+
+export const listAssignmentsForStudent = async (studentUserId: string): Promise<RosterAssignment[]> => {
+    const rows: AssignmentRow[] = [];
+    for (let from = 0; ; from += POSTGREST_MAX_ROWS) {
+        const { data, error } = await getSupabase()
+            .from('assignments')
+            .select('*')
+            .eq('student_user_id', studentUserId)
+            .order('created_at', { ascending: false })
+            .order('id')
+            .range(from, from + POSTGREST_MAX_ROWS - 1);
+        if (error) {
+            throw new Error(`Could not load assignments: ${error.message}`);
+        }
+        const page = data ?? [];
+        rows.push(...page);
+        if (page.length < POSTGREST_MAX_ROWS) {
+            break;
+        }
+    }
+    const titles = await documentTitles(rows.map((row) => row.document_id));
+    return rows.map((assignment) => ({
+        assignment,
+        documentTitle: titles.get(assignment.document_id) ?? UNKNOWN_TITLE,
+    }));
 };
 
 /** The RPCs raise structured errors; these are the ones a teacher can act on. */

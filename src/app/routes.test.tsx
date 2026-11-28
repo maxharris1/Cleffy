@@ -57,6 +57,26 @@ describe('AppRoutes guest gate', () => {
     });
 });
 
+describe('AppRoutes /students/:studentId', () => {
+    afterEach(() => {
+        cleanup();
+        auth.signedOut = false;
+    });
+
+    it('sits behind the same shell gate as /students', async () => {
+        for (const path of ['/students', '/students/student-1']) {
+            render(
+                <MemoryRouter initialEntries={[path]}>
+                    <AppRoutes />
+                </MemoryRouter>,
+            );
+            expect(await screen.findByText('library-shell')).toBeInTheDocument();
+            expect(screen.queryByText('Tacet')).not.toBeInTheDocument();
+            cleanup();
+        }
+    });
+});
+
 describe('AppRoutes public pages', () => {
     afterEach(cleanup);
 
