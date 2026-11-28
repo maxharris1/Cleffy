@@ -238,7 +238,10 @@ describe('Toolbar', () => {
         await userEvent.setup().click(screen.getByRole('button', { name: 'Pen colour and size' }));
         const popover = screen.getByRole('group', { name: 'Pen colour and size' });
         for (const button of within(popover).getAllByRole('button')) {
-            expect(effectiveBox(button).hit44, button.getAttribute('aria-label') ?? '').toBe(true);
+            const box = effectiveBox(button);
+            const name = button.getAttribute('aria-label') ?? '';
+            expect(box.minWidth, name).toBeGreaterThanOrEqual(44);
+            expect(box.height, name).toBeGreaterThanOrEqual(44);
         }
     });
 
@@ -280,7 +283,57 @@ describe('Toolbar', () => {
         expect(screen.getByRole('button', { name: 'Text colour' })).toBeInTheDocument();
 
         await user.click(screen.getByRole('button', { name: 'Text note' }));
-        expect(screen.queryByRole('button', { name: /colour|size/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Pen colour and size' })).toBeDisabled();
+    });
+
+    it('keeps the colours and sizes in place, dimmed and inert, with no tool in hand', async () => {
+        const { useViewerStore } = await renderToolbar();
+        const user = userEvent.setup();
+        const before = screen.getAllByRole('button').map((b) => b.getAttribute('aria-label'));
+
+        await user.click(screen.getByRole('button', { name: 'Pen' }));
+        expect(useViewerStore.getState().tool).toBeNull();
+        expect(screen.getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual(before);
+
+        const style = screen.getByRole('button', { name: 'Pen colour and size' });
+        const inline = [
+            ...screen.getAllByRole('button', { name: /^Color #/ }),
+            ...screen.getAllByRole('button', { name: /^Pen size / }),
+        ];
+        for (const button of [style, ...inline]) {
+            expect(button, button.getAttribute('aria-label') ?? '').toBeDisabled();
+            expect(button.closest('.opacity-\\[0\\.45\\]'), button.getAttribute('aria-label') ?? '').not.toBeNull();
+        }
+        await user.click(inline[1] as HTMLElement);
+        expect(useViewerStore.getState().color).toBe('#1f2937');
+
+        await user.click(screen.getByRole('button', { name: 'Pen' }));
+        expect(style).toBeEnabled();
+        expect(style.closest('.opacity-\\[0\\.45\\]')).toBeNull();
+    });
+
+    it('fades whichever edge of the phone row is scrolled out of sight, without catching taps', async () => {
+        useViewport({ width: 390, coarse: true });
+        await renderToolbar();
+        const row = (fingerSwitch() as HTMLElement).parentElement as HTMLElement;
+        const fades = () => Array.from(document.querySelectorAll<HTMLElement>('[data-scroll-fade]'));
+        const scrollTo = (left: number) => {
+            Object.defineProperty(row, 'scrollLeft', { configurable: true, value: left });
+            act(() => row.dispatchEvent(new Event('scroll')));
+        };
+        Object.defineProperty(row, 'clientWidth', { configurable: true, value: 354 });
+        Object.defineProperty(row, 'scrollWidth', { configurable: true, value: 424 });
+
+        scrollTo(0);
+        expect(fades().map((f) => f.dataset['scrollFade'])).toEqual(['end']);
+        scrollTo(30);
+        expect(fades().map((f) => f.dataset['scrollFade'])).toEqual(['start', 'end']);
+        scrollTo(70);
+        expect(fades().map((f) => f.dataset['scrollFade'])).toEqual(['start']);
+        for (const fade of fades()) {
+            expect(fade).toHaveClass('pointer-events-none', 'w-6', 'sm:hidden');
+            expect(fade).toHaveAttribute('aria-hidden', 'true');
+        }
     });
 
     it('puts the tool in hand down when it is clicked again, leaving every tool unpressed', async () => {

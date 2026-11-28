@@ -210,8 +210,8 @@ jobs:
             - name: The runner's Chrome is installed
               run: |
                   "$CLEFFY_UI_CHROMIUM" --version || { echo "::error::${CLEFFY_UI_CHROMIUM} is missing or does not run; this job uses the runner's Chrome and never downloads one"; exit 1; }
-            - name: First touch on the Toolbar in Chromium (toolbarFirstTouch.test.ts)
-              run: npx vitest run tests/ui/toolbarFirstTouch.test.ts
+            - name: First touch and layout of the Toolbar in Chromium (toolbarFirstTouch.test.ts, toolbarLayout.test.ts)
+              run: npx vitest run tests/ui/toolbarFirstTouch.test.ts tests/ui/toolbarLayout.test.ts
             - name: Cancel-link store test (billingCancelStore.ts against the local stack)
               run: |
                   eval "$(supabase status -o env | grep -E '^(API_URL|SERVICE_ROLE_KEY)=')"
@@ -361,6 +361,8 @@ jobs:
               run: deno check --config supabase/functions/deno.json supabase/functions/*/index.ts
             - name: Shared IMSLP cache Deno regression tests
               run: deno test --config supabase/functions/deno.json supabase/functions/_shared/imslpPdfCacheStore_test.ts
+            - name: Server-Timing measurement Deno tests
+              run: deno test --config supabase/functions/deno.json supabase/functions/_shared/serverTiming_test.ts
             - name: Share v2 Edge Function Deno tests
               run: >-
                   deno test --config supabase/functions/deno.json
