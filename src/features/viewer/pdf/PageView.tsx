@@ -61,7 +61,6 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, pixelRatio, regis
                 renderTask = page.render({ canvasContext: ctx, viewport, canvas, background: 'rgba(255,255,255,1)' });
                 await renderTask.promise;
                 if (pageIndex === 0) {
-                    // Runs just ahead of the first frame that shows this raster: the closest a mark gets to the paint.
                     requestAnimationFrame(() => {
                         perfMark('pdf-page1-painted');
                         perfImportSummaryIfDev();

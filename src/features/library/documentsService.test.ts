@@ -143,7 +143,6 @@ vi.mock('@/sync/db', () => {
 vi.mock('@/features/imslp/imslpApi', () => ({
     importImslpPdfToStorage: vi.fn(),
 }));
-/** Pages pdf.js finds in any score; null fails the parse, as for the test's non-PDF bytes. */
 const pdfjs = vi.hoisted(() => ({ pages: null as number | null }));
 vi.mock('pdfjs-dist', () => ({
     getDocument: () => ({

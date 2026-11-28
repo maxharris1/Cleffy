@@ -395,8 +395,7 @@ export interface ImslpImportRequest {
  * behind. IMSLP fetches are paced deployment-wide (imslpDownloadGate.ts): a
  * full slot answers 429 download_queued with retryAfterSec, and this waits it
  * out and retries — up to maxWaitMs — reporting `queued` through onStage
- * rather than failing. Each call is bounded by IMSLP_DOWNLOAD_TIMEOUT_MS, and
- * marked imslp-edge-start / imslp-edge-done, so a queued retry repeats the pair.
+ * rather than failing. Each call is bounded by IMSLP_DOWNLOAD_TIMEOUT_MS.
  */
 export const importImslpPdfToStorage = async ({
     filename,

@@ -409,7 +409,8 @@ export const importDocumentFromImslp = async (
         const bytes = await loadDocumentBytes(document, {
             userId: ownerId,
             role: 'owner',
-            onPhase: (phase) => perfMark(phase === 'downloaded' ? 'imslp-storage-dl-done' : 'imslp-dexie-put-done'),
+            onDownloadPhase: (phase) =>
+                perfMark(phase === 'downloaded' ? 'imslp-storage-dl-done' : 'imslp-dexie-put-done'),
         });
         pageCount = await countPdfPages(bytes);
         perfMark('imslp-page-count-done');
@@ -927,11 +928,10 @@ export const loadDocumentBytes = async (
         preloaded?: PreloadedBytes;
         /** Asked for by callers with a progress UI; switches the download to a streamed read. */
         onProgress?: (progress: UploadProgress) => void;
-        /** A download finished, then its offline copy was written (the IMSLP import times these). */
-        onPhase?: (phase: 'downloaded' | 'cached') => void;
+        onDownloadPhase?: (phase: 'downloaded' | 'cached') => void;
     } = {},
 ): Promise<ArrayBuffer> => {
-    const { preloaded, userId, onProgress, onPhase } = options;
+    const { preloaded, userId, onProgress, onDownloadPhase } = options;
     const role = options.role ?? undefined;
     const local = await currentLocalBytes(doc, preloaded, role);
     if (local.bytes) {
@@ -962,9 +962,9 @@ export const loadDocumentBytes = async (
         }
         bytes = await data.arrayBuffer();
     }
-    onPhase?.('downloaded');
+    onDownloadPhase?.('downloaded');
     await cacheDocumentBytes(doc, bytes, { userId, role, cached });
-    onPhase?.('cached');
+    onDownloadPhase?.('cached');
     return bytes;
 };
 

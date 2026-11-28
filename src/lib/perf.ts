@@ -1,14 +1,12 @@
 /**
  * Perceived-load instrumentation: a handful of User Timing marks on the paths
  * this app optimises (session known, library painted from cache / from the
- * network, viewer painted / confirmed, an IMSLP import from Add to page 1).
- * They cost nothing in production and show up in any browser's Performance
- * panel; in dev, the library's network paint also logs a table of every
- * mark's offset from navigation start, and an import's page 1 a table of its
- * phases, so a change to the load path can be measured instead of guessed at.
+ * network, viewer painted / confirmed). They cost nothing in production and
+ * show up in any browser's Performance panel; in dev, the library's network
+ * paint also logs a table of every mark's offset from navigation start so a
+ * change to the load path can be measured instead of guessed at.
  */
 
-/** The marks of an import from Find a score, in the order a successful one records them. */
 export const IMSLP_IMPORT_MARKS = [
     'imslp-work-click',
     'imslp-work-ready',
@@ -76,7 +74,6 @@ export const perfLogIfDev = (): void => {
     }
 };
 
-/** Dev only: once page 1 of an imported score is painted, print each mark since the latest Add click. */
 export const perfImportSummaryIfDev = (): void => {
     if (!import.meta.env.DEV) {
         return;
