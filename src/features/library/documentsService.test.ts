@@ -225,6 +225,7 @@ interface StubOptions {
     /** PostgREST `details` on the insert error (the cap trigger's JSON DETAIL). */
     insertDetails?: string | null;
     deleteError?: string;
+    updateError?: string;
     /** Rows the documents delete reports; 0 is how RLS answers a refused delete. */
     deletedRows?: number;
     /** After a zero-row delete: whether the row is still visible to the caller. */
@@ -423,12 +424,22 @@ const makeStub = (options: StubOptions = {}) => {
             update: (patch: Record<string, unknown>) => {
                 calls.update(table, patch);
                 return {
-                    eq: () => ({
-                        select: () => ({
-                            single: () =>
-                                Promise.resolve({ data: options.updatedRow ?? doc({ content_rev: 1 }), error: null }),
-                        }),
-                    }),
+                    eq: () =>
+                        Object.assign(
+                            Promise.resolve({
+                                data: null,
+                                error: options.updateError ? { message: options.updateError } : null,
+                            }),
+                            {
+                                select: () => ({
+                                    single: () =>
+                                        Promise.resolve({
+                                            data: options.updatedRow ?? doc({ content_rev: 1 }),
+                                            error: null,
+                                        }),
+                                }),
+                            },
+                        ),
                 };
             },
             upsert: (row: Record<string, unknown>, opts: unknown) => {
@@ -1478,6 +1489,21 @@ describe('importDocumentFromImslp', () => {
             'imslp-page-count-done',
             'imslp-page-count-db-done',
         ]);
+    });
+
+    it('keeps the import but marks no page-count write when the documents update returns an error', async () => {
+        vi.mocked(importImslpPdfToStorage).mockImplementation(stored);
+        pdfjs.pages = 3;
+        const calls = makeStub({
+            selectedRow: (id) => doc({ id, storage_path: `${id}/original.pdf`, page_count: null }),
+            updateError: 'service unavailable',
+        });
+
+        const result = await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+
+        expect(result.ok).toBe(true);
+        expect(calls.update).toHaveBeenCalledWith('documents', { page_count: 3 });
+        expect(perfReport().map((row) => row.mark)).not.toContain('imslp-page-count-db-done');
     });
 
     it('marks no page-count write when pdf.js could not count the pages', async () => {

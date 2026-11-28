@@ -415,8 +415,10 @@ export const importDocumentFromImslp = async (
         pageCount = await countPdfPages(bytes);
         perfMark('imslp-page-count-done');
         if (pageCount !== null) {
-            await getSupabase().from('documents').update({ page_count: pageCount }).eq('id', id);
-            perfMark('imslp-page-count-db-done');
+            const { error } = await getSupabase().from('documents').update({ page_count: pageCount }).eq('id', id);
+            if (!error) {
+                perfMark('imslp-page-count-db-done');
+            }
         }
     } catch {
         // the viewer loads the PDF (and counts its pages) on open
