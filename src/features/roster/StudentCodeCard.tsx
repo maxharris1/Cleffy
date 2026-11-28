@@ -48,7 +48,7 @@ const Step = ({ letter, children }: { letter: string; children: ReactNode }) => 
     <li className="flex items-start gap-3.5">
         <span
             aria-hidden="true"
-            className="student-code-card-letter flex size-[30px] flex-none items-center justify-center border-[1.5px] border-ink font-display text-[17px] font-semibold"
+            className="student-code-card-letter box-content flex size-[30px] flex-none items-center justify-center border-[1.5px] border-ink font-display text-[17px] font-semibold"
         >
             {letter}
         </span>

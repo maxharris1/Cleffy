@@ -35,6 +35,14 @@ describe('StudentCodeCard', () => {
         expect(rule?.className).not.toMatch(/(^|\s)bg-/);
     });
 
+    it('draws each step letter in a 30 px box inside its 1.5 px border, as Flow-Student does', () => {
+        render(<StudentCodeCard displayName="Leo Martin" loginCode="K7QM-2HXP-9RTD" />);
+
+        for (const letter of ['A', 'B', 'C']) {
+            expect(screen.getByText(letter)).toHaveClass('box-content', 'size-[30px]', 'border-[1.5px]');
+        }
+    });
+
     it('keeps the 12 px card padding around the inset frame on paper', () => {
         const css = readFileSync(`${process.cwd()}/src/features/roster/StudentCodeCard.css`, 'utf8');
         const printCard = /@media print[\s\S]*?\.student-code-card \{([^}]*)\}/.exec(css)?.[1] ?? '';
