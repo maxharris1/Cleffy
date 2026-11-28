@@ -42,6 +42,8 @@ import { buildImslpProvenance } from '../_shared/imslpProvenance.ts';
 import { wikitextFromMwPage } from '../_shared/imslpWorkPage.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 import { CONTROL_BODY_MAX_BYTES, isJsonObject, PAYLOAD_TOO_LARGE, readCappedJson } from '../_shared/readCappedJson.ts';
+import { withServerTiming, type TelemetryFields } from '../_shared/serverTiming.ts';
+import { downloadFields, timedCacheDeps, timedImportDeps, type ImslpDownloadTiming } from './timing.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -126,7 +128,8 @@ const reportFailure = (flow: FlowResponse, context: Record<string, unknown>): vo
     logError('imslp-download', new Error(message), { code: 'download_failed', status: flow.status, ...context });
 };
 
-Deno.serve(async (req) => {
+const handle = async (req: Request, timing: ImslpDownloadTiming, telemetry: TelemetryFields): Promise<Response> => {
+    const fields = downloadFields(telemetry);
     if (req.method === 'OPTIONS') {
         return optionsResponse();
     }
@@ -134,14 +137,16 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Method not allowed' }, 405);
     }
 
-    const addressRate = await checkRateLimit(`download:${clientKey(req)}`, PER_ADDRESS_LIMIT, 60_000);
+    const addressRate = await timing.time('rl_ip', () =>
+        checkRateLimit(`download:${clientKey(req)}`, PER_ADDRESS_LIMIT, 60_000),
+    );
     if (!addressRate.ok) {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: addressRate.retryAfterSec }, 429);
     }
 
     // The caller's id is established with the Auth server (requireUser): a
     // new score is created as this user, and the per-caller limit keys on it.
-    const auth = await requireUser(req);
+    const auth = await timing.time('auth', () => requireUser(req));
     if (!auth.ok) {
         return auth.response;
     }
@@ -150,7 +155,9 @@ Deno.serve(async (req) => {
     if (isAnonymous || userType === 'student') {
         return jsonResponse({ error: 'This account cannot add scores' }, 403);
     }
-    const { data: canImport, error: eligibilityError } = await userClient.rpc('can_import_imslp');
+    const { data: canImport, error: eligibilityError } = await timing.time('elig_rl_del', () =>
+        userClient.rpc('can_import_imslp'),
+    );
     if (eligibilityError) {
         return jsonResponse({ error: 'Could not check import permissions' }, 503);
     }
@@ -158,7 +165,9 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'This account cannot add scores' }, 403);
     }
 
-    const userRate = await checkRateLimit(`download:user:${userId}`, PER_USER_LIMIT, 60_000);
+    const userRate = await timing.time('elig_rl_del', () =>
+        checkRateLimit(`download:user:${userId}`, PER_USER_LIMIT, 60_000),
+    );
     if (!userRate.ok) {
         return jsonResponse(
             {
@@ -253,7 +262,7 @@ Deno.serve(async (req) => {
     // A score imported into an account being deleted would outlive the sweep
     // (../_shared/deletionPending.ts). Asked before any quota, pacing slot or
     // write; the documents trigger stays the backstop.
-    const pending = await accountDeletionPending(admin, userId);
+    const pending = await timing.time('elig_rl_del', () => accountDeletionPending(admin, userId));
     if (!pending.ok) {
         logError('imslp-download', new Error(pending.message), { code: 'deletion_check_failed' });
         return jsonResponse(DELETION_CHECK_UNAVAILABLE, 503);
@@ -266,8 +275,9 @@ Deno.serve(async (req) => {
     try {
         flow = await withImslpPdfCache(
             canonicalFilename,
-            imslpPdfCacheStore(admin),
+            timedCacheDeps(timing, imslpPdfCacheStore(admin)),
             async (cache) => {
+                fields.cacheHit = cache.entry !== null;
                 const licenseFilename = cache.entry?.filename ?? canonicalFilename;
                 let verifiedWork = cache.entry?.work_title ?? workTitle;
                 let verifiedLicense = cache.entry?.license_label ?? null;
@@ -281,7 +291,7 @@ Deno.serve(async (req) => {
                         openUrl: imagefromIndexUrl(canonicalFilename),
                         createTitle,
                     },
-                    {
+                    timedImportDeps(timing, fields, {
                         // License backstop, read BEFORE any pacing slot or quota is spent.
                         // What it verified (the work page the file is listed on, IMSLP's
                         // license tag) is also what the document's provenance records.
@@ -317,6 +327,7 @@ Deno.serve(async (req) => {
                             // insert below remains the enforcement.
                             const { data: ent } = await admin.rpc('get_entitlements', { p_user: userId });
                             const entitlements = ent as { tier?: unknown; limits?: { cloud_scores?: unknown } } | null;
+                            fields.tier = typeof entitlements?.tier === 'string' ? entitlements.tier : null;
                             const limit = entitlements?.limits?.cloud_scores;
                             if (typeof limit === 'number' && limit >= 0) {
                                 const { count, error: countError } = await admin
@@ -413,7 +424,9 @@ Deno.serve(async (req) => {
                         downloadPdf: async () => {
                             let entry = cache.entry;
                             if (!entry) {
-                                const result = await tryDownloadPdf(canonicalFilename);
+                                const result = await tryDownloadPdf(canonicalFilename, (phase, run) =>
+                                    timing.time(phase, run),
+                                );
                                 if (!result.ok) {
                                     return result;
                                 }
@@ -431,7 +444,9 @@ Deno.serve(async (req) => {
                                         filename: canonicalFilename,
                                     };
                                 }
-                                const credits = await fetchFileCredits(verifiedWork, canonicalFilename);
+                                const credits = await timing.time('imslp_credits', () =>
+                                    fetchFileCredits(verifiedWork, canonicalFilename),
+                                );
                                 entry = await cache.store(result.bytes, {
                                     work_title: verifiedWork,
                                     license_label: verifiedLicense,
@@ -515,7 +530,7 @@ Deno.serve(async (req) => {
                                 .single();
                             return error ? error.message : null;
                         },
-                    },
+                    }),
                 );
             },
             () => downloadQueued(30),
@@ -537,4 +552,6 @@ Deno.serve(async (req) => {
     }
     reportFailure(flow, { documentId, creating });
     return respond(flow);
-});
+};
+
+Deno.serve(withServerTiming('imslp-download', handle));
