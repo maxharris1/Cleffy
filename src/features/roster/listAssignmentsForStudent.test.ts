@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { describe, expect, it, vi } from 'vitest';
 
-import { listAssignmentsForStudent } from '@/features/roster/rosterService';
+import { documentThumbRevs, listAssignmentsForStudent } from '@/features/roster/rosterService';
 import type { AssignmentRow } from '@/types/database';
 
 const MAX_ROWS = 1000;
@@ -25,7 +25,11 @@ const transport = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
     const params = url.searchParams;
     if (url.pathname.endsWith('/documents')) {
         const ids = (params.get('id') ?? '').replace(/^in\.\(|\)$/g, '').split(',');
-        return Response.json(ids.map((id) => ({ id: id.replace(/"/g, ''), title: `Title of ${id}` })));
+        return Response.json(
+            ids
+                .slice(0, MAX_ROWS)
+                .map((id) => ({ id: id.replace(/"/g, ''), title: `Title of ${id}`, content_rev: 9, thumb_rev: 9 })),
+        );
     }
     const student = params.get('student_user_id')?.replace(/^eq\./, '');
     const rows = table
@@ -67,5 +71,29 @@ describe('listAssignmentsForStudent', () => {
 
         expect(rows).toHaveLength(MAX_ROWS + 5);
         expect(new Set(rows.map(({ assignment: row }) => row.id)).size).toBe(MAX_ROWS + 5);
+    });
+
+    it('gives every assignment its score’s title and preview revisions when they outnumber one response', async () => {
+        table.length = 0;
+        for (let n = 0; n < MAX_ROWS + 5; n++) {
+            table.push(assignment(n, 'leo'));
+        }
+
+        const rows = await listAssignmentsForStudent('leo');
+        const thumbs = await documentThumbRevs(rows.map(({ assignment: row }) => row.document_id));
+
+        expect({
+            assignments: rows.length,
+            knownTitles: rows.filter(
+                ({ assignment: row, documentTitle }) => documentTitle === `Title of ${row.document_id}`,
+            ).length,
+            knownThumbs: rows.filter(({ assignment: row }) => thumbs.get(row.document_id)?.thumbRev === 9).length,
+            unknownTitles: rows.filter(({ documentTitle }) => documentTitle === 'Untitled score').length,
+        }).toEqual({
+            assignments: MAX_ROWS + 5,
+            knownTitles: MAX_ROWS + 5,
+            knownThumbs: MAX_ROWS + 5,
+            unknownTitles: 0,
+        });
     });
 });

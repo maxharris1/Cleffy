@@ -15,7 +15,8 @@ const assignScore = vi.fn();
 const unassignScore = vi.fn();
 
 vi.mock('@/features/roster/rosterService', () => ({
-    listRoster: (...args: unknown[]) => listRoster(...args),
+    findRosterStudent: async (studentId: string) =>
+        ((await listRoster()) as ManagedStudentRow[]).find((row) => row.id === studentId) ?? null,
     listAssignmentsForStudent: (...args: unknown[]) => listAssignmentsForStudent(...args),
     documentThumbRevs: (...args: unknown[]) => documentThumbRevs(...args),
     assignScore: (...args: unknown[]) => assignScore(...args),

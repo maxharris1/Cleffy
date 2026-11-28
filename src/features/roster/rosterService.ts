@@ -334,17 +334,50 @@ export const listRoster = async (): Promise<ManagedStudentRow[]> => {
     });
 };
 
-/** Titles for a set of score ids, in one query — the client-side half of the joins below. */
-const documentTitles = async (documentIds: string[]): Promise<Map<string, string>> => {
-    const unique = [...new Set(documentIds)];
-    if (unique.length === 0) {
-        return new Map();
+const isUuid = (value: string): boolean =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+export const findRosterStudent = async (studentId: string): Promise<ManagedStudentRow | null> => {
+    if (!isUuid(studentId)) {
+        return null;
     }
-    const { data, error } = await getSupabase().from('documents').select('id, title').in('id', unique);
+    const { data, error } = await getSupabase()
+        .from('managed_students')
+        .select(MANAGED_STUDENT_COLUMNS)
+        .eq('id', studentId)
+        .maybeSingle();
     if (error) {
-        throw new Error(`Could not load score titles: ${error.message}`);
+        throw new Error(`Could not load this student: ${error.message}`);
     }
-    return new Map((data ?? []).map((row) => [row.id, row.title]));
+    return data;
+};
+
+const DOCUMENT_ID_BATCH = 100;
+
+/**
+ * Splits score ids into batches small enough that neither the response row cap
+ * nor the request URL length cuts a batch short.
+ */
+const documentIdBatches = (documentIds: string[]): string[][] => {
+    const unique = [...new Set(documentIds)];
+    const batches: string[][] = [];
+    for (let from = 0; from < unique.length; from += DOCUMENT_ID_BATCH) {
+        batches.push(unique.slice(from, from + DOCUMENT_ID_BATCH));
+    }
+    return batches;
+};
+
+const documentTitles = async (documentIds: string[]): Promise<Map<string, string>> => {
+    const pages = await Promise.all(
+        documentIdBatches(documentIds).map(async (ids) => {
+            const { data, error } = await getSupabase().from('documents').select('id, title').in('id', ids);
+            if (error) {
+                throw new Error(`Could not load score titles: ${error.message}`);
+            }
+            return data ?? [];
+        }),
+    );
+    return new Map(pages.flat().map((row) => [row.id, row.title]));
 };
 
 const UNKNOWN_TITLE = 'Untitled score';
@@ -354,18 +387,21 @@ export interface ThumbRevs {
     thumbRev: number | null;
 }
 
-/** The revisions a score's thumbnail is keyed on, for a set of score ids, in one query. */
 export const documentThumbRevs = async (documentIds: string[]): Promise<Map<string, ThumbRevs>> => {
-    const unique = [...new Set(documentIds)];
-    if (unique.length === 0) {
-        return new Map();
-    }
-    const { data, error } = await getSupabase().from('documents').select('id, content_rev, thumb_rev').in('id', unique);
-    if (error) {
-        throw new Error(`Could not load score previews: ${error.message}`);
-    }
+    const pages = await Promise.all(
+        documentIdBatches(documentIds).map(async (ids) => {
+            const { data, error } = await getSupabase()
+                .from('documents')
+                .select('id, content_rev, thumb_rev')
+                .in('id', ids);
+            if (error) {
+                throw new Error(`Could not load score previews: ${error.message}`);
+            }
+            return data ?? [];
+        }),
+    );
     return new Map(
-        (data ?? []).map((row) => [row.id, { contentRev: row.content_rev ?? 0, thumbRev: row.thumb_rev ?? null }]),
+        pages.flat().map((row) => [row.id, { contentRev: row.content_rev ?? 0, thumbRev: row.thumb_rev ?? null }]),
     );
 };
 

@@ -9,8 +9,8 @@ import { persistAssignmentCount } from '@/features/roster/rosterCache';
 import {
     assignScore,
     documentThumbRevs,
+    findRosterStudent,
     listAssignmentsForStudent,
-    listRoster,
     unassignScore,
     type RosterAssignment,
     type ThumbRevs,
@@ -59,13 +59,8 @@ const nextDueOf = (assignments: RosterAssignment[]): string | null => {
 
 const possessive = (name: string): string => `${name}’s`;
 
-/**
- * Only this teacher's roster is readable (managed_students' policy), so an id
- * that names nobody and an id that names another teacher's student both come
- * back absent, and both render the same not-found page.
- */
 const loadStudent = async (studentId: string): Promise<Loaded | null> => {
-    const student = (await listRoster()).find((row) => row.id === studentId);
+    const student = await findRosterStudent(studentId);
     if (!student) {
         return null;
     }
@@ -260,7 +255,7 @@ const StudentDetail = ({
             </header>
 
             <section className="mt-10 min-w-0 lg:max-w-[796px]">
-                <h2 className="display-opsz text-balance font-display text-[30px] font-semibold leading-[1.15] tracking-[-0.01em] text-ink">
+                <h2 className="display-opsz text-balance font-display [overflow-wrap:anywhere] text-[30px] font-semibold leading-[1.15] tracking-[-0.01em] text-ink">
                     {possessive(student.display_name)} scores
                 </h2>
                 {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
@@ -320,7 +315,7 @@ const AssignmentItem = ({
             <div className="min-w-0 flex-[1_1_260px]">
                 <Link
                     to={href}
-                    className="text-[17px] font-semibold text-ink [overflow-wrap:anywhere] transition-colors hover:text-accent-hover max-sm:inline-flex max-sm:min-h-11 max-sm:items-center pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center"
+                    className="text-[17px] font-semibold text-ink [overflow-wrap:anywhere] transition-colors hover:text-accent-hover max-sm:inline-flex max-sm:min-h-11 max-sm:min-w-11 max-sm:items-center pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:min-w-11 pointer-coarse:items-center"
                 >
                     {title}
                 </Link>
