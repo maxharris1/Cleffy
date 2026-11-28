@@ -63,9 +63,6 @@ const SEARCH_FIELD_CLASS =
 
 const COLUMNS_CLASS = 'columns-[2_420px] gap-x-14';
 
-const TOGGLE_FIRST_IN_TAB_ORDER_FACETS_DRAWN_LEFT_CLASS =
-    'mt-[18px] flex flex-col-reverse gap-3 sm:flex-row-reverse sm:flex-wrap-reverse sm:items-center sm:justify-between';
-
 const RULED_UL_CLASS = 'border-b border-hairline';
 
 const ROW_BUTTON_CLASS =
@@ -567,39 +564,33 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     />
                 </form>
 
-                <div className={TOGGLE_FIRST_IN_TAB_ORDER_FACETS_DRAWN_LEFT_CLASS}>
-                    <div className="flex items-center justify-between gap-3.5 sm:justify-end">
-                        <p className="text-sm tabular-nums text-ink-muted" aria-live="polite">
-                            {statusLine}
-                        </p>
-                        {/* Never disabled with the panel: switching views is free. */}
-                        <ViewToggle view={view} onChange={changeView} />
-                    </div>
-                    <div role="group" aria-label="Filter by" className={`${chipRowClassName} min-w-0 sm:mr-auto`}>
-                        {FACET_DIMENSIONS.map((dim) => (
-                            <button
-                                key={dim.id}
-                                type="button"
-                                aria-pressed={dimension === dim.id}
-                                className={chipClassName(dimension === dim.id)}
-                                onClick={() => setDimension(dim.id)}
-                                disabled={disabled}
-                            >
-                                {dim.label}
-                            </button>
-                        ))}
-                        {!isDefaultState ? (
-                            <button
-                                type="button"
-                                className={chipClassName(false)}
-                                onClick={resetToDefault}
-                                disabled={disabled}
-                            >
-                                Reset
-                            </button>
-                        ) : null}
-                    </div>
+                <div className="mt-[18px] flex items-center justify-between gap-3.5">
+                    <p className="text-sm tabular-nums text-ink-muted" aria-live="polite">
+                        {statusLine}
+                    </p>
+                    {/* Never disabled with the panel: switching views is free. */}
+                    <ViewToggle view={view} onChange={changeView} />
                 </div>
+            </div>
+
+            <div role="group" aria-label="Filter by" className={`${chipRowClassName} mt-3`}>
+                {FACET_DIMENSIONS.map((dim) => (
+                    <button
+                        key={dim.id}
+                        type="button"
+                        aria-pressed={dimension === dim.id}
+                        className={chipClassName(dimension === dim.id)}
+                        onClick={() => setDimension(dim.id)}
+                        disabled={disabled}
+                    >
+                        {dim.label}
+                    </button>
+                ))}
+                {!isDefaultState ? (
+                    <button type="button" className={chipClassName(false)} onClick={resetToDefault} disabled={disabled}>
+                        Reset
+                    </button>
+                ) : null}
             </div>
 
             <div role="group" aria-label={`${dimension} values`} className={`${chipRowClassName} mt-3`}>
