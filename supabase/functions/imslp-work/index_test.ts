@@ -73,17 +73,24 @@ const assertNotRun = (log: Record<string, unknown>, line: string, pdfTitles = 0)
     assert(log.pdfTitles === pdfTitles, line);
 };
 
+const firstTwo = [(await drive(request({ method: 'OPTIONS' }))).log, (await drive(request({ method: 'OPTIONS' }))).log];
+
+Deno.test('the instance logs coldStart true on its first request and false after', () => {
+    const line = JSON.stringify(firstTwo);
+    assert(firstTwo[0]!.coldStart === true && firstTwo[1]!.coldStart === false, line);
+});
+
 Deno.test('OPTIONS: the timing record carries every required field', async () => {
     const { res, log, line } = await drive(request({ method: 'OPTIONS' }));
     assert(res.status === 200, `status ${res.status}`);
-    assert(log.status === 200 && log.coldStart === true, line);
+    assert(log.status === 200, line);
     assertNotRun(log, line);
 });
 
 Deno.test('405: the timing record carries every required field', async () => {
     const { res, log, line } = await drive(request({ method: 'GET' }));
     assert(res.status === 405, `status ${res.status}`);
-    assert(log.status === 405 && log.coldStart === false, line);
+    assert(log.status === 405, line);
     assertNotRun(log, line);
 });
 
