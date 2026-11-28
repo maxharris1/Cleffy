@@ -1041,6 +1041,7 @@ export const PdfViewport = ({
                     return;
                 }
                 playheadControllerRef.current?.notifyUserGesture();
+                slackRef.current = null;
                 const { view: v, setView } = useViewerStore.getState();
                 setView(clamp(zoomAt(v, v.scale * factor, cx, cy)));
             },
