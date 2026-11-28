@@ -395,26 +395,24 @@ export const listAssignmentsForStudents = async (): Promise<Map<string, RosterAs
     return grouped;
 };
 
-/** PostgREST caps a response at `max_rows` (supabase/config.toml), so longer reads go page by page. */
-const ASSIGNMENT_PAGE = 1000;
+const POSTGREST_MAX_ROWS = 1000;
 
-/** One student's assignments, newest first, read in full however many pages the server splits them into. */
 export const listAssignmentsForStudent = async (studentUserId: string): Promise<RosterAssignment[]> => {
     const rows: AssignmentRow[] = [];
-    for (let from = 0; ; from += ASSIGNMENT_PAGE) {
+    for (let from = 0; ; from += POSTGREST_MAX_ROWS) {
         const { data, error } = await getSupabase()
             .from('assignments')
             .select('*')
             .eq('student_user_id', studentUserId)
             .order('created_at', { ascending: false })
             .order('id')
-            .range(from, from + ASSIGNMENT_PAGE - 1);
+            .range(from, from + POSTGREST_MAX_ROWS - 1);
         if (error) {
             throw new Error(`Could not load assignments: ${error.message}`);
         }
         const page = data ?? [];
         rows.push(...page);
-        if (page.length < ASSIGNMENT_PAGE) {
+        if (page.length < POSTGREST_MAX_ROWS) {
             break;
         }
     }

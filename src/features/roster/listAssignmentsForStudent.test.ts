@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { listAssignmentsForStudent } from '@/features/roster/rosterService';
 import type { AssignmentRow } from '@/types/database';
 
-/** supabase/config.toml's api.max_rows: PostgREST never returns more rows than this in one response. */
 const MAX_ROWS = 1000;
 
 const assignment = (n: number, studentUserId: string): AssignmentRow => ({
@@ -21,7 +20,6 @@ const assignment = (n: number, studentUserId: string): AssignmentRow => ({
 
 const table: AssignmentRow[] = [];
 
-/** A PostgREST stand-in: filters by `eq.`, orders newest first, honours offset/limit, and caps at max_rows. */
 const transport = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const params = url.searchParams;

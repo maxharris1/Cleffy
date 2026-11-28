@@ -62,8 +62,7 @@ const possessive = (name: string): string => `${name}’s`;
 /**
  * Only this teacher's roster is readable (managed_students' policy), so an id
  * that names nobody and an id that names another teacher's student both come
- * back absent, and both render the same not-found page. Membership is settled
- * before any assignment is read, so no assignment failure can stand in for it.
+ * back absent, and both render the same not-found page.
  */
 const loadStudent = async (studentId: string): Promise<Loaded | null> => {
     const student = (await listRoster()).find((row) => row.id === studentId);
@@ -110,12 +109,10 @@ const StudentPage = ({ studentId }: { studentId: string }) => {
         };
     }, [studentId]);
 
-    /**
-     * A change the server accepted is applied to the list and the roster's
-     * count snapshot at once, so a failed refresh afterwards cannot leave the
-     * list showing (and acting on) what was there before.
-     */
-    const run = async (action: () => Promise<unknown>, apply: (rows: RosterAssignment[]) => RosterAssignment[]) => {
+    const commitThenRefresh = async (
+        action: () => Promise<unknown>,
+        apply: (rows: RosterAssignment[]) => RosterAssignment[],
+    ) => {
         if (state.status !== 'ready') {
             return;
         }
@@ -150,7 +147,7 @@ const StudentPage = ({ studentId }: { studentId: string }) => {
      * given, so the note and due date go back in unchanged.
      */
     const setAccess = (assignment: AssignmentRow, access: AssignmentAccess) =>
-        run(
+        commitThenRefresh(
             () =>
                 assignScore(
                     assignment.document_id,
@@ -166,7 +163,7 @@ const StudentPage = ({ studentId }: { studentId: string }) => {
         );
 
     const unassign = (assignment: AssignmentRow) =>
-        run(
+        commitThenRefresh(
             () => unassignScore(assignment.document_id, assignment.student_user_id),
             (rows) => rows.filter((row) => row.assignment.id !== assignment.id),
         );
@@ -323,7 +320,7 @@ const AssignmentItem = ({
             <div className="min-w-0 flex-[1_1_260px]">
                 <Link
                     to={href}
-                    className="text-[17px] font-semibold text-ink [overflow-wrap:anywhere] transition-colors hover:text-accent-hover max-sm:inline-flex max-sm:min-h-11 max-sm:items-center"
+                    className="text-[17px] font-semibold text-ink [overflow-wrap:anywhere] transition-colors hover:text-accent-hover max-sm:inline-flex max-sm:min-h-11 max-sm:items-center pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center"
                 >
                     {title}
                 </Link>
