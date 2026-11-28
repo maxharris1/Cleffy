@@ -7,6 +7,7 @@ import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { getThumbnail } from '@/features/library/thumbnailService';
 import { purgeSupersededThumbnails } from '@/features/library/thumbnailRemote';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
+import { perfMark } from '@/lib/perf';
 import { getSupabase } from '@/lib/supabase';
 import { noteLibraryMutationCommitted, noteLibraryMutation } from '@/features/library/libraryCache';
 import { readCachedEntitlements } from '@/features/billing/entitlementsService';
@@ -396,6 +397,7 @@ export const importDocumentFromImslp = async (
     noteLibraryMutationCommitted();
 
     const document = await fetchDocument(id).catch(() => null);
+    perfMark('imslp-fetch-doc-done');
     if (!document) {
         throw new Error('The score was added, but could not be opened yet — refresh your library to see it.');
     }
@@ -404,10 +406,16 @@ export const importDocumentFromImslp = async (
     // stored, so a slow or failed read here must not undo a paid import.
     let pageCount: number | null = document.page_count;
     try {
-        const bytes = await loadDocumentBytes(document, { userId: ownerId, role: 'owner' });
+        const bytes = await loadDocumentBytes(document, {
+            userId: ownerId,
+            role: 'owner',
+            onPhase: (phase) => perfMark(phase === 'downloaded' ? 'imslp-storage-dl-done' : 'imslp-dexie-put-done'),
+        });
         pageCount = await countPdfPages(bytes);
+        perfMark('imslp-page-count-done');
         if (pageCount !== null) {
             await getSupabase().from('documents').update({ page_count: pageCount }).eq('id', id);
+            perfMark('imslp-page-count-db-done');
         }
     } catch {
         // the viewer loads the PDF (and counts its pages) on open
@@ -919,9 +927,11 @@ export const loadDocumentBytes = async (
         preloaded?: PreloadedBytes;
         /** Asked for by callers with a progress UI; switches the download to a streamed read. */
         onProgress?: (progress: UploadProgress) => void;
+        /** A download finished, then its offline copy was written (the IMSLP import times these). */
+        onPhase?: (phase: 'downloaded' | 'cached') => void;
     } = {},
 ): Promise<ArrayBuffer> => {
-    const { preloaded, userId, onProgress } = options;
+    const { preloaded, userId, onProgress, onPhase } = options;
     const role = options.role ?? undefined;
     const local = await currentLocalBytes(doc, preloaded, role);
     if (local.bytes) {
@@ -952,7 +962,9 @@ export const loadDocumentBytes = async (
         }
         bytes = await data.arrayBuffer();
     }
+    onPhase?.('downloaded');
     await cacheDocumentBytes(doc, bytes, { userId, role, cached });
+    onPhase?.('cached');
     return bytes;
 };
 

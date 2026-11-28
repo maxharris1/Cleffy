@@ -11,6 +11,7 @@ import { isEditionImportable, recommendEdition, suggestedPdfName } from '@/featu
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
 import type { LimitReachedError } from '@/features/billing/limitErrors';
+import { perfMark } from '@/lib/perf';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 
@@ -138,11 +139,13 @@ export const ImslpBrowser = ({
         const seq = ++workSeqRef.current;
         setError(null);
         dispatch({ type: 'loadingWork' });
+        perfMark('imslp-work-click');
         fetchImslpWork(workParam).then(
             (work) => {
                 if (seq !== workSeqRef.current) {
                     return;
                 }
+                perfMark('imslp-work-ready');
                 loadedTitleRef.current = workParam;
                 dispatch({ type: 'workLoaded', work });
             },
@@ -178,6 +181,7 @@ export const ImslpBrowser = ({
         if (!isEditionImportable(flow.selected)) {
             return;
         }
+        perfMark('imslp-add-click');
         importInFlightRef.current = true;
         const { work, selected } = flow;
         const controller = new AbortController();

@@ -3,6 +3,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 
 import { bitmapDims, INK_MAX_DPR, type PageLayout } from '@/features/viewer/geometry';
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
+import { perfImportSummaryIfDev, perfMark } from '@/lib/perf';
 
 export interface PageViewProps {
     doc: PDFDocumentProxy;
@@ -59,6 +60,13 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, pixelRatio, regis
                 // paper white ourselves so scans and vector pages look the same.
                 renderTask = page.render({ canvasContext: ctx, viewport, canvas, background: 'rgba(255,255,255,1)' });
                 await renderTask.promise;
+                if (pageIndex === 0) {
+                    // Runs just ahead of the first frame that shows this raster: the closest a mark gets to the paint.
+                    requestAnimationFrame(() => {
+                        perfMark('pdf-page1-painted');
+                        perfImportSummaryIfDev();
+                    });
+                }
             } catch (err) {
                 if (!(err instanceof RenderingCancelledException) && !cancelled) {
                     // Leave the canvas blank but surface a product-level failure.

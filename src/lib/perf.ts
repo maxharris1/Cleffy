@@ -1,14 +1,39 @@
 /**
  * Perceived-load instrumentation: a handful of User Timing marks on the paths
  * this app optimises (session known, library painted from cache / from the
- * network, viewer painted / confirmed). They cost nothing in production and
- * show up in any browser's Performance panel; in dev, the library's network
- * paint also logs a table of every mark's offset from navigation start so a
- * change to the load path can be measured instead of guessed at.
+ * network, viewer painted / confirmed, an IMSLP import from Add to page 1).
+ * They cost nothing in production and show up in any browser's Performance
+ * panel; in dev, the library's network paint also logs a table of every
+ * mark's offset from navigation start, and an import's page 1 a table of its
+ * phases, so a change to the load path can be measured instead of guessed at.
  */
 
+/** The marks of an import from Find a score, in the order a successful one records them. */
+export const IMSLP_IMPORT_MARKS = [
+    'imslp-work-click',
+    'imslp-work-ready',
+    'imslp-add-click',
+    'imslp-edge-start',
+    'imslp-edge-done',
+    'imslp-fetch-doc-done',
+    'imslp-storage-dl-done',
+    'imslp-dexie-put-done',
+    'imslp-page-count-done',
+    'imslp-page-count-db-done',
+    'imslp-navigate',
+    'viewer-mount',
+    'pdf-doc-open',
+    'pdf-sizes-ready',
+    'pdf-page1-painted',
+] as const;
+
 export type PerfMark =
-    'session-known' | 'library-cache-paint' | 'library-network-paint' | 'viewer-cache-paint' | 'viewer-confirmed';
+    | 'session-known'
+    | 'library-cache-paint'
+    | 'library-network-paint'
+    | 'viewer-cache-paint'
+    | 'viewer-confirmed'
+    | (typeof IMSLP_IMPORT_MARKS)[number];
 
 const PREFIX = 'cleffy:';
 
@@ -49,4 +74,18 @@ export const perfLogIfDev = (): void => {
     if (rows.length > 0) {
         console.table(rows);
     }
+};
+
+/** Dev only: once page 1 of an imported score is painted, print each mark since the latest Add click. */
+export const perfImportSummaryIfDev = (): void => {
+    if (!import.meta.env.DEV) {
+        return;
+    }
+    const rows = perfReport();
+    const start = rows.map((row) => row.mark).lastIndexOf('imslp-add-click');
+    const addClick = rows[start];
+    if (!addClick) {
+        return;
+    }
+    console.table(rows.slice(start).map((row) => ({ ...row, deltaMs: row.ms - addClick.ms })));
 };

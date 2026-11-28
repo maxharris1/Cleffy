@@ -492,6 +492,7 @@ describe('ImslpBrowser', () => {
         vi.unstubAllEnvs();
         vi.unstubAllGlobals();
         vi.restoreAllMocks();
+        performance.clearMarks();
     });
 
     const renderBrowser = async (props: Partial<ImslpBrowserProps> = {}, initialEntry = '/search') => {
@@ -960,6 +961,33 @@ describe('ImslpBrowser', () => {
         const recommendedRow = within(list).getByText('Recommended').closest('li');
         expect(recommendedRow).toHaveTextContent('clean-scan');
         expect(within(recommendedRow!).getByRole('radio')).toBeChecked();
+    });
+
+    it('marks the work opening and loaded, then one Add click however many land', async () => {
+        const { screen, fireEvent } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+        const { perfReport } = await import('@/lib/perf');
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('a.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockImplementation(() => new Promise(() => {}));
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await waitForWork();
+        const add = screen.getByRole('button', { name: 'Add to my library' });
+        fireEvent.click(add);
+        fireEvent.click(add);
+
+        expect(onImportImslp).toHaveBeenCalledTimes(1);
+        expect(perfReport().map((row) => row.mark)).toEqual([
+            'imslp-work-click',
+            'imslp-work-ready',
+            'imslp-add-click',
+        ]);
     });
 
     it('freezes the rows while a download is in flight and ignores a second click in the same tick', async () => {

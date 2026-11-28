@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LibraryShell, type LibraryOutletContext } from '@/features/library/LibraryShell';
 import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import { features } from '@/lib/features';
+import { perfReport } from '@/lib/perf';
 import { dialogPanelModule } from '@/ui/lazyPrimitives';
 import type { Entitlements } from '@/types/database';
 
@@ -223,6 +224,7 @@ const renderShell = (initialEntry = '/library') =>
 afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    performance.clearMarks();
 });
 
 describe('LibraryShell', () => {
@@ -296,6 +298,7 @@ describe('LibraryShell', () => {
             onStage: undefined,
             signal: importControl.controller.signal,
         });
+        expect(perfReport().map((row) => row.mark)).toEqual(['imslp-navigate']);
     });
 
     it('keeps a score that lands after the user cancelled, without pulling them back to it', async () => {
@@ -318,6 +321,7 @@ describe('LibraryShell', () => {
         await waitFor(() => expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', null, document));
         expect(screen.getByText('search page')).toBeInTheDocument();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(perfReport()).toEqual([]);
     });
 
     it('reports a failed IMSLP import, but not one the user cancelled while queued', async () => {

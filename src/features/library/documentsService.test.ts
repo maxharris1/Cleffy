@@ -143,6 +143,18 @@ vi.mock('@/sync/db', () => {
 vi.mock('@/features/imslp/imslpApi', () => ({
     importImslpPdfToStorage: vi.fn(),
 }));
+/** Pages pdf.js finds in any score; null fails the parse, as for the test's non-PDF bytes. */
+const pdfjs = vi.hoisted(() => ({ pages: null as number | null }));
+vi.mock('pdfjs-dist', () => ({
+    getDocument: () => ({
+        promise:
+            pdfjs.pages === null
+                ? Promise.reject(new Error('Invalid PDF'))
+                : Promise.resolve({ numPages: pdfjs.pages }),
+        destroy: () => Promise.resolve(),
+    }),
+}));
+vi.mock('@/features/viewer/pdf/pdfWorker', () => ({ createPdfWorker: () => ({ destroy: () => undefined }) }));
 vi.mock('@/features/import/prepareUpload', () => ({
     prepareUploadFile: vi.fn(async (file: File) => ({ file, convertedFromImage: false })),
     UPLOAD_ACCEPT: '',
@@ -150,6 +162,7 @@ vi.mock('@/features/import/prepareUpload', () => ({
 
 import { FREE_LIMITS } from '@/features/billing/entitlementsService';
 import { isLimitReachedError } from '@/features/billing/limitErrors';
+import { perfReport } from '@/lib/perf';
 import {
     deleteDocument,
     fetchLibraryPage,
@@ -470,6 +483,13 @@ describe('loadDocumentBytes content_rev staleness', () => {
         const bytes = await loadDocumentBytes(d);
         expect(new TextDecoder().decode(bytes)).toBe('cached-bytes');
         expect(calls.download).not.toHaveBeenCalled();
+    });
+
+    it('records no import marks on an ordinary download', async () => {
+        performance.clearMarks();
+        makeStub();
+        await loadDocumentBytes(doc({ content_rev: 1 }));
+        expect(perfReport()).toEqual([]);
     });
 
     it('re-downloads when the cache is older than the row revision', async () => {
@@ -1431,6 +1451,48 @@ describe('importDocumentFromImslp', () => {
 
     beforeEach(() => {
         vi.mocked(importImslpPdfToStorage).mockReset();
+        pdfjs.pages = null;
+        performance.clearMarks();
+    });
+
+    const stored = async (req: { documentId: string }) => ({
+        ok: true as const,
+        filename: 'a.pdf',
+        byteLength: 10,
+        storagePath: `${req.documentId}/original.pdf`,
+    });
+
+    it('marks each phase after the Edge call: row read, download, offline copy, page count and its write', async () => {
+        vi.mocked(importImslpPdfToStorage).mockImplementation(stored);
+        pdfjs.pages = 3;
+        const calls = makeStub({
+            selectedRow: (id) => doc({ id, storage_path: `${id}/original.pdf`, page_count: null }),
+        });
+
+        await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+
+        expect(calls.update).toHaveBeenCalled();
+        expect(perfReport().map((row) => row.mark)).toEqual([
+            'imslp-fetch-doc-done',
+            'imslp-storage-dl-done',
+            'imslp-dexie-put-done',
+            'imslp-page-count-done',
+            'imslp-page-count-db-done',
+        ]);
+    });
+
+    it('marks no page-count write when pdf.js could not count the pages', async () => {
+        vi.mocked(importImslpPdfToStorage).mockImplementation(stored);
+        makeStub({ selectedRow: (id) => doc({ id, storage_path: `${id}/original.pdf`, page_count: null }) });
+
+        await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+
+        expect(perfReport().map((row) => row.mark)).toEqual([
+            'imslp-fetch-doc-done',
+            'imslp-storage-dl-done',
+            'imslp-dexie-put-done',
+            'imslp-page-count-done',
+        ]);
     });
 
     it('creates no row itself: the function creates the score once the PDF is stored', async () => {

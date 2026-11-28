@@ -1,6 +1,7 @@
 import { parseLimitResponse } from '@/features/billing/limitErrors';
 import { genericScoreMessage } from '@/features/imslp/imslpDisplay';
 import type { EraId, RelaxedConstraint, SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
+import { perfMark } from '@/lib/perf';
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 export interface ImslpSearchHit {
@@ -394,7 +395,8 @@ export interface ImslpImportRequest {
  * behind. IMSLP fetches are paced deployment-wide (imslpDownloadGate.ts): a
  * full slot answers 429 download_queued with retryAfterSec, and this waits it
  * out and retries — up to maxWaitMs — reporting `queued` through onStage
- * rather than failing. Each call is bounded by IMSLP_DOWNLOAD_TIMEOUT_MS.
+ * rather than failing. Each call is bounded by IMSLP_DOWNLOAD_TIMEOUT_MS, and
+ * marked imslp-edge-start / imslp-edge-done, so a queued retry repeats the pair.
  */
 export const importImslpPdfToStorage = async ({
     filename,
@@ -420,8 +422,9 @@ export const importImslpPdfToStorage = async ({
 
     const { url: projectUrl, anonKey } = requireSupabaseConfig();
     const request = async (): Promise<Response> => {
+        perfMark('imslp-edge-start');
         try {
-            return await fetch(`${projectUrl}/functions/v1/imslp-download`, {
+            const response = await fetch(`${projectUrl}/functions/v1/imslp-download`, {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${accessToken}`,
@@ -438,6 +441,8 @@ export const importImslpPdfToStorage = async ({
                 }),
                 signal: AbortSignal.timeout(IMSLP_DOWNLOAD_TIMEOUT_MS),
             });
+            perfMark('imslp-edge-done');
+            return response;
         } catch (err) {
             if (isTimeout(err)) {
                 throw new Error(IMSLP_DOWNLOAD_TIMEOUT_MESSAGE, { cause: err });
