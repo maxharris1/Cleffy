@@ -29,11 +29,9 @@ const IMPORT_SPANS: Partial<Record<keyof ImslpImportDeps, ImslpDownloadSpan>> = 
     recordProvenance: 'db_doc_write',
 };
 
-const CACHE_SPANS: Record<keyof PdfCacheDeps, ImslpDownloadSpan> = {
+const CACHE_SPANS: Partial<Record<keyof PdfCacheDeps, ImslpDownloadSpan>> = {
     read: 'cache_read_claim',
     claim: 'cache_read_claim',
-    upload: 'hash_upload_pub',
-    publish: 'hash_upload_pub',
     release: 'cache_release',
 };
 

@@ -415,6 +415,11 @@ const handle = async (req: Request, timing: ImslpDownloadTiming, telemetry: Tele
                         // Metered as smart_imports, gated before the IMSLP fetch it pays for.
                         enforceQuota: async () => {
                             const gate = await enforce(admin, userId, 'smart_imports');
+                            if (gate.ok) {
+                                fields.tier = gate.entitlements.tier;
+                            } else if ('tier' in gate.body) {
+                                fields.tier = gate.body.tier;
+                            }
                             return gate.ok
                                 ? { ok: true, consumed: gate.consumed }
                                 : { ok: false, status: gate.status, body: gate.body };
@@ -447,16 +452,18 @@ const handle = async (req: Request, timing: ImslpDownloadTiming, telemetry: Tele
                                 const credits = await timing.time('imslp_credits', () =>
                                     fetchFileCredits(verifiedWork, canonicalFilename),
                                 );
-                                entry = await cache.store(result.bytes, {
-                                    work_title: verifiedWork,
-                                    license_label: verifiedLicense,
-                                    provenance: buildImslpProvenance({
-                                        workTitle: verifiedWork,
-                                        filename: canonicalFilename,
-                                        licenseLabel: verifiedLicense,
-                                        credits,
+                                entry = await timing.time('hash_upload_pub', () =>
+                                    cache.store(result.bytes, {
+                                        work_title: verifiedWork,
+                                        license_label: verifiedLicense,
+                                        provenance: buildImslpProvenance({
+                                            workTitle: verifiedWork,
+                                            filename: canonicalFilename,
+                                            licenseLabel: verifiedLicense,
+                                            credits,
+                                        }),
                                     }),
-                                });
+                                );
                             }
                             return {
                                 ok: true,

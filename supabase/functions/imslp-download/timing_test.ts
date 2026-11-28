@@ -108,11 +108,13 @@ const stubImportDeps = (
             });
             if (!result.ok) return result;
             await onPhase('imslp_credits', async () => null);
-            entry = await cache.store(result.bytes, {
-                work_title: cachedEntry.work_title,
-                license_label: cachedEntry.license_label,
-                provenance: cachedEntry.provenance,
-            });
+            entry = await onPhase('hash_upload_pub', () =>
+                cache.store(result.bytes, {
+                    work_title: cachedEntry.work_title,
+                    license_label: cachedEntry.license_label,
+                    provenance: cachedEntry.provenance,
+                }),
+            );
         }
         return {
             ok: true,
@@ -284,4 +286,186 @@ Deno.test('an early refusal still carries the header and one safe line with null
         'refusal fields',
     );
     assert(typeof log.coldStart === 'boolean', 'coldStart is logged');
+});
+
+const USER_ID = '99999999-8888-7777-6666-555555555555';
+const SUPABASE = 'http://supabase.test';
+
+type Route = (req: Request, url: URL) => unknown;
+
+let registered: Promise<(req: Request) => Promise<Response>> | undefined;
+const registeredHandler = () =>
+    (registered ??= (async () => {
+        Deno.env.set('SUPABASE_URL', SUPABASE);
+        Deno.env.set('SUPABASE_ANON_KEY', 'anon-key');
+        Deno.env.set('SUPABASE_SERVICE_ROLE_KEY', 'service-key');
+        const deno = Deno as unknown as { serve: unknown };
+        const serve = deno.serve;
+        let captured: ((req: Request) => Promise<Response>) | undefined;
+        deno.serve = (handler: (req: Request) => Promise<Response>) => {
+            captured = handler;
+        };
+        try {
+            await import('./index.ts');
+        } finally {
+            deno.serve = serve;
+        }
+        return captured!;
+    })());
+
+const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+const supabaseRoutes = (overrides: Record<string, Route>): Record<string, Route> => ({
+    'POST /rest/v1/rpc/check_edge_rate_limit': () => ({ ok: true }),
+    'GET /auth/v1/user': () => ({ id: USER_ID, aud: 'authenticated', app_metadata: {}, user_metadata: {} }),
+    'POST /rest/v1/rpc/can_import_imslp': () => true,
+    'POST /rest/v1/rpc/account_deletion_pending': () => false,
+    'GET /rest/v1/imslp_pdf_cache': () => [],
+    'POST /rest/v1/rpc/claim_imslp_pdf': () => true,
+    'POST /rest/v1/rpc/release_imslp_pdf': () => null,
+    'POST /rest/v1/rpc/is_shared_imslp_pdf': () => true,
+    'GET /rest/v1/imslp_file_licenses': () => [
+        {
+            restriction: null,
+            downloadable: true,
+            fetched_at: new Date().toISOString(),
+            license_label: 'Public Domain',
+            work_title: cachedEntry.work_title,
+        },
+    ],
+    'POST /rest/v1/rpc/document_role': () => 'owner',
+    'GET /rest/v1/documents': () => [
+        { id: DOCUMENT_ID, storage_path: `${DOCUMENT_ID}/original.pdf`, owner_id: USER_ID },
+    ],
+    'POST /rest/v1/documents': () => [],
+    'PATCH /rest/v1/documents': () => ({ id: DOCUMENT_ID }),
+    'POST /rest/v1/rpc/publish_imslp_pdf': () => null,
+    ...overrides,
+});
+
+const fakeNetwork =
+    (routes: Record<string, Route>): typeof fetch =>
+    async (input, init) => {
+        const req = new Request(input, init);
+        const url = new URL(req.url);
+        if (url.origin === SUPABASE) {
+            const path = url.pathname.startsWith('/storage/v1/object/') ? '/storage/v1/object' : url.pathname;
+            const route = routes[`${req.method} ${path}`];
+            if (!route) throw new Error(`unexpected Supabase call ${req.method} ${url.pathname}`);
+            return json(await route(req, url));
+        }
+        if (url.href === CDN_URL) return new Response(PDF, { headers: { 'content-type': 'application/pdf' } });
+        if (url.pathname.includes('ImagefromIndex')) {
+            return new Response(WAIT_PAGE, { headers: { 'content-type': 'text/html' } });
+        }
+        return new Response('{}', { status: 503 });
+    };
+
+const runRegistered = async (routes: Record<string, Route>, body: Record<string, unknown>) => {
+    const handler = await registeredHandler();
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = fakeNetwork(routes);
+    try {
+        return await run(() =>
+            handler(
+                new Request('https://x.test/functions/v1/imslp-download', {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        filename: FILENAME,
+                        documentId: DOCUMENT_ID,
+                        acceptedDisclaimer: true,
+                        ...body,
+                    }),
+                }),
+            ),
+        );
+    } finally {
+        globalThis.fetch = realFetch;
+    }
+};
+
+const entitlements = (tier: string, smartImports: number) => ({
+    user_id: USER_ID,
+    tier,
+    status: null,
+    source: 'none',
+    current_period_end: null,
+    cancel_at_period_end: false,
+    limits: {
+        cloud_scores: -1,
+        omr_runs: -1,
+        vision_reads: -1,
+        smart_imports: smartImports,
+        pdf_exports: -1,
+        students: 0,
+    },
+});
+
+Deno.test('the registered handler times the PDF hash, upload and publication as hash_upload_pub', async () => {
+    let clock = 0;
+    const advance = (ms: number) => {
+        clock += ms;
+    };
+    const realNow = performance.now;
+    const realDigest = crypto.subtle.digest;
+    performance.now = () => clock;
+    crypto.subtle.digest = async (...args: Parameters<SubtleCrypto['digest']>) => {
+        const digest = await realDigest.apply(crypto.subtle, args);
+        advance(100);
+        return digest;
+    };
+    try {
+        const { res, header, lines } = await runRegistered(
+            supabaseRoutes({
+                'POST /rest/v1/rpc/get_entitlements': () => entitlements('teacher', -1),
+                'GET /rest/v1/documents': () => [],
+                'POST /storage/v1/object': () => {
+                    advance(1);
+                    return { Key: 'scores/shared.pdf' };
+                },
+                'POST /rest/v1/rpc/publish_imslp_pdf': () => {
+                    advance(1);
+                    return null;
+                },
+            }),
+            { create: true, title: 'Etude' },
+        );
+        assert(res.status === 200, `status ${res.status}: ${await res.text()}`);
+        assert(header.includes('hash_upload_pub;dur=102.0'), header);
+        const log = assertSafeSingleLine(lines);
+        same((log.spans as Record<string, number>).hash_upload_pub, 102, 'logged hash_upload_pub');
+        same(log.cacheHit, false, 'cache miss');
+    } finally {
+        performance.now = realNow;
+        crypto.subtle.digest = realDigest;
+    }
+});
+
+Deno.test('a legacy import logs the tier its quota gate resolved', async () => {
+    const { res, lines } = await runRegistered(
+        supabaseRoutes({
+            'GET /rest/v1/imslp_pdf_cache': () => [cachedEntry],
+            'POST /rest/v1/rpc/get_entitlements': () => entitlements('teacher', -1),
+        }),
+        { create: false },
+    );
+    const body = await res.json();
+    assert(res.status === 200 && body.created === false, `status ${res.status}: ${JSON.stringify(body)}`);
+    same(assertSafeSingleLine(lines).tier, 'teacher', 'legacy import tier');
+});
+
+Deno.test('a legacy import refused at the quota limit logs the refused tier', async () => {
+    const { res, lines } = await runRegistered(
+        supabaseRoutes({
+            'GET /rest/v1/imslp_pdf_cache': () => [cachedEntry],
+            'POST /rest/v1/rpc/get_entitlements': () => entitlements('free', 2),
+            'POST /rest/v1/rpc/consume_quota': () => ({ ok: false, count: 2 }),
+        }),
+        { create: false },
+    );
+    const body = await res.json();
+    assert(res.status === 402 && body.tier === 'free', `status ${res.status}: ${JSON.stringify(body)}`);
+    same(assertSafeSingleLine(lines).tier, 'free', 'refused legacy import tier');
 });
