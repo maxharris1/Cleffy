@@ -30,30 +30,52 @@ export class RequestTiming<S extends string> {
 
 let firstInvocation = true;
 
+export type TelemetryFields = Record<string, string | number | boolean | null>;
+
+const bigintAsString = (_key: string, value: unknown): unknown =>
+    typeof value === 'bigint' ? value.toString() : value;
+
+const logLine = (measured: Record<string, unknown>, fields: TelemetryFields): void => {
+    let line: string;
+    try {
+        line = JSON.stringify({ ...fields, ...measured }, bigintAsString);
+    } catch {
+        line = JSON.stringify(measured);
+    }
+    try {
+        console.log(line);
+    } catch {
+        return;
+    }
+};
+
+const withHeader = (res: Response, name: string, value: string): Response => {
+    try {
+        res.headers.set(name, value);
+        return res;
+    } catch {
+        const headers = new Headers(res.headers);
+        headers.set(name, value);
+        return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+    }
+};
+
 export const withServerTiming =
     <S extends string>(
         fn: string,
-        handler: (
-            req: Request,
-            timing: RequestTiming<S>,
-            fields: Record<string, unknown>,
-        ) => Response | Promise<Response>,
+        handler: (req: Request, timing: RequestTiming<S>, fields: TelemetryFields) => Response | Promise<Response>,
     ): ((req: Request) => Promise<Response>) =>
     async (req) => {
         const timing = new RequestTiming<S>();
-        const fields: Record<string, unknown> = {};
+        const fields: TelemetryFields = {};
         const coldStart = firstInvocation;
         firstInvocation = false;
         let status = 500;
         try {
             const res = await handler(req, timing, fields);
             status = res.status;
-            const headers = new Headers(res.headers);
-            headers.set('Server-Timing', timing.header());
-            return new Response(res.body, { status, statusText: res.statusText, headers });
+            return withHeader(res, 'Server-Timing', timing.header());
         } finally {
-            console.log(
-                JSON.stringify({ fn, status, totalMs: timing.totalMs(), spans: timing.spans(), coldStart, ...fields }),
-            );
+            logLine({ fn, status, totalMs: timing.totalMs(), spans: timing.spans(), coldStart }, fields);
         }
     };

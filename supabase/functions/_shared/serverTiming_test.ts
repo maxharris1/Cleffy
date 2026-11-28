@@ -1,6 +1,8 @@
 import { corsHeaders, jsonResponse, optionsResponse } from './cors.ts';
 import { CONTROL_BODY_MAX_BYTES, readCappedJson } from './readCappedJson.ts';
 import { withServerTiming } from './serverTiming.ts';
+import { withServerTiming as coldCopyA } from './serverTiming.ts?cold=a';
+import { withServerTiming as coldCopyB } from './serverTiming.ts?cold=b';
 
 const assert = (condition: unknown, message = 'assertion failed'): void => {
     if (!condition) throw new Error(message);
@@ -29,7 +31,7 @@ const durations = (header: string): Map<string, number> =>
     );
 
 Deno.test('a 200 that ran auth twice and db once carries auth, db and total; everything else unchanged', async () => {
-    const handler = withServerTiming<'auth' | 'db'>('test-fn', async (_req, timing, fields) => {
+    const handler = coldCopyA<'auth' | 'db'>('test-fn', async (_req, timing, fields) => {
         await timing.time('auth', () => sleep(5));
         await timing.time('auth', () => sleep(5));
         const rows = await timing.time('db', () => [1, 2, 3]);
@@ -60,6 +62,7 @@ Deno.test('a 200 that ran auth twice and db once carries auth, db and total; eve
 });
 
 Deno.test('an early 429 and an OPTIONS response carry total only and keep status and body', async () => {
+    await captureLogs(() => withServerTiming('warm', () => new Response('ok'))(new Request('https://x.test/warm')));
     const handler = withServerTiming<'auth'>('test-fn', (req) =>
         req.method === 'OPTIONS'
             ? optionsResponse()
@@ -136,3 +139,72 @@ Deno.test('the log line and header never carry the token, request body or respon
 Deno.test('browsers may read Server-Timing cross-origin', () => {
     assert(corsHeaders['Access-Control-Expose-Headers']?.includes('Server-Timing'));
 });
+
+Deno.test('handler fields never overwrite the measured fn, status, totalMs, spans or coldStart', async () => {
+    const lines = await captureLogs(async () => {
+        await coldCopyB('probe', () => new Response('ok'))(new Request('https://x.test/fn'));
+        await coldCopyB('probe', (_req, _timing, fields) => {
+            Object.assign(fields, { fn: 'spoofed', status: 'ready', totalMs: -1, spans: 'none', coldStart: true });
+            return new Response('ok', { status: 202 });
+        })(new Request('https://x.test/fn'));
+    });
+
+    assert(lines.length === 2, `one log line per request, got ${lines.length}`);
+    const [first, second] = lines.map((line) => JSON.parse(line));
+    assert(first.coldStart === true, lines[0]);
+    assert(second.fn === 'probe' && second.status === 202 && second.coldStart === false, lines[1]);
+    assert(typeof second.totalMs === 'number' && second.totalMs >= 0, lines[1]);
+    assert(JSON.stringify(second.spans) === '{}', lines[1]);
+});
+
+Deno.test('fields that JSON cannot serialize still return the response and write one structured line', async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const handler = withServerTiming('probe', (req, _timing, fields) => {
+        if (req.method === 'POST') fields.rowCount = 3n as unknown as number;
+        else fields.detail = circular as unknown as string;
+        return new Response('ok', { status: 202 });
+    });
+    const responses: Response[] = [];
+    const lines = await captureLogs(async () => {
+        responses.push(await handler(new Request('https://x.test/fn', { method: 'POST' })));
+        responses.push(await handler(new Request('https://x.test/fn')));
+    });
+
+    for (const res of responses) assert(res.status === 202 && (await res.text()) === 'ok');
+    assert(lines.length === 2, `one log line per request, got ${lines.length}`);
+    const [bigint, unserializable] = lines.map((line) => JSON.parse(line));
+    assert(bigint.fn === 'probe' && bigint.status === 202 && bigint.rowCount === '3', lines[0]);
+    assert(unserializable.fn === 'probe' && unserializable.status === 202, lines[1]);
+    assert(typeof unserializable.totalMs === 'number' && !('detail' in unserializable), lines[1]);
+});
+
+Deno.test(
+    'a response with mutable headers is returned as is, so its body framing and headers stay intact',
+    async () => {
+        const original = jsonResponse({ ok: true });
+        let res: Response | undefined;
+        await captureLogs(async () => {
+            res = await withServerTiming('probe', () => original)(new Request('https://x.test/fn'));
+        });
+
+        assert(res === original, 'the original response object is returned');
+        assert(/^total;dur=\d+\.\d$/.test(res!.headers.get('Server-Timing') ?? ''));
+        assert(JSON.stringify(await res!.json()) === '{"ok":true}');
+    },
+);
+
+Deno.test(
+    'a response with immutable headers is rebuilt with Server-Timing and its status and headers kept',
+    async () => {
+        let res: Response | undefined;
+        await captureLogs(async () => {
+            res = await withServerTiming('probe', () => Response.redirect('https://x.test/next', 302))(
+                new Request('https://x.test/fn'),
+            );
+        });
+
+        assert(res!.status === 302 && res!.headers.get('Location') === 'https://x.test/next');
+        assert(/^total;dur=\d+\.\d$/.test(res!.headers.get('Server-Timing') ?? ''));
+    },
+);
