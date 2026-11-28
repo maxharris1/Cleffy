@@ -34,6 +34,11 @@ const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
     { key: 'thick', label: 'Thick', preview: 8 },
 ];
 
+const SIZE_CAPTIONS = ['Pen size', 'Marker size', 'Eraser size'] as const;
+
+const sizeCaptionFor = (tool: Tool | null) =>
+    tool === 'eraser' ? SIZE_CAPTIONS[2] : tool === 'highlighter' ? SIZE_CAPTIONS[1] : SIZE_CAPTIONS[0];
+
 type FingerMode = 'scroll' | 'draw';
 
 const FINGER_MODES = [
@@ -46,8 +51,7 @@ const FINGER_MODES = [
  * rather than shrinking them. From `sm` up the tools grow to 54 × 50 with a
  * label under the icon.
  */
-const BAR_BUTTON =
-    'flex h-11 min-w-11 shrink-0 items-center justify-center text-ink-soft active:bg-ink/10 touch-ui:hit-44-y';
+const BAR_BUTTON = 'flex h-11 min-w-11 shrink-0 items-center justify-center active:bg-ink/10 touch-ui:hit-44-y';
 
 const TOOL_BUTTON = `${BAR_BUTTON} rounded-xl sm:h-[50px] sm:w-[54px] sm:flex-col sm:gap-[3px]`;
 
@@ -107,9 +111,11 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     const [canUndo, canRedo] = undoState.split('|').map((v) => v === 'true');
 
     const idle = tool === null;
-    const showColors = idle || tool === 'pen' || tool === 'highlighter' || tool === 'text';
-    const showSize = idle || tool === 'pen' || tool === 'highlighter' || tool === 'eraser';
-    const sizeCaption = tool === 'eraser' ? 'Eraser size' : tool === 'highlighter' ? 'Marker size' : 'Pen size';
+    const colorsApply = tool === 'pen' || tool === 'highlighter' || tool === 'text';
+    const sizeApplies = tool === 'pen' || tool === 'highlighter' || tool === 'eraser';
+    const showColors = idle || colorsApply;
+    const showSize = idle || sizeApplies;
+    const sizeCaption = sizeCaptionFor(tool);
     const colorCaption = tool === 'highlighter' ? 'Marker colour' : tool === 'text' ? 'Text colour' : 'Pen colour';
     const styleLabel = showColors && showSize ? `${colorCaption} and size` : showColors ? colorCaption : sizeCaption;
     const preview = WIDTHS.find((w) => w.key === widthKey)?.preview ?? 5;
@@ -136,6 +142,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         return () => observer.disconnect();
     }, []);
 
+    const touchTargets = touchScreen || touchSeen;
     const fingerSwitch = showFingerSwitch({ touchScreen, touchSeen, penSeen });
     const fingerScrolls = fingerSwitch && !fingerDraws;
 
@@ -176,7 +183,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
     }, [styleOpen]);
 
     // Report the strip of viewport the bar covers whenever either one resizes
-    // (rotation, a tool that adds the style button) or the bottom safe area
+    // (rotation, the row wrapping) or the bottom safe area
     // moves the bar without resizing anything (the probe's height tracks it).
     useEffect(() => {
         const overlay = overlayRef.current;
@@ -219,16 +226,16 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
         };
     }, [onObscuredChange]);
 
-    const colorButtons = (className: string) =>
+    const colorButtons = (className: string, inert: boolean) =>
         STROKE_COLORS.map((c) => (
             <button
                 key={c}
                 type="button"
                 aria-label={`Color ${c}`}
                 aria-pressed={color === c}
-                disabled={idle}
+                disabled={inert}
                 onClick={() => setColor(c)}
-                className={`flex h-11 min-w-11 shrink-0 items-center justify-center ${className}`}
+                className={`flex h-11 shrink-0 items-center justify-center ${className}`}
             >
                 <span
                     className={`h-[22px] w-[22px] rounded-full ${tool === 'highlighter' ? 'opacity-55' : ''} ${
@@ -239,7 +246,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
             </button>
         ));
 
-    const sizeButtons = (className: string) =>
+    const sizeButtons = (className: string, inert: boolean) =>
         WIDTHS.map(({ key, label, preview: dot }) => (
             <button
                 key={key}
@@ -247,10 +254,10 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                 title={`${sizeCaption}: ${label}`}
                 aria-label={`${sizeCaption} ${label}`}
                 aria-pressed={widthKey === key}
-                disabled={idle}
+                disabled={inert}
                 onClick={() => setWidthKey(key)}
-                className={`flex h-11 min-w-11 shrink-0 items-center justify-center rounded-[10px] active:bg-ink/10 ${className} ${
-                    widthKey === key ? 'bg-ink/[0.07]' : idle ? '' : 'hover:bg-ink/5'
+                className={`flex h-11 shrink-0 items-center justify-center rounded-[10px] active:bg-ink/10 ${className} ${
+                    widthKey === key ? 'bg-ink/[0.07]' : inert ? '' : 'hover:bg-ink/5'
                 }`}
             >
                 <SizeDot tool={tool} size={dot} />
@@ -298,7 +305,9 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                             aria-pressed={tool === t}
                             onClick={() => selectTool(t)}
                             className={`${TOOL_BUTTON} ${
-                                tool === t ? 'bg-accent-tint font-bold text-accent' : 'font-semibold hover:bg-ink/5'
+                                tool === t
+                                    ? 'bg-accent-tint font-bold text-accent'
+                                    : 'font-semibold text-ink-soft hover:bg-ink/5'
                             } ${fingerScrolls ? DIMMED : ''}`}
                         >
                             {icon}
@@ -306,90 +315,99 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                         </button>
                     ))}
 
-                    {showColors || showSize ? (
-                        <>
-                            <div className={`${DIVIDER} lg:hidden`} />
-                            <button
-                                ref={styleButtonRef}
-                                type="button"
-                                title={styleLabel}
-                                aria-label={styleLabel}
-                                // A disclosure, not a menu: aria-haspopup would promise menu
-                                // keys the swatches do not have. Expanded + controls says it.
-                                aria-expanded={styleOpen}
-                                aria-controls={styleOpen ? popoverId : undefined}
-                                disabled={idle}
-                                onClick={() => setStyleOpen((open) => !open)}
-                                className={`${BAR_BUTTON} rounded-xl lg:hidden ${
-                                    styleOpen ? 'bg-ink/[0.07]' : idle ? DIMMED : 'hover:bg-ink/5'
+                    <div className={`${DIVIDER} lg:hidden`} />
+                    <button
+                        ref={styleButtonRef}
+                        type="button"
+                        title={styleLabel}
+                        aria-label={styleLabel}
+                        // A disclosure, not a menu: aria-haspopup would promise menu
+                        // keys the swatches do not have. Expanded + controls says it.
+                        aria-expanded={styleOpen}
+                        aria-controls={styleOpen ? popoverId : undefined}
+                        disabled={!colorsApply && !sizeApplies}
+                        onClick={() => setStyleOpen((open) => !open)}
+                        className={`${BAR_BUTTON} rounded-xl text-ink-soft lg:hidden ${
+                            styleOpen ? 'bg-ink/[0.07]' : colorsApply || sizeApplies ? 'hover:bg-ink/5' : DIMMED
+                        }`}
+                    >
+                        {showColors ? (
+                            <span
+                                className={`flex h-6 w-6 items-center justify-center rounded-full ${CURRENT_RING} ${
+                                    tool === 'highlighter' ? 'opacity-55' : ''
                                 }`}
+                                style={{ backgroundColor: color }}
                             >
-                                {showColors ? (
+                                {showSize ? (
                                     <span
-                                        className={`flex h-6 w-6 items-center justify-center rounded-full ${CURRENT_RING} ${
-                                            tool === 'highlighter' ? 'opacity-55' : ''
-                                        }`}
-                                        style={{ backgroundColor: color }}
-                                    >
-                                        {showSize ? (
-                                            <span
-                                                className="rounded-full bg-white/90"
-                                                style={{ width: preview, height: preview }}
-                                            />
-                                        ) : null}
-                                    </span>
-                                ) : (
-                                    <SizeDot tool={tool} size={preview + 4} />
-                                )}
-                            </button>
-                            {styleOpen ? (
-                                <div
-                                    ref={popoverRef}
-                                    id={popoverId}
-                                    role="group"
-                                    aria-label={styleLabel}
-                                    // Lifts the viewer frame over floating UI while open (LocalViewerFrame).
-                                    data-toolbar-popup
-                                    className={`ui-menu-pop absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-[18px] bg-white px-3 py-2 ${BAR_SHADOW} [--transform-origin:bottom_center] sm:bottom-auto sm:[--transform-origin:top_center] sm:top-full sm:mb-0 sm:mt-2 lg:hidden`}
-                                >
-                                    {showColors ? (
-                                        <>
-                                            <p className={`${CAPTION} text-ink-muted`}>{colorCaption}</p>
-                                            <div className="mt-1 flex flex-wrap items-center">{colorButtons('')}</div>
-                                        </>
-                                    ) : null}
-                                    {showSize ? (
-                                        <>
-                                            <p className={`${CAPTION} text-ink-muted ${showColors ? 'mt-2' : ''}`}>
-                                                {sizeCaption}
-                                            </p>
-                                            <div className="mt-1 flex items-center">{sizeButtons('')}</div>
-                                        </>
-                                    ) : null}
-                                </div>
-                            ) : null}
-                        </>
-                    ) : null}
-
-                    {showColors ? (
-                        <div className="hidden lg:contents">
-                            <div className={DIVIDER} />
-                            {tool === 'highlighter' ? (
-                                <span className={`mr-1.5 ${CAPTION} text-amber-700`}>Marker</span>
-                            ) : null}
-                            {colorButtons(`-mx-[5px] first-of-type:ml-0 last-of-type:mr-0 ${idle ? DIMMED : ''}`)}
-                        </div>
-                    ) : null}
-
-                    {showSize ? (
-                        <div className="hidden lg:contents">
-                            <div className={DIVIDER} />
-                            <span className={`mr-1.5 ${CAPTION} text-ink-muted ${idle ? DIMMED : ''}`}>
-                                {sizeCaption}
+                                        className="rounded-full bg-white/90"
+                                        style={{ width: preview, height: preview }}
+                                    />
+                                ) : null}
                             </span>
-                            {sizeButtons(`-mx-1 ${idle ? DIMMED : ''}`)}
+                        ) : (
+                            <SizeDot tool={tool} size={preview + 4} />
+                        )}
+                    </button>
+                    {styleOpen ? (
+                        <div
+                            ref={popoverRef}
+                            id={popoverId}
+                            role="group"
+                            aria-label={styleLabel}
+                            // Lifts the viewer frame over floating UI while open (LocalViewerFrame).
+                            data-toolbar-popup
+                            className={`ui-menu-pop absolute inset-x-0 bottom-full mx-auto mb-2 w-fit max-w-full rounded-[18px] bg-white px-3 py-2 ${BAR_SHADOW} [--transform-origin:bottom_center] sm:bottom-auto sm:[--transform-origin:top_center] sm:top-full sm:mb-0 sm:mt-2 lg:hidden`}
+                        >
+                            {showColors ? (
+                                <>
+                                    <p className={`${CAPTION} text-ink-muted`}>{colorCaption}</p>
+                                    <div className="mt-1 flex flex-wrap items-center">
+                                        {colorButtons('min-w-11', false)}
+                                    </div>
+                                </>
+                            ) : null}
+                            {showSize ? (
+                                <>
+                                    <p className={`${CAPTION} text-ink-muted ${showColors ? 'mt-2' : ''}`}>
+                                        {sizeCaption}
+                                    </p>
+                                    <div className="mt-1 flex items-center">{sizeButtons('min-w-11', false)}</div>
+                                </>
+                            ) : null}
                         </div>
                     ) : null}
+
+                    <div className="hidden lg:contents">
+                        <div className={DIVIDER} />
+                        <span
+                            className={`mr-1.5 ${CAPTION} text-amber-700 ${tool === 'highlighter' ? '' : 'invisible'}`}
+                        >
+                            Marker
+                        </span>
+                        {colorButtons(
+                            `${touchTargets ? 'min-w-11' : 'min-w-[34px]'} ${colorsApply ? '' : DIMMED}`,
+                            !colorsApply,
+                        )}
+                    </div>
+
+                    <div className="hidden lg:contents">
+                        <div className={DIVIDER} />
+                        <span className={`mr-1.5 grid ${CAPTION} text-ink-muted ${sizeApplies ? '' : DIMMED}`}>
+                            {SIZE_CAPTIONS.map((caption) => (
+                                <span
+                                    key={caption}
+                                    className={`col-start-1 row-start-1 ${caption === sizeCaption ? '' : 'invisible'}`}
+                                >
+                                    {caption}
+                                </span>
+                            ))}
+                        </span>
+                        {sizeButtons(
+                            `${touchTargets ? 'min-w-11' : 'min-w-9'} ${sizeApplies ? '' : DIMMED}`,
+                            !sizeApplies,
+                        )}
+                    </div>
 
                     <div className={DIVIDER} />
                     <button
@@ -398,7 +416,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                         aria-label="Undo"
                         disabled={!canUndo}
                         onClick={() => settleEdit(store.undoLast())}
-                        className={`${BAR_BUTTON} rounded-[10px] hover:bg-ink/5 disabled:text-on-ink-faint disabled:hover:bg-transparent`}
+                        className={`${BAR_BUTTON} rounded-[10px] text-ink-soft hover:bg-ink/5 disabled:text-on-ink-faint disabled:hover:bg-transparent`}
                     >
                         <UndoIcon size={19} />
                     </button>
@@ -408,7 +426,7 @@ export const Toolbar = ({ store, onObscuredChange }: ToolbarProps) => {
                         aria-label="Redo"
                         disabled={!canRedo}
                         onClick={() => settleEdit(store.redoLast())}
-                        className={`${BAR_BUTTON} rounded-[10px] hover:bg-ink/5 disabled:text-on-ink-faint disabled:hover:bg-transparent`}
+                        className={`${BAR_BUTTON} rounded-[10px] text-ink-soft hover:bg-ink/5 disabled:text-on-ink-faint disabled:hover:bg-transparent`}
                     >
                         <RedoIcon size={19} />
                     </button>
