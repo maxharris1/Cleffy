@@ -683,18 +683,32 @@ export const PdfViewport = ({
     }, [viewportSize, layout, pageColumns, pageSizes, spreadCover, standMode, obscuredWithStrip]);
 
     // Edges arrive from separate observers in either order, so the view settles
-    // on each committed change; a resize in the same commit clamps above instead.
-    const settledEdgesRef = useRef(obscured);
+    // on each committed change. A resize, committed or still on its way to
+    // state, reanchors above instead. Only the toolbar's own clearance growing
+    // keeps an end-of-score view at the end.
+    const settledEdgesRef = useRef({ obscured, toolbarBottom: 0 });
     useLayoutEffect(() => {
         const before = settledEdgesRef.current;
-        settledEdgesRef.current = obscured;
-        if (viewportSize !== fittedViewportRef.current || standReturnRef.current) {
+        const toolbarBottom = toolbarEdgesRef.current.bottom;
+        settledEdgesRef.current = { obscured, toolbarBottom };
+        const { width, height } = viewportSize;
+        const container = containerRef.current;
+        if (
+            viewportSize !== fittedViewportRef.current ||
+            container?.clientWidth !== width ||
+            container.clientHeight !== height
+        ) {
             return;
         }
-        const { width, height } = viewportSize;
         const { view: v, setView } = useViewerStore.getState();
         const atEnd = (edges: ObscuredEdges) => clampScroll({ ...v, scrollY: Infinity }, layout, width, height, edges);
-        if (obscured.bottom > before.bottom && Math.abs(v.scrollY - atEnd(before).scrollY) < 0.5) {
+        if (
+            !standReturnRef.current &&
+            before.toolbarBottom > 0 &&
+            toolbarBottom > before.toolbarBottom &&
+            obscured.bottom > before.obscured.bottom &&
+            Math.abs(v.scrollY - atEnd(before.obscured).scrollY) < 0.5
+        ) {
             if (!gestureRef.current?.pointerActive) {
                 cancelSettleGlide();
                 setView(atEnd(obscured));
