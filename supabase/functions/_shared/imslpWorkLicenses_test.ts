@@ -2,25 +2,10 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { jsonResponse } from './cors.ts';
 import { resolveLicenses, type LicenseSpan } from './imslpWorkLicenses.ts';
 import { withServerTiming } from './serverTiming.ts';
-import { withServerTiming as coldServerTiming } from './serverTiming.ts?cold=imslp-work';
 
 const assert = (condition: unknown, message = 'assertion failed'): void => {
     if (!condition) throw new Error(message);
 };
-
-const captureLogs = async (run: () => Promise<unknown>): Promise<string[]> => {
-    const lines: string[] = [];
-    const original = console.log;
-    console.log = (...args: unknown[]) => lines.push(args.map(String).join(' '));
-    try {
-        await run();
-    } finally {
-        console.log = original;
-    }
-    return lines;
-};
-
-const coldCopy = coldServerTiming as unknown as typeof withServerTiming;
 
 const WORK = 'Second Rhapsody (Gershwin, George)';
 const TWO_PIANOS = 'PMLP314974-Gershwin 2nd Rhapsody - 2 pianos.pdf';
@@ -73,36 +58,27 @@ const fakeIo = (rows: Row[], html: string | null) => {
     return { admin, fetchWorkPageHtml, tables, upserts, htmlFetches };
 };
 
-const runWork = async (io: ReturnType<typeof fakeIo>, pdfTitles: string[], wrap = withServerTiming) => {
+const runWork = async (io: ReturnType<typeof fakeIo>, pdfTitles: string[]) => {
     let result: Awaited<ReturnType<typeof resolveLicenses>> | undefined;
     let res: Response | undefined;
-    const handler = wrap<LicenseSpan>('imslp-work', async (_req, timing, fields) => {
-        fields.pdfTitles = pdfTitles.length;
+    const handler = withServerTiming<LicenseSpan>('imslp-work', async (_req, timing) => {
         result = await resolveLicenses(
             { admin: io.admin, fetchWorkPageHtml: io.fetchWorkPageHtml, timing },
             WORK,
             pdfTitles,
         );
-        fields.licenseSource = result.source;
-        fields.imageinfoBatches = Math.ceil(pdfTitles.length / 40);
         return jsonResponse({ title: WORK, editions: pdfTitles });
     });
-    const lines = await captureLogs(async () => {
-        res = await handler(
-            new Request('https://x.test/imslp-work', {
-                method: 'POST',
-                headers: {
-                    Authorization: 'Bearer secret-token-abc',
-                    apikey: 'anon-key-xyz',
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ title: WORK }),
-            }),
-        );
-    });
+    const log = console.log;
+    console.log = () => undefined;
+    try {
+        res = await handler(new Request('https://x.test/imslp-work', { method: 'POST' }));
+    } finally {
+        console.log = log;
+    }
     const header = res!.headers.get('Server-Timing') ?? '';
     const spans = header.split(', ').map((entry) => entry.split(';dur=')[0]);
-    return { result: result!, res: res!, header, spans, lines };
+    return { result: result!, header, spans };
 };
 
 Deno.test('every file fresh in the cache: source cache, no page fetch, no upsert, only lic_db timed', async () => {
@@ -149,23 +125,4 @@ Deno.test('the page fetch fails: source unavailable, fresh seeded rows kept, not
     assert(result.licenses.size === 1 && result.licenses.get(SEEDED)?.restriction === 'Seeded restriction');
     assert(io.upserts.length === 0, 'no upsert');
     assert(JSON.stringify(spans) === '["lic_db","lic_parse","total"]', header);
-});
-
-Deno.test('one timing line per request with coldStart, licenseSource, counts, and no titles or secrets', async () => {
-    const io = fakeIo([row(TWO_PIANOS, '2000-01-01T00:00:00Z')], workPageHtml);
-    const { lines, res } = await runWork(io, [TWO_PIANOS, FULL_SCORE], coldCopy);
-
-    assert(res.status === 200);
-    assert(lines.length === 1, `one log line, got ${lines.length}`);
-    const log = JSON.parse(lines[0]!);
-    assert(log.fn === 'imslp-work' && log.status === 200 && log.coldStart === true, lines[0]);
-    assert(log.licenseSource === 'live' && log.pdfTitles === 2 && log.imageinfoBatches === 1, lines[0]);
-    assert(
-        ['lic_db', 'lic_parse', 'lic_upsert'].every((span) => typeof log.spans[span] === 'number'),
-        lines[0],
-    );
-    for (const leak of ['PMLP', 'Gershwin', '<', 'secret-token-abc', 'anon-key-xyz', 'bearer', 'authorization']) {
-        assert(!lines[0]!.toLowerCase().includes(leak.toLowerCase()), `leaked ${leak}: ${lines[0]}`);
-    }
-    assert(!/key|token/i.test(lines[0]!), lines[0]);
 });

@@ -367,6 +367,10 @@ jobs:
               run: >-
                   deno test --config supabase/functions/deno.json --allow-read=tests/imslp/fixtures
                   supabase/functions/_shared/imslpWorkLicenses_test.ts
+            - name: imslp-work handler timing log Deno tests
+              run: >-
+                  deno test --config supabase/functions/deno.json --allow-env=SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY
+                  supabase/functions/imslp-work/index_test.ts
             - name: Share v2 Edge Function Deno tests
               run: >-
                   deno test --config supabase/functions/deno.json

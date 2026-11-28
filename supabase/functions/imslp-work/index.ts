@@ -36,6 +36,9 @@ type WorkSpan = 'rl' | 'mw_page' | 'mw_imageinfo' | LicenseSpan;
 
 Deno.serve(
     withServerTiming<WorkSpan>('imslp-work', async (req, timing, fields) => {
+        fields.licenseSource = null;
+        fields.imageinfoBatches = 0;
+        fields.pdfTitles = 0;
         if (req.method === 'OPTIONS') {
             return optionsResponse();
         }
@@ -130,7 +133,6 @@ Deno.serve(
 
             const editions: Edition[] = [];
             let imageinfoBatches = 0;
-            fields.imageinfoBatches = imageinfoBatches;
 
             // Batch imageinfo in chunks of 40.
             for (let i = 0; i < pdfTitles.length; i += 40) {
