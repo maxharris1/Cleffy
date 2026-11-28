@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-rou
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
+import { perfReport } from '@/lib/perf';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { holdOps, resetInkRecoveryForTests } from '@/sync/inkRecovery';
@@ -321,6 +322,7 @@ afterEach(() => {
     cleanup();
     vi.useRealTimers();
     resetInkRecoveryForTests();
+    performance.clearMarks();
 });
 
 describe('CloudViewer warm open', () => {
@@ -397,6 +399,21 @@ describe('CloudViewer warm open', () => {
         await waitFor(() => expect(screen.getByText('Nocturne (Chopin)')).toBeInTheDocument());
         expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
         expect(screen.getByTestId('share-export-menu')).toBeInTheDocument();
+    });
+
+    it('marks the viewer mounting before it paints from the cache and confirms', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen());
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() =>
+            expect(perfReport().map((row) => row.mark)).toEqual([
+                'viewer-mount',
+                'viewer-cache-paint',
+                'viewer-confirmed',
+            ]),
+        );
     });
 
     it('confirms the warm paint against the fresh archive flag, not the cached one', async () => {

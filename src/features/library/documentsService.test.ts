@@ -143,6 +143,17 @@ vi.mock('@/sync/db', () => {
 vi.mock('@/features/imslp/imslpApi', () => ({
     importImslpPdfToStorage: vi.fn(),
 }));
+const pdfjs = vi.hoisted(() => ({ pages: null as number | null }));
+vi.mock('pdfjs-dist', () => ({
+    getDocument: () => ({
+        promise:
+            pdfjs.pages === null
+                ? Promise.reject(new Error('Invalid PDF'))
+                : Promise.resolve({ numPages: pdfjs.pages }),
+        destroy: () => Promise.resolve(),
+    }),
+}));
+vi.mock('@/features/viewer/pdf/pdfWorker', () => ({ createPdfWorker: () => ({ destroy: () => undefined }) }));
 vi.mock('@/features/import/prepareUpload', () => ({
     prepareUploadFile: vi.fn(async (file: File) => ({ file, convertedFromImage: false })),
     UPLOAD_ACCEPT: '',
@@ -150,6 +161,7 @@ vi.mock('@/features/import/prepareUpload', () => ({
 
 import { FREE_LIMITS } from '@/features/billing/entitlementsService';
 import { isLimitReachedError } from '@/features/billing/limitErrors';
+import { perfReport } from '@/lib/perf';
 import {
     deleteDocument,
     fetchLibraryPage,
@@ -213,6 +225,7 @@ interface StubOptions {
     /** PostgREST `details` on the insert error (the cap trigger's JSON DETAIL). */
     insertDetails?: string | null;
     deleteError?: string;
+    updateError?: string;
     /** Rows the documents delete reports; 0 is how RLS answers a refused delete. */
     deletedRows?: number;
     /** After a zero-row delete: whether the row is still visible to the caller. */
@@ -411,12 +424,22 @@ const makeStub = (options: StubOptions = {}) => {
             update: (patch: Record<string, unknown>) => {
                 calls.update(table, patch);
                 return {
-                    eq: () => ({
-                        select: () => ({
-                            single: () =>
-                                Promise.resolve({ data: options.updatedRow ?? doc({ content_rev: 1 }), error: null }),
-                        }),
-                    }),
+                    eq: () =>
+                        Object.assign(
+                            Promise.resolve({
+                                data: null,
+                                error: options.updateError ? { message: options.updateError } : null,
+                            }),
+                            {
+                                select: () => ({
+                                    single: () =>
+                                        Promise.resolve({
+                                            data: options.updatedRow ?? doc({ content_rev: 1 }),
+                                            error: null,
+                                        }),
+                                }),
+                            },
+                        ),
                 };
             },
             upsert: (row: Record<string, unknown>, opts: unknown) => {
@@ -470,6 +493,13 @@ describe('loadDocumentBytes content_rev staleness', () => {
         const bytes = await loadDocumentBytes(d);
         expect(new TextDecoder().decode(bytes)).toBe('cached-bytes');
         expect(calls.download).not.toHaveBeenCalled();
+    });
+
+    it('records no import marks on an ordinary download', async () => {
+        performance.clearMarks();
+        makeStub();
+        await loadDocumentBytes(doc({ content_rev: 1 }));
+        expect(perfReport()).toEqual([]);
     });
 
     it('re-downloads when the cache is older than the row revision', async () => {
@@ -1431,6 +1461,63 @@ describe('importDocumentFromImslp', () => {
 
     beforeEach(() => {
         vi.mocked(importImslpPdfToStorage).mockReset();
+        pdfjs.pages = null;
+        performance.clearMarks();
+    });
+
+    const stored = async (req: { documentId: string }) => ({
+        ok: true as const,
+        filename: 'a.pdf',
+        byteLength: 10,
+        storagePath: `${req.documentId}/original.pdf`,
+    });
+
+    it('marks each phase after the Edge call: row read, download, offline copy, page count and its write', async () => {
+        vi.mocked(importImslpPdfToStorage).mockImplementation(stored);
+        pdfjs.pages = 3;
+        const calls = makeStub({
+            selectedRow: (id) => doc({ id, storage_path: `${id}/original.pdf`, page_count: null }),
+        });
+
+        await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+
+        expect(calls.update).toHaveBeenCalled();
+        expect(perfReport().map((row) => row.mark)).toEqual([
+            'imslp-fetch-doc-done',
+            'imslp-storage-dl-done',
+            'imslp-dexie-put-done',
+            'imslp-page-count-done',
+            'imslp-page-count-db-done',
+        ]);
+    });
+
+    it('keeps the import but marks no page-count write when the documents update returns an error', async () => {
+        vi.mocked(importImslpPdfToStorage).mockImplementation(stored);
+        pdfjs.pages = 3;
+        const calls = makeStub({
+            selectedRow: (id) => doc({ id, storage_path: `${id}/original.pdf`, page_count: null }),
+            updateError: 'service unavailable',
+        });
+
+        const result = await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+
+        expect(result.ok).toBe(true);
+        expect(calls.update).toHaveBeenCalledWith('documents', { page_count: 3 });
+        expect(perfReport().map((row) => row.mark)).not.toContain('imslp-page-count-db-done');
+    });
+
+    it('marks no page-count write when pdf.js could not count the pages', async () => {
+        vi.mocked(importImslpPdfToStorage).mockImplementation(stored);
+        makeStub({ selectedRow: (id) => doc({ id, storage_path: `${id}/original.pdf`, page_count: null }) });
+
+        await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+
+        expect(perfReport().map((row) => row.mark)).toEqual([
+            'imslp-fetch-doc-done',
+            'imslp-storage-dl-done',
+            'imslp-dexie-put-done',
+            'imslp-page-count-done',
+        ]);
     });
 
     it('creates no row itself: the function creates the score once the PDF is stored', async () => {

@@ -5,6 +5,7 @@ import { pdfDocumentOptions } from '@/features/viewer/pdf/pdfDocumentOptions';
 import { LOADING_VALUE, PdfContext, type PdfContextValue } from '@/features/viewer/pdf/pdfContext';
 import { createPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import { PDF_RANGE_CHUNK, ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
+import { perfMark } from '@/lib/perf';
 import type { PageSize } from '@/types/models';
 
 /**
@@ -132,6 +133,7 @@ export const PdfProvider = ({
 
         (async () => {
             try {
+                perfMark('pdf-doc-open');
                 if (!streamed) {
                     // Copy: getDocument transfers the underlying buffer to the
                     // worker, and the caller still owns `data` (export, cache).
@@ -177,6 +179,7 @@ export const PdfProvider = ({
                     const sizes = await allPageSizes(doc);
                     if (!cancelled) {
                         setLoaded({ source: data, value: { doc, pageSizes: sizes, status: 'ready', error: null } });
+                        perfMark('pdf-sizes-ready');
                     }
                     return;
                 }
@@ -198,6 +201,7 @@ export const PdfProvider = ({
                 }
                 const sizes = Array.from({ length: doc.numPages }, () => first);
                 setLoaded({ source: data, value: { doc, pageSizes: [...sizes], status: 'ready', error: null } });
+                perfMark('pdf-sizes-ready');
 
                 let dirty = false;
                 let flushedAt = performance.now();

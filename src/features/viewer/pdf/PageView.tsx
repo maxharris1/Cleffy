@@ -3,6 +3,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 
 import { bitmapDims, INK_MAX_DPR, type PageLayout } from '@/features/viewer/geometry';
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
+import { perfImportSummaryIfDev, perfMark } from '@/lib/perf';
 
 export interface PageViewProps {
     doc: PDFDocumentProxy;
@@ -38,6 +39,7 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, pixelRatio, regis
             return;
         }
         let renderTask: RenderTask | null = null;
+        let paintFrame: number | null = null;
         let cancelled = false;
         setRenderFailed(false);
 
@@ -59,6 +61,12 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, pixelRatio, regis
                 // paper white ourselves so scans and vector pages look the same.
                 renderTask = page.render({ canvasContext: ctx, viewport, canvas, background: 'rgba(255,255,255,1)' });
                 await renderTask.promise;
+                if (pageIndex === 0 && !cancelled) {
+                    paintFrame = requestAnimationFrame(() => {
+                        perfMark('pdf-page1-painted');
+                        perfImportSummaryIfDev();
+                    });
+                }
             } catch (err) {
                 if (!(err instanceof RenderingCancelledException) && !cancelled) {
                     // Leave the canvas blank but surface a product-level failure.
@@ -71,6 +79,9 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, pixelRatio, regis
         return () => {
             cancelled = true;
             renderTask?.cancel();
+            if (paintFrame !== null) {
+                cancelAnimationFrame(paintFrame);
+            }
             // Required to actually free canvas memory on iOS.
             canvas.width = 0;
             canvas.height = 0;

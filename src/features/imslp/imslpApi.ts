@@ -1,6 +1,7 @@
 import { parseLimitResponse } from '@/features/billing/limitErrors';
 import { genericScoreMessage } from '@/features/imslp/imslpDisplay';
 import type { EraId, RelaxedConstraint, SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
+import { perfMark } from '@/lib/perf';
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 export interface ImslpSearchHit {
@@ -420,8 +421,9 @@ export const importImslpPdfToStorage = async ({
 
     const { url: projectUrl, anonKey } = requireSupabaseConfig();
     const request = async (): Promise<Response> => {
+        perfMark('imslp-edge-start');
         try {
-            return await fetch(`${projectUrl}/functions/v1/imslp-download`, {
+            const response = await fetch(`${projectUrl}/functions/v1/imslp-download`, {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${accessToken}`,
@@ -438,6 +440,8 @@ export const importImslpPdfToStorage = async ({
                 }),
                 signal: AbortSignal.timeout(IMSLP_DOWNLOAD_TIMEOUT_MS),
             });
+            perfMark('imslp-edge-done');
+            return response;
         } catch (err) {
             if (isTimeout(err)) {
                 throw new Error(IMSLP_DOWNLOAD_TIMEOUT_MESSAGE, { cause: err });

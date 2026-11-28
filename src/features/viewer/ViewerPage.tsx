@@ -203,6 +203,9 @@ type AccessLoss = 'removed' | 'denied' | 'ended' | 'left';
 const CloudViewer = ({ docId }: { docId: string }) => {
     const { session, loading } = useSession();
     const navigate = useNavigate();
+    useEffect(() => {
+        perfMark('viewer-mount');
+    }, []);
     const [state, setState] = useState<CloudDocState | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');

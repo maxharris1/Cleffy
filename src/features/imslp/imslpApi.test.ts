@@ -10,6 +10,7 @@ import {
     type ImslpDownloadStage,
     type ImslpImportRequest,
 } from '@/features/imslp/imslpApi';
+import { perfReport } from '@/lib/perf';
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 
@@ -51,6 +52,7 @@ beforeEach(() => {
 afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    performance.clearMarks();
 });
 
 describe('importImslpPdfToStorage — deployment-wide IMSLP pacing', () => {
@@ -83,6 +85,21 @@ describe('importImslpPdfToStorage — deployment-wide IMSLP pacing', () => {
         expect(stages).toEqual(['queued', 'downloading']);
         await expect(promise).resolves.toMatchObject({ ok: true, storagePath: 'doc-1/original.pdf' });
         expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('marks the start and end of each call to the function, a queued retry included', async () => {
+        // Fake timers fake `performance` too, which has no marks to report.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        fetchMock.mockResolvedValueOnce(queued(1)).mockResolvedValueOnce(json(stored));
+        const promise = importNocturnes();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await promise;
+        expect(perfReport().map((row) => row.mark)).toEqual([
+            'imslp-edge-start',
+            'imslp-edge-done',
+            'imslp-edge-start',
+            'imslp-edge-done',
+        ]);
     });
 
     it('stays silent when the pacing wait is too short to notice', async () => {

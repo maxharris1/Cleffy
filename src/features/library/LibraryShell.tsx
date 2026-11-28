@@ -18,6 +18,7 @@ import {
     type LibraryListSnapshot,
 } from '@/features/library/libraryBootstrap';
 import { features } from '@/lib/features';
+import { perfMark } from '@/lib/perf';
 import { prefersReducedMotion } from '@/lib/motion';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
@@ -520,6 +521,7 @@ const LibraryFrame = ({
                 // unmounting aborts the import, and this is no longer the page
                 // it started on (nor, past the shell, a page of it at all).
                 if (!signal?.aborted && stillOn(startedAt)) {
+                    perfMark('imslp-navigate');
                     navigate(`/doc/${result.document.id}`);
                 }
             }

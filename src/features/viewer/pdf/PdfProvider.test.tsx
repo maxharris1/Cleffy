@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
+import { perfReport } from '@/lib/perf';
 
 /** A 3-page document whose last page is landscape; records which pages were asked for. */
 const pdfjs = vi.hoisted(() => ({
@@ -87,6 +88,7 @@ beforeEach(() => {
 afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    performance.clearMarks();
 });
 
 describe('PdfProvider streaming a score', () => {
@@ -107,6 +109,7 @@ describe('PdfProvider streaming a score', () => {
         await waitFor(() => expect(screen.getByTestId('probe')).toHaveAttribute('data-status', 'ready'));
         // Ready on page 1 alone: the others take its size for now.
         expect(screen.getByTestId('probe')).toHaveTextContent('600x800,600x800,600x800');
+        expect(perfReport().map((row) => row.mark)).toEqual(['pdf-doc-open', 'pdf-sizes-ready']);
         expect(pdfjs.params[0]).toHaveProperty('range');
         expect(pdfjs.params[0]).not.toHaveProperty('data');
 
@@ -209,5 +212,6 @@ describe('PdfProvider with bytes', () => {
         expect(pdfjs.getPageCalls).toEqual([1, 2, 3]);
         expect(screen.getByTestId('probe')).toHaveTextContent('600x800,600x800,800x600');
         expect(pdfjs.params[0]).toHaveProperty('data');
+        expect(perfReport().map((row) => row.mark)).toEqual(['pdf-doc-open', 'pdf-sizes-ready']);
     });
 });
