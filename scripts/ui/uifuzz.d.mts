@@ -19,7 +19,25 @@ export type ViewportName =
     | 'iphone-se'
     | 'android-small'
     | 'iphone-landscape';
-export const VIEWPORTS: Record<ViewportName, ViewportOptions>;
+export interface DesktopViewport {
+    viewport: { width: number; height: number };
+}
+export interface TouchViewport extends DesktopViewport {
+    isMobile: boolean;
+    hasTouch: boolean;
+    deviceScaleFactor: number;
+}
+export const VIEWPORTS: Record<'desktop-1440' | 'laptop-1280', DesktopViewport> &
+    Record<
+        | 'ipad-landscape'
+        | 'ipad-portrait'
+        | 'ipad-mini-portrait'
+        | 'iphone-14'
+        | 'iphone-se'
+        | 'android-small'
+        | 'iphone-landscape',
+        TouchViewport
+    >;
 export const ACCOUNTS: Record<'teacher' | 'student', { email: string; password: string }>;
 export const STUB_USER: {
     id: string;
