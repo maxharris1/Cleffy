@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useBottomDock } from '@/features/viewer/bottomDock';
-import { computeDocumentLayout } from '@/features/viewer/geometry';
+import { clampScroll, computeDocumentLayout } from '@/features/viewer/geometry';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { useViewerStore } from '@/state/store';
 
@@ -17,6 +17,7 @@ vi.mock('@/features/viewer/toolbar/Toolbar', () => ({ Toolbar: () => null }));
 
 const VIEWPORT = { width: 390, height: 700 };
 const DOCK_PX = 200;
+let dockPx = DOCK_PX;
 /** The zoom row's 0.5rem lift above the dock, its 44 px keys and a 4 px gap. */
 const CONTROLS_STRIP_PX = 56;
 
@@ -35,11 +36,12 @@ beforeEach(() => {
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(() => VIEWPORT.height);
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
         return this.hasAttribute('data-dock')
-            ? DOMRect.fromRect({ x: 0, y: VIEWPORT.height - DOCK_PX, width: VIEWPORT.width, height: DOCK_PX })
+            ? DOMRect.fromRect({ x: 0, y: VIEWPORT.height - dockPx, width: VIEWPORT.width, height: dockPx })
             : DOMRect.fromRect({ x: 0, y: 0, ...VIEWPORT });
     });
     useViewerStore.getState().resetView({ scale: 1, scrollX: 0, scrollY: 0 });
     PAGE_SIZES = [LETTER];
+    dockPx = DOCK_PX;
 });
 
 afterEach(() => {
@@ -74,7 +76,7 @@ describe('PdfViewport on a phone with a bottom dock (the signed-out ink notice) 
 
         scrollToEnd(container.querySelector('.ink-surface')!);
 
-        expect(pageBottomOnScreen()).toBeLessThanOrEqual(VIEWPORT.height - DOCK_PX - CONTROLS_STRIP_PX);
+        expect(pageBottomOnScreen()).toBeLessThanOrEqual(VIEWPORT.height - dockPx - CONTROLS_STRIP_PX);
     });
 
     it('frees that room once the dock goes', async () => {
@@ -93,7 +95,7 @@ describe('PdfViewport on a phone with a bottom dock (the signed-out ink notice) 
 
         scrollToEnd(container.querySelector('.ink-surface')!);
 
-        expect(pageBottomOnScreen()).toBeGreaterThan(VIEWPORT.height - DOCK_PX - CONTROLS_STRIP_PX);
+        expect(pageBottomOnScreen()).toBeGreaterThan(VIEWPORT.height - dockPx - CONTROLS_STRIP_PX);
     });
 });
 
@@ -119,14 +121,16 @@ const controlFrames = () => {
     };
 };
 
-const touch = (type: string, y: number) =>
+const touchAt = (type: string, pointerId: number, x: number, y: number) =>
     act(() => {
         document
             .querySelector('.ink-surface')!
             .dispatchEvent(
-                new PointerEvent(type, { pointerId: 1, pointerType: 'touch', clientX: 195, clientY: y, bubbles: true }),
+                new PointerEvent(type, { pointerId, pointerType: 'touch', clientX: x, clientY: y, bubbles: true }),
             );
     });
+
+const touch = (type: string, y: number) => touchAt(type, 1, 195, y);
 
 describe('PdfViewport when the bottom dock goes with the score at its end', () => {
     const dismissDockAtEnd = async (advance: (ms: number) => void) => {
@@ -196,5 +200,39 @@ describe('PdfViewport when the bottom dock goes with the score at its end', () =
         expect(limit).toBeLessThan(settling);
         expect(furthest).toBeLessThanOrEqual(limit + 0.5);
         expect(pageBottomOnScreen(2)).toBeLessThanOrEqual(VIEWPORT.height - CONTROLS_STRIP_PX);
+    });
+
+    it('keeps a pinch that interrupts the settle inside the new bottom bound', async () => {
+        dockPx = 76;
+        const advance = controlFrames();
+        await dismissDockAtEnd(advance);
+        const startScale = useViewerStore.getState().view.scale;
+        const overshoot = () => {
+            const view = useViewerStore.getState().view;
+            const layout = computeDocumentLayout(PAGE_SIZES, 1, false);
+            const bound = clampScroll(view, layout, VIEWPORT.width, VIEWPORT.height, {
+                top: 0,
+                bottom: CONTROLS_STRIP_PX,
+            });
+            return view.scrollY - bound.scrollY;
+        };
+
+        touchAt('pointerdown', 1, 100, 300);
+        touchAt('pointerdown', 2, 290, 300);
+        const overshoots: number[] = [];
+        for (let x = 277; x >= 186; x -= 13) {
+            advance(16);
+            touchAt('pointermove', 2, x, 300);
+            overshoots.push(overshoot());
+        }
+        const beforeRelease = pageBottomOnScreen(2);
+        touchAt('pointerup', 2, 186, 300);
+        touchAt('pointerup', 1, 100, 300);
+        advance(0);
+        advance(1000);
+
+        expect(useViewerStore.getState().view.scale).toBeLessThan(startScale);
+        expect(Math.max(...overshoots)).toBeLessThanOrEqual(0.5);
+        expect(pageBottomOnScreen(2)).toBeCloseTo(beforeRelease, 0);
     });
 });
