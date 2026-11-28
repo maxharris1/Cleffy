@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
+import { Link, NavLink, Navigate, Outlet, useLocation, useMatch, useNavigate } from 'react-router';
 
 import { initialsOf } from '@/features/account/initials';
 import { RequireRegistered } from '@/features/auth/AuthGates';
@@ -226,6 +226,7 @@ const LibraryFrame = ({
     // Where the teacher is, read by an upload that finishes later: a bar they
     // have navigated away from has no one to finish in front of.
     const { pathname } = useLocation();
+    const libraryMatch = useMatch('/library');
     const pathnameRef = useRef(pathname);
     useEffect(() => {
         pathnameRef.current = pathname;
@@ -566,6 +567,7 @@ const LibraryFrame = ({
                 progress and the account menu stay reachable from any page. */}
             <header
                 ref={headerRef}
+                data-route={libraryMatch ? 'library' : undefined}
                 className="shell-bar sticky top-0 z-30 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] sm:pl-0 sm:pr-0"
             >
                 <div

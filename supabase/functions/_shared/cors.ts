@@ -3,6 +3,7 @@ export const corsHeaders: Record<string, string> = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-imslp-sync-secret',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Expose-Headers': 'Server-Timing',
 };
 
 export const jsonResponse = (body: unknown, status = 200): Response =>
