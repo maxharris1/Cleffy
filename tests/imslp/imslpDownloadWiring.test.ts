@@ -36,7 +36,7 @@ describe('IMSLP entry point security wiring', () => {
             "timing.time('auth', () => requireUser(req))",
             "timing.time('elig_rl_del', () =>\n        userClient.rpc('can_import_imslp')",
             "timing.time('elig_rl_del', () =>\n        checkRateLimit(`download:user:${userId}`",
-            "timing.time('elig_rl_del', () => accountDeletionPending(admin, userId))",
+            "timing.time('elig_rl_del', async () => await accountDeletionPending(admin, userId))",
             'timedCacheDeps(timing, imslpPdfCacheStore(admin))',
             'fields.cacheHit = cache.entry !== null',
             'timedImportDeps(timing, fields, {',

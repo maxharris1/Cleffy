@@ -262,7 +262,7 @@ const handle = async (req: Request, timing: ImslpDownloadTiming, telemetry: Tele
     // A score imported into an account being deleted would outlive the sweep
     // (../_shared/deletionPending.ts). Asked before any quota, pacing slot or
     // write; the documents trigger stays the backstop.
-    const pending = await timing.time('elig_rl_del', () => accountDeletionPending(admin, userId));
+    const pending = await timing.time('elig_rl_del', async () => await accountDeletionPending(admin, userId));
     if (!pending.ok) {
         logError('imslp-download', new Error(pending.message), { code: 'deletion_check_failed' });
         return jsonResponse(DELETION_CHECK_UNAVAILABLE, 503);
