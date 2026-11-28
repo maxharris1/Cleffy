@@ -148,13 +148,19 @@ describe('PresenceBar in a crowd', () => {
         expect(screen.getAllByRole('button')).toHaveLength(3);
     });
 
-    it('narrows the names beside "+N" on a phone, so two chips and "+N" share one row', () => {
-        atWidth(390);
-        const { rerender } = render(<PresenceBar peers={crowd(2)} selfUserId="me" />);
-        expect(screen.getByText('Alexandria Williamson 00')).not.toHaveClass('max-sm:max-w-28');
-        rerender(<PresenceBar peers={crowd(16)} selfUserId="me" />);
-        expect(screen.getByText('Alexandria Williamson 00')).toHaveClass('max-w-40', 'max-sm:max-w-28');
-    });
+    it.each([390, 1440])(
+        'narrows the names once three people are here, so the group fits the header at %ipx',
+        (width) => {
+            atWidth(width);
+            const { rerender } = render(<PresenceBar peers={crowd(2)} selfUserId="me" />);
+            expect(screen.getByText('Alexandria Williamson 00')).toHaveClass('max-w-40');
+            for (const count of [3, 4, 16]) {
+                rerender(<PresenceBar peers={crowd(count)} selfUserId="me" />);
+                expect(screen.getByText('Alexandria Williamson 00')).toHaveClass('max-w-20', 'sm:max-w-32');
+                expect(screen.getByText('Alexandria Williamson 00')).not.toHaveClass('max-w-40');
+            }
+        },
+    );
 });
 
 describe('LinkViewerCount', () => {

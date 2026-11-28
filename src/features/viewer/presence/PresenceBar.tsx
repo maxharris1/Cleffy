@@ -22,9 +22,10 @@ const Dot = ({ color }: { color: string }) => (
 /**
  * Who's here: a named chip per person, a dot in their ink colour, up to three
  * (two below 640px), then one "+N" chip for the rest, so a crowd keeps the
- * header to one row. Each named chip opens a small popover with the name and
- * the page they are on — on hover with a mouse, on a tap on touch. "+N" opens
- * a paper list of everyone it stands for.
+ * header to one row. Names narrow once three people are here, so the fullest
+ * group still fits beside the header's actions. Each named chip opens a small
+ * popover with the name and the page they are on — on hover with a mouse, on a
+ * tap on touch. "+N" opens a paper list of everyone it stands for.
  */
 export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }: PresenceBarProps) => {
     const wide = useMediaQuery('(min-width: 40rem)');
@@ -38,6 +39,7 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
     });
     const shown = people.slice(0, wide ? 3 : 2);
     const rest = people.slice(shown.length);
+    const crowded = people.length > 2;
     const restLabel = `${rest.length} more collaborators`;
     return (
         <div
@@ -53,7 +55,7 @@ export const PresenceBar = ({ peers, selfUserId, labelOf = (peer) => peer.name }
                         className={`${CHIP} relative cursor-default pointer-coarse:hit-44-y`}
                     >
                         <Dot color={peer.color} />
-                        <span className={`max-w-40 truncate ${rest.length > 0 ? 'max-sm:max-w-28' : ''}`}>{name}</span>
+                        <span className={`truncate ${crowded ? 'max-w-20 sm:max-w-32' : 'max-w-40'}`}>{name}</span>
                     </Popover.Trigger>
                     <Popover.Portal>
                         <Popover.Positioner side="bottom" sideOffset={6} collisionPadding={8} className="z-50">
