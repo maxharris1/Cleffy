@@ -781,7 +781,7 @@ describe('ImslpBrowser', () => {
     /** The card above the toggle: the edition Add will import. */
     const editionCard = async () => {
         const { screen } = await import('@testing-library/react');
-        return screen.getByRole('button', { name: /^Choose a different edition/ }).closest('.rounded-xl')!
+        return screen.getByRole('button', { name: /^Choose a different edition/ }).closest('.rounded-2xl')!
             .firstElementChild as HTMLElement;
     };
 
@@ -1848,6 +1848,21 @@ describe('ImslpBrowser', () => {
             expect(screen.getByRole('button', { name: 'List view' })).toHaveAttribute('aria-pressed', 'true');
             expect(screen.getByRole('button', { name: 'Grid view' })).toHaveAttribute('aria-pressed', 'false');
             expect(screen.getByText('Moonlight Sonata').closest('ul')?.className ?? '').not.toContain('grid-cols');
+        });
+
+        it('pins the search and view toggle, while the facet dimensions scroll with their values', async () => {
+            const { screen } = await import('@testing-library/react');
+            const userEvent = (await import('@testing-library/user-event')).default;
+
+            await renderBrowser();
+            await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
+
+            const stickyOf = (el: HTMLElement) => el.closest('.imslp-search-sticky');
+            const sticky = stickyOf(screen.getByRole('search'));
+            expect(sticky).not.toBeNull();
+            expect(stickyOf(screen.getByRole('button', { name: 'Grid view' }))).toBe(sticky);
+            expect(stickyOf(screen.getByRole('group', { name: 'Filter by' }))).toBeNull();
+            expect(stickyOf(screen.getByRole('group', { name: 'instrument values' }))).toBeNull();
         });
 
         it('switches Popular to cards with real tags, and remembers the choice', async () => {

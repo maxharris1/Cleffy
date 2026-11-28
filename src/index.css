@@ -744,7 +744,6 @@ body {
     padding-bottom: 0.25rem;
     background: color-mix(in srgb, var(--color-paper) 88%, transparent);
     backdrop-filter: blur(6px);
-    border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 8%, transparent);
 }
 
 @media (max-width: 39.99rem) {

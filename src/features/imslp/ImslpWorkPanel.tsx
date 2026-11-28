@@ -152,10 +152,10 @@ export const ImslpWorkPanel = ({
                 <ArrowLeftIcon size={16} aria-hidden />
                 Back
             </button>
-            <h2 className="mt-2 font-display text-2xl font-semibold tracking-tight text-stone-900 sm:text-3xl">
+            <h2 className="display-opsz mt-2 text-balance font-display text-[28px] leading-[1.02] font-semibold tracking-[-0.02em] text-ink sm:text-[30px]">
                 {parsed.work}
             </h2>
-            <p className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-stone-500">
+            <p className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[15px] text-ink-muted">
                 {composer ? <span>{composer}</span> : null}
                 <a href={work.imslpUrl} target="_blank" rel="noreferrer" className={`text-xs ${linkClassName}`}>
                     View source page
@@ -163,11 +163,13 @@ export const ImslpWorkPanel = ({
             </p>
 
             {work.editions.length === 0 ? (
-                <p className="mt-6 text-sm text-stone-500">No PDF editions found for this work.</p>
+                <p className="mt-6 border-y border-hairline px-1 py-4 text-[15px] text-ink-muted">
+                    No PDF editions found for this work.
+                </p>
             ) : null}
 
             {importable.length > 0 ? (
-                <div className="mt-6 max-w-2xl rounded-xl border border-stone-200 bg-white/70">
+                <div className="mt-6 max-w-2xl rounded-2xl border border-panel-line">
                     <div className="px-4 py-3.5">
                         {selected ? (
                             <EditionLabel
@@ -177,17 +179,17 @@ export const ImslpWorkPanel = ({
                                 prominent
                             />
                         ) : (
-                            <p className="text-sm text-stone-500">No edition selected.</p>
+                            <p className="text-sm text-ink-muted">No edition selected.</p>
                         )}
                     </div>
                     {otherCount > 0 ? (
-                        <div className="border-t border-stone-200">
+                        <div className="border-t border-panel-line">
                             <button
                                 type="button"
                                 onClick={() => setOthersOpen((open) => !open)}
                                 aria-expanded={othersOpen}
                                 aria-controls={othersId}
-                                className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-b-xl px-4 py-2.5 text-left text-sm text-stone-600 hover:bg-ink/5 hover:text-stone-800"
+                                className="flex min-h-11 w-full cursor-pointer items-center justify-between gap-2 rounded-b-2xl px-4 py-2.5 text-left text-sm font-medium text-ink-soft hover:bg-ink/5 hover:text-ink"
                             >
                                 Choose a different edition ({otherCount})
                                 <ChevronDownIcon
@@ -206,15 +208,15 @@ export const ImslpWorkPanel = ({
                                                 <li key={edition.filename}>
                                                     <label
                                                         className={[
-                                                            'flex items-start gap-2.5 rounded-lg px-2 py-2.5',
-                                                            checked ? 'bg-accent-soft' : 'hover:bg-ink/5',
+                                                            'flex items-start gap-2.5 rounded-[14px] px-2 py-2.5',
+                                                            checked ? 'bg-accent-tint' : 'hover:bg-ink/5',
                                                             importing ? 'cursor-default' : 'cursor-pointer',
                                                         ].join(' ')}
                                                     >
                                                         <input
                                                             type="radio"
                                                             name="imslp-edition"
-                                                            className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+                                                            className="mt-0.5 h-5 w-5 shrink-0 accent-accent"
                                                             checked={checked}
                                                             onChange={() => onSelect(edition)}
                                                             disabled={importing}
@@ -230,7 +232,7 @@ export const ImslpWorkPanel = ({
                                         })}
                                     </ul>
                                     {unavailable.length > 0 ? (
-                                        <p className="mt-2 px-2 text-xs text-stone-500">
+                                        <p className="mt-2 px-2 text-[13px] text-ink-muted">
                                             {unavailable.length} more{' '}
                                             {unavailable.length === 1 ? 'edition' : 'editions'} can’t be downloaded
                                             here.{' '}
@@ -252,7 +254,7 @@ export const ImslpWorkPanel = ({
             ) : null}
 
             {noneImportable ? (
-                <div className="mt-6 max-w-2xl rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
+                <div className="mt-6 max-w-2xl rounded-2xl border border-amber-300/70 bg-amber-50/80 p-4">
                     <p className="text-sm text-amber-950">
                         {unavailable.every((e) => e.licenseCheck === 'unavailable')
                             ? 'Couldn’t check the licenses just now, so nothing can be imported automatically. Try again in a minute.'
@@ -288,7 +290,7 @@ export const ImslpWorkPanel = ({
                             {buttonLabel}
                         </button>
                         {quotaExhausted ? (
-                            <p className="text-xs text-stone-600">
+                            <p className="text-[13px] text-ink-soft">
                                 {quotaUpgradeHint ? (
                                     <>
                                         Cloud-score limit reached —{' '}
@@ -299,18 +301,18 @@ export const ImslpWorkPanel = ({
                                 )}
                             </p>
                         ) : importLimit ? (
-                            <p className="text-xs text-stone-600">
+                            <p className="text-[13px] text-ink-soft">
                                 {limitHeadline(importLimit)} —{' '}
                                 <UpgradeLink onUpgrade={onUpgrade}>see plans</UpgradeLink>.
                             </p>
                         ) : !selectedImportable ? (
-                            <p className="text-xs text-stone-500">Select a downloadable edition to add.</p>
+                            <p className="text-[13px] text-ink-muted">Select a downloadable edition to add.</p>
                         ) : null}
                     </div>
                     {/* In the footer so Cancel stays beside the Add it stops. */}
                     {download.kind === 'queued' ? (
                         <div className="mt-2 flex flex-wrap items-center gap-3">
-                            <p className="text-xs text-stone-600" aria-hidden="true">
+                            <p className="text-[13px] text-ink-soft" aria-hidden="true">
                                 {QUEUED_COPY}
                             </p>
                             {onCancelQueued ? (
@@ -324,7 +326,7 @@ export const ImslpWorkPanel = ({
                             ) : null}
                         </div>
                     ) : null}
-                    <p className="mt-2 text-xs text-stone-500">
+                    <p className="mt-3 text-[13px] text-ink-muted">
                         Public-domain status varies by country.{' '}
                         <button
                             type="button"
@@ -339,7 +341,7 @@ export const ImslpWorkPanel = ({
                     <p
                         id={legalId}
                         hidden={!legalOpen}
-                        className="mt-1 max-w-prose text-xs leading-relaxed text-stone-600"
+                        className="mt-1 max-w-prose text-[13px] leading-relaxed text-ink-soft"
                     >
                         {DISCLAIMER}
                     </p>
@@ -351,7 +353,7 @@ export const ImslpWorkPanel = ({
             </p>
 
             {download.kind === 'fallback' ? (
-                <div className="mt-4 max-w-2xl rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
+                <div className="mt-4 max-w-2xl rounded-2xl border border-amber-300/70 bg-amber-50/80 p-4">
                     <p className="text-sm text-amber-950">{download.message}</p>
                     <p className="mt-1 text-xs text-amber-900/80">
                         View the source page (verify if asked), save the PDF, then choose it here.
@@ -369,7 +371,7 @@ export const ImslpWorkPanel = ({
                     </div>
                 </div>
             ) : null}
-            <p className="mt-8 text-xs text-stone-500">Public-domain scores via IMSLP</p>
+            <p className="mt-8 text-[13px] text-ink-muted">Public-domain scores via IMSLP</p>
         </div>
     );
 };
@@ -395,7 +397,7 @@ const EditionLabel = ({
         <span className="block min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span
-                    className={`min-w-0 break-words ${prominent ? 'text-base font-medium text-stone-900' : 'text-sm text-stone-800'}`}
+                    className={`min-w-0 break-words ${prominent ? 'text-base font-semibold text-ink' : 'text-sm text-ink'}`}
                 >
                     {editionHeadline(edition)}
                 </span>
@@ -404,7 +406,7 @@ const EditionLabel = ({
                 {tag ? <Badge>{tag}</Badge> : null}
             </span>
             {showFileLabel ? (
-                <span className="mt-0.5 block break-words text-xs text-stone-500">
+                <span className="mt-0.5 block break-words text-[13px] text-ink-muted">
                     {editionFileLabel(edition.filename)}
                 </span>
             ) : null}
