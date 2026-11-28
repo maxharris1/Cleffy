@@ -1,4 +1,5 @@
 import { cleanup, render, screen, within } from '@testing-library/react';
+import type { ComponentType } from 'react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -27,6 +28,7 @@ import {
     TermsPage,
 } from '@/features/legal/LegalPage';
 import { LEGAL_DOCUMENT_IDS } from '@/features/legal/legalVersions';
+import { ReportContentPage } from '@/features/moderation/ReportContentPage';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { clearCloudAnnotationData } from '@/sync/signOutSync';
@@ -384,5 +386,44 @@ describe('LegalPage', () => {
             </MemoryRouter>,
         );
         expect(screen.getByRole('link', { name: 'Report content' })).toHaveAttribute('href', '/report');
+    });
+});
+
+describe('legal page headings', () => {
+    afterEach(cleanup);
+
+    const headingsIn = (selector: string, Page: ComponentType) => {
+        const { container } = render(
+            <MemoryRouter>
+                <Page />
+            </MemoryRouter>,
+        );
+        return [...container.querySelectorAll(selector)];
+    };
+
+    it.each([
+        ['privacy', PrivacyPage],
+        ['children’s privacy', ChildrenPrivacyPage],
+        ['terms', TermsPage],
+        ['refund', RefundPolicyPage],
+        ['copyright', CopyrightPolicyPage],
+    ])('sets every %s heading in the display face', (_name, Page) => {
+        const headings = headingsIn('article :is(h1,h2,h3)', Page);
+        expect(headings.length).toBeGreaterThan(0);
+        for (const heading of headings) {
+            expect(heading).toHaveClass('font-display');
+        }
+    });
+
+    it('has subheadings on the privacy policy', () => {
+        expect(headingsIn('article h3', PrivacyPage).length).toBeGreaterThan(0);
+    });
+
+    it('sets every report form heading in the display face', () => {
+        const headings = headingsIn('main :is(h1,h2,h3)', ReportContentPage);
+        expect(headings.length).toBeGreaterThan(0);
+        for (const heading of headings) {
+            expect(heading).toHaveClass('font-display');
+        }
     });
 });

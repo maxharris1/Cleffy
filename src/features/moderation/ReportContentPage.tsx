@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router';
 
 import { TurnstileField } from '@/features/auth/TurnstileField';
 import { useTurnstileToken } from '@/features/auth/useTurnstileToken';
+import { DocumentHeader } from '@/features/legal/DocumentHeader';
 import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import {
     ILLEGAL_CATEGORY_LABELS,
@@ -22,17 +23,17 @@ const PERJURY_STATEMENT =
 const GOOD_FAITH_STATEMENT =
     'I believe in good faith that the information and allegations in this report are accurate and complete.';
 
+const TITLE =
+    'display-opsz font-display text-[44px] leading-[1.02] font-semibold tracking-[-0.02em] text-balance text-ink sm:text-[60px]';
+
 const Paper = ({ children }: { children: ReactNode }) => (
     <main className="paper-page safe-page min-h-full">
         <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6 sm:py-10">
-            <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-                <Link to="/" className="landing-brand font-display text-2xl font-semibold sm:text-3xl">
-                    Cleffy
-                </Link>
+            <DocumentHeader>
                 <Link to="/copyright" className={`${linkClassName} text-sm`}>
                     Copyright and Content Policy
                 </Link>
-            </header>
+            </DocumentHeader>
             {children}
         </div>
     </main>
@@ -57,7 +58,7 @@ const Check = ({
             onChange={(event) => onChange(event.target.checked)}
             className="mt-1 h-4 w-4 shrink-0 accent-accent"
         />
-        <label htmlFor={id} className="text-sm leading-relaxed text-stone-700">
+        <label htmlFor={id} className="text-sm leading-relaxed text-ink-soft">
             {children}
         </label>
     </div>
@@ -85,7 +86,7 @@ const TextArea = ({
             {label}
         </label>
         {hint ? (
-            <p id={`${id}-hint`} className="mt-1 text-xs text-stone-500">
+            <p id={`${id}-hint`} className="mt-1.5 text-[13px] text-ink-muted">
                 {hint}
             </p>
         ) : null}
@@ -182,14 +183,12 @@ export const ReportContentPage = () => {
         return (
             <Paper>
                 <section className="mt-8 sm:mt-10" aria-live="polite">
-                    <h1 className="font-display text-3xl font-semibold tracking-tight text-stone-800">
-                        Report received
-                    </h1>
-                    <p className="mt-4 text-[0.95rem] leading-relaxed text-stone-700">
+                    <h1 className={TITLE}>Report received</h1>
+                    <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">
                         Your reference is <strong className="font-semibold">{done.reference}</strong>. A person will
                         review your report, and we will email you what we decide.
                     </p>
-                    <p className="mt-3 text-[0.95rem] leading-relaxed text-stone-700">
+                    <p className="mt-3 text-[15px] leading-relaxed text-ink-soft">
                         {done.acknowledged
                             ? `We have emailed a confirmation to ${reporterEmail.trim()}.`
                             : `We've received your report and will email a confirmation to ${reporterEmail.trim()} as soon as possible; keep this reference meanwhile.`}{' '}
@@ -212,8 +211,8 @@ export const ReportContentPage = () => {
     return (
         <Paper>
             <section className="mt-8 sm:mt-10">
-                <h1 className="font-display text-3xl font-semibold tracking-tight text-stone-800">Report content</h1>
-                <p className="mt-3 text-[0.95rem] leading-relaxed text-stone-600">
+                <h1 className={TITLE}>Report content</h1>
+                <p className="mt-3.5 text-[17px] leading-normal text-pretty text-ink-muted">
                     Tell us about a score on Cleffy that you believe infringes copyright or is illegal. You do not need
                     a Cleffy account. We confirm every report by email and tell you what we decide. You can also write
                     to{' '}
@@ -239,7 +238,7 @@ export const ReportContentPage = () => {
                             ).map(([value, title, description]) => (
                                 <label
                                     key={value}
-                                    className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-3 transition-colors ${kind === value ? 'border-accent bg-accent-soft' : 'border-stone-300/90 bg-white/70'}`}
+                                    className={`flex cursor-pointer items-start gap-3 rounded-xl border-[1.5px] px-3.5 py-3 transition-colors ${kind === value ? 'border-accent bg-[#f6f5fe]' : 'border-panel-line'}`}
                                 >
                                     <input
                                         type="radio"
@@ -250,8 +249,8 @@ export const ReportContentPage = () => {
                                         className="mt-1 accent-accent"
                                     />
                                     <span>
-                                        <span className="block text-sm font-medium text-stone-800">{title}</span>
-                                        <span className="block text-xs text-stone-500">{description}</span>
+                                        <span className="block text-sm font-semibold text-ink">{title}</span>
+                                        <span className="block text-[13px] text-ink-muted">{description}</span>
                                     </span>
                                 </label>
                             ))}
@@ -291,7 +290,7 @@ export const ReportContentPage = () => {
                             value={contentUrl}
                             onChange={(event) => setContentUrl(event.target.value)}
                         />
-                        <p className="mt-1 text-xs text-stone-500">
+                        <p className="mt-1.5 text-[13px] text-ink-muted">
                             The score’s address, or the share link you were sent.
                         </p>
                     </div>
@@ -334,7 +333,9 @@ export const ReportContentPage = () => {
                         onChange={setExplanation}
                     />
 
-                    <h2 className="mt-8 font-display text-xl font-semibold text-stone-800">About you</h2>
+                    <h2 className="display-opsz mt-10 border-t border-hairline pt-8 font-display text-[26px] leading-[1.1] font-semibold tracking-[-0.01em] text-ink">
+                        About you
+                    </h2>
                     <div className="mt-3 grid gap-x-4 sm:grid-cols-2">
                         <div className="mt-2">
                             <TextField
@@ -401,7 +402,7 @@ export const ReportContentPage = () => {
                         />
                     </div>
 
-                    <p className="mt-4 text-xs leading-relaxed text-stone-500">
+                    <p className="mt-4 text-[13px] leading-relaxed text-ink-muted">
                         We use what you send to handle this report, as our{' '}
                         <Link to="/privacy" className={linkClassName}>
                             Privacy Policy
